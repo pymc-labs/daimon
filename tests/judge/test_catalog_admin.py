@@ -12,11 +12,11 @@ import pytest
 from daimon.testing.admin_bindings import AdminBindings, AdminReceipt, provision_admin_run
 from daimon.testing.anthropic_fixtures import load_anthropic_fixtures
 from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.outcome_oracle import TurnEvidence
 from daimon.testing.provider_fixtures import FixtureGap, load_provider_fixtures
 from mux.contracts.ids import Provider
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 from .catalog_runner import Invocation, load_catalog, plan_scenario

@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from daimon.testing.conformance.recording import RecordingError, Replay, RequestMetadata
+from mux.testing.conformance.recording import RecordingError, Replay, RequestMetadata
 
 LIVE_IDS = frozenset({"C10", "C15", "C16"})
 SESSION = "/v1/agents/sessions/resource-2"

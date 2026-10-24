@@ -217,33 +217,80 @@ def _declared_entries(data: bytes) -> int:
     return total
 
 
-def retained_archive_files(data: bytes) -> dict[str, bytes]:
+def retained_archive_files(
+    data: bytes, *, max_uncompressed_bytes: int = MAX_UNCOMPRESSED_BYTES
+) -> dict[str, bytes]:
     """Read a retained provider archive without applying new-upload name policy.
 
     Existing provider skill names can predate that policy. Preserve every file
     while reusing the same bounded archive/path checks; never filter bytes.
     """
-    files = _strip_wrapper(_read_zip(data, preserve_all=True))
+    files = _strip_wrapper(
+        _read_zip(data, preserve_all=True, max_uncompressed_bytes=max_uncompressed_bytes)
+    )
     if "SKILL.md" not in files or len(files) > MAX_FILES:
         raise SkillIngestError("A retained archive needs one complete skill bundle.")
     return files
 
 
-def _read_zip(data: bytes, *, preserve_all: bool = False) -> dict[str, bytes]:
+def bundle_from_retained_archive(
+    data: bytes, *, max_uncompressed_bytes: int = MAX_UNCOMPRESSED_BYTES
+) -> SkillBundle:
+    """Validate retained/seeded bytes without applying new-upload name policy.
+
+    Archive safety and decompression limits still apply. Preserve the archive
+    digest so a pinned retained version remains tied to its original bytes.
+    """
+    files = retained_archive_files(data, max_uncompressed_bytes=max_uncompressed_bytes)
+    if any(path != "SKILL.md" and path.endswith("/SKILL.md") for path in files):
+        raise SkillIngestError("A retained archive must contain exactly one skill.")
+    try:
+        spec, _ = parse_skill_markdown(files["SKILL.md"].decode("utf-8"), source="SKILL.md")
+    except (UnicodeDecodeError, DefaultsError) as exc:
+        raise SkillIngestError("A retained skill needs a readable SKILL.md manifest.") from exc
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", spec.name):
+        raise SkillIngestError("A retained skill name must be a safe mount directory.")
+    ordered = sorted(files)
+    return SkillBundle(
+        preview=SkillPreview(
+            name=spec.name,
+            description=spec.description.strip(),
+            files=ordered,
+            scripts=[path for path in ordered if _is_script(path, files[path])],
+            total_bytes=sum(len(body) for body in files.values()),
+            content_hash=hashlib.sha256(data).hexdigest(),
+        ),
+        zip_bytes=data,
+    )
+
+
+def _read_zip(
+    data: bytes,
+    *,
+    preserve_all: bool = False,
+    max_uncompressed_bytes: int = MAX_UNCOMPRESSED_BYTES,
+) -> dict[str, bytes]:
     if _declared_entries(data) > MAX_FILES * 2:
         raise SkillIngestError(f"A skill may hold at most {MAX_FILES} files.")
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            return _read_entries(archive, preserve_all=preserve_all)
+            return _read_entries(
+                archive, preserve_all=preserve_all, max_uncompressed_bytes=max_uncompressed_bytes
+            )
     except (zipfile.BadZipFile, NotImplementedError, zlib.error, EOFError) as exc:
         raise SkillIngestError(
             "That zip is damaged or uses a compression that can't be read."
         ) from exc
 
 
-def _read_entries(archive: zipfile.ZipFile, *, preserve_all: bool = False) -> dict[str, bytes]:
+def _read_entries(
+    archive: zipfile.ZipFile,
+    *,
+    preserve_all: bool = False,
+    max_uncompressed_bytes: int = MAX_UNCOMPRESSED_BYTES,
+) -> dict[str, bytes]:
     files: dict[str, bytes] = {}
-    budget = MAX_UNCOMPRESSED_BYTES
+    budget = min(MAX_UNCOMPRESSED_BYTES, max_uncompressed_bytes)
     entries = [info for info in archive.infolist() if not info.is_dir()]
     if len(entries) > MAX_FILES * 2:
         raise SkillIngestError(f"A skill may hold at most {MAX_FILES} files.")

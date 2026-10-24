@@ -13,6 +13,7 @@ from daimon.adapters.mcp.tools.microsoft._person import require_person
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.tools.teams._direct import send_card_to_caller
 from daimon.core.stores import microsoft_sign_ins as sign_ins
+from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
 
@@ -59,6 +60,14 @@ def connect_card(url: str) -> dict[str, object]:
     }
 
 
+_GUEST_ONLY = "works only for people in the organisation that added Daimon"
+
+
+def _where(origin: TurnOriginRow) -> str:
+    """Where the sign-in card is: a person from another organisation has no 1:1 chat."""
+    return "sent to them" if origin.sender_foreign else "in the person's 1:1 chat with Daimon"
+
+
 async def connect_microsoft_impl(
     runtime: McpRuntime, auth: AuthIdentity, *, origin_context_id: str
 ) -> ConnectMicrosoftResult:
@@ -79,9 +88,8 @@ async def connect_microsoft_impl(
             return ConnectMicrosoftResult(
                 status="already_sent",
                 message=(
-                    "A Connect Microsoft card is already in the person's 1:1 chat with "
-                    f"Daimon and works until {live.expires_at:%H:%M} UTC, so no new card was "
-                    "sent. Tell them to use it."
+                    f"A Connect Microsoft card is already {_where(origin)} and works until "
+                    f"{live.expires_at:%H:%M} UTC, so no new card was sent. Tell them to use it."
                 ),
             )
         state = secrets.token_urlsafe(32)
@@ -109,15 +117,18 @@ async def connect_microsoft_impl(
         return ConnectMicrosoftResult(
             status="delivery_failed",
             message=(
-                "The sign-in card could not reach the person's 1:1 chat with Daimon (it may "
-                "not be added for them personally), so nothing was sent or saved. Ask them to "
-                "open a 1:1 chat with Daimon in Teams and ask there."
+                "The sign-in card could not be sent, because Microsoft 365 access "
+                f"{_GUEST_ONLY}, so nothing was sent or saved."
+                if origin.sender_foreign
+                else "The sign-in card could not reach the person's 1:1 chat with Daimon (it "
+                "may not be added for them personally), so nothing was sent or saved. Ask them "
+                "to open a 1:1 chat with Daimon in Teams and ask there."
             ),
         )
     return ConnectMicrosoftResult(
         status="sent",
         message=(
-            "The Connect Microsoft card is in the person's 1:1 chat with Daimon. Nothing is "
+            f"The Connect Microsoft card is {_where(origin)}. Nothing is "
             "connected until they sign in. Say so in one line; never repeat the link."
         ),
     )

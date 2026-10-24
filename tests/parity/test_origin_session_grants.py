@@ -28,7 +28,8 @@ from daimon.core.stores.turn_origins import create_origin, delete_origin
 from daimon.testing import ma_agent
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma import MARouter
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker

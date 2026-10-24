@@ -19,7 +19,7 @@ from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.core.routines import PANEL_CAP
 from daimon.core.stores.routines import create_routine, record_result, set_last_fired_at
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------

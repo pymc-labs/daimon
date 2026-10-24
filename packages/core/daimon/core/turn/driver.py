@@ -92,8 +92,9 @@ from daimon.core.turn.io import (
     turn_io,
 )
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge, stop_rendering
+from daimon.core.turn.mutation_gate import initial_send_check, unattended_gate
 from daimon.core.turn.outcomes import current_outcome
-from daimon.core.turn.persistence import current_persistence
+from daimon.core.turn.persistence import LeaseWaitCancelled, current_persistence
 from daimon.core.turn.posture import (
     AutoApprove,
     Billed,
@@ -121,7 +122,7 @@ from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.usage import UsageObservation
-from mux.drivers.anthropic.transport import LegacyTurnTransport, single_attempt_mutation
+from mux.drivers.anthropic import LegacyTurnTransport, single_attempt_mutation
 from mux.errors import ProviderError
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
@@ -379,9 +380,7 @@ async def _decide_or_refuse_on_cancel(
 #: reconnect, so each send resumes the session under the policy now in force.
 #: A gate that raises stops that send.
 _UNATTENDED: ContextVar[bool] = ContextVar("turn_unattended", default=False)
-_UNATTENDED_GATE: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar(
-    "turn_unattended_gate", default=None
-)
+_UNATTENDED_GATE = unattended_gate
 
 
 @contextlib.contextmanager
@@ -453,7 +452,7 @@ async def _send_decision_batch(
                         io,
                         session_id,
                         fresh,
-                        message="This turn ended before the call was approved; it did not run.",
+                        message="The reply ended before the call was approved; it did not run.",
                         interrupt_unattended=not isinstance(err, _InterruptInConsume),
                     ),
                     name="turn.refuse_blocked",
@@ -737,6 +736,7 @@ async def run_turn(
                 await before_send()
             if (gate := _UNATTENDED_GATE.get()) is not None:
                 await gate()
+            send_check_token = initial_send_check.set(before_send)
             try:
                 await io.send(batch)
             except _anthropic.BadRequestError as err:
@@ -744,6 +744,8 @@ async def run_turn(
                     unwedge_attempts[0] += 1
                     raise _SessionAwaitingConfirmations() from err
                 raise
+            finally:
+                initial_send_check.reset(send_check_token)
         await acknowledge(lifecycle, "accepted")
 
     if (observation := current_outcome.get()) is not None:
@@ -842,8 +844,46 @@ async def run_turn(
             return final_cell[0]
 
     # Native usage reconciliation remains inside the admitted binding lease.
-    pump = _pump_metered if isinstance(billing, ObservationBilled) else _pump_unwedging
-    pump_coro = pump() if persistence is None else persistence.run(pump)
+    pumped = _pump_metered if isinstance(billing, ObservationBilled) else _pump_unwedging
+
+    async def abandon_native() -> None:
+        # Looked up at failure time: recovery may have swapped `io`.
+        hook = getattr(io, "abandon_native", None)
+        if hook is not None:
+            await hook()
+
+    async def pump() -> TurnState:
+        # A provider codec that runs work natively (Gemini) stops it when the
+        # host ends the turn as a failure, including a cancelled or timed-out
+        # pump. Codecs without the optional hook are unaffected.
+        try:
+            state = await pumped()
+        except BaseException:
+            await abandon_native()
+            raise
+        # A rate-limited provider cannot take another call to stop it.
+        if (
+            state.termination is not None
+            and state.termination.is_failure
+            and state.termination != TerminationReason.RATE_LIMITED
+        ):
+            await abandon_native()
+        return state
+
+    async def _run_leased() -> TurnState:
+        assert persistence is not None
+        try:
+            return await persistence.run(pump)
+        except LeaseWaitCancelled:
+            # Stopped while queued behind another turn: nothing was sent, so
+            # this ends as an interrupt, like a Stop before the stream opens.
+            err = TurnError(kind="interrupted", message="interrupted while waiting its turn")
+            queued_state = TurnState(error=err, termination=TerminationReason.INTERRUPTED)
+            log.info("turn.interrupt.while_queued", session_id=session_id)
+            await lifecycle.on_terminal_failure(queued_state, err)
+            return queued_state
+
+    pump_coro = pump() if persistence is None else _run_leased()
     if deadline is None:
         return await pump_coro
 
@@ -1802,7 +1842,9 @@ async def _consume_with_reconnect(
             # temporary SDK edge preserves legacy's terminal handling of them.
             stop = (
                 normalized_stop_reason(normalized)
-                if normalized is not None and normalized.type != "native.session.status_idle"
+                if normalized is not None
+                and normalized.type != "native.session.status_idle"
+                and event.type == "session.status_idle"
                 else terminal_stop_reason(event)
             )
             if stop == "requires_action":
@@ -1925,7 +1967,7 @@ async def _finalize_success_or_error(
             case AutoApprove() | PolicyApproval():
                 message = "The agent stopped because it couldn't confirm your approval."
             case RequireApproval():
-                message = "Approvals aren't available here. Ask in Discord, Slack or Teams."
+                message = "Approvals aren't available here yet."
         err = TurnError(kind="requires_action", message=message)
         final_state = dataclasses.replace(
             final_state, error=err, termination=TerminationReason.REQUIRES_ACTION
@@ -2060,12 +2102,17 @@ async def _finalize_upstream(
         ),
     )
     await render_once(state_cell[0])
+    provider = err if isinstance(err, ProviderError) else None
     log.warning(
         "turn.failed",
         session_id=session_id,
         turn_error_kind="upstream",
         error=str(err),
         renders_failed=renders_failed,
+        # Redacted provider detail: which check or HTTP status ended the turn.
+        provider_category=provider.category if provider else None,
+        provider_native_code=provider.native_code if provider else None,
+        provider_http_status=provider.native_error_code if provider else None,
     )
     if rate_limit_until is not None:
         log.warning(

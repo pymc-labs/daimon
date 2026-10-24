@@ -15,9 +15,9 @@ from daimon.testing.anthropic_fixtures import (
     anthropic_turn_tape,
     load_anthropic_fixtures,
 )
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.provider_fixtures import load_provider_fixtures, turn_tape
 from daimon.testing.provider_replay import provider_replay
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 ROOT = Path(__file__).resolve().parents[3]
 DATA = ROOT / "packages/testing/fixtures/target53"

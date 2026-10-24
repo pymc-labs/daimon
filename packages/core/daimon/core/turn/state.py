@@ -26,6 +26,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
 from daimon.core.errors import TurnError
 from daimon.core.pricing import uncached_input_tokens
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
+from daimon.core.turn.status_log import status_log_enabled
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.usage import UsageObservation
 from mux.profiles import accounting_mode_for
@@ -33,8 +34,10 @@ from mux.profiles import accounting_mode_for
 
 @dataclass(frozen=True, slots=True)
 class TextBlock:
-    """Assistant text. Grown by appending across `agent.message` events —
-    the reducer concatenates onto the most recent `TextBlock` when no
+    """Assistant text. Managed Agents delivers each `agent.message` whole (its
+    streamed deltas are previews that never reach the reducer). With
+    `turn.status_log` on, every message is its own block; off, the reducer
+    concatenates consecutive messages onto the most recent `TextBlock` when no
     tool-use block has intervened."""
 
     kind: Literal["text"]
@@ -76,7 +79,14 @@ def daimon_tool_arguments(block: ToolUseBlock, tool: str) -> Mapping[str, object
     interface (`call_tool(name=tool, arguments={...})`), which is how a large
     daimon catalog is reached.
     """
-    if block.mcp_server_name != DAIMON_SERVER_NAME or block.status != "complete" or block.is_error:
+    if block.status != "complete" or block.is_error:
+        return None
+    return daimon_tool_input(block, tool)
+
+
+def daimon_tool_input(block: ToolUseBlock, tool: str) -> Mapping[str, object] | None:
+    """`daimon_tool_arguments` for a call that may still be running; None once it failed."""
+    if block.mcp_server_name != DAIMON_SERVER_NAME or block.status == "failed" or block.is_error:
         return None
     arguments: object = block.input
     if block.name == _CALL_TOOL:
@@ -180,43 +190,89 @@ class TurnState:
     """Ids of the tool calls that got a result, in the order the results came."""
 
 
+def join_messages(texts: list[str]) -> str:
+    """Join the messages of one answer; a lone message is returned as it is.
+
+    With `turn.status_log` on, every message is kept and they are set apart by a
+    blank line (blank messages add nothing). Off, texts are joined as they are,
+    as before.
+    """
+    if len(texts) == 1:
+        return texts[0]
+    if not status_log_enabled():
+        return "".join(texts)
+    return "\n\n".join(stripped for text in texts if (stripped := text.strip()))
+
+
+def _text_runs(content: list[ContentBlock]) -> list[tuple[int, list[TextBlock]]]:
+    """Runs of consecutive text blocks as ``(index of the first block, blocks)``."""
+    runs: list[tuple[int, list[TextBlock]]] = []
+    previous_was_text = False
+    for i, block in enumerate(content):
+        if isinstance(block, TextBlock):
+            if previous_was_text:
+                runs[-1][1].append(block)
+            else:
+                runs.append((i, [block]))
+        previous_was_text = isinstance(block, TextBlock)
+    return runs
+
+
+def _last_tool_index(content: list[ContentBlock]) -> int:
+    return max(
+        (i for i, block in enumerate(content) if isinstance(block, ToolUseBlock)), default=-1
+    )
+
+
+def final_answer_texts(content: list[ContentBlock]) -> list[str]:
+    """The messages after the last tool use, one text each, in order."""
+    return [
+        block.text
+        for block in content[_last_tool_index(content) + 1 :]
+        if isinstance(block, TextBlock)
+    ]
+
+
 def extract_final_response(content: list[ContentBlock]) -> str:
     """Extract text after the last ToolUseBlock, or all text if no tools.
 
     In multi-tool turns, intermediate agent.message text (pre-tool narration)
     is positionally before ToolUseBlocks. Only text AFTER the last tool use
     is the actual response. When no tools were used, all text is final.
+    With `turn.status_log` on, an answer of several messages keeps every one,
+    set apart by a blank line.
     """
-    last_tool_idx = -1
-    for i, block in enumerate(content):
-        if isinstance(block, ToolUseBlock):
-            last_tool_idx = i
-
-    return "".join(
-        block.text for block in content[last_tool_idx + 1 :] if isinstance(block, TextBlock)
-    )
+    return join_messages(final_answer_texts(content))
 
 
 def extract_sealed_responses(
     content: list[ContentBlock], *, min_chars: int
 ) -> list[tuple[int, str]]:
-    """Text blocks "sealed" by a later tool use and at least ``min_chars`` long.
+    """Runs of text "sealed" by a later tool use and at least ``min_chars`` long.
 
-    A text block with a ToolUseBlock after it can never grow again (the reducer
-    only appends onto the last block), so it is safe to render permanently
-    mid-turn. The length floor separates substantive answers from pre-tool
-    narration ("Let me check…"). Returns ``(content index, text)`` pairs in
-    stream order; the index is a stable dedup key for callers that flush
+    Text with a ToolUseBlock after it can never grow again, so it is safe to
+    render permanently mid-turn. The length floor separates substantive
+    answers from pre-tool narration ("Let me check…"). A run of consecutive
+    messages is one candidate, its messages set apart by a blank line, so
+    the floor sees what the old single glued block would have; with
+    `turn.status_log` off every block is a candidate on its own.
+    Returns ``(content index of the run's first block, text)`` pairs in stream
+    order; the index is a stable dedup key for callers that flush
     incrementally. Text after the last tool use is the final response and is
     never included — that's ``extract_final_response``'s job.
     """
-    last_tool_idx = -1
-    for i, block in enumerate(content):
-        if isinstance(block, ToolUseBlock):
-            last_tool_idx = i
-
-    return [
-        (i, block.text)
-        for i, block in enumerate(content[:last_tool_idx])
-        if isinstance(block, TextBlock) and len(block.text) >= min_chars
-    ]
+    last_tool_idx = _last_tool_index(content)
+    sealed: list[tuple[int, str]] = []
+    runs = (
+        _text_runs(content)
+        if status_log_enabled()
+        else [(i, [block]) for i, block in enumerate(content) if isinstance(block, TextBlock)]
+    )
+    for index, blocks in runs:
+        if index + len(blocks) > last_tool_idx:
+            break
+        # The floor measures the raw messages, as the old glued block did, so
+        # whitespace the join trims can't push a run below it.
+        if sum(len(block.text) for block in blocks) >= min_chars:
+            sealed.append((index, join_messages([block.text for block in blocks])))
+    return sealed

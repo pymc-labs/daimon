@@ -47,9 +47,9 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
 )
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AGENT_ID, ENV_ID, MODEL_ID, build_turn_router

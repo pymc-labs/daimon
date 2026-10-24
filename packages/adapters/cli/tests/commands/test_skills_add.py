@@ -24,8 +24,9 @@ from daimon.core.config import Settings
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.user_skills import load_user_skill
-from daimon.testing import MARouter, build_fake_anthropic, list_response, ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

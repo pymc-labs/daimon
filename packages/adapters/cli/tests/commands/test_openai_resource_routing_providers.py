@@ -70,11 +70,11 @@ def _scope(tenant_id: uuid.UUID, account_id: uuid.UUID, principal: str = PRINCIP
 
 
 def _driver(scope: Scope, workspace: str) -> Any:
-    from daimon.testing.isolated_sdk import build_async_openai
     from mux.drivers.openai import OpenAIDriver
     from mux.drivers.openai.transport import SDKTransport
     from mux.drivers.openai.turn import MemoryRecoveryJournal
     from mux.drivers.openai.usage import MemoryUsageRevisions
+    from mux.testing.isolated_sdk import build_async_openai
 
     return OpenAIDriver(
         SDKTransport(build_async_openai(transport=httpx.MockTransport(_no_egress))),

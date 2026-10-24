@@ -136,6 +136,8 @@ async def _caller(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
             chat_session_id="test-session",
@@ -239,7 +241,7 @@ async def test_discord_read_of_a_sealed_channel_from_outside_is_refused(
         {"channel_id": _SEALED, "origin_context_id": str(uuid.uuid4())},
     ):
         payload = await _call(app, token, "read_channel", arguments)
-        assert payload.get("isError") and "limited to turns inside it" in _text(payload), (
+        assert payload.get("isError") and "limited to conversations inside it" in _text(payload), (
             f"a sealed channel read from outside must be refused; got {payload!r}"
         )
     assert history_hits == [], "a refused read must never fetch the sealed channel's history"
@@ -333,9 +335,9 @@ async def test_slack_read_of_a_sealed_channel_from_outside_is_refused(
             ("get_message", {"channel_id": "C_SEALED", "message_id": "1700000000.000100"}),
         ):
             payload = await _call(app, token, tool, arguments)
-            assert payload.get("isError") and "limited to turns inside it" in _text(payload), (
-                f"{tool} of a sealed channel from outside must be refused; got {payload!r}"
-            )
+            assert payload.get("isError") and "limited to conversations inside it" in _text(
+                payload
+            ), f"{tool} of a sealed channel from outside must be refused; got {payload!r}"
             assert "connect" not in _text(payload).lower(), "no connect hint on a sealed refusal"
         assert not any(url == _CONVERSATIONS_HISTORY for _, url in m.requests), (
             "a refused read must never fetch the sealed channel's history"
@@ -414,7 +416,7 @@ async def test_discord_sealed_origin_is_refused_to_a_token_of_another_responder(
         {"channel_id": _SEALED, "origin_context_id": origin_id},
     )
 
-    assert payload.get("isError") and "limited to turns inside it" in _text(payload), (
+    assert payload.get("isError") and "limited to conversations inside it" in _text(payload), (
         f"got {payload!r}"
     )
     assert history_hits == [], "a borrowed origin must never reach the sealed history"
@@ -482,7 +484,7 @@ async def test_slack_read_thread_honours_a_seal_on_the_thread_itself(
     if allowed:
         assert not payload.get("isError") and "secret" in _text(payload), f"got {payload!r}"
     else:
-        assert payload.get("isError") and "limited to turns inside it" in _text(payload), (
+        assert payload.get("isError") and "limited to conversations inside it" in _text(payload), (
             f"got {payload!r}"
         )
         assert "secret" not in _text(payload)
@@ -526,7 +528,7 @@ async def test_slack_get_message_withholds_a_reply_inside_a_sealed_thread(
             {"channel_id": "C_OPEN", "message_id": "1700000000.000200"},
         )
 
-    assert payload.get("isError") and "limited to turns inside it" in _text(payload), (
+    assert payload.get("isError") and "limited to conversations inside it" in _text(payload), (
         f"got {payload!r}"
     )
     assert "secret reply" not in _text(payload)
@@ -644,7 +646,7 @@ async def test_discord_scoped_search_into_a_sealed_channel_is_refused_before_sea
         _app(sessionmaker), token, "search_messages", {"content": "x", "channel_ids": [scope]}
     )
 
-    assert payload.get("isError") and "limited to turns inside it" in _text(payload), (
+    assert payload.get("isError") and "limited to conversations inside it" in _text(payload), (
         f"got {payload!r}"
     )
     assert search_hits == [], "the search route must not be hit"
@@ -762,7 +764,7 @@ async def test_discord_thread_created_notices_do_not_name_a_sealed_thread(
         assert not message.get("isError") and "sealed acquisition target" in _text(message)
     else:
         assert "sealed acquisition target" not in _text(history), "the name is withheld"
-        assert message.get("isError") and "limited to turns inside it" in _text(message), (
+        assert message.get("isError") and "limited to conversations inside it" in _text(message), (
             f"got {message!r}"
         )
         assert "sealed acquisition target" not in _text(message)

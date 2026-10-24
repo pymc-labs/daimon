@@ -46,9 +46,9 @@ from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_labe
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 111
@@ -252,7 +252,7 @@ def test_the_deployment_default_is_named_for_its_own_tier() -> None:
         allowed_user_id=42,
     )
 
-    assert "**specialist**\n-# deployment default" in _text(view), (
+    assert "**specialist**\n-# Daimon-wide default" in _text(view), (
         "a deployment default is changed somewhere else than a server default, and must say so"
     )
 
@@ -296,7 +296,7 @@ def test_roster_preserves_long_names_but_bounds_the_targeted_setup_label() -> No
     assert f"**{answering.name}**\n-# answers here" in _text(view), (
         "the readable row keeps the full agent identity and its status"
     )
-    setup_label = next(label for label in _labels(view) if label.startswith("⚙️ Manage"))
+    setup_label = next(label for label in _labels(view) if label.startswith("⚙️ Set up"))
     assert len(setup_label) <= 30 and setup_label.endswith("…"), (
         "the targeted action stays within its product copy limit and marks truncation"
     )

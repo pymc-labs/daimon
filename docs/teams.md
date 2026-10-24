@@ -66,8 +66,9 @@ is supported; government and China clouds use other Bot Framework hosts.
   adding `;messageid=<root post id>`. Where readers are limited, the agent's
   memory is read-only. See [permissions.md](permissions.md).
 
-A turn shows one status card, edited in place, with a Stop button only the
-author can use. The answer replaces the card, split across messages when long,
+A turn shows one status card, edited in place, with a Stop button the
+author, or a Daimon admin (an owner of the admin team), can use. Stop turns the card into "Stopping…", without the button, until
+the turn has stopped and the card says so. The answer replaces the card, split across messages when long,
 then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. When a tool call named the
 outputs folder, that card waits for file delivery (30 seconds at most, or
@@ -140,11 +141,11 @@ chat) and after an @mention (channels) fill in a ready-made request to send.
 | Command | Does |
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
-| `help` | List the commands. |
+| `help` | The commands that work where it was sent. In a 1:1 chat it lists them all; in a channel it lists the ones answered there and names the 1:1 chat for `setup` (and `support`); in a group chat it also lists `new`. |
 | `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins), mint, list and revoke operator tokens (admins), or open a setup conversation. |
-| `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
+| `here` | Who answers here and what it can use: the status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
-| `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Answered in a 1:1 chat instead of a channel whose readers are limited, it says so, since the answer would leave the channel. |
+| `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Answered in a 1:1 chat instead of a channel whose readers are limited, it says so, since the answer would leave the channel. In a channel shared with another organisation the agent uses that channel's own memory, which everyone there sees: `memory` shows it, and `memory mine` and `memory forget-mine` say personal memory is not used there. |
 | `privacy` | See, export or delete what Daimon stores about you, or disconnect your Microsoft account. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
 | `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`); Teams requests never go to Discord's or Slack's channel. The post links to where it was asked; requests go to the escalation channel. |
@@ -165,6 +166,9 @@ falls back to the last successful one for up to an hour, and demotes no one. If
 the app is removed from the admin team, or no owner list has been read within
 an hour, nobody is an admin in chats and cards until the next good read, while
 stored admin roles stand until then; re-adding the app restores the owners.
+When a Teams refusal sends someone to an admin, it adds "Admins are the owners
+of the {team name} team.", using the name Daimon last recorded for the admin
+team; until that team has had activity with the app in it, the line is left out.
 Admins' turns run with the admin role, and the
 panels unlock the admin actions for them. Every card click and dialog
 re-checks the organisation, the clicker and their role. Boot does the same
@@ -313,7 +317,9 @@ instance (see Restart behaviour); a followed-thread reply or a refusal read
 then is dropped, as on Bot Framework. Each boot also reads every subscribed
 channel once for messages after the last one handled, at most 10 minutes
 back, and so does a notice that Graph missed notifications; a notified
-message older than that is skipped too. Edits never start
+message older than that is skipped too. Only the boot's read runs an @mention
+of the bot: Bot Framework delivers those, except while the adapter was
+restarting. Edits never start
 a turn, and a message seen through both Bot Framework and Graph, notified
 twice or read again after a restart runs once: both routes write the same
 database receipt (see Restart behaviour). A shared
@@ -419,7 +425,7 @@ confirmation card. **Add skill** on an agent's Details in `setup` takes a
 pasted SKILL.md (up to 4,000 characters; a dialog has no file input), shows
 what it holds, and adds it on a second Send as the agent's own skill, under
 Discord's and Slack's rule: an admin for any agent, or anyone for an agent nobody else uses. The
-panel is outside every channel, so a pinned agent needs a server admin.
+panel is outside every channel, so a pinned agent needs an admin.
 
 ### Channel files (optional)
 
@@ -513,8 +519,11 @@ expired and stopped cards lose their buttons.
 
 Nothing app-only lists the teams an app is in, so the adapter records each
 team when the app is added or anyone writes there; an older install shows up
-once someone writes in it. Adding the app posts a welcome (in the team's General
-channel, or the 1:1 chat); removing it from a team forgets that team.
+once someone writes in it. Adding the app posts a welcome: in a team's General
+channel a card that says to @mention Daimon in a post, with an **Open chat**
+button that opens the person's 1:1 chat with it; in the 1:1 chat a short note
+that says to ask a question or send a data file. Removing the app from a team
+forgets that team.
 
 ### Microsoft account (optional)
 
@@ -578,13 +587,19 @@ The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
 - **`microsoft_write`** uploads or replaces files, edits workbooks and
   creates or updates OneNote pages. It has no delete or move call, but
   replacing a file or a workbook call (clearing or deleting a range or sheet)
-  can still destroy data. With tool safety on, each call waits for the
-  person's Approve.
+  can still destroy data. A path over 500 characters, or a body over 8,000
+  characters or 14,000 bytes (emoji and most non-Latin text take 3 to 4
+  bytes a character), is refused. With tool safety on, each call waits for the person's Approve
+  on a card that names the change (a workbook, a file, a OneNote page) and
+  shows the method, the path, and the whole body under **Details** (the file
+  handle for an upload).
 - **`microsoft_send`** sends an email or a calendar invite, each time only
   after the person presses Approve on a card showing every recipient, the
   subject, time and time zone, location and the start of the message, with
   the whole message under **Details**, whether or not tool safety is on. A
-  message over 8,000 characters is refused.
+  message over 8,000 characters, an address with an invisible character, or
+  addresses, subject, location and times that total over 3,000 bytes, is
+  refused. If the card can't be shown, nothing is sent.
 
 Mail, calendar and OneNote are reachable only from the person's 1:1 chat
 with Daimon, never from a channel or group chat. The chat is the one recorded
@@ -664,6 +679,30 @@ message whose start could not be recorded is tried again every 30 seconds. A mes
 text is stored only until its turn starts or it is answered, and the
 content-free receipt is deleted after 24 hours.
 
+Teams does not resend a message posted in the seconds between the old process
+stopping and the new one serving. So once the new one serves, it reads back,
+through Graph, the standard channels (replies included) and group chats where
+a message was admitted in the last 24 hours, newest first, at most 50 of them,
+one page each. A message from a person that is under 10 minutes old and was
+posted before the service began serving runs through the same admission as any
+other, in order: an @mention, a reply in a followed thread, a group chat
+mention, or a typed "@<bot name>" while that switch is on. Later ones are
+Bot Framework's own. One already admitted, whether Bot Framework delivered it
+or an earlier boot read it, is skipped, so nothing runs twice; a message
+within a second or so of the start of serving can be missed. This needs the
+same per-team permissions as channel history (`ChannelMessage.Read.Group`,
+`ChatMessage.Read.Chat`), not the setting for private channels. A conversation
+Graph refuses is logged (`teams.restart_catch_up.read_failed`) and skipped; it
+never holds up boot. Private and shared channels are read through their
+subscription (above), so they are caught up only with
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED` on. A 1:1 chat cannot be read back
+through Graph, so a message sent there in the gap is lost and must be sent again.
+The bot's name for a typed "@<bot name>" comes from a private-channel
+subscription or the bot's own earlier message in what was read; with neither,
+only a real mention is read back. Deleting your data in `privacy` clears you
+and your words from your receipts but keeps each receipt until the 24 hours are
+up, so a message you deleted is not run again by a restart's read.
+
 Handoffs, work waiting on a private input and timers are durable wake-queue
 rows, and a wake poller opens every chat with due work. They survive a
 restart, a timer fires at its time, and one whose turn had already started
@@ -678,5 +717,6 @@ not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.
 
 Agent Details shows a read-only GitHub section with one repo per line, the
-working repo (or “No working repo”), and a prompt to ask the agent in the
-setup conversation to change repos.
+working repo (or “No working repo”), and a prompt to ask the agent in chat to
+change repos; the Teams setup card has no Connect GitHub button. A setup
+conversation in the 1:1 chat opens with “This chat is about…”.

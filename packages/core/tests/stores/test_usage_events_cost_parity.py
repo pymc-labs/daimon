@@ -10,7 +10,7 @@ from daimon.core._models import UsageEvent
 from daimon.core.pricing import LONG_CONTEXT_PROMPT_TOKENS, MODEL_PRICING, cost_of
 from daimon.core.stores import usage_events
 from daimon.testing.factories import make_tenant, make_usage_event
-from daimon.testing.ma_models import ma_model_usage
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 

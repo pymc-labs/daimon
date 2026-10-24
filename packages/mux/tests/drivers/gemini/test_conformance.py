@@ -5,18 +5,6 @@ import sys
 from collections.abc import Sequence
 
 import pytest
-from daimon.testing.conformance.fixtures import FIXTURES
-from daimon.testing.conformance.gemini import PENDING_REASONS, GeminiScript, adapter, register
-from daimon.testing.conformance.runner import (
-    Adapter,
-    ConformanceFailure,
-    PendingKind,
-    Registry,
-    Scenario,
-    require,
-    run,
-    run_fixture,
-)
 from mux.contracts.actions import InputEvent
 from mux.contracts.admission import Admission
 from mux.contracts.config import ConfigRevision
@@ -28,6 +16,18 @@ from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import GeminiManagedAgents, GeminiUsage
 from mux.drivers.gemini.core import GeminiEvents, GeminiSessions
 from mux.profiles.gemini import INLINE_REUSE
+from mux.testing.conformance.fixtures import FIXTURES
+from mux.testing.conformance.gemini import PENDING_REASONS, GeminiScript, adapter, register
+from mux.testing.conformance.runner import (
+    Adapter,
+    ConformanceFailure,
+    PendingKind,
+    Registry,
+    Scenario,
+    require,
+    run,
+    run_fixture,
+)
 
 
 @pytest.mark.asyncio

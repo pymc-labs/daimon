@@ -18,8 +18,10 @@ one older than `CATCH_UP_WINDOW` is skipped. A burst of more than
 `MAX_MESSAGE_READS` reads each channel's newest page once instead.
 Only `created` changes are read, so an edit never runs anything again. A
 `missed` notice reads the channel's newest page since the last message handled;
-so does each boot, for what a predecessor answered 202 but never read. Neither
-reads further back than `CATCH_UP_WINDOW`. The adapter's admission row keeps a
+so does each boot, for what a predecessor answered 202 but never read, and for
+the @mentions Bot Framework did not deliver while the adapter restarted (the
+notices and a `missed` read leave mentions to it). Neither reads further back
+than `CATCH_UP_WINDOW`. The adapter's admission row keeps a
 message read twice from running twice; an addressed one read while draining is
 held for the next boot's reclaim.
 """
@@ -42,6 +44,7 @@ from typing import Any, Protocol
 import httpx
 import structlog
 from daimon.adapters.teams.admissions import REPLAY_MAX_AGE
+from daimon.adapters.teams.identity import display_bot_name
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow
 from daimon.core.stores.teams_channel_subscriptions import (
@@ -99,7 +102,15 @@ _RESOURCE = re.compile(
 _CHANNEL_ID = re.compile(r"^19:[^/?#'\s]+$")
 _GUID = re.compile(r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 
-Deliver = Callable[[GraphMessage, TeamsChannelSubscriptionRow], Awaitable[None]]
+
+class Deliver(Protocol):
+    """Route a message read from a channel; `mentions` lets an @mention of the bot through."""
+
+    def __call__(
+        self, message: GraphMessage, channel: TeamsChannelSubscriptionRow, *, mentions: bool = False
+    ) -> Awaitable[None]: ...
+
+
 ChannelTypeLookup = Callable[[str, str], Awaitable[str | None]]
 # Bot Framework's 403 code for a conversation the bot is not in. No read tells:
 # a channel's member list answers whether or not the bot is in it.
@@ -199,10 +210,7 @@ def bot_not_in_roster(err: httpx.HTTPStatusError) -> bool:
 
 
 def _created(message: GraphMessage) -> datetime | None:
-    try:
-        return datetime.fromisoformat(message.created_date_time or "")
-    except ValueError:
-        return None
+    return message.created_at
 
 
 class ChannelSubscriptions:
@@ -452,7 +460,7 @@ class ChannelSubscriptions:
                     channel_type=channel.type,
                     channel_name=channel.name,
                     team_name=team.name,
-                    bot_name=activity.recipient.name,
+                    bot_name=display_bot_name(activity.recipient.name),
                     service_url=activity.service_url,
                 )
             )
@@ -581,11 +589,18 @@ class ChannelSubscriptions:
         self._wake.set()
 
     async def catch_up(
-        self, row: TeamsChannelSubscriptionRow, *, floor: datetime, notified: bool = False
+        self,
+        row: TeamsChannelSubscriptionRow,
+        *,
+        floor: datetime,
+        notified: bool = False,
+        mentions: bool = False,
     ) -> None:
         """Deliver what the channel's newest page holds since the last message handled
         and since `floor`. One read: the page bounds it. Without a watermark, only
-        when Graph `notified` new messages: else nothing was handled to have missed after."""
+        when Graph `notified` new messages: else nothing was handled to have missed after.
+        `mentions` delivers an @mention of the bot too: Bot Framework sent none while
+        the adapter was down."""
         if row.last_message_at is None and not notified:
             return
         since = max(row.last_message_at or floor, floor)
@@ -606,13 +621,19 @@ class ChannelSubscriptions:
                 if created is not None and created > since:
                     newer.append((created, message))
         newer.sort(key=lambda pair: pair[0])
-        await self._handle(row, [message for _, message in newer])
+        await self._handle(row, [message for _, message in newer], mentions=mentions)
         log.info("teams.channel_catch_up.read", count=len(newer))
 
-    async def _handle(self, row: TeamsChannelSubscriptionRow, messages: list[GraphMessage]) -> None:
+    async def _handle(
+        self,
+        row: TeamsChannelSubscriptionRow,
+        messages: list[GraphMessage],
+        *,
+        mentions: bool = False,
+    ) -> None:
         """Deliver in order, moving the watermark past each."""
         for message in messages:
-            await self._deliver(message, row)
+            await self._deliver(message, row, mentions=mentions)
             if (created := _created(message)) is None:
                 continue
             try:
@@ -656,7 +677,8 @@ class ChannelSubscriptions:
 
     async def _catch_up_at_boot(self) -> None:
         """Read each channel once for what a predecessor answered 202 but never took
-        before it exited, within `CATCH_UP_WINDOW`."""
+        before it exited, within `CATCH_UP_WINDOW`, and for the @mentions Bot Framework
+        could not deliver while the adapter was restarting."""
         try:
             async with self._sessionmaker() as session:
                 rows = await list_teams_channel_subscriptions(session, tenant_id=self._tenant_id)
@@ -665,7 +687,7 @@ class ChannelSubscriptions:
             return
         floor = self._now() - CATCH_UP_WINDOW
         for row in rows:
-            await self.catch_up(row, floor=floor)
+            await self.catch_up(row, floor=floor, mentions=True)
 
     def _due_at(self, row: TeamsChannelSubscriptionRow) -> datetime:
         return renewal_due_at(

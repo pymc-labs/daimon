@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import SDK_ENV_VARS
+from mux.testing.isolated_sdk import SDK_ENV_VARS
 
 from .catalog_runner import load_catalog, plan_scenario
 from .headless_executor import execute_gemini_cell, execute_openai_cell

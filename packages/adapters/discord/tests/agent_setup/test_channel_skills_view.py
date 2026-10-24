@@ -24,8 +24,8 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001
@@ -149,7 +149,7 @@ async def test_an_unknown_skill_is_refused_with_its_reason(
     admin = _interaction(admin=True)
     await modal.on_submit(admin)
     (message,), _ = admin.response.send_message.await_args
-    assert "No skill of this workspace" in message
+    assert "No skill here" in message
     async with db_session_factory() as session:
         assert await list_channel_skills(session, tenant_id=tenant_id, platform="discord") == []
 

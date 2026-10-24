@@ -169,7 +169,7 @@ async def test_attach_refuses_repointing_a_server_unless_replace_is_allowed() ->
     import httpx
     import pytest
     from daimon.core.mcp_attach import McpServerReplaceRefusedError, attach_mcp_server_to_agent
-    from daimon.testing.ma import MARouter, build_fake_anthropic
+    from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 
     agent = _agent(
         mcp_servers=[{"name": "linear", "url": "https://mcp.linear.app/sse"}],

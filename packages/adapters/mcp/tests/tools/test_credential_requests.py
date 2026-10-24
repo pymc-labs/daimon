@@ -55,11 +55,12 @@ from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import create_origin
-from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -419,6 +420,8 @@ async def test_request_agent_key_creates_row_and_posts_button(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -492,6 +495,8 @@ async def test_request_mcp_token_creates_row_and_posts_button(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -548,6 +553,8 @@ async def test_request_mcp_oauth_creates_an_oauth_row_and_posts_the_connect_card
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -717,6 +724,8 @@ async def test_request_agent_key_succeeds_for_non_admin_caller(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -749,7 +758,7 @@ async def test_request_agent_key_rejects_slack_caller_without_workspace(
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    with pytest.raises(ToolError, match="workspace context"):
+    with pytest.raises(ToolError, match="chat context"):
         await _request_agent_key_impl(
             runtime, auth, agent_name="daimon", key="OPENAI_API_KEY", purpose="x", channel_id="222"
         )
@@ -762,7 +771,7 @@ async def test_request_mcp_token_rejects_slack_caller_without_workspace(
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    with pytest.raises(ToolError, match="workspace context"):
+    with pytest.raises(ToolError, match="chat context"):
         await _request_mcp_token_impl(
             runtime,
             auth,
@@ -862,6 +871,8 @@ async def test_request_agent_key_member_allowlist_but_admin_may_add_any_name(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=admin.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -927,6 +938,8 @@ async def test_request_agent_key_rejects_unknown_agent(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -1002,6 +1015,8 @@ async def test_request_agent_key_raises_when_button_post_fails(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -1140,6 +1155,8 @@ async def test_request_agent_key_posts_slack_button_carrying_the_token(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -1228,6 +1245,8 @@ async def _seed_origin(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -1872,6 +1891,8 @@ async def test_second_slack_request_in_same_thread_supersedes_the_live_one_and_e
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -1984,6 +2005,8 @@ async def _teams_setup(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -2064,7 +2087,7 @@ async def test_request_agent_key_refuses_before_posting_when_no_crypto_keys(
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9501", posted=posted)
 
-    with pytest.raises(ToolError, match="DAIMON_CRYPTO__KEYS"):
+    with pytest.raises(ToolError, match="no encryption key yet"):
         await _request_agent_key_impl(
             runtime,
             auth,
@@ -2374,6 +2397,8 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -2466,6 +2491,8 @@ async def test_an_admins_dm_turn_posts_a_credential_card_for_a_pinned_agent_into
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
             chat_session_id="test-session",
@@ -2506,3 +2533,62 @@ def test_a_credential_request_refuses_a_server_name_with_a_slash() -> None:
             server_name="linear/bridge",
             url="https://bridge.example/mcp",
         )
+
+
+@pytest.mark.parametrize("server_name", ["linear", "notion"], ids=["replace", "new-name"])
+async def test_the_agents_owner_may_connect_and_rotate_on_their_own_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    server_name: str,
+) -> None:
+    from daimon.core.stores import agent_owners
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [
+            _ma_agent_with_server(
+                agent_id="ag_shared",
+                tenant_id=tenant.id,
+                server_name="linear",
+                url="https://mcp.linear.app/sse",
+            )
+        ]
+    )
+    runtime = _runtime(
+        committing_sessionmaker,
+        client=client,
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+    )
+    auth = _auth_identity(tenant_id=tenant.id, is_admin=False)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    origin_id = await _seed_origin(committing_sessionmaker, tenant_id=tenant.id, auth=auth)
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9501", posted=posted)
+
+    async def request():
+        return await _request_mcp_token_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin_id),
+            expected_ma_agent_id="ag_shared",
+            agent_name="daimon",
+            server_name=server_name,
+            url="https://mcp.example.com/mcp",
+            channel_id="222",
+        )
+
+    with pytest.raises(ToolError, match="admin"):
+        await request()
+    async with committing_sessionmaker.begin() as session:
+        await agent_owners.set_owner(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared"),
+            owner_account_id=auth.account_id,
+            source="admin_assigned",
+        )
+    result = await request()
+    assert result.message_id == "9501"

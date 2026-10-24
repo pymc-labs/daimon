@@ -18,9 +18,9 @@ from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
 from daimon.core.stores import access_policy, fleet, mux_state
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.runtime_manifest import capture_preparation_source
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.resources import AgentPatch
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy import update
 
 from .test_frozen_root import freeze
@@ -120,7 +120,7 @@ async def _settled(ports, root, identifier):
         while True:
             _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
             selected = next(row for row in rows if str(row.id) == identifier)
-            if selected.status in ("failed", "succeeded"):
+            if selected.status in ("failed", "succeeded", "cancelled"):
                 return selected
             await asyncio.sleep(0.01)
 
@@ -266,7 +266,7 @@ async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_agai
         prices=prices,
         markup=Decimal(1),
         preparation=preparation,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
     )
     owner = FleetOrchestrator(ports)
@@ -315,7 +315,7 @@ async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_agai
 
 
 async def test_shared_preparation_factory_reads_each_actual_root(
-    db_preflight, db_nullpool_engine, root_turn
+    db_preflight, db_committing_engine, root_turn
 ):
     from contextlib import aclosing
     from datetime import UTC, datetime
@@ -324,7 +324,7 @@ async def test_shared_preparation_factory_reads_each_actual_root(
     from daimon.core.turn.runtime_manifest import read_frozen_root
 
     await freeze(root_turn)
-    async with aclosing(root_turn_factory(db_preflight, db_nullpool_engine)) as second_roots:
+    async with aclosing(root_turn_factory(db_preflight, db_committing_engine)) as second_roots:
         second = await anext(second_roots)
         await freeze(second)
         requests, parents = {}, []
@@ -470,7 +470,7 @@ async def test_falsey_injected_dispatch_remains_selected_without_native_fallback
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2)
         if dependencies
         else None,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         terms = _spawn_terms(request, root, resolved, "falsey-dispatch")
@@ -507,7 +507,7 @@ async def test_falsey_preparation_and_pool_run_the_actual_worker(worker_root):
         markup=Decimal(1),
         preparation=Preparation(),
         pool=Pool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         reply = await FleetOrchestrator(ports).spawn(
@@ -564,7 +564,7 @@ async def test_loader_is_bounded_before_and_after_admission_without_native_effec
         markup=Decimal(1),
         preparation=preparation,
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         async with asyncio.timeout(5):
@@ -654,7 +654,7 @@ async def test_dispatcher_ends_only_its_known_pre_native_claim_and_allows_a_heal
         markup=Decimal(1),
         preparation=preparation,
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     owner = FleetOrchestrator(ports)
     try:
@@ -695,7 +695,16 @@ async def test_dispatcher_ends_only_its_known_pre_native_claim_and_allows_a_heal
             blocked[0].cancel()
         release.set()
         ended = await _settled(ports, root, reply["worker_id"])
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        # A person's Stop reads as stopped, never as a refusal; a cancel from outside
+        # is never a refusal either (#1413 review B3).
+        expected = (
+            ("cancelled", "stop_requested")
+            if stop
+            else ("failed", "watch_ended")
+            if fault == "cancel"
+            else ("failed", "preparation_refused")
+        )
+        assert (ended.status, ended.error_code) == expected
         assert ended.binding_id is None and ended.attempts == ended.turns_used == 0
         assert ended.reserved_usd == claimed.reserved_usd and not calls
         await _assert_completion_offered(request, wake_key)
@@ -705,7 +714,7 @@ async def test_dispatcher_ends_only_its_known_pre_native_claim_and_allows_a_heal
                 db, tenant_id=request.tenant_id, policy=original_policy
             )
         replay = await owner.spawn(root, original_policy, **terms)
-        assert replay["worker_id"] == reply["worker_id"] and replay["status"] == "failed"
+        assert replay["worker_id"] == reply["worker_id"] and replay["status"] == ended.status
         assert not calls
         first, _ = await ports.read_run(root.fleet.scope, root.fleet.run_id)
         healthy = await fleet.create_run(
@@ -760,7 +769,7 @@ async def test_pre_native_cleanup_refuses_a_changed_claim_without_overwriting_it
         markup=Decimal(1),
         preparation=preparation,
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     owner = FleetOrchestrator(ports)
     policy = await _policy(request)
@@ -903,7 +912,7 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
         markup=Decimal(1),
         preparation=preparation,
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     owner = FleetOrchestrator(ports)
     try:
@@ -942,7 +951,12 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
                     await asyncio.sleep(0.01)
         release.set()
         ended = await _settled(ports, root, reply["worker_id"])
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        # A Stop ends the worker as stopped, never as a refusal (#1413 review B3).
+        assert (ended.status, ended.error_code) == (
+            ("cancelled", "stop_requested")
+            if fault == "stop"
+            else ("failed", "preparation_refused")
+        )
         assert ended.binding_id is None and ended.attempts == ended.turns_used == 0
         assert ended.reserved_usd == claimed.reserved_usd > 0 and not calls
         await _assert_completion_offered(request, wake_key)
@@ -953,7 +967,7 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
                 db, tenant_id=request.tenant_id, policy=original_policy
             )
         replay = await owner.spawn(root, original_policy, **terms)
-        assert replay["worker_id"] == reply["worker_id"] and replay["status"] == "failed"
+        assert replay["worker_id"] == reply["worker_id"] and replay["status"] == ended.status
         assert not calls
         first, _ = await ports.read_run(root.fleet.scope, root.fleet.run_id)
         healthy = await fleet.create_run(
@@ -1003,7 +1017,7 @@ async def test_wedged_preparation_fails_promptly_and_releases_its_claim(paused_s
         markup=Decimal(1),
         preparation=preparation,
         pool=pool,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         reply = await FleetOrchestrator(ports).spawn(
@@ -1014,7 +1028,7 @@ async def test_wedged_preparation_fails_promptly_and_releases_its_claim(paused_s
         async with asyncio.timeout(5):
             await entered.wait()
             ended = await _settled(ports, root, reply["worker_id"])
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        assert ended.status == "failed" and ended.error_code == "preparation_deadline_exceeded"
         assert ended.binding_id is None and ended.turns_used == 0 and not calls
         # A second real store claim must succeed through the same size-one pool.
         _, rows = await fleet.run_status(
@@ -1068,7 +1082,7 @@ async def test_worker_failure_log_retains_closed_refusal_without_private_payload
         prices=prices,
         markup=Decimal(1),
         preparation=preparation,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
         pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
     )
     try:
@@ -1146,7 +1160,7 @@ async def test_dispatch_failure_ends_claim_and_preserves_siblings_and_collection
         markup=Decimal(1),
         preparation=preparation,
         pool=pool,
-        deps=request.deps,
+        deps=replace(request.deps, fleet_enabled=True),
     )
     try:
         with capture_logs() as logs:
@@ -1166,9 +1180,11 @@ async def test_dispatch_failure_ends_claim_and_preserves_siblings_and_collection
                 while not any(row.get("event") == "fleet.worker_task_failed" for row in logs):
                     await asyncio.sleep(0.01)
         assert ended.status == "failed"
-        assert ended.error_code == (
-            "deadline_expired" if error_kind == "already_terminal" else "dispatch_refused"
-        )
+        # An unexpected exception is a bug on our side, never "couldn't start on that model".
+        assert ended.error_code == {
+            "already_terminal": "deadline_expired",
+            "unexpected": "setup_error",
+        }.get(error_kind, "dispatch_refused")
         run, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
         assert run.status == "running"
         assert next(row for row in rows if row.id == sibling.id) == sibling
@@ -1231,3 +1247,157 @@ async def test_dispatch_failure_cannot_terminalize_a_requeued_claim(worker_root)
         assert next(row for row in rows if row.id == newer.id) == newer
     finally:
         pool.release()
+
+
+async def test_fleet_r7_retry_reuses_defaulted_limits_instead_of_conflicting(worker_root):
+    """#1298 review: a bounded default deadline (now + 120 s) moves on retry.
+
+    The retry must reuse the admitted worker's limits; recomputing them would change
+    the admission digest and refuse the replay as an operation conflict.
+    """
+    from datetime import timedelta
+
+    request, root, _, resolved, prices, calls, _, _, _ = worker_root
+    captured = await request.capture_root(root)
+    dispatched = []
+
+    class Dispatch:
+        async def __call__(self, parent, row, specification, review):
+            dispatched.append(row)
+
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        dispatch=Dispatch(),
+        deps=replace(request.deps, fleet_enabled=True),
+    )
+    owner = FleetOrchestrator(ports)
+    try:
+        policy = await _policy(request)
+        replies = []
+        start = request.now()
+        for later in (0, 5):
+            now = start + timedelta(seconds=later)
+            limits = await owner.spawn_limits(
+                root,
+                policy,
+                operation_key="bounded-default",
+                provider=resolved.spec.model.provider,
+                now=now,
+                budget_usd=resolved.limits.budget_usd,
+                max_turns=resolved.limits.max_turns,
+                max_runtime_s=30,
+            )
+            if later == 0:
+                first = limits
+                # Shorter than this run's deadline, so a fresh default moves with time.
+                assert limits.deadline == start + timedelta(seconds=30)
+                assert limits.deadline < root.limits.deadline
+            else:
+                # A fresh default would be 5 s later and change the admission digest.
+                assert limits.deadline == first.deadline
+            terms = _spawn_terms(request, root, resolved, "bounded-default")
+            terms.update(
+                now=now,
+                limits=limits,
+                agent=resolved.spec,
+                clone=None,
+                clone_revision=None,
+                overrides=None,
+            )
+            replies.append(
+                await owner.spawn(root, policy, captured_source=captured.source, **terms)
+            )
+        assert replies[0]["worker_id"] == replies[1]["worker_id"]
+        # A replay of a still-pending worker re-runs its idempotent dispatch only.
+        assert {str(row.id) for row in dispatched} == {replies[0]["worker_id"]} and not calls
+        _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+        assert sum(1 for row in rows if str(row.id) == replies[0]["worker_id"]) == 1
+    finally:
+        await ports.close()
+
+
+async def test_a_bug_while_running_a_worker_is_recorded_as_a_setup_error(worker_root, monkeypatch):
+    """RESCORE-2 J4: a ValidationError read on the card as the model being unable to run."""
+    from daimon.core import headless_runner
+    from mux.contracts.resources import AgentPatch
+
+    request, root, _, resolved, prices, calls, _, _, _ = worker_root
+
+    async def preparation(parent):
+        return request
+
+    async def broken(*args, **kwargs):
+        AgentPatch.model_validate({"extensions": [{"namespace": "x", "version": 1}]})
+        raise AssertionError("expected a ValidationError")
+
+    monkeypatch.setattr(headless_runner, "run_worker", broken)
+    pool = fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=2)
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        preparation=preparation,
+        pool=pool,
+        deps=replace(request.deps, fleet_enabled=True),
+    )
+    try:
+        reply = await FleetOrchestrator(ports).spawn(
+            root, await _policy(request), **_spawn_terms(request, root, resolved, "bug-in-run")
+        )
+        async with asyncio.timeout(10):
+            ended = await _settled(ports, root, reply["worker_id"])
+        assert ended.status == "failed" and ended.error_code == "setup_error"
+        assert not calls
+    finally:
+        await ports.close()
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+async def test_dispatch_skips_a_second_failure_commit_run_worker_already_recorded(
+    worker_root, monkeypatch, recorded
+):
+    """#1416: run_worker records its own pre-native failure; a second commit from the
+    dispatcher would only wait on the tenant fleet lock again."""
+    from daimon.core import headless_runner
+    from structlog.testing import capture_logs
+
+    request, root, _, resolved, prices, _, _, _, _ = worker_root
+    commits: list[str] = []
+
+    async def fail(*args, **kwargs):
+        error = RuntimeError("worker failed")
+        if recorded:
+            setattr(error, headless_runner.FAILURE_RECORDED, True)
+        raise error
+
+    async def counted(*args, failure_code, **kwargs):
+        commits.append(failure_code)
+
+    async def preparation(parent):
+        return request
+
+    monkeypatch.setattr(headless_runner, "run_worker", fail)
+    monkeypatch.setattr(headless_runner, "commit_worker_failure", counted)
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        preparation=preparation,
+        pool=fleet.WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=2),
+        deps=replace(request.deps, fleet_enabled=True),
+    )
+    try:
+        with capture_logs() as logs:
+            await FleetOrchestrator(ports).spawn(
+                root,
+                await _policy(request),
+                **_spawn_terms(request, root, resolved, f"recorded-{recorded}"),
+            )
+            async with asyncio.timeout(10):
+                while not any(row.get("event") == "fleet.worker_task_failed" for row in logs):
+                    await asyncio.sleep(0.01)
+        assert commits == ([] if recorded else ["setup_error"])
+    finally:
+        await ports.close()

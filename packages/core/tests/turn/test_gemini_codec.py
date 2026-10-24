@@ -13,8 +13,8 @@ from daimon.core.turn.gemini import PROFILE, GeminiTurnIO
 from daimon.core.turn.io import TurnConnectionLost
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.privacy import TurnPrivacy
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
-from daimon.testing.ma_transport import ScriptedTransport
+from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.extensions import ExtensionConfig
@@ -24,6 +24,8 @@ from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.transport import Object, OwnedStream
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="host", authorization_id="offline")
 CHANNEL = ChannelRef(tenant_id="t", platform="test", channel_id="c")
@@ -468,3 +470,154 @@ async def test_close_disposes_stream_returned_by_cancel_resistant_opener(
         await reader
     await stream.close()
     assert closed == ["closed"]
+
+
+async def stalled_turn(
+    harness: Harness,
+    *,
+    flip_after_opens: int | None,
+    deadline_s: float | None = None,
+) -> tuple[TurnState, RecordingLifecycle]:
+    """Run a real host turn whose Gemini stream never sends another event.
+
+    The interaction completes natively once `flip_after_opens` streams have
+    opened (None: it never does).
+    """
+    from datetime import timedelta
+
+    revision = ConfigRevision.create(
+        CHANNEL,
+        1,
+        resolve_default(BackendConfig(backend="gemini", profile=PROFILE, model="gemini-3.8-flash")),
+    )
+    harness.transport.responses.append(interaction("host", status="in_progress"))
+    harness.transport.block = True
+    lifecycle = RecordingLifecycle()
+
+    async def complete_natively() -> None:
+        assert flip_after_opens is not None
+        while len(harness.transport.opened) < flip_after_opens:
+            await asyncio.sleep(0.01)
+        await harness.transport.read_started.wait()
+        harness.transport.saved["host"] = interaction("host", text="late answer")
+
+    flipper = asyncio.create_task(complete_natively()) if flip_after_opens else None
+    async with ScriptedTransport().client() as client:
+        state = await run_turn(
+            privacy=TurnPrivacy("test"),
+            anthropic=client,
+            session_id=harness.session.id,
+            user_message="question",
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            billing=BillingExempt(reason="headless-unrecorded"),
+            path="mux",
+            scope=SCOPE,
+            backend=harness.backend,
+            session_ref=harness.session,
+            profile=PROFILE,
+            backend_request=TurnBackendRequest(
+                profile=PROFILE,
+                client=client,
+                scope=SCOPE,
+                session_id=harness.session.id,
+                session=harness.session,
+                config=revision,
+                read_timeout_s=0.2,
+            ),
+            stream_read_timeout_s=0.2,
+            deadline=None
+            if deadline_s is None
+            else datetime.now(UTC) + timedelta(seconds=deadline_s),
+        )
+    if flipper is not None:
+        flipper.cancel()
+    return state, lifecycle
+
+
+@pytest.mark.asyncio
+async def test_idle_stream_then_completed_interaction_delivers_the_answer(
+    harness: Harness,
+) -> None:
+    state, lifecycle = await stalled_turn(harness, flip_after_opens=1, deadline_s=30)
+    assert state.termination != TerminationReason.CEILING and state.error is None
+    assert [c.text for c in state.content if c.kind == "text"] == ["late answer"]
+    assert len(lifecycle.terminal_success) == 1 and not lifecycle.terminal_failures
+    assert len(harness.transport.requests) == 1  # never re-sent
+
+
+@pytest.mark.asyncio
+async def test_idle_stream_while_running_keeps_polling_then_delivers_once(
+    harness: Harness,
+) -> None:
+    # Two silent streams while the interaction still runs, then completion.
+    state, lifecycle = await stalled_turn(harness, flip_after_opens=3, deadline_s=30)
+    assert len(harness.transport.opened) >= 3
+    assert state.error is None
+    # Replayed and reattached streams never fold the answer twice.
+    assert [c.text for c in state.content if c.kind == "text"] == ["late answer"]
+    assert len(lifecycle.terminal_success) == 1 and not lifecycle.terminal_failures
+    assert len(harness.transport.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_idle_stream_past_the_real_deadline_is_the_ceiling(harness: Harness) -> None:
+    state, lifecycle = await stalled_turn(harness, flip_after_opens=None, deadline_s=1.0)
+    assert state.termination == TerminationReason.CEILING
+    assert len(lifecycle.terminal_failures) == 1 and not lifecycle.terminal_success
+    assert len(harness.transport.opened) >= 2  # idle reads were cycles, not the ceiling
+
+
+@pytest.mark.asyncio
+async def test_idle_read_surfaces_as_a_read_timeout_not_a_bare_timeout(
+    harness: Harness,
+) -> None:
+    import httpx
+
+    harness.transport.responses.append(interaction("running", status="in_progress"))
+    harness.transport.block = True
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    stream = await io.open_stream(read_timeout_s=0.1)
+    await io.send([{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}])
+    for _ in await io.replay_turn_events(reconcile=False):
+        await stream.__anext__()
+    with pytest.raises(httpx.ReadTimeout):
+        await stream.__anext__()
+    assert harness.transport.close_count == 1
+    with pytest.raises(StopAsyncIteration):
+        await stream.__anext__()
+
+
+@pytest.mark.parametrize(
+    ("deployment_tokens", "expected"),
+    [
+        pytest.param(
+            {"max_input_tokens": 30_000, "max_output_tokens": 2048},
+            "gemini-4-argon",
+            id="bounded-worker",
+        ),
+        pytest.param({}, "gemini-4-argon", id="channel"),
+        # The unbounded worker path (a 4096-token cap) is Flash's; Argon never runs it.
+        pytest.param({"max_total_tokens": 4096}, "gemini-3.8-flash", id="unbounded-worker"),
+    ],
+)
+def test_argon_runs_only_bounded_or_as_a_channel(
+    deployment_tokens: dict[str, int], expected: str
+) -> None:
+    from daimon.core.mux_backend import TurnRuntime
+    from daimon.core.turn.gemini import GeminiDeployment, GeminiJournal, _runtime_model
+
+    deployment = GeminiDeployment(
+        "digest",
+        1,
+        "project",
+        AgentSpec(name="w", model=ModelRef(provider="gemini", id="gemini-4-argon")),
+        EnvironmentSpec(name="e"),
+        **deployment_tokens,
+    )
+    runtime = TurnRuntime(
+        transport_factory=lambda config, scope: None,
+        journal=GeminiJournal(MemoryStorage(), MemoryStateStore(), deployment),
+        usage_store=None,
+    )
+    assert _runtime_model(runtime) == expected  # pyright: ignore[reportPrivateUsage]

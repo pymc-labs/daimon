@@ -45,6 +45,7 @@ from daimon.core.routine_delivery import (
     tenant_dm_still_open,
 )
 from daimon.core.routine_files import deliver_routine_files, payload_for
+from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine
@@ -90,7 +91,7 @@ async def _dm_fallback(
             return DeliveryOutcome(status="skipped", note=reason)
         opened = await client.conversations_open(users=creator)  # pyright: ignore[reportUnknownMemberType]
         channel = cast("dict[str, str]", opened["channel"])["id"]
-        text = escape_mrkdwn_preserving_mentions(render_fallback_dm(row, reason))
+        text = escape_mrkdwn_preserving_mentions(render_fallback_dm(row, reason, platform="slack"))
         for chunk in split_fenced(text, 11800, word_boundary=True):
             if not await may_post():
                 return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
@@ -205,7 +206,10 @@ def make_slack_routine_poster(
         if not isinstance(cleared, TenantAccessPolicy):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
-        keep_inside = keeps_routine_inside(cleared, row)
+        # An isolated or shared channel's result never leaves it, not even by DM.
+        keep_inside = keeps_routine_inside(cleared, row) or await result_is_held(
+            runtime.sessionmaker, row, platform="slack"
+        )
 
         async def creator_current() -> bool:
             async with runtime.sessionmaker() as session:
@@ -247,7 +251,7 @@ def make_slack_routine_poster(
             )
 
         async def fallback(reason: str) -> DeliveryOutcome:
-            if keep_inside:  # an isolated channel's result never leaves it, not even by DM
+            if keep_inside:
                 return DeliveryOutcome(status="skipped", note=reason)
             return await _dm_fallback(
                 client,
@@ -293,7 +297,7 @@ def make_slack_routine_poster(
             # Slack drops `username` and `icon_url` without an error when the
             # install lacks chat:write.customize, so the line keeps naming the
             # agent here; only Discord, whose label always carries it, drops it.
-            text = escape_mrkdwn_preserving_mentions(render_fallback_post(row))
+            text = escape_mrkdwn_preserving_mentions(render_fallback_post(row, platform="slack"))
             for chunk in split_fenced(text, 11800, word_boundary=True):
                 await post_as_agent(client, identity, text=chunk, **place)
         except SlackApiError as err:

@@ -39,9 +39,10 @@ from daimon.core.scope import (
 )
 from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import EMPTY_CLOUD_CONFIG
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -160,7 +161,7 @@ def test_environment_notes_name_the_scope_and_the_tier() -> None:
     assert "nothing changed" in build_clear_environment_note(channel="c1", cleared=False), (
         "a clear with nothing set says so"
     )
-    assert "falls through" in build_clear_environment_note(channel="c1", cleared=True), (
+    assert "falls back" in build_clear_environment_note(channel="c1", cleared=True), (
         "a clear says where the channel goes"
     )
     assert "workspace default" in build_environment_resolution_note(

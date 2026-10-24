@@ -13,12 +13,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal
 from urllib.parse import parse_qsl, unquote
 
+from daimon.core.microsoft_write_paths import WriteKind, write_kind
 from fastmcp.exceptions import ToolError
-
-WriteKind = Literal["upload", "workbook", "onenote_create", "onenote_update"]
 
 _FILES = frozenset({"drive", "drives", "sites"})
 _PERSONAL = frozenset(
@@ -43,24 +41,6 @@ _QUERY_KEYS = frozenset(
 # Their answers hold links anyone can open without signing in.
 _BEARER = frozenset({"permissions", "thumbnails"})
 _ESCAPES = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
-_DRIVE = r"/(?:me/drive|drives/[^/:]+|sites/[^/:]+/drive)"
-_ITEM = _DRIVE + r"/(?:root|items/[^/:]+)(?::/[^:]+:)?"
-_WRITES: tuple[tuple[frozenset[str], re.Pattern[str], WriteKind], ...] = (
-    (frozenset({"PUT"}), re.compile(_ITEM + r"/content", re.I), "upload"),
-    # A colon only inside a quoted argument (range(address='A1:B2')), never
-    # path addressing that could step out of the workbook.
-    (
-        frozenset({"POST", "PATCH"}),
-        re.compile(_ITEM + r"/workbook/(?:[^:']|'[^'/]*')+", re.I),
-        "workbook",
-    ),
-    (
-        frozenset({"POST"}),
-        re.compile(r"/me/onenote/(?:sections/[^/:]+/)?pages", re.I),
-        "onenote_create",
-    ),
-    (frozenset({"PATCH"}), re.compile(r"/me/onenote/pages/[^/:]+/content", re.I), "onenote_update"),
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,9 +119,9 @@ def check_write(method: str, raw: str) -> tuple[GraphPath, WriteKind]:
     target = parse_path(raw)
     if target.query:
         raise _refuse("a write takes no query parameters")
-    for methods, pattern, kind in _WRITES:
-        if method in methods and pattern.fullmatch(target.decoded):
-            return target, kind
+    kind = write_kind(method, target.decoded)
+    if kind is not None:
+        return target, kind
     raise ToolError(
         f"Refused: {method} {target.path} is not a write this tool makes. It uploads or "
         "replaces a file (PUT .../content), edits an Excel workbook under a drive item "

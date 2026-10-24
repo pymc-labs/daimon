@@ -275,12 +275,12 @@ async def _pending(sm, parent, *, ordinal=0, reviewer_of=None):
 
 
 async def test_one_shared_ports_derives_each_original_root_address(
-    db_preflight, db_nullpool_engine, root_turn
+    db_preflight, db_committing_engine, root_turn
 ):
     from contextlib import aclosing
 
     await freeze(root_turn)
-    async with aclosing(root_turn_fixture(db_preflight, db_nullpool_engine)) as roots:
+    async with aclosing(root_turn_fixture(db_preflight, db_committing_engine)) as roots:
         second = await anext(roots)
         ports = HostFleetPorts(
             root_turn[0].sessionmaker, prices={}, markup=Decimal(1), deps=root_turn[0]

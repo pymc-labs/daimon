@@ -121,6 +121,27 @@ async def drain_github_installation_reconciliations(
                     ),
                     now=finished_at,
                 )
+                owner_before = (
+                    await installation_store.correct_github_app_owner(
+                        session,
+                        installation_id=job.installation_id,
+                        account_id=installation_state.account_id,
+                        account_login=installation_state.account_login,
+                    )
+                    if completed
+                    and installation_state is not None
+                    and installation_state.account_id is not None
+                    else None
+                )
+            if owner_before is not None and installation_state is not None:
+                _log.info(
+                    "github.installation_reconciliation.owner_corrected",
+                    installation_id=job.installation_id,
+                    old_account_login=owner_before[0],
+                    old_account_id=owner_before[1],
+                    account_login=installation_state.account_login,
+                    account_id=installation_state.account_id,
+                )
             _log.info(
                 "github.installation_reconciliation.finished",
                 installation_id=job.installation_id,

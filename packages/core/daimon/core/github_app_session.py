@@ -47,12 +47,17 @@ from daimon.core.mux_compat import (
 )
 from daimon.core.session_snapshot import SessionSnapshot, TokenScope, token_scope_parts
 from daimon.core.stores.github_access import (
+    MAX_AGENT_INSTALLATIONS,
+    MAX_SESSION_VAULT_CREDENTIALS,
+    AdmissibleGrantRows,
     AgentGrant,
     AuthorizedRepo,
+    admissible_grant_rows,
     list_agent_grants,
     list_authorized_repos,
     list_live_grant_repositories,
     lock_agent_grants,
+    projected_session_credential_count,
 )
 from daimon.core.stores.github_app_installations import get as get_installation
 from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
@@ -77,14 +82,14 @@ from daimon.core.stores.thread_sessions import (
     live_effective_config_for_ma_session,
     record_app_token_refresh,
 )
+from daimon.core.turn_hold import TurnHold
 from daimon.core.turn_origin import current_origin_id
 from mux.contracts.ids import Scope
 from mux.contracts.resources import WorkspaceSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = logging.getLogger(__name__)
-MAX_INSTALLATIONS_PER_AGENT = 12
-MAX_SESSION_VAULT_CREDENTIALS = 15
+MAX_INSTALLATIONS_PER_AGENT = MAX_AGENT_INSTALLATIONS
 
 
 def installation_credential_name(installation_id: int, chunk: int) -> str:
@@ -143,12 +148,14 @@ def projected_vault_credential_count(
     multi_installation: bool | None = None,
 ) -> int:
     """Count vault token variables and other credentials after sync."""
-    if other_credentials < 0:
-        raise ValueError("vault credential count cannot be negative")
     if multi_installation is None:
         multi_installation = len({installation_id for installation_id, _, _ in groups}) > 1
-    token_variables = len(groups) + int(include_alias) if multi_installation else int(bool(groups))
-    return token_variables + int(bool(groups) and include_alias) + other_credentials
+    return projected_session_credential_count(
+        len(groups),
+        multi_installation=multi_installation,
+        include_alias=include_alias,
+        other_credentials=other_credentials,
+    )
 
 
 def require_vault_budget(
@@ -210,8 +217,9 @@ class GitHubTokenMintUnavailable(RuntimeError):
 
 
 REQUESTER_CACHE = PermissionCache()
-type EffectiveAppRows = tuple[tuple[AgentGrant, AuthorizedRepo, PermissionProfile], ...]
-type EffectiveAppGrantView = tuple[EffectiveAppRows, int | None, int | None]
+type EffectiveAppRows = AdmissibleGrantRows
+type EffectiveAppGrantView = tuple[EffectiveAppRows, int | None, int | None, tuple[str, ...]]
+
 
 #: Bot identity per App slug. The numeric bot id never changes for a slug, so a
 #: process asks GitHub once; a failed lookup is not cached and is retried by the
@@ -302,7 +310,7 @@ async def effective_repo_plan(
     tuple[tuple[str, str], ...],
 ]:
     """One grant view determines scope, mount and non-secret helper map."""
-    rows, _, _ = await effective_app_grant_view(
+    rows, _, _, _ = await effective_app_grant_view(
         sessionmaker,
         tenant_id=tenant_id,
         agent_id=agent_id,
@@ -362,7 +370,7 @@ async def effective_repo_state(
     fernet: MultiFernet | None,
     mounted_only: bool = False,
 ) -> tuple[tuple[str, ...], dict[int, dict[str, str]]]:
-    rows, _, _ = await effective_app_grant_view(
+    rows, _, _, _ = await effective_app_grant_view(
         sessionmaker,
         tenant_id=tenant_id,
         agent_id=agent_id,
@@ -393,7 +401,14 @@ async def create_session_vault(
     public_url: str | None,
     jwt_secret: bytes | None,
     sessionmaker: async_sessionmaker[AsyncSession],
+    hold: TurnHold | None = None,
 ) -> str:
+    """Create the session's own GitHub-token vault.
+
+    It carries a Daimon MCP credential too, so a held turn's ``hold`` goes on
+    that one as well: a session never mounts an unheld Daimon credential beside
+    a held one.
+    """
     scope = resource_scope(
         tenant_id=str(tenant_id),
         account_id=str(account_id) if account_id is not None else "service",
@@ -409,6 +424,7 @@ async def create_session_vault(
                     jwt_secret=jwt_secret,
                     public_url=public_url,
                     now=datetime.now(UTC),
+                    hold=hold,
                 )
                 await store_credential(anthropic, vault.id, payload, scope=scope)
     except BaseException:
@@ -428,7 +444,7 @@ async def effective_app_grant_view(
         await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
         live = await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
     if not live:
-        return (), None, None
+        return (), None, None, ()
     if fernet is None:
         raise ValueError("GitHub App mode requires encryption")
     rows: list[tuple[AgentGrant, AuthorizedRepo, PermissionProfile]] = []
@@ -439,11 +455,8 @@ async def effective_app_grant_view(
         rows.append((grant, repo, profile))
     # Existing single-installation read grants remain valid in M1. The #1005
     # multi-installation path is write-only.
-    if len({repo.installation_id for _, repo, _ in rows}) > 1 and any(
-        profile != "write" for _, _, profile in rows
-    ):
-        raise ValueError("multi-installation App grants require write access")
-    return tuple(rows), None, None
+    accepted, refused = admissible_grant_rows(tuple(rows))
+    return accepted, None, None, refused
 
 
 async def revoke_token(client: httpx.AsyncClient, token: str) -> None:
@@ -459,7 +472,17 @@ async def _declared_repositories(
     sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> list[tuple[AgentGrant, AuthorizedRepo]]:
     async with sessionmaker() as session:
-        return await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
+        live = await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
+    rows: EffectiveAppRows = tuple(
+        (
+            grant,
+            repo,
+            "write" if grant.ceiling_access == "write" and repo.max_access == "write" else "read",
+        )
+        for grant, repo in live
+    )
+    accepted, _ = admissible_grant_rows(rows)
+    return [(grant, repo) for grant, repo, _ in accepted]
 
 
 async def _enqueue_mint_failure_reconciliation(
@@ -516,17 +539,21 @@ async def prepare_app_access(
     vault_id: str | None = None,
 ) -> AppSessionAccess:
     """Mint only this session's effective repository groups, recording every token."""
-    rows, user_id, link_generation = grant_view or await effective_app_grant_view(
-        sessionmaker,
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        fernet=fernet,
+    rows, user_id, link_generation, inadmissible_urls = (
+        grant_view
+        or await effective_app_grant_view(
+            sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            fernet=fernet,
+        )
     )
     if not rows:
-        return AppSessionAccess((), (), None)
+        return AppSessionAccess((), (), None, inadmissible_urls)
     if fernet is None or config.app_id is None or config.private_key is None:
         raise ValueError("GitHub App mode requires App credentials and encryption")
     repo_urls = {repo.repo_id: f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows}
+    excluded_repo_urls = (*excluded_repo_urls, *inadmissible_urls)
     skipped_repo_ids = {
         repo.repo_id for _, repo, _ in rows if repo_urls[repo.repo_id] in excluded_repo_urls
     }
@@ -755,9 +782,12 @@ async def prepare_app_access(
     )
     excluded = tuple(
         sorted(
-            f"https://github.com/{repo.repo_full_name}"
-            for _, repo, _ in rows
-            if repo.repo_id in excluded_repo_ids
+            set(inadmissible_urls)
+            | {
+                f"https://github.com/{repo.repo_full_name}"
+                for _, repo, _ in rows
+                if repo.repo_id in excluded_repo_ids
+            }
         )
     )
     token_repo_urls = tuple(

@@ -7,15 +7,15 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from daimon.testing.conformance import Registry, run
-from daimon.testing.conformance.runner import Adapter, PendingKind, run_fixture
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ResolvedBackend
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import Session
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
 from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.testing.conformance import Registry, run
+from mux.testing.conformance.runner import Adapter, PendingKind, run_fixture
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 from .conformance_adapter import (
     BETA_QUERY,
@@ -213,12 +213,10 @@ async def test_c10_pending_does_not_falsify_the_actual_native_profile(
     native.wire.assert_consumed()
 
 
-async def test_c05_reconciliation_and_c09_hard_delete_really_are_unavailable(
+async def test_c09_hard_delete_really_is_unavailable(
     adapters: AnthropicOfflineFactory,
 ) -> None:
     adapter = adapters()
-    with pytest.raises(UnsupportedCapability, match="reconcile"):
-        await adapter.driver.events.reconcile(SCOPE, REF)
     with pytest.raises(UnsupportedCapability, match="session_delete"):
         await adapter.driver.sessions.delete(SCOPE, REF, key="delete")
     assert script(adapter).wire.requests == []

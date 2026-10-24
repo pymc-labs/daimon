@@ -11,8 +11,9 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import build_fake_anthropic, make_agent_env_echo_handler
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
+from daimon.testing.ma import make_agent_env_echo_handler
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 

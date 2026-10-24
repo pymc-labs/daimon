@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Literal
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import SDK_ENV_VARS, AmbientSDKConfigurationError
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.provider_fixtures import load_provider_fixtures, turn_tape
 from daimon.testing.provider_replay import provider_replay
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.isolated_sdk import SDK_ENV_VARS, AmbientSDKConfigurationError
 
 if TYPE_CHECKING:
     pass

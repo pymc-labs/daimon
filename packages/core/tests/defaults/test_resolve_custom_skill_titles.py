@@ -7,8 +7,8 @@ import uuid
 import httpx
 from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.skills import resolve_custom_skill_titles
-from daimon.testing import ma_agent
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
 
 def _skill(*, id: str, display_title: str) -> dict[str, object]:

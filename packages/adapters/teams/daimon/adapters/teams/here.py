@@ -19,8 +19,14 @@ from daimon.adapters.teams.billing_panel import plain_name
 from daimon.adapters.teams.card_actions import heading
 from daimon.adapters.teams.commands import CommandContext
 from daimon.core.agent_details import GitHubDeploymentFacts
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.errors import DaimonError
-from daimon.core.here_card import HereCard, load_here_card, render_here_card
+from daimon.core.here_card import (
+    HereCard,
+    for_foreign_sender,
+    load_here_card,
+    render_here_card,
+)
 from daimon.core.stores.identity import find_platform_principal
 from microsoft_teams.cards import AdaptiveCard, CardElement, TextBlock
 
@@ -34,8 +40,7 @@ def here_card(card: HereCard) -> AdaptiveCard:
     """The shared compact card, as literal text: names cannot format or mention."""
     shown = render_here_card(card)
     lines = [
-        # The shared copy names Slack and Discord's command; Teams' is `setup`.
-        *([shown.subline.replace("/agent-setup", "setup")] if shown.subline else []),
+        *([shown.subline] if shown.subline else []),
         *([f"Reading: {shown.reading}"] if shown.reading else []),
         *([f"Publishing: {shown.publishing}"] if shown.publishing else []),
         *shown.extras,
@@ -50,11 +55,21 @@ async def _load(context: CommandContext) -> HereCard:
     # A plain 1:1 chat is its own thread; only a post or a setup conversation is one.
     thread_id = asked.thread_id if asked.thread_id != asked.channel_id else None
     public_url = runtime.settings.mcp.public_url
-    async with runtime.sessionmaker() as session:
+    async with (
+        guard_selfhosted_channel(
+            runtime.sessionmaker,
+            tenant_id=context.tenant_id,
+            platform="teams",
+            channel_id=asked.channel_id,
+            thread_id=thread_id,
+            caller_id=asked.user_id,
+        ),
+        runtime.sessionmaker() as session,
+    ):
         principal = await find_platform_principal(
             session, tenant_id=context.tenant_id, platform="teams", external_id=asked.user_id
         )
-        return await load_here_card(
+        card = await load_here_card(
             session,
             runtime.anthropic,
             tenant_id=context.tenant_id,
@@ -74,6 +89,8 @@ async def _load(context: CommandContext) -> HereCard:
             bot_can_view=True,
             caller_can_view=True,
         )
+    # Someone from another organisation has no 1:1 chat to send `setup` in.
+    return for_foreign_sender(card) if asked.is_foreign else card
 
 
 async def show_here(context: CommandContext) -> None:

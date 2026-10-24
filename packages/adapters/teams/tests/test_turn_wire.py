@@ -36,15 +36,15 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing import list_response, ma_session
-from daimon.testing.ma import (
+from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, ENV_ID, build_turn_router, turn_events
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
+    list_response,
     make_fake_memory_store_handler,
     sse_response,
 )
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
-from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, ENV_ID, build_turn_router, turn_events
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -356,7 +356,7 @@ async def test_long_answer_splits_into_ordered_parts_and_keeps_its_code_block_wh
     assert all(labels), "every part is labelled AI generated"
 
 
-_RUNNING_BASH = "🖋️ Running a command"
+_RUNNING_BASH = "⏳ Running a command"
 
 
 async def test_tool_use_edits_the_status_card_before_the_answer_replaces_it(
@@ -471,11 +471,20 @@ async def test_cancel_from_the_author_interrupts_the_session_and_closes_the_card
     message = "application/vnd.microsoft.activity.message"
     assert refused == {"statusCode": 200, "type": message, "value": app._CANCEL_NOT_AUTHOR}  # pyright: ignore[reportPrivateUsage]
     assert sent_after_refusal == 1, "another person's click sends nothing to MA"
-    assert accepted == {"statusCode": 200, "type": message, "value": app._CANCELLING}  # pyright: ignore[reportPrivateUsage]
+    assert (
+        accepted["statusCode"] == 200
+        and accepted["type"] == "application/vnd.microsoft.card.adaptive"
+    )
+    stopping = json.dumps(accepted["value"], ensure_ascii=False)
+    assert card.STOPPING_HEADLINE in stopping, "the clicker's card says it is stopping"
+    assert card.CANCEL_VERB not in stopping, "without a Stop button"
     events = [e["type"] for body in sent for e in body["events"]]
     assert events == ["user.message", "user.interrupt"], "one interrupt reaches MA"
     assert streams == [] and not release.is_set(), "the interrupt ends the turn, not the stream"
-    _status, closed = teams_api_fake.activity_requests
+    _status, stopping_edit, closed = teams_api_fake.activity_requests
+    assert (stopping_edit.method, _path(stopping_edit)) == ("PUT", _path(status) + "/m-1")
+    assert card.STOPPING_HEADLINE in _texts(stopping_edit)[0], "everyone's card says so"
+    assert card.CANCEL_VERB not in json.dumps(stopping_edit.body), "without a Stop button"
     assert (closed.method, _path(closed)) == ("PUT", _path(status) + "/m-1"), "the card is closed"
     notice, summary = _texts(closed)
     assert notice == card.CANCELLED_NOTICE and _actions(closed) == [], "and says so"

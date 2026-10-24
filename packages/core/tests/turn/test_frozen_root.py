@@ -37,16 +37,18 @@ from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtime_manifest import freeze_prepared_root, read_frozen_root
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, send_events_response, sse_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from daimon.testing.ma_transport import ScriptedTransport
-from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import RecordingLifecycle, deps_for_pinned_mux
 from mux.contracts.resources import ProviderBinding
 from mux.errors import OperationConflict, ScopeViolation
 from mux.state.store import binding_slot
+from mux.testing.drivers.anthropic.ma import MARouter, send_events_response, sse_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from structlog.testing import capture_logs
@@ -58,13 +60,14 @@ from .conftest import make_status_idle
 @pytest.fixture
 async def root_turn(
     db_preflight,
-    db_nullpool_engine,
+    db_committing_engine,
     *,
     live_root=False,
     null_environment_description=False,
     resolved_model=False,
+    memory=True,
 ):
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
     async with sm.begin() as db:
         tenant = await make_tenant(db)
@@ -178,13 +181,14 @@ async def root_turn(
         captured = await load_backend_agent(
             client, sm, tenant_id=tenant.id, agent_name="root", actual_agent=actual
         )
-        async with sm.begin() as db:
-            await agent_memory_stores.insert_memory_store(
-                db,
-                tenant_id=tenant.id,
-                agent_id=captured.agent_id,
-                memory_store_id="warm-root-memory",
-            )
+        if memory:
+            async with sm.begin() as db:
+                await agent_memory_stores.insert_memory_store(
+                    db,
+                    tenant_id=tenant.id,
+                    agent_id=captured.agent_id,
+                    memory_store_id="warm-root-memory",
+                )
         captured = await project_session_resources(
             captured,
             agent=actual,
@@ -227,6 +231,7 @@ async def root_turn(
             thread.channel.channel_id,
             thread.thread_id,
             False,
+            platform="discord",
         )
         admission = Admission(
             account.id,
@@ -256,6 +261,8 @@ async def root_turn(
             responder_ma_agent_id=native.id,
             responder_name="root",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             root = replace(
                 root,
@@ -330,7 +337,10 @@ async def root_turn(
                 return None
 
             deps = replace(
-                deps_for(client, sm), fleet_enabled=True, fleet_root_grants=None, state_store=store
+                deps_for_pinned_mux(client, sm),
+                fleet_enabled=True,
+                fleet_root_grants=None,
+                state_store=store,
             )
             backend = managed_agents(
                 client, scope=scope, resources=frozenset({("session", acknowledged.id)})
@@ -377,6 +387,35 @@ async def freeze(value):
             )
 
     await persistence.run(write)
+
+
+async def test_a_root_frozen_before_worker_times_still_reads(root_turn):
+    """A root recorded before #1436 has no max_worker_seconds: it decodes as None and
+    its workers keep the old rule (the root's own, shorter deadline)."""
+    from daimon.core.neutral_resources import worker_runtime_ceiling
+
+    await freeze(root_turn)
+    deps, _, _, intent, _, scope, _, _ = root_turn
+    current, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    assert current.max_worker_seconds is not None
+    async with deps.sessionmaker() as db:
+        row = await db.scalar(
+            select(MuxOperation).where(
+                MuxOperation.tenant_id == intent.tenant_id,
+                MuxOperation.key.startswith("fleet_root:"),
+            )
+        )
+        assert row is not None
+        record = dict(row.record)
+        result = dict(record["result"])
+        permissions = dict(result["permissions"])
+        del permissions["max_worker_seconds"]
+        row.record = {**record, "result": {**result, "permissions": permissions}}
+        await db.commit()
+    old, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    assert old.max_worker_seconds is None
+    assert old == replace(current, max_worker_seconds=None)
+    assert worker_runtime_ceiling(old, "anthropic") is None
 
 
 async def test_real_native_ack_root_join_is_shared_by_intent_and_origin(root_turn):
@@ -515,6 +554,69 @@ async def test_real_run_retains_root_before_native_input(root_turn):
     assert any(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
 
 
+def with_login_tool(prepared):
+    """A source with a login that belongs to no connector workers could leave behind.
+
+    (A stored connector login, `agent-mcp:<id>`, is left out of worker ceilings
+    instead: test_fleet_login_connectors.)
+    """
+    from mux.contracts.resources import ResourceBinding
+
+    login = "vault:internal-login"
+    source = prepared._source
+    return replace(
+        prepared,
+        _source=source.model_copy(
+            update={
+                "resource_requirements": (
+                    *source.resource_requirements,
+                    ResourceBinding(id=login, kind="credential", credential_ref=login),
+                )
+            }
+        ),
+    )
+
+
+async def test_an_agent_that_cant_run_a_fleet_still_answers_with_fleet_off(root_turn):
+    from daimon.core.neutral_resources import fleet_root_obstacle, fleet_root_obstacle_text
+    from daimon.core.turn.runtime_manifest import root_refusal
+
+    deps, prepared, grants, intent, origin, scope, binding, transport = root_turn
+    prepared = with_login_tool(prepared)
+    assert fleet_root_obstacle(prepared._source) == "credentials"
+    await run_root_input((deps, prepared, grants, intent, origin, scope, binding, transport))
+    # The turn reached the provider; no root or run was retained for it.
+    assert any(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+    with pytest.raises((WorkerSpecRefused, ScopeViolation)):
+        await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
+    assert root_refusal(origin.id) == "credentials"
+    assert fleet_root_obstacle_text("credentials") == (
+        "This agent can't run a fleet yet: it uses a connected tool or repository "
+        "with its own login."
+    )
+    assert fleet_root_obstacle(root_turn[1]._source) is None  # the plain agent can
+
+
+async def test_a_refusal_that_is_not_the_agents_setup_still_fails_the_turn(root_turn, monkeypatch):
+    from daimon.core import neutral_resources
+    from daimon.core.turn.runtime_manifest import root_refusal
+
+    deps, prepared, grants, intent, origin, scope, binding, transport = root_turn
+
+    def refused(*args, **kwargs):
+        # e.g. a backend the policy no longer allows; the agent itself could run one.
+        raise WorkerSpecRefused("backend", "unsupported")
+
+    monkeypatch.setattr(neutral_resources, "fleet_root_permissions", refused)
+    with pytest.raises(WorkerSpecRefused, match="backend"):
+        await freeze(root_turn)
+    assert root_refusal(origin.id) is None
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+
+
 async def test_fresh_channel_admission_reaches_root_freeze(root_turn):
     from daimon.core.authz import build_turn_place
 
@@ -623,6 +725,8 @@ async def test_same_intent_cannot_be_reassigned_to_another_execution(root_turn):
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name="root",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as other:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=other.id))
         with pytest.raises(OperationConflict):
@@ -898,6 +1002,8 @@ async def another_account_root(value):
             responder_ma_agent_id=actual.id,
             responder_name="root",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             root = replace(
                 grants[0],
@@ -1004,13 +1110,13 @@ async def test_one_intent_cannot_be_reserved_by_another_account(root_turn, statu
         assert len(other_transport.requests) == 2
 
 
-async def run_root_input(value, *, intent_id=None, completion=None):
+async def run_root_input(value, *, intent_id=None, completion=None, lifecycle=None, message=None):
     deps, prepared, _, intent, origin, _, _, _ = value
 
     async def reseed():
-        return "root input"
+        return message or "root input"
 
-    lifecycle = RecordingLifecycle()
+    lifecycle = lifecycle or RecordingLifecycle()
     return await run_prepared_turn(
         deps,
         prepared,
@@ -1018,7 +1124,7 @@ async def run_root_input(value, *, intent_id=None, completion=None):
         platform="discord",
         thread_id=origin.thread_id,
         external_user_id="requester",
-        user_message="root input",
+        user_message=message or "root input",
         lifecycle=lifecycle,
         cancel=asyncio.Event(),
         reseed_user_message=reseed,
@@ -1115,6 +1221,8 @@ async def wake_frame(value):
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as current:
         yield intent, current
 
@@ -1131,6 +1239,8 @@ async def test_started_completion_carries_original_run_across_two_real_turn_fram
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
@@ -1230,6 +1340,8 @@ async def test_completion_bound_without_a_prepared_scope_resumes_the_original_ro
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
@@ -1343,6 +1455,8 @@ async def test_retained_root_readers_follow_later_run_transitions(root_turn, sta
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
@@ -1423,6 +1537,8 @@ async def test_original_context_and_card_are_not_retained_for_a_closed_run(root_
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
@@ -1611,10 +1727,10 @@ async def test_retention_never_extends_existing_database_expiry(root_turn):
 
 
 @pytest.fixture
-async def recorded_fresh_root(db_preflight, db_nullpool_engine):
+async def recorded_fresh_root(db_preflight, db_committing_engine):
     async for value in root_turn.__wrapped__(
         db_preflight,
-        db_nullpool_engine,
+        db_committing_engine,
         live_root=True,
         null_environment_description=True,
         resolved_model=True,
@@ -1647,8 +1763,8 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
     from daimon.core.turn.admission import admit
     from daimon.core.turn.prepare import bind_session_impl
     from daimon.core.turn.runtime_manifest import read_frozen_preparation
-    from daimon.testing.ma import make_fake_memory_store_handler
     from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+    from mux.testing.drivers.anthropic.ma import make_fake_memory_store_handler
 
     deps, original, _, _, _, _, old_binding, _ = recorded_fresh_root
     tenant_id = original.admission.grant.tenant_id
@@ -1754,6 +1870,7 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
         admission = await admit(
             deps,
             tenant_id=tenant_id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="requester",
             channel_id=channel_id,
@@ -1806,6 +1923,8 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
             responder_ma_agent_id=native.id,
             responder_name="root",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             prepared = await bind_session_impl(
                 deps,
@@ -2244,6 +2363,7 @@ async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesi
         admission = await admit(
             deps,
             tenant_id=tenant_id,
+            requester_org=RequesterOrg.HOST,
             platform=channel.platform,
             external_user_id="requester",
             channel_id=channel.channel_id,
@@ -2273,6 +2393,8 @@ async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesi
             responder_ma_agent_id=native.id,
             responder_name="root",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ):
             prepared = await bind_session_impl(
                 deps,

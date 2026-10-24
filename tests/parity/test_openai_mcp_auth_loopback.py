@@ -14,7 +14,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from daimon.testing.conformance.default_capability import MCP_TOOLS
 from mux.contracts.ids import ModelRef, Revision, Scope
 from mux.contracts.resources import AgentSpec, MCPConnection, SessionSpec, ToolSpec
 from mux.drivers.openai import OpenAIDriver
@@ -23,6 +22,7 @@ from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
+from mux.testing.conformance.default_capability import MCP_TOOLS
 from openai import AsyncOpenAI
 
 URL = "https://qa.example.com/mcp"
@@ -78,6 +78,8 @@ async def test_sdk_mcp_auth_uses_the_real_loopback_host_and_revocation(
     caplog.set_level(logging.DEBUG, logger="openai")
     saved: Object = {}
     posted: list[Object] = []
+    vaults: dict[str, Object] = {}
+    credentials: dict[str, Object] = {}
     resolutions: list[tuple[Scope, str, str]] = []
     outcomes: list[tuple[str, Object]] = []
     token = qa.bearer.token
@@ -98,6 +100,34 @@ async def test_sdk_mcp_auth_uses_the_real_loopback_host_and_revocation(
                     return httpx.Response(200, json={"id": "a", "created_at": 0, **saved})
                 if (request.method, request.url.path) == ("GET", "/v1/agents/a"):
                     return httpx.Response(200, json={"id": "a", "created_at": 0, **saved})
+                if request.url.path == "/v1/vaults":
+                    if request.method == "GET":
+                        return httpx.Response(
+                            200, json={"data": list(vaults.values()), "has_more": False}
+                        )
+                    assert request.method == "POST"
+                    identity = "vault-" + str(len(vaults))
+                    vault = {"id": identity, **object_json(json.loads(request.content))}
+                    vaults[identity] = vault
+                    return httpx.Response(200, json=vault)
+                if request.url.path.startswith("/v1/vaults/"):
+                    identity = request.url.path.split("/")[3]
+                    if request.url.path.endswith("/credentials"):
+                        assert request.method == "POST"
+                        credential = {
+                            "id": "credential-" + identity,
+                            "vault_id": identity,
+                            "created_at": 0,
+                            **object_json(json.loads(request.content)),
+                        }
+                        credentials[identity] = credential
+                        return httpx.Response(200, json=credential)
+                    if request.method == "DELETE":
+                        del vaults[identity]
+                        credentials.pop(identity, None)
+                        return httpx.Response(200, json={"id": identity, "deleted": True})
+                    assert request.method == "GET"
+                    return httpx.Response(200, json=vaults[identity])
                 assert (request.method, request.url.path) == ("POST", "/v1/agents/sessions")
                 body = object_json(json.loads(request.content))
                 posted.append(body)
@@ -109,7 +139,13 @@ async def test_sdk_mcp_auth_uses_the_real_loopback_host_and_revocation(
                 assert transport["server_url"] == URL
                 # Only this fictional HTTPS destination is mapped by the scripted
                 # provider to the actual loopback gate. The driver has no bypass.
-                headers = {**INIT_HEADERS, "Authorization": str(transport["authorization"])}
+                assert "authorization" not in transport
+                (vault_id,) = body["vault_ids"]
+                credential = credentials[str(vault_id)]
+                assert credential["id"] == server["credential_id"]
+                auth = object_json(credential["auth"])
+                assert auth["type"] == "static_bearer" and auth["mcp_server_url"] == URL
+                headers = {**INIT_HEADERS, "Authorization": "Bearer " + str(auth["token"])}
                 response = await mcp.post(loopback_url, json=dict(INIT_BODY), headers=headers)
                 if response.status_code == 401:
                     # Even an upstream error echoing the synthetic credential
@@ -183,6 +219,10 @@ async def test_sdk_mcp_auth_uses_the_real_loopback_host_and_revocation(
                 with pytest.raises(ProviderError) as refused:
                     await driver.sessions.create(scope, session_spec, key="revoked-session")
                 assert refused.value.category == "permission"
+                assert refused.value.native_message is None
+                assert refused.value.native_error_code is None
+                assert refused.value.native_param is None
+                assert all(token not in json.dumps(body) for body in posted)
                 assert token not in str(refused.value) and token not in repr(refused.value)
                 assert refused.value.__cause__ is None
                 assert len(posted) == len(resolutions) == 2

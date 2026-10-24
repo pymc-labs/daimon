@@ -5,12 +5,12 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import PageRequest, ResourceRef, Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.usage import AnthropicUsage, UsageWalk
 from mux.errors import ExtensionVersionError, ProviderError, ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 TENANT = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="grant"

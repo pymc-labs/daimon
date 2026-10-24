@@ -12,6 +12,7 @@ from uuid import UUID
 import pytest
 from daimon.adapters.discord import bot as discord
 from daimon.adapters.discord.thread_gone import ThreadStops
+from daimon.adapters.discord.typed_stop import TypedStops
 from daimon.adapters.slack import app as slack
 from daimon.adapters.teams import app as teams
 from daimon.adapters.teams.identity import TeamsInbound
@@ -50,6 +51,7 @@ class Replay:
             # Teams' reactions, with no client: every call does nothing.
             _reactions=TeamsReactions(None),
             _thread_stops=ThreadStops(),
+            _typed_stops=TypedStops(),
             user=SimpleNamespace(id=999),
             _deferred_dispatch={},
             _inflight={},

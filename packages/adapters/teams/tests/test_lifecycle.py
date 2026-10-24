@@ -33,6 +33,7 @@ from daimon.core.message_split import split_fenced
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import TerminationReason
@@ -108,6 +109,227 @@ def _card_body(sender: FakeSender, index: int) -> list[dict[str, Any]]:
     return json.loads(_card_json(sender, index))["attachments"][0]["content"]["body"]
 
 
+def _has_stop_button(sender: FakeSender, index: int) -> bool:
+    return card.CANCEL_VERB in _card_json(sender, index)
+
+
+class GatedSender(FakeSender):
+    """A `FakeSender` whose sends from the `held`th on wait for `release`."""
+
+    def __init__(self, held: int) -> None:
+        super().__init__()
+        self.held, self.entered, self.release = held, asyncio.Event(), asyncio.Event()
+
+    async def send(
+        self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
+    ) -> SentActivity:
+        index = len(self.sent)
+        sent = await super().send(conversation_id, activity, service_url=service_url)
+        if index == self.held:
+            self.entered.set()
+            await self.release.wait()
+        return sent
+
+
+async def _settled(lifecycle: TeamsTurnLifecycle) -> None:
+    """Let the click's background edit run to its end."""
+    task = lifecycle._card_edits.stopping  # pyright: ignore[reportPrivateUsage]
+    assert task is not None
+    await task
+
+
+async def test_a_stop_click_edits_the_chat_card_to_stopping_without_any_render() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = await _posted(sender, clock)
+    clock.now += 1
+    stopping = lifecycle.request_stop()
+    assert stopping is not None and lifecycle.stopping
+    assert len(sender.sent) == 1, "the click itself sends nothing"
+
+    await _settled(lifecycle)
+    assert len(sender.sent) == 2 and sender.activities[1].id == "m-1", "one edit of the same card"
+    headline, elapsed = _card_body(sender, 1)
+    assert headline["text"] == f"**{card.STOPPING_HEADLINE}**" and elapsed["text"] == "1s"
+    assert not _has_stop_button(sender, 1)
+
+    clock.now += 5
+    await lifecycle.on_render(TurnState(content=[_TOOL]))
+    assert not _has_stop_button(sender, -1), "a later render keeps it stopping"
+    assert _card_body(sender, -1)[0]["text"] == f"**{card.STOPPING_HEADLINE}**"
+
+
+async def test_a_double_click_starts_one_edit() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    assert lifecycle.request_stop() is not None
+    first = lifecycle._card_edits.stopping  # pyright: ignore[reportPrivateUsage]
+    assert lifecycle.request_stop() is not None
+    assert lifecycle._card_edits.stopping is first  # pyright: ignore[reportPrivateUsage]
+    await _settled(lifecycle)
+    assert len(sender.sent) == 2, "one Stopping edit"
+
+
+async def test_the_closing_notice_waits_for_a_slow_stopping_edit() -> None:
+    sender = GatedSender(held=1)
+    lifecycle = await _posted(sender)
+    lifecycle.request_stop()
+    await sender.entered.wait()  # The Stopping edit is out and unanswered.
+
+    closing = asyncio.create_task(lifecycle.on_terminal_success(TurnState()))
+    await asyncio.sleep(0.05)
+    assert len(sender.sent) == 2 and not closing.done(), "Stopped. does not overtake it"
+    sender.release.set()
+    await closing
+    assert len(sender.sent) == 3
+    assert not _has_stop_button(sender, 1) and "Stopped." in _card_json(sender, -1)
+
+
+async def test_a_failed_close_waits_for_a_slow_stopping_edit_too() -> None:
+    sender = GatedSender(held=1)
+    lifecycle = await _posted(sender)
+    lifecycle.request_stop()
+    await sender.entered.wait()
+    closing = asyncio.create_task(lifecycle.close_with_notice("Something went wrong."))
+    await asyncio.sleep(0.05)
+    assert len(sender.sent) == 2 and not closing.done()
+    sender.release.set()
+    await closing
+    assert "Something went wrong." in _card_json(sender, -1) and len(sender.sent) == 3
+
+
+async def test_a_render_in_flight_at_the_click_lands_before_the_stopping_edit() -> None:
+    sender, clock = GatedSender(held=1), Clock()
+    lifecycle = await _posted(sender, clock)
+    clock.now += 5
+    render = asyncio.create_task(lifecycle.on_render(TurnState()))
+    await sender.entered.wait()  # A "Working…" edit is out and unanswered.
+    lifecycle.request_stop()
+    await asyncio.sleep(0.05)
+    assert len(sender.sent) == 2, "the Stopping edit waits its turn"
+    sender.release.set()
+    await render
+    await _settled(lifecycle)
+    assert len(sender.sent) == 3 and not _has_stop_button(sender, -1), "Stopping is the last word"
+
+
+async def test_a_stopping_edit_that_failed_does_not_break_the_closing_notice() -> None:
+    sender, clock = FakeSender(fail_on={1}), Clock()
+    lifecycle = await _posted(sender, clock)
+    lifecycle.request_stop()
+    await _settled(lifecycle)
+    clock.now += 16
+    await lifecycle.on_terminal_success(TurnState())
+    closing = _card_body(sender, -1)
+    assert closing[0]["text"].startswith("Stopped."), "the terminal edit is the last word"
+    assert closing[-1]["text"] == "16s", "the real time from the start until it stopped"
+    sent = len(sender.sent)
+    await lifecycle.on_render(TurnState())
+    assert len(sender.sent) == sent, "a render after the close sends nothing"
+
+
+async def test_a_stop_click_after_the_turn_ended_sends_nothing() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(TurnState())
+    assert lifecycle.request_stop() is None and not lifecycle.stopping
+    assert lifecycle._card_edits.stopping is None  # pyright: ignore[reportPrivateUsage]
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.close_with_notice("Something went wrong.")
+    assert lifecycle.request_stop() is None
+    assert len(sender.sent) == 2, "only the closing edit"
+
+
+async def test_a_close_that_wins_the_race_leaves_no_stopping_edit() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    lifecycle.request_stop()
+    await lifecycle.close_with_notice("Stopped.")  # The edit task has not run yet.
+    assert len(sender.sent) == 2 and "Stopped." in _card_json(sender, -1), "skipped, not late"
+
+
+async def test_recovery_attempt_stays_stopping_and_follows_the_old_attempts_edit() -> None:
+    sender = GatedSender(held=1)
+    old = await _posted(sender)
+    old.request_stop()
+    await sender.entered.wait()
+    adopted = TeamsTurnLifecycle(
+        sender=sender,
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        clock=Clock(),
+        adopt_message_id=old.message_id,
+    )
+    adopted.inherit_stop(old)
+    assert adopted.stopping
+    closing = asyncio.create_task(adopted.on_terminal_success(TurnState()))
+    await asyncio.sleep(0.05)
+    assert len(sender.sent) == 2 and not closing.done(), "waits behind the old attempt's edit"
+    sender.release.set()
+    await closing
+    assert "Stopped." in _card_json(sender, -1), "the new attempt's notice is last"
+
+
+def _adopt(old: TeamsTurnLifecycle, sender: FakeSender) -> TeamsTurnLifecycle:
+    adopted = TeamsTurnLifecycle(
+        sender=sender,
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        clock=Clock(),
+        adopt_message_id=old.message_id,
+    )
+    adopted.inherit_stop(old)
+    return adopted
+
+
+async def test_a_stop_on_the_recovery_attempt_after_the_old_attempt_closed_sends_nothing() -> None:
+    sender = FakeSender()
+    old = await _posted(sender)
+    adopted = _adopt(old, sender)
+    await old.close_with_notice("Took too long.")  # the run closes the original attempt
+    assert adopted.request_stop() is None, "the turn has ended on the card"
+    assert len(sender.sent) == 2 and "Took too long." in _card_json(sender, -1)
+
+
+async def test_the_old_attempts_close_waits_for_a_stop_clicked_on_the_recovery_attempt() -> None:
+    sender = GatedSender(held=1)
+    old = await _posted(sender)
+    adopted = _adopt(old, sender)
+    adopted.request_stop()
+    await sender.entered.wait()
+    closing = asyncio.create_task(old.close_with_notice("Took too long."))
+    await asyncio.sleep(0.05)
+    assert len(sender.sent) == 2 and not closing.done(), "waits behind the stopping edit"
+    sender.release.set()
+    await closing
+    assert "Took too long." in _card_json(sender, -1), "the closing notice is last"
+
+
+def _agent_message(event_id: str, text: str) -> Any:
+    return BetaManagedAgentsAgentMessageEvent(
+        id=event_id,
+        type="agent.message",
+        processed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content=[BetaManagedAgentsTextBlock(type="text", text=text)],
+    )
+
+
+async def test_status_lines_show_as_a_running_log_on_the_card() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = await _posted(sender, clock)
+    for number in range(1, 5):
+        await lifecycle.on_sse_event(_agent_message(f"evt_{number}", f"🔍 step {number}"))
+    clock.now += 65
+    await lifecycle.on_render(TurnState())
+
+    body = _card_body(sender, -1)
+    draft = next(block for block in body if block.get("isSubtle") and block.get("size") != "Small")
+    assert draft["text"] == "🔍 step 2\n\n🔍 step 3\n\n🔍 step 4", "last three, one paragraph each"
+
+
 async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
     sender, clock = FakeSender(), Clock()
     lifecycle = await _posted(sender, clock)
@@ -125,11 +347,11 @@ async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
     clock.now += 65
     await lifecycle.on_render(TurnState(content=[read, bash], finished_tool_ids=("t1",)))
 
-    headline, details, tools, draft, elapsed, _actions = _card_body(sender, -1)
+    headline, draft, details, tools, elapsed, _actions = _card_body(sender, -1)
     assert headline["text"] == "**Working on it…**"
     assert (elapsed["text"], elapsed["isSubtle"]) == ("1m 5s", True), "elapsed time, quiet"
     assert details["text"] == "Details"
-    assert tools["text"] == "✔️ Read a file\n\n🖋️ Running a command", "one paragraph per line"
+    assert tools["text"] == "☑️ Read a file\n\n⏳ Running a command", "one paragraph per line"
     assert tools["fontType"] == "Monospace", "a TextBlock draws no code fence"
     assert (draft["text"], draft["isSubtle"]) == ("Checking the files.", True), "draft on one line"
 
@@ -1041,3 +1263,30 @@ async def test_watch_posts_controls_before_its_output_grant_closes():
     guard.close()
     await lifecycle.release_controls()
     assert len(sender.activities) == count
+
+
+async def test_nothing_posted_names_another_app() -> None:
+    sender, clock = FakeSender(), Clock()
+    inner = await _posted(sender, clock)
+    lc = OtherAppsScrubbedLifecycle(inner, "teams")
+    await lc.on_sse_event(
+        BetaManagedAgentsAgentMessageEvent(
+            id="e1",
+            type="agent.message",
+            content=[BetaManagedAgentsTextBlock(type="text", text="Looking in Discord or Slack")],
+            processed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    tool = ToolUseBlock(
+        kind="tool_use", id="t1", type="agent.tool_use", name="discord_read_messages", input={}
+    )
+    clock.now += 10
+    await lc.on_render(TurnState(content=[tool]))
+    live = _card_json(sender, -1)
+    assert "Looking in another app" in live
+    assert "Discord" not in live and "Slack" not in live
+
+    reply = "Teams is right here. Never upload customer data to Discord or Slack."
+    await lc.on_terminal_success(_answer(reply))
+    answer = sender.activities[-2].text
+    assert answer == "Teams is right here. Never upload customer data to another app."

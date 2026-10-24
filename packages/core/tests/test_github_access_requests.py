@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from daimon.core._models import (
@@ -20,7 +22,7 @@ from daimon.core.github_request_expiry import (
     poll_expired_requests_once,
     retire_expired_forms_once,
 )
-from daimon.core.stores import github_access, github_app_installations
+from daimon.core.stores import github_access, github_app_installations, github_panel_grants
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.stores.github_access_requests import (
@@ -44,10 +46,117 @@ from daimon.core.stores.github_request_actions import (
     approve_connected_request,
     approve_connection_request,
     finish_confirmed_requests,
+    lock_confirmed_request_repos,
 )
 from daimon.core.stores.task_continuations import get_continuation
 from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+
+@pytest.mark.asyncio
+async def test_late_draft_waits_for_nested_request_completion(
+    db_engine: AsyncEngine, db_clean: None
+) -> None:
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    tenant_id, asker_id, admin_id, agent_id = (uuid.uuid4() for _ in range(4))
+    async with factory.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+        await session.flush()
+        session.add(Account(id=asker_id, tenant_id=tenant_id, role="user"))
+        session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+        await session.flush()
+        for repo_id, name in ((101, "one/x"), (102, "two/y")):
+            await github_app_installations.upsert(
+                session,
+                installation_id=repo_id,
+                account_login=name.split("/", 1)[0],
+                repo_full_names=[name],
+            )
+            session.add(
+                TenantGitHubRepo(
+                    tenant_id=tenant_id,
+                    repo_id=repo_id,
+                    owner_id=repo_id,
+                    installation_id=repo_id,
+                    repo_full_name=name,
+                    max_access="write",
+                    authorized_by_github_user_id=7,
+                    status="active",
+                    version=1,
+                )
+            )
+        await session.flush()
+        request = await request_access(
+            session,
+            tenant_id=tenant_id,
+            requester_account_id=asker_id,
+            requester_platform_user_id="person",
+            platform="discord",
+            parent_channel_id="channel",
+            thread_id="thread",
+            agent_id=agent_id,
+            ma_agent_id="ag_helper",
+            agent_name="Helper",
+            repo_name="one/x",
+            requested_work="Continue",
+            required_ability="write",
+            is_admin=False,
+        )
+        assert await approve_connection_request(
+            session, tenant_id=tenant_id, request_id=request.id, account_id=admin_id
+        )
+    snapshot_taken, release_completion = asyncio.Event(), asyncio.Event()
+
+    async def complete() -> None:
+        async with factory.begin() as session:
+            request_ids = await lock_confirmed_request_repos(
+                session, tenant_id=tenant_id, approved_by_account_id=admin_id
+            )
+            snapshot_taken.set()
+            await release_completion.wait()
+            assert (
+                await finish_confirmed_requests(
+                    session,
+                    tenant_id=tenant_id,
+                    approved_by_account_id=admin_id,
+                    prelocked_request_ids=request_ids,
+                )
+                == 1
+            )
+
+    async def stage_late_draft() -> None:
+        async with factory.begin() as session:
+            await github_panel_grants.stage_panel_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=102,
+                baseline_access="write",
+                ceiling_access="write",
+                account_id=admin_id,
+                is_working_repo=False,
+            )
+
+    completion = asyncio.create_task(complete())
+    try:
+        await asyncio.wait_for(snapshot_taken.wait(), timeout=5)
+        draft = asyncio.create_task(stage_late_draft())
+        await asyncio.sleep(0.05)
+        assert not draft.done()
+    finally:
+        release_completion.set()
+    await asyncio.wait_for(asyncio.gather(completion, draft), timeout=10)
+    async with factory() as session:
+        assert {
+            grant.repo_id
+            for grant in await github_access.list_agent_grants(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        } == {101}
+        panel = await github_panel_grants.load_grants_panel(
+            session, tenant_id=tenant_id, agent_id=agent_id
+        )
+        assert any(repo.repo_id == 102 and repo.staged for repo in panel.repos)
 
 
 @pytest.mark.asyncio
@@ -462,6 +571,35 @@ async def test_confirmed_connection_applies_one_admin_decision(db_session: Async
     db_session.add(Account(id=asker_id, tenant_id=tenant_id, role="user"))
     db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
     await db_session.flush()
+    await github_app_installations.upsert(
+        db_session,
+        installation_id=700,
+        account_login="first",
+        repo_full_names=["first/repo"],
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=700,
+            owner_id=7,
+            installation_id=700,
+            repo_full_name="first/repo",
+            max_access="write",
+            authorized_by_github_user_id=7,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_id=700,
+        baseline_access="write",
+        ceiling_access="write",
+        granted_by_account_id=None,
+    )
     request = await request_access(
         db_session,
         tenant_id=tenant_id,
@@ -516,8 +654,8 @@ async def test_confirmed_connection_applies_one_admin_decision(db_session: Async
     grants = await github_access.list_agent_grants(
         db_session, tenant_id=tenant_id, agent_id=agent_id
     )
-    assert len(grants) == 1
-    assert grants[0].baseline_access == "write"
+    assert {grant.repo_id for grant in grants} == {700, 701}
+    assert all(grant.baseline_access == "write" for grant in grants)
     assert await get_continuation(db_session, idempotency_key=request.id) is None
     grant_wake = await get_continuation(
         db_session, idempotency_key=uuid.uuid5(request.id, "agent-grant")
@@ -534,6 +672,46 @@ async def test_confirmed_connection_applies_one_admin_decision(db_session: Async
     assert await ready_and_continue(db_session, tenant_id=tenant_id, request_id=request.id)
     wake = await get_continuation(db_session, idempotency_key=request.id)
     assert wake is not None and wake.reason == "github_access_ready"
+
+
+@pytest.mark.asyncio
+async def test_confirmed_connection_preserves_grant_limit_error_for_oauth_page(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, asker_id, admin_id, agent_id = (uuid.uuid4() for _ in range(4))
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    db_session.add(Account(id=asker_id, tenant_id=tenant_id, role="user"))
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    request = await request_access(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=asker_id,
+        requester_platform_user_id="person",
+        platform="discord",
+        parent_channel_id="channel",
+        thread_id="thread",
+        agent_id=agent_id,
+        ma_agent_id="ag_helper",
+        agent_name="Helper",
+        repo_name="second/repo",
+        requested_work="Continue",
+        required_ability="write",
+        is_admin=False,
+    )
+    assert await approve_connection_request(
+        db_session, tenant_id=tenant_id, request_id=request.id, account_id=admin_id
+    )
+    monkeypatch.setattr(
+        "daimon.core.stores.github_request_actions.approve_connected_request",
+        AsyncMock(side_effect=github_access.InstallationLimitError("Remove one first.")),
+    )
+    with pytest.raises(github_access.InstallationLimitError, match="Remove one first"):
+        await finish_confirmed_requests(
+            db_session, tenant_id=tenant_id, approved_by_account_id=admin_id
+        )
+    assert (await db_session.get(GitHubAccessRequest, request.id)).status == "open"
 
 
 @pytest.mark.asyncio
@@ -680,7 +858,7 @@ async def test_only_tenant_admin_can_approve_connected_request(db_session: Async
         requested_work="Continue",
         is_admin=False,
     )
-    with pytest.raises(ValueError, match="Only a server or workspace admin"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await approve_connected_request(
             db_session,
             tenant_id=tenant_id,

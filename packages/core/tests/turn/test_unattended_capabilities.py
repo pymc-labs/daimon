@@ -35,11 +35,17 @@ from daimon.core.turn.unattended_capabilities import (
     restore_capabilities,
     unattended_entry_point,
 )
-from daimon.testing import ma_agent, ma_session
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, send_events_response
+from daimon.testing import ma_agent
+from daimon.testing.ma import MARouter
 from daimon.testing.ma_sessions import session_turn_sse
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma import (
+    build_fake_anthropic,
+    json_body,
+    ma_session,
+    send_events_response,
+)
 from pydantic import BaseModel
 
 from .conftest import make_status_idle

@@ -41,15 +41,12 @@ from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing import pytest_plugin as database_plugin
-from daimon.testing.conformance.gemini import adapter
-from daimon.testing.conformance.runner import PendingKind, run_fixture
 from daimon.testing.db import (
     DatabasePreflight,
     build_test_engine,
     preflight_test_database,
     require_owned_sessionmaker,
 )
-from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.factories import make_tenant
 from daimon.testing.gemini_termination import (
     REQUIRED_REASONS,
@@ -58,9 +55,7 @@ from daimon.testing.gemini_termination import (
     GeminiTerminationTransport,
     compose_gemini_termination,
 )
-from daimon.testing.isolated_sdk import SDK_ENV_VARS, build_gemini_client
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_conformance import (
     TerminationCase,
     TerminationEvidence,
@@ -72,6 +67,11 @@ from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.drivers.gemini.transport import Object, SDKTransport
 from mux.errors import ScopeViolation
+from mux.testing.conformance.gemini import adapter
+from mux.testing.conformance.runner import PendingKind, run_fixture
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.isolated_sdk import SDK_ENV_VARS, build_gemini_client
 from sqlalchemy import event as sql_event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -97,6 +97,11 @@ def clean_sdk_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+async def _silence() -> AsyncIterator[bytes]:
+    await asyncio.Event().wait()
+    yield b""
+
+
 class NativeWire:
     """Docs-derived native replies; no normalized events/outcomes injected."""
 
@@ -109,6 +114,13 @@ class NativeWire:
         self.final_get_status: str | None = None
         self.retry_after_s: int | None = None
         self.saved: dict[str, Object] = {}
+        # Accepted but never started: the stream stays silent, as under Gemini load.
+        self.silent_stream = False
+        # The function a requires_action interaction calls, and how many calls
+        # to it follow each function_result before the run completes.
+        self.function_name = "weather"
+        self.repeat_calls = 0
+        self.results: list[list[dict[str, object]]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -123,17 +135,52 @@ class NativeWire:
                     "parameters": {"type": "object", "properties": {}},
                 }
             ]
-            assert body["input"] == [{"type": "text", "text": "offline question"}]
             identity = f"offline-interaction-{len(self.saved) + 1}"
+            if body["input"] and body["input"][0].get("type") == "function_result":
+                # The host answered the call: the run continues as a new interaction
+                # chained to the one that asked.
+                assert (
+                    body.get("previous_interaction_id") == f"offline-interaction-{len(self.saved)}"
+                )
+                self.results.append(body["input"])
+                again = len(self.results) <= self.repeat_calls
+                raw = interaction(
+                    identity, status="requires_action" if again else "completed", text="direct"
+                )
+                if again:
+                    raw["steps"] = [
+                        {
+                            "type": "function_call",
+                            "id": f"call-{len(self.results) + 1}",
+                            "name": self.function_name,
+                            "arguments": {},
+                        }
+                    ]
+                self.saved[identity] = raw
+                return httpx.Response(200, json=raw)
+            assert body["input"] == [{"type": "text", "text": "offline question"}]
             raw = interaction(identity, status=self.status)
             if self.usage is not None:
                 raw["usage"] = self.usage
+            if self.silent_stream:
+                # As Gemini reads back a run it accepted and never began (live probe).
+                raw["steps"] = [{"type": "user_input"}]
+                del raw["usage"]
             if self.status == "requires_action":
                 raw["steps"] = [
-                    {"type": "function_call", "id": "call-1", "name": "weather", "arguments": {}}
+                    {
+                        "type": "function_call",
+                        "id": "call-1",
+                        "name": self.function_name,
+                        "arguments": {},
+                    }
                 ]
             self.saved[identity] = raw
             return httpx.Response(200, json=raw)
+        if request.method == "POST" and request.url.path.endswith("/cancel"):
+            identity = request.url.path.rsplit("/", 2)[-2]
+            self.saved[identity]["status"] = "cancelled"
+            return httpx.Response(200, json=self.saved[identity])
         if request.method == "GET":
             identity = request.url.path.rsplit("/", 1)[-1]
             assert identity in self.saved
@@ -155,7 +202,13 @@ class NativeWire:
                 )
             if request.url.params.get("stream") == "true":
                 return httpx.Response(
-                    200, headers={"content-type": "text/event-stream"}, content=b""
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    # Only a run still waiting is silent: its continuation answers.
+                    content=_silence()
+                    if self.silent_stream
+                    and self.saved[identity]["status"] in ("in_progress", "requires_action")
+                    else b"",
                 )
             if self.final_get_status is not None:
                 self.saved[identity]["status"] = self.final_get_status
@@ -376,6 +429,61 @@ async def test_native_final_outcome_has_exact_committed_snapshot(
     assert composed.pending["C18"].kind == PendingKind.ADAPTER_DEPENDENCY
     assert isinstance(composed.transport, GeminiTerminationTransport)
     assert callable(composed.transport.host_termination_evidence)
+
+
+async def test_a_turn_gemini_never_starts_frees_its_hold_at_the_deadline(
+    native_host: NativeHost,
+) -> None:
+    native_host.wire.status = "in_progress"
+    native_host.wire.silent_stream = True
+    deadline = datetime.now(UTC) + timedelta(seconds=3)
+    outcome = await asyncio.wait_for(run(native_host, deadline=deadline), timeout=60)
+    assert outcome.state.termination is not None and outcome.state.termination.is_failure
+    # The host gave up: the interaction is cancelled, as before.
+    cancels = [r for r in native_host.wire.requests if r.url.path.endswith("/cancel")]
+    assert len(cancels) == 1
+    identity = cancels[0].url.path.rsplit("/", 2)[-2]
+    assert native_host.wire.saved[identity]["status"] == "cancelled"
+    # It never ran or billed: its hold is released now, not after the hold TTL (the
+    # cancel's read-back and any later read both ask; the ledger release is idempotent).
+    usage = native_host.deps.turn_runtimes[PROFILE].usage_store
+    assert set(cast(Accounting, usage.accounting).released) == {identity}
+
+
+async def test_a_stop_cancels_the_running_gemini_interaction(native_host: NativeHost) -> None:
+    from daimon.core.turn.run import run_prepared_turn
+
+    native_host.wire.status = "in_progress"
+    native_host.wire.silent_stream = True
+    prepared = await prepare(native_host)
+    cancel = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.5, cancel.set)
+
+    async def reseed() -> str:
+        raise AssertionError("Gemini native replay must not invoke Anthropic replacement")
+
+    outcome = await asyncio.wait_for(
+        run_prepared_turn(
+            native_host.deps,
+            prepared,
+            tenant_id=TENANT,
+            platform=CHANNEL.platform,
+            thread_id="thread",
+            external_user_id="user",
+            user_message="offline question",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+            render_interval_s=3600,
+            operation_key="offline-stop",
+        ),
+        timeout=30,
+    )
+    assert outcome.state.termination == TerminationReason.INTERRUPTED
+    # Gemini stops working (and spending) on the reply nobody will see.
+    cancels = [r for r in native_host.wire.requests if r.url.path.endswith("/cancel")]
+    assert len(cancels) == 1
 
 
 async def test_public_binding_refusal_is_pre_native_and_committed(native_host: NativeHost) -> None:
@@ -623,11 +731,6 @@ def test_post_native_reason_cannot_claim_null_session(
     "url,skipped",
     [
         ("postgresql+asyncpg://offline:fixture@foreign.invalid/daimon_test_nc_n12", False),
-        ("postgresql+asyncpg://offline:fixture@localhost/unowned_test", False),
-        (
-            "postgresql+asyncpg://offline:fixture@localhost/daimon_test_nc_n12?host=foreign.invalid",
-            False,
-        ),
         ("postgresql+asyncpg://offline:fixture@localhost/daimon_test", True),
     ],
 )

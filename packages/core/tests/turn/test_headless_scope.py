@@ -9,11 +9,12 @@ from daimon.core import headless_runner
 from daimon.core.mux_backend import resource_scope
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.privacy import TurnPrivacy
-from daimon.testing.ma import MARouter, sse_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from daimon.testing.ma_transport import ScriptedTransport
+from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma import MARouter, sse_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 
 @pytest.mark.parametrize("path", ["legacy", "mux"])

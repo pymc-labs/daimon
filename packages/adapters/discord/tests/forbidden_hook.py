@@ -18,9 +18,9 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.discord_runtime_capture import require_discord_runtime_capture
 from daimon.testing.discord_surface import DiscordPostEvent, OfflineDiscordGateway
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import Provider, Scope
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Host title generation precedes thread creation; it is not a provider turn write.

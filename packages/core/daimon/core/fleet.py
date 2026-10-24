@@ -76,6 +76,7 @@ type FleetConflictReason = Literal[
     "source_lineage_changed",
     "intent_changed",
     "financial_admission_refused",
+    "worker_limit",
     "private_slot_mismatch",
     "source_intent_changed",
     "result_journal_missing",
@@ -84,7 +85,125 @@ type FleetConflictReason = Literal[
     "recovery_reconciliation_required",
     "retained_revision_changed",
     "result_not_successful",
+    "wake_pending",
+    "worker_setup_busy",
 ]
+
+
+#: What a worker's closed error code means for the fleet card: the cause, then what a
+#: person can do about it. Unknown codes stay codes.
+WORKER_ERROR_TEXT: Mapping[str, str] = {
+    # A refusal with no more specific cause: the reference finds it in the logs.
+    "dispatch_refused": "Daimon refused to start it; try again, or give an admin the reference",
+    "preparation_refused": "Daimon refused to set it up; try again, or give an admin the reference",
+    "financial_admission_refused": (
+        "it would have gone over the fleet or server budget; ask for fewer or cheaper workers"
+    ),
+    "not_admitted": (
+        "it would have gone over the fleet or server budget; ask for fewer or cheaper workers"
+    ),
+    "budget_exceeded": "it used up its budget; ask for a bigger budget or a shorter task",
+    "worker_budget_exceeded": "it used up its budget; ask for a bigger budget or a shorter task",
+    "run_budget_exceeded": "the fleet's budget for this run ran out; ask for a bigger budget",
+    "provider_budget_exceeded": (
+        "the fleet's budget for that provider ran out; ask for a bigger budget or another model"
+    ),
+    "tenant_budget_exceeded": "this server's spending limit was reached; an admin can raise it",
+    "channel_budget_exceeded": "this channel's spending limit was reached; an admin can raise it",
+    "admission_channel_budget_exceeded": (
+        "this channel's spending limit was reached; an admin can raise it"
+    ),
+    "cap_exceeded": "a spending limit was reached; an admin can raise it",
+    "admission_cap_exceeded": "a spending limit was reached; an admin can raise it",
+    "balance_depleted": "this server is out of credit; an admin can top it up",
+    "provider_hold_cap_reached": (
+        "too many replies were already running on that model for this account; "
+        "try again when one finishes"
+    ),
+    "provider_busy": (
+        "the model provider didn't answer in time (it may be busy); try again in a minute"
+    ),
+    # The same cause and fix as `provider_quota_copy` (a turn's notice); the card line
+    # already names the model.
+    "provider_quota_zero": (
+        "this server's Google plan doesn't include that model; "
+        "pick another model or ask an admin to upgrade it"
+    ),
+    "provider_rate_limited": "Google is rate-limiting that model right now; try again in a minute",
+    "provider_setup_pending": "that model provider is still being set up; try again in a minute",
+    "timed_out": "it ran out of time; ask again with a smaller task",
+    "deadline_expired": "it ran out of time; ask again with a smaller task",
+    "preparation_deadline_exceeded": "it took too long to start; try again",
+    "run_deadline": "the fleet ran out of time; ask again with a smaller task",
+    "worker_lost": "it was lost when Daimon restarted; ask again",
+    "stop_requested": "it was stopped",
+    # The budget watch's own stop reasons, when they end a worker.
+    "worker_stop_requested": "it was stopped",
+    "terminal": "the fleet had already ended; ask again",
+    "funding_unavailable": (
+        "this server's balance couldn't be checked, so it didn't start; try again in a minute"
+    ),
+    "pricing_unavailable": (
+        "its cost couldn't be priced, so it was stopped; ask for another model, "
+        "or give an admin the reference"
+    ),
+    "accepted_attempt_inventory_unavailable": (
+        "an earlier attempt couldn't be accounted for, so it wasn't run again; "
+        "give an admin the reference"
+    ),
+    "watch_ended": "the fleet ended before it finished; ask again",
+    "shutdown": "Daimon restarted before it finished; ask again",
+    "usage_unavailable": "its spending couldn't be measured, so it was stopped; try again",
+    # A bug on our side, never a model limit: the card adds a reference to the logs.
+    "setup_error": "a setup error on our side; give an admin the reference",
+    "provider_error": (
+        "the model provider returned an error or didn't respond; try again or ask for another model"
+    ),
+    "provider_not_configured": (
+        "that model provider isn't set up on this server yet; an admin can add its key, "
+        "or ask for another model"
+    ),
+    "provider_not_allowed": (
+        "this server doesn't allow that model provider; an admin can allow it, "
+        "or ask for another model"
+    ),
+    "provider_daily_cap_reached": (
+        "today's budget for that model on this server is used up; it resets at midnight UTC, "
+        "or ask for another model"
+    ),
+    "provider_price_unavailable": (
+        "Daimon can't price that model right now, so it won't run it; ask for another model"
+    ),
+    "channel_backend_pinned": (
+        "this channel is set to run on one model provider only; ask for a model from it, "
+        "or an admin can change the channel's setting"
+    ),
+    "worker_runtime_missing": (
+        "this server isn't set up to run that model's workers yet; ask for another model, "
+        "or give an admin the reference"
+    ),
+}
+
+#: Codes whose fix is "give an admin the reference": the card adds the worker id prefix
+#: the host logs (fleet.worker_task_failed).
+_REFERENCED_CODES: Final = frozenset(
+    {
+        "setup_error",
+        "dispatch_refused",
+        "preparation_refused",
+        "worker_runtime_missing",
+        "pricing_unavailable",
+        "accepted_attempt_inventory_unavailable",
+    }
+)
+
+
+def worker_error_text(code: str | None, *, ref: str | None = None) -> str | None:
+    """The card's reason for a worker's error code: its cause, its fix and any log reference."""
+    text = WORKER_ERROR_TEXT.get(code) if code else None
+    if text is not None and code in _REFERENCED_CODES and ref:
+        return f"{text} (ref {ref})"
+    return text
 
 
 class FleetConflict(Exception):
@@ -201,6 +320,23 @@ def spawn_operation_key(run_id: uuid.UUID, ordinal: int) -> str:
 def result_source_key(worker_id: uuid.UUID) -> str:
     """The journal source key of a worker's result entry (deduplicated per worker)."""
     return f"fleet:{worker_id}:result"
+
+
+def holds_slot(worker: FleetWorker) -> bool:
+    """Whether a worker counts against its run's `max_workers`.
+
+    A cancelled worker that never bound, ran, held money or produced a result (a
+    spawn refused at admission) frees its slot; its row stays as evidence. The
+    store also keeps any worker with a claim stamp, which this view cannot see.
+    """
+    return not (
+        worker.status == "cancelled"
+        and worker.binding_id is None
+        and worker.attempts == 0
+        and worker.turns_used == 0
+        and worker.reserved_usd == 0
+        and worker.result is None
+    )
 
 
 def run_settled(run: FleetRun, workers: Sequence[FleetWorker]) -> bool:

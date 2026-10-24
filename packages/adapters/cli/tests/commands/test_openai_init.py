@@ -13,8 +13,8 @@ import httpx
 import pytest
 from daimon.adapters.cli.commands.openai import _skill_bundle, openai_init_command
 from daimon.core.turn.openai_deployment import OpenAIDeployment
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.drivers.openai.transport import SDKTransport
+from mux.testing.isolated_sdk import build_async_openai
 
 TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 

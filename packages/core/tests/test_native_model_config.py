@@ -15,11 +15,12 @@ from daimon.core.sessions import create_session, project_session_resources
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.runtime_manifest import classify_source_obligations, preview_source_drops
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec
 from mux.drivers.anthropic.resources.agents import agent_payload
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 
 @pytest.fixture

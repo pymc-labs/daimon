@@ -51,7 +51,7 @@ def test_parse_refuses_an_empty_id(platform: str, raw: str, message: str) -> Non
 
 async def test_a_discord_id_that_is_not_a_snowflake_is_refused_before_any_lookup() -> None:
     runtime = MagicMock()
-    with pytest.raises(ToolError, match="not a Discord channel id"):
+    with pytest.raises(ToolError, match="is not a channel id"):
         await resolve_channel(runtime, _auth("discord"), "general", lenient=True)
     assert runtime.mock_calls == [], "nothing is looked up"
 
@@ -102,7 +102,7 @@ async def test_a_lenient_slack_or_teams_id_is_split_without_a_lookup() -> None:
 
 
 async def test_other_platforms_are_refused() -> None:
-    with pytest.raises(ToolError, match="only for Discord, Slack and Teams"):
+    with pytest.raises(ToolError, match="channel tools aren't available here"):
         await resolve_channel(MagicMock(), _auth("cli"), "c1")
 
 

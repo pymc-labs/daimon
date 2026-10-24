@@ -31,8 +31,12 @@ from daimon.core.stores.credential_requests import (
     create_credential_request,
 )
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
-from daimon.testing import build_fake_anthropic, list_response, make_fake_ma_handler
 from daimon.testing.factories import make_account, make_tenant
+from mux.testing.drivers.anthropic.ma import (
+    build_fake_anthropic,
+    list_response,
+    make_fake_ma_handler,
+)
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -71,6 +75,7 @@ def _override_users_info_admin(mock: Any) -> None:
             "user": {
                 "id": _USER_ID,
                 "name": "admin",
+                "team_id": _TEAM_ID,
                 "is_admin": True,
                 "is_owner": False,
                 "is_primary_owner": False,

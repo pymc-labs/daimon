@@ -10,13 +10,13 @@ from typing import Literal, cast
 import pytest
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.testing.accounting_conformance import HostAccountingHook, Snapshot
-from daimon.testing.conformance.fixtures import c12
-from daimon.testing.conformance.reference import create
-from daimon.testing.conformance.runner import Adapter, ConformanceFailure, PendingKind, run_fixture
 from daimon.testing.db import build_test_engine, isolated_test_schema
 from daimon.testing.factories import make_tenant
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
+from mux.testing.conformance.fixtures import c12
+from mux.testing.conformance.reference import create
+from mux.testing.conformance.runner import Adapter, ConformanceFailure, PendingKind, run_fixture
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 

@@ -45,8 +45,10 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.posted_controls import RECEIVED_FOOTER
 from daimon.core.scope import DeploymentDefault
+from daimon.core.security_audit import AuditDecision, capture_decision
 from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.credential_requests import (
+    consume_credential_request,
     create_credential_request,
     peek_credential_request,
 )
@@ -58,14 +60,14 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     build_fake_anthropic,
     build_stub_anthropic,
     list_response,
 )
-from daimon.testing.turn_fakes import deps_for
 from pydantic import HttpUrl
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -373,6 +375,20 @@ def _card_text(view: discord.ui.LayoutView) -> str:
     )
 
 
+async def _submit_with_audit(
+    modal: discord.ui.Modal, interaction: MagicMock
+) -> tuple[list[dict[str, Any]], AuditDecision]:
+    """Submit, returning the structured log events and the security-audit decision it made.
+
+    The events are what an operator reads to see which key was saved and how it ended;
+    the decision is what the audit trail records for a replacement gate. Both are part
+    of the credential-submit contract that Slack and Teams keep in their own shape.
+    """
+    with structlog.testing.capture_logs() as logs, capture_decision() as decision:
+        await modal.on_submit(interaction)
+    return logs, decision
+
+
 def _card_buttons(view: discord.ui.LayoutView) -> list[discord.ui.Button[Any]]:
     return [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
 
@@ -396,6 +412,9 @@ async def test_env_modal_submit_consumes_token_and_writes_agent_file(
     assert len(rows) == 1, "exactly one agent_files row must be written"
     assert rows[0].key == "OPENAI_API_KEY", "the key must come from the consumed row's target"
     assert rows[0].content == _SECRET_VALUE, "the value comes from the modal's TextInput"
+    assert rows[0].created_by_account_id == row.account_id, (
+        "the stored key is owned by the account the request was made for"
+    )
 
     interaction.followup.send.assert_not_awaited()
     _assert_secret_absent_from_every_reply(interaction, _SECRET_VALUE)
@@ -410,7 +429,16 @@ async def test_env_modal_successful_submit_edits_the_card_into_the_received_stat
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
 
     interaction = _card_interaction()
-    await modal.on_submit(interaction)
+    logs, decision = await _submit_with_audit(modal, interaction)
+    assert logs == [
+        {
+            "event": "credential_modal.env.submit",
+            "key": "STRIPE_KEY",
+            "outcome": "applied",
+            "log_level": "info",
+        }
+    ], "one event names the key and how the submit ended, and never the value"
+    assert decision == AuditDecision(), "adding a key records no policy decision"
 
     interaction.response.defer.assert_awaited_once_with()
     edits = _card_edits(interaction)
@@ -646,7 +674,10 @@ async def test_env_modal_without_crypto_keys_tells_the_person_and_keeps_the_requ
     assert rows == [], "nothing is stored without encryption keys"
     spent = await peek_credential_request(db_session, token=row.token)
     assert spent is not None and spent.used_at is None, "the request stays live for a retry"
-    assert "DAIMON_CRYPTO__KEYS" in _sent_message(interaction), "the operator step is named"
+    sent = _sent_message(interaction)
+    assert "no encryption key" in sent and "Nothing was saved" in sent, "the cause is named"
+    assert "whoever runs this Daimon install" in sent, "the fix names who can do it"
+    assert "DAIMON_" not in sent, "no operator setting is shown to the person"
     _assert_secret_absent_from_every_reply(interaction, _SECRET_VALUE)
 
 
@@ -1213,6 +1244,37 @@ async def test_env_file_parse_error_does_not_consume_the_request(
     assert "No keys were saved for tester" in message, "the rejection names the agent"
 
 
+@pytest.mark.parametrize("validity", ["expired", "used"])
+async def test_env_file_expired_or_spent_form_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession], validity: str
+) -> None:
+    row = await _seed_env_file_request(db_session_factory)
+    async with db_session_factory.begin() as session:
+        if validity == "expired":
+            await session.execute(
+                sql_text("UPDATE credential_requests SET expires_at = :at WHERE token = :token"),
+                {"at": datetime.now(UTC) - timedelta(minutes=1), "token": row.token},
+            )
+        else:
+            await consume_credential_request(session, token=row.token, now=datetime.now(UTC))
+    modal = _env_file_modal(
+        runtime=_runtime(sessionmaker=db_session_factory),
+        row=row,
+        attachment=_uploaded(b"TOGGL_TOKEN=toggl-secret\n"),
+    )
+
+    interaction = _card_interaction()
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert files == [], f"a {validity} form must never produce a write"
+    assert persisted is not None and persisted.outcome is None, "no outcome for a dead form"
+    assert await _queued_continuation(db_session_factory, row) is None, "no turn is queued"
+    assert "no longer valid" in _sent_message(interaction), "the submitter is told it is dead"
+
+
 async def test_env_file_collision_refuses_and_writes_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1233,7 +1295,16 @@ async def test_env_file_collision_refuses_and_writes_nothing(
     )
 
     interaction = _card_interaction()
-    await modal.on_submit(interaction)
+    logs, decision = await _submit_with_audit(modal, interaction)
+    assert logs == [
+        {
+            "event": "credential_modal.env_file.submit",
+            "key_count": 2,
+            "collision_count": 1,
+            "log_level": "info",
+        }
+    ], "the event counts keys and collisions and names neither"
+    assert decision == AuditDecision()
 
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
@@ -1275,7 +1346,16 @@ async def test_env_file_valid_upload_writes_all_keys_atomically_and_edits_card_a
     )
 
     interaction = _card_interaction()
-    await modal.on_submit(interaction)
+    logs, decision = await _submit_with_audit(modal, interaction)
+    assert logs == [
+        {
+            "event": "credential_modal.env_file.submit",
+            "key_count": 2,
+            "collision_count": 0,
+            "log_level": "info",
+        }
+    ], "the event counts the keys saved and names none"
+    assert decision == AuditDecision()
 
     async with db_session_factory() as session:
         persisted = await peek_credential_request(session, token=row.token)
@@ -1284,6 +1364,9 @@ async def test_env_file_valid_upload_writes_all_keys_atomically_and_edits_card_a
         "OPENAI_API_KEY": "openai-secret",
         "TOGGL_TOKEN": "toggl-secret",
     }, "every key in an accepted file lands, with the value the file gave it"
+    assert {file.created_by_account_id for file in files} == {row.account_id}, (
+        "every imported key is owned by the account the request was made for"
+    )
     assert persisted is not None and persisted.outcome == "applied", (
         "the spent request must record that the import landed"
     )
@@ -1457,7 +1540,16 @@ async def test_stale_replacement_leaves_the_stored_value_alone_and_renders_super
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
 
     interaction = _as_card_interaction(_admin_interaction())
-    await modal.on_submit(interaction)
+    logs, decision = await _submit_with_audit(modal, interaction)
+    assert logs == [
+        {
+            "event": "credential_modal.env.submit",
+            "key": "ROTATING_KEY",
+            "outcome": "stale_replacement",
+            "log_level": "info",
+        }
+    ], "a replacement that lost the race is logged with the outcome it recorded"
+    assert decision == AuditDecision(), "a live guild admin is allowed without a policy lookup"
 
     stored = await _stored_key(db_session_factory, row, "ROTATING_KEY")
     assert stored is not None and stored.content == "the-value-someone-else-wrote", (
@@ -1518,7 +1610,18 @@ async def test_replacement_needs_admin_at_submit_renders_refused_and_writes_noth
     modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
 
     interaction = _as_card_interaction(_member_interaction())
-    await modal.on_submit(interaction)
+    logs, decision = await _submit_with_audit(modal, interaction)
+    assert logs == [
+        {
+            "event": "credential_modal.env.submit",
+            "key": "SHARED_SECRET",
+            "outcome": "write_failed",
+            "log_level": "info",
+        }
+    ], "a refused replacement is logged with the outcome it recorded"
+    assert decision == AuditDecision(
+        operation="key_replace", denied=True, reason="managed_agent"
+    ), "the audit records the replacement gate refusing a member on a shared agent"
 
     current = await _stored_key(db_session_factory, row, "SHARED_SECRET")
     assert current is not None and current.content == "the-value-in-use", (
@@ -1762,7 +1865,8 @@ async def test_mcp_modal_refuses_a_token_the_server_rejects_before_any_write(
 
 
 @pytest.mark.parametrize(
-    "target", ["R_PROFILE_USER", "TAR_OPTIONS", "SNOWFLAKE_USER", "AWS_REGION"]
+    "target",
+    ["R_PROFILE_USER", "TAR_OPTIONS", "SNOWFLAKE_USER", "AWS_REGION", "1BAD", "LD_PRELOAD"],
 )
 async def test_env_modal_member_cannot_store_a_non_secret_name(
     db_session_factory: async_sessionmaker[AsyncSession], target: str
@@ -1825,6 +1929,58 @@ async def test_env_file_member_upload_with_a_non_secret_name_writes_nothing(
         files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
     assert files == [], "a member upload with a non-secret name is refused whole"
     assert persisted is not None and persisted.used_at is None, "the refusal spends nothing"
+
+
+@pytest.mark.parametrize("kind", ["env", "env_file"])
+async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    kind: str,
+) -> None:
+    """A pin landing after the early check refuses in the consume: nothing saved, form unspent."""
+    from daimon.adapters.discord import credential_origin
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.agent_pins import PIN_WRITE_REFUSAL
+    from daimon.core.stores.access_policy import set_access_policy
+
+    if kind == "env":
+        row = await _seed_env_request(db_session_factory, target="API_KEY", with_origin=True)
+    else:
+        row = await _seed_env_file_request(db_session_factory)
+    agent = _make_agent(
+        ma_agent_id=_MA_AGENT_ID, tenant_id=row.tenant_id, name="tester", managed=False
+    )
+    runtime = _runtime(
+        sessionmaker=db_session_factory,
+        anthropic=build_fake_anthropic(_list_agents_handler([agent])),
+    )
+    if kind == "env":
+        modal: discord.ui.Modal = EnvCredentialModal(runtime=runtime, request_row=row)
+        modal.value_input._value = _SECRET_VALUE  # pyright: ignore[reportPrivateUsage]
+    else:
+        modal = _env_file_modal(
+            runtime=runtime, row=row, attachment=_uploaded(b"API_KEY=submitted\n")
+        )
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=row.tenant_id,
+            policy=TenantAccessPolicy(agent_channel_pins={"tester": ("C_ELSEWHERE",)}),
+        )
+
+    async def early_check_passes(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(credential_origin, "request_pin_refusal", early_check_passes)
+    interaction = _as_card_interaction(_member_interaction())
+    await modal.on_submit(interaction)
+
+    async with db_session_factory() as session:
+        persisted = await peek_credential_request(session, token=row.token)
+        files = await list_agent_files(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    assert files == [], "nothing is saved"
+    assert persisted is not None and persisted.used_at is None, "the refused form was not spent"
+    assert _sent_message(interaction) == PIN_WRITE_REFUSAL
 
 
 async def test_mcp_agent_gone_before_the_attach_saves_nothing(

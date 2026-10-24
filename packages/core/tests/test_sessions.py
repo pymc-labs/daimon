@@ -33,8 +33,10 @@ from daimon.core.github_app_auth import BotIdentity
 from daimon.core.github_app_session import AppSessionAccess, AppToken
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.memory_resource import (
+    CHANNEL_MEMORY_INSTRUCTIONS,
     MEMORY_INSTRUCTIONS,
     PERSONAL_MEMORY_INSTRUCTIONS,
+    READ_ONLY_CHANNEL_MEMORY_INSTRUCTIONS,
     READ_ONLY_MEMORY_INSTRUCTIONS,
     READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS,
     SHARED_ONLY_MEMORY_INSTRUCTIONS,
@@ -50,16 +52,18 @@ from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.posture import ExemptReason
+from daimon.core.turn_hold import TurnHold
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     NotHandled,
     combine_handlers,
     json_body,
     make_fake_memory_store_handler,
 )
-from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session, ma_session_agent
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -2124,6 +2128,167 @@ async def test_a_personal_store_outage_degrades_to_shared_only(
     )
 
 
+_HELD_PLACE = TurnHold(platform="slack", channel_id="C-SYN-1", client=False)
+
+
+@pytest.mark.usefixtures("empty_app_vault")
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_a_held_session_mounts_its_channel_store_alone(
+    read_only: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Held, a session mounts only its channel's store: no agent-wide store, no
+    personal one even though the caller asked for it, and a second channel gets
+    its own. The same caller unheld still gets agent-wide plus personal."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    agent_uuid = uuid.uuid4()
+    mem_state = FakeMemoryStoreState()
+    bodies: list[dict[str, Any]] = []
+    client = _capturing_memory_client(mem_state, bodies)
+
+    for hold in (
+        _HELD_PLACE,
+        TurnHold(platform="slack", channel_id="C-SYN-2", client=False),
+        None,
+    ):
+        await create_session(
+            client,
+            agent=_make_agent(anthropic_id="ag_held", name="daimon-held"),
+            environment=_make_env(anthropic_id="env_held"),
+            account_id=account.id,
+            tenant_id=tenant.id,
+            agent_uuid=agent_uuid,
+            session_factory=db_session_factory,
+            memory_read_only=read_only,
+            personal_memory=True,
+            memory_hold=hold,
+        )
+
+    (first,), (second,), unheld = (_memory_mounts(body) for body in bodies)
+    assert first["memory_store_id"] != second["memory_store_id"]
+    assert first["instructions"] == (
+        READ_ONLY_CHANNEL_MEMORY_INSTRUCTIONS if read_only else CHANNEL_MEMORY_INSTRUCTIONS
+    )
+    assert first["access"] == ("read_only" if read_only else "read_write")
+    assert first["memory_store_id"] not in {m["memory_store_id"] for m in unheld}
+    assert len(unheld) == 2, "an unheld session mounts the agent-wide and the personal store"
+    assert {mem_state.stores[m["memory_store_id"]]["name"] for m in (first, second)} == {
+        "channel slack C-SYN-1",
+        "channel slack C-SYN-2",
+    }
+
+
+@pytest.mark.usefixtures("empty_app_vault")
+async def test_a_held_session_without_a_caller_still_mounts_the_channel_store(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A shared thread's session has no caller account, hence no credential hold,
+    but its memory is the place's."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    bodies: list[dict[str, Any]] = []
+
+    await create_session(
+        _capturing_memory_client(FakeMemoryStoreState(), bodies),
+        agent=_make_agent(anthropic_id="ag_thread"),
+        environment=_make_env(anthropic_id="env_thread"),
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        session_factory=db_session_factory,
+        memory_hold=_HELD_PLACE,
+    )
+
+    (mounted,) = _memory_mounts(bodies[0])
+    assert mounted["instructions"] == CHANNEL_MEMORY_INSTRUCTIONS
+
+
+@pytest.mark.usefixtures("empty_app_vault")
+async def test_a_channel_store_outage_leaves_a_held_session_without_memory_not_with_agent_wide(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    bodies: list[dict[str, Any]] = []
+    memory_handler = make_fake_memory_store_handler(FakeMemoryStoreState())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/memory_stores":
+            return httpx.Response(
+                500, json={"type": "error", "error": {"type": "api_error", "message": "boom"}}
+            )
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
+        body = json_body(request)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_1", agent_id=body["agent"], environment_id=body["environment_id"]
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=_make_agent(anthropic_id="ag_outage"),
+        environment=_make_env(anthropic_id="env_outage"),
+        account_id=account.id,
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        session_factory=db_session_factory,
+        personal_memory=True,
+        memory_hold=_HELD_PLACE,
+    )
+
+    assert _memory_mounts(bodies[0]) == [], "nothing agent-wide or personal fills in for it"
+
+
+async def test_a_held_turn_never_reaches_a_fleet_worker_capture(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fleet worker captures exactly one memory resource, the agent-wide store.
+    A held admission is refused before that source is read, the session a worker
+    would create refuses a held place, and the source projection refuses a hold."""
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+    from mux.errors import ScopeViolation
+
+    held_request = SimpleNamespace(admission=SimpleNamespace(hold=_HELD_PLACE))
+    with pytest.raises(ScopeViolation, match="held turn never captures"):
+        await capture_preparation_source(held_request)  # type: ignore[arg-type]
+
+    with pytest.raises(ScopeViolation, match="held turn never captures"):
+        await project_session_resources(
+            None,  # type: ignore[arg-type]
+            agent=None,  # type: ignore[arg-type]
+            environment=None,  # type: ignore[arg-type]
+            session_factory=db_session_factory,
+            tenant_id=uuid.uuid4(),
+            agent_uuid=uuid.uuid4(),
+            account_id=None,
+            resource_scope=None,  # type: ignore[arg-type]
+            memory_read_only=False,
+            hold=_HELD_PLACE,
+        )
+
+    with pytest.raises(ScopeViolation, match="held turn has no fleet worker"):
+        await create_session(
+            None,  # type: ignore[arg-type]
+            agent=None,  # type: ignore[arg-type]
+            environment=None,  # type: ignore[arg-type]
+            resource_source=SimpleNamespace(),  # type: ignore[arg-type]
+            memory_hold=_HELD_PLACE,
+        )
+
+
 # --- Agent-scoped external MCP credentials mirror into the caller's vault ----
 
 
@@ -2580,7 +2745,7 @@ async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
     "warm,read_only", [(False, False), (False, True), (True, False), (True, True)]
 )
 async def test_read_only_source_projection_keeps_implicit_memory_without_provisioning(
-    db_preflight, db_nullpool_engine, warm, read_only, monkeypatch
+    db_preflight, db_committing_engine, warm, read_only, monkeypatch
 ):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
@@ -2589,9 +2754,9 @@ async def test_read_only_source_projection_keeps_implicit_memory_without_provisi
     from daimon.core.sessions import project_session_resources
     from daimon.core.stores import agent_memory_stores
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
@@ -2643,7 +2808,7 @@ async def test_read_only_source_projection_keeps_implicit_memory_without_provisi
 
 
 async def test_source_projection_requires_app_vault_only_for_a_live_grant(
-    db_preflight, db_nullpool_engine
+    db_preflight, db_committing_engine
 ):
     from daimon.core._models import TenantGitHubRepo
     from daimon.core.channel_backend import load_backend_agent
@@ -2652,9 +2817,9 @@ async def test_source_projection_requires_app_vault_only_for_a_live_grant(
     from daimon.core.sessions import project_session_resources
     from daimon.core.stores import github_access, github_app_installations
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
@@ -2770,7 +2935,7 @@ async def test_source_projection_refuses_changed_source_before_database_or_nativ
 
 
 async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
-    db_preflight, db_nullpool_engine, monkeypatch
+    db_preflight, db_committing_engine, monkeypatch
 ):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
@@ -2778,9 +2943,9 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
     from daimon.core.sessions import project_session_resources
     from daimon.core.stores import agent_mcp_credentials as credentials
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
@@ -2854,7 +3019,7 @@ async def test_shared_projection_lists_agent_tokens_but_no_caller_vault(
     from daimon.core.sessions import project_session_resources
     from daimon.core.stores import agent_mcp_credentials as credentials
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
@@ -2902,7 +3067,7 @@ async def test_shared_projection_lists_agent_tokens_but_no_caller_vault(
 
 
 async def worker_source_context(
-    db_nullpool_engine,
+    db_committing_engine,
     *,
     original_tools=(),
     granted_tools=(),
@@ -2921,14 +3086,14 @@ async def worker_source_context(
     from daimon.core.neutral_resources import resolve_worker_spec
     from daimon.core.sessions import project_session_resources
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.contracts.extensions import ExtensionConfig
     from mux.contracts.ids import ChannelRef, Scope, ThreadRef
     from mux.contracts.resources import AgentSpec, ResourceBinding
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     from .test_fleet_permissions import POLICY, parent
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
@@ -2991,7 +3156,7 @@ async def worker_source_context(
         root, root.spec, policy=POLICY, now=datetime(2026, 10, 12, 18, tzinfo=UTC)
     )
     from daimon.core.memory_resource import ensure_memory_store_and_mount
-    from daimon.testing.ma import MARouter
+    from mux.testing.drivers.anthropic.ma import MARouter
 
     router = MARouter()
     memory_handler = make_fake_memory_store_handler(FakeMemoryStoreState())
@@ -3067,12 +3232,12 @@ async def worker_source_context(
     ],
 )
 async def test_worker_source_context_refuses_before_resources_or_native_io(
-    db_preflight, db_nullpool_engine, changed
+    db_preflight, db_committing_engine, changed
 ):
     from dataclasses import replace
 
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.errors import ScopeViolation, UnsupportedCapability
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     (
         sessions,
@@ -3082,7 +3247,7 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
         environment,
         worker,
         source,
-    ) = await worker_source_context(db_nullpool_engine)
+    ) = await worker_source_context(db_committing_engine)
     executing = ma_agent(id="actual-worker", tenant_id=str(tenant_id), name="worker")
     source_uuid = source.agent_id
 
@@ -3126,8 +3291,13 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
             }
         )
     elif changed == "drops":
+        from mux.contracts.resources import ResourceBinding
+
+        # A worker that declared memory dropped may not still carry a mount.
         worker = replace(
-            worker, spec=worker.spec.model_copy(update={"declared_drops": ("memory",)})
+            worker,
+            spec=worker.spec.model_copy(update={"declared_drops": ("memory",)}),
+            resources=(ResourceBinding(id="memory", kind="native"),),
         )
     trace = ScriptedTransport()
     async with trace.client() as client:
@@ -3166,15 +3336,15 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
     ],
 )
 async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
-    db_preflight, db_nullpool_engine, fault
+    db_preflight, db_committing_engine, fault
 ):
     from dataclasses import replace
 
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.errors import ScopeViolation, UnsupportedCapability
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     sessions, tenant, account, _, environment, worker, source = await worker_source_context(
-        db_nullpool_engine, warm=fault != "cold"
+        db_committing_engine, warm=fault != "cold"
     )
     if fault != "cold":
         binding = worker.resources[0]
@@ -3238,7 +3408,7 @@ async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
     "failure", ["namespace", "model_option", "version", "tools", "memory", "sandbox"]
 )
 async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
-    db_preflight, db_nullpool_engine, failure
+    db_preflight, db_committing_engine, failure
 ):
     from dataclasses import replace
 
@@ -3256,7 +3426,7 @@ async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
         input_schema={"type": "object"},
     )
     _, _, _, _, _, worker, captured = await worker_source_context(
-        db_nullpool_engine, original_tools=(tool_payload(tool),), granted_tools=(tool,)
+        db_committing_engine, original_tools=(tool_payload(tool),), granted_tools=(tool,)
     )
     root = replace(
         worker.permissions,
@@ -3313,9 +3483,9 @@ async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
 )
 async def test_source_environment_projection_retains_unrepresented_native_policy(failure):
     from daimon.core.mux_compat import retrieve_environment, source_environment_record
-    from daimon.testing.ma import MARouter
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.contracts.ids import Scope
+    from mux.testing.drivers.anthropic.ma import MARouter
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     config = {
         "type": "cloud",
@@ -3575,3 +3745,101 @@ async def test_each_daimon_session_mounts_its_own_signed_origin_credential(
         assert (tokens[-2]["routine_id"], tokens[-2]["execution_id"]) == tuple(map(str, execution))
     assert "routine_id" not in tokens[-1] and "execution_id" not in tokens[-1]
     await client.close()
+
+
+@pytest.mark.usefixtures("empty_app_vault")
+@pytest.mark.parametrize("held", [False, True])
+async def test_create_session_mounts_the_vault_of_the_turns_hold(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    held: bool,
+) -> None:
+    """A held turn's session mounts a vault named for its hold, whose credential
+    carries the signed hold; an unheld turn's session mounts the ordinary one."""
+    import jwt as pyjwt
+    from daimon.core.mcp_hold import HOLD_CLAIM, hold_vault_suffix
+    from daimon.core.turn_hold import TurnHold
+
+    tenant = await make_tenant(db_session, platform="slack")
+    account = await make_account(db_session, tenant=tenant)
+    agent_uuid = uuid.uuid4()
+    hold = TurnHold(platform="slack", channel_id="C-SYN-1", client=True) if held else None
+    created_vaults: list[str] = []
+    credential_bodies: list[dict[str, Any]] = []
+    session_bodies: list[dict[str, Any]] = []
+    memory_handler = make_fake_memory_store_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
+        if request.method == "GET" and request.url.path == "/v1/vaults":
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        if request.method == "POST" and request.url.path == "/v1/vaults":
+            name = json.loads(request.content)["display_name"]
+            created_vaults.append(name)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vlt_new",
+                    "type": "vault",
+                    "display_name": name,
+                    "metadata": None,
+                    "archived_at": None,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/vaults/vlt_new/credentials":
+            body = json.loads(request.content)
+            credential_bodies.append(body)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vcrd_new",
+                    "type": "credential",
+                    "vault_id": "vlt_new",
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": body["auth"]["mcp_server_url"],
+                    },
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/v1/sessions"):
+            body = json.loads(request.content)
+            session_bodies.append(body)
+            sent_agent = body["agent"]
+            return httpx.Response(
+                200,
+                json=_session_body(
+                    session_id="sess_held",
+                    agent_id=sent_agent if isinstance(sent_agent, str) else sent_agent["id"],
+                    environment_id=body["environment_id"],
+                ),
+            )
+        raise AssertionError(f"unexpected call: {request.method} {request.url.path}")
+
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=_make_agent(anthropic_id="ag_held"),
+        environment=_make_env(anthropic_id="env_held"),
+        account_id=account.id,
+        mcp_settings=McpSettings(
+            jwt_secret=SecretStr("x" * 32), public_url=HttpUrl("https://mcp.example.com/mcp")
+        ),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        hold=hold,
+    )
+
+    ordinary = f"daimon-mcp:{account.id}:{agent_uuid}"
+    assert created_vaults == [ordinary + (hold_vault_suffix(hold) if hold else "")]
+    claims = pyjwt.decode(
+        credential_bodies[0]["auth"]["token"],
+        "x" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert (HOLD_CLAIM in claims) is held
+    assert session_bodies[0]["vault_ids"] == ["vlt_new"]

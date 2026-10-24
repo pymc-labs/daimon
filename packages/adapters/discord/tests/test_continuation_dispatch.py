@@ -38,9 +38,9 @@ from daimon.core.stores.task_continuations import (
     list_pending_continuations,
     record_continuation,
 )
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TENANT_UUID = uuid.uuid4()

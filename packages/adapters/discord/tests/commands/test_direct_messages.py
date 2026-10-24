@@ -78,7 +78,7 @@ async def test_dm_from_a_thread_admits_and_records_its_parent_channel(
         admitted.append(kwargs)
         if over_budget:
             raise AdmissionDenied(reason="channel_budget_exceeded")
-        return MagicMock(source_sealed=False)
+        return MagicMock(source_sealed=False, source_shared=False)
 
     monkeypatch.setattr(dm_module, "require_dm_enabled", AsyncMock())
     monkeypatch.setattr(dm_module, "admit", admit)

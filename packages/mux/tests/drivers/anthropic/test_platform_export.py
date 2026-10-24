@@ -5,11 +5,11 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport
 from mux.errors import ProviderError
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 SCOPE = Scope.platform(reason="test export", authorization_id="platform-export")
 

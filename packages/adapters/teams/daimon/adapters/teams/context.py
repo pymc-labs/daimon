@@ -52,6 +52,12 @@ _GROUP_FILES_HINT = (
     "Files can't be attached in a group chat. Mention it only if someone asks for a file "
     "here: they can ask you for it in their 1:1 chat with you."
 )
+# The same, for a person from another organisation, who has no 1:1 chat with the agent.
+_GROUP_FILES_HINT_FOREIGN = (
+    "Files can't be attached in a group chat. This person is from another organisation, so "
+    "a 1:1 chat with Daimon can't be opened for them; don't suggest one. Mention it only if "
+    "someone asks for a file here: paste short text inline."
+)
 # A 1:1 chat has no Graph thumbnails: the agent may picture a document itself
 # (`output_delivery.is_preview_output`). Page one only: typst's PNG export of a multi-page
 # document needs a page template. The default environment has no office suite.
@@ -494,7 +500,7 @@ def render_user_message(
         ]
     elif inbound.kind == "group":
         name = f" name={quoteattr(inbound.channel_name)}" if inbound.channel_name else ""
-        hint = quoteattr(_GROUP_FILES_HINT)
+        hint = quoteattr(_GROUP_FILES_HINT_FOREIGN if inbound.is_foreign else _GROUP_FILES_HINT)
         context = [
             f'<channel platform="teams" id={quoteattr(inbound.channel_id)} role="group_chat"'
             f'{name} files="unavailable" files_hint={hint}/>'

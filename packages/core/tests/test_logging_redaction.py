@@ -160,3 +160,88 @@ def test_rich_handler_tracebacks_are_redacted_and_carry_no_locals(
     assert "Error calling tool" in logged
     assert text_canary not in logged
     assert local_canary not in logged
+
+
+@pytest.mark.parametrize(
+    "name", ["AccountKey", "accountkey", "ACCOUNTKEY", "SharedAccessSignature"]
+)
+def test_azure_connection_string_secrets_are_redacted(
+    name: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from daimon.core.observability import redact_log_text
+
+    canary = _canary() + "=="
+    connection = f"AccountName=local;{name}={canary};BlobEndpoint=http://127.0.0.1:10000/local"
+    assert canary not in redact_log_text(connection)
+    configure_log_level("INFO")
+    structlog.get_logger("daimon.test").info(
+        "storage.failed", detail=connection, credentials={name: canary}
+    )
+    rendered = capsys.readouterr().out
+    assert "storage.failed" in rendered
+    assert canary not in rendered
+
+
+async def test_genai_sdk_never_logs_request_options_with_a_credential_at_debug() -> None:
+    """google-genai's Interactions client logs "Request options" (the whole
+    request body, incl. extra_body) at DEBUG. That body carries the storage-mount
+    and MCP Authorization headers; after install_log_redaction it must not log."""
+    import httpx as _httpx
+    from google import genai
+    from google.genai.types import HttpOptions, HttpRetryOptions
+
+    canary = _canary()
+    records: list[logging.LogRecord] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    root = logging.getLogger()
+    handler = Collect(level=logging.DEBUG)
+    previous = root.level
+    sdk_logger = logging.getLogger("google.genai")
+    sdk_previous = sdk_logger.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        install_log_redaction()
+
+        def respond(request: _httpx.Request) -> _httpx.Response:
+            return _httpx.Response(200, json={"id": "i", "status": "in_progress"})
+
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(respond)) as http:
+            client = genai.Client(
+                api_key="offline-fixture",
+                http_options=HttpOptions(
+                    httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+                ),
+            )
+            interactions = client.aio._nextgen_client.with_options(  # pyright: ignore[reportPrivateUsage]
+                max_retries=0
+            ).interactions
+            await interactions.create(
+                agent="antigravity-preview-05-2026",
+                input=[],
+                background=True,
+                store=True,
+                extra_body={
+                    "environment": {
+                        "network": {
+                            "allowlist": [
+                                {
+                                    "domain": "storage.googleapis.com",
+                                    "transform": {"Authorization": "Bearer " + canary},
+                                }
+                            ]
+                        }
+                    }
+                },
+            )
+            await client.aio.aclose()
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous)
+        sdk_logger.setLevel(sdk_previous)
+    assert not any(canary in record.getMessage() for record in records)
+    assert not any("Request options" in record.getMessage() for record in records)

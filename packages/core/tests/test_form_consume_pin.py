@@ -27,9 +27,9 @@ from daimon.core.stores import credential_requests as store
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.agent_files import lock_agent_keys, put_agent_file_if_unchanged
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_models import ma_agent
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool

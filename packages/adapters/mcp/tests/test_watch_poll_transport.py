@@ -118,8 +118,8 @@ async def test_junk_requests_cannot_starve_real_polls(monkeypatch):
 async def test_poll_executor_is_absent_from_public_mcp_app(monkeypatch, sessionmaker):
     from daimon.adapters.mcp.server import create_mcp_app
     from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
-    from daimon.testing.ma import build_stub_anthropic
     from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
     from pydantic import HttpUrl, PostgresDsn, SecretStr
 
     monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")

@@ -15,9 +15,9 @@ from daimon.core.defaults.ma_index import (
     list_skills_strict,
 )
 from daimon.core.errors import SkillsListTruncatedError
-from daimon.testing.ma import MARouter, list_response
-from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 
 
 async def test_find_agent_returns_match() -> None:

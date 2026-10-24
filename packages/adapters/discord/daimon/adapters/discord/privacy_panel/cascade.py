@@ -56,10 +56,10 @@ def build_cascade_preview_container(
         )
     if preview.slack_user_tokens.count > 0:
         will_happen_rows.append(
-            f"-# 🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
+            f"-# 🔐 Delete {amount(preview.slack_user_tokens.count, 'saved access token')}"
         )
     if preview.slack_turn_contexts.count > 0:
-        n = amount(preview.slack_turn_contexts.count, "temporary Slack request record")
+        n = amount(preview.slack_turn_contexts.count, "temporary request record")
         will_happen_rows.append(f"-# 💬 Delete {n}")
     if preview.direct_message_conversations.count > 0:
         n = amount(preview.direct_message_conversations.count, "private conversation")
@@ -79,7 +79,7 @@ def build_cascade_preview_container(
         "📋 **What is intentionally kept elsewhere**",
         "",
         "-# Usage records are retained for service integrity and cannot be erased on request.",
-        "-# Uploaded skill files stay in Managed Agents; guild agents may keep using them.",
+        "-# Uploaded skill files stay in Managed Agents; shared agents may keep using them.",
         "-# The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",
         "",

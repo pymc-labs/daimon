@@ -1434,7 +1434,7 @@ async def test_recovery_reseed_withholds_the_oversized_image_url() -> None:
 
     assert huge.url not in xml, "the URL that terminated the last session must be withheld"
     assert 'oversized="true"' in xml, "the agent must still know the image exists"
-    assert "already terminated a session" in xml
+    assert "already ended a conversation" in xml
 
 
 async def test_reseed_still_exposes_normal_image_urls() -> None:

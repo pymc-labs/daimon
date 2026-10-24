@@ -30,8 +30,8 @@ from daimon.core.stores.tenants import (
     set_provision_status,
 )
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_agent, ma_environment, ma_session
-from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .harness import make_bot
@@ -249,12 +249,12 @@ class TestNonReadySelfHealGate:
         mock_resolve_config: AsyncMock,
         mock_reconcile: AsyncMock,
         db_clean: None,
-        db_nullpool_engine: AsyncEngine,
+        db_committing_engine: AsyncEngine,
     ) -> None:
         from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
 
-        db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+        db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
         mock_reconcile.return_value = ApplyReport()
         guild_id = "700000004"
         result = await provision_tenant(
@@ -336,13 +336,13 @@ class TestNonReadySelfHealGate:
         mock_resolve_config: AsyncMock,
         mock_reconcile: AsyncMock,
         db_session: AsyncSession,
-        db_nullpool_engine: AsyncEngine,
+        db_committing_engine: AsyncEngine,
     ) -> None:
         from daimon.core.defaults.report import ApplyReport
 
         # Provisioning and admission can run concurrently; each task needs its
         # own connection rather than the test fixture's shared transaction.
-        db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+        db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
         mock_reconcile.return_value = ApplyReport()
         guild_id = "700000005"  # NO tenant row — get_tenant_liveness returns None
 

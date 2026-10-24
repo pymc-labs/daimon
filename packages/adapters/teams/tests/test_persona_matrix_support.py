@@ -15,9 +15,9 @@ from daimon.core.config import SupportSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
-from daimon.testing import build_fake_anthropic, ma_session
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -29,6 +29,7 @@ from .conftest import (
     make_card_action,
     make_invoke,
     make_message_activity,
+    notice_text,
     post_activity,
     running_service,
 )
@@ -121,7 +122,7 @@ async def test_support_persona_matrix(
         if actor.name in {"admin", "member", "guest"}:
             assert result["task"]["type"] == "continue", result
         else:
-            assert result["task"]["type"] == "message", result
+            notice_text(result)  # a refusal opens as a one-line dialog, not a message
     elif route == "support_send":
         assert count == (1 if actor.name in {"admin", "member", "guest"} else 0), result
     else:

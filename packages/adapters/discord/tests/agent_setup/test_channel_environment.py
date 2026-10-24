@@ -45,15 +45,15 @@ from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
-from daimon.testing import ma_environment
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_environment
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     build_no_retry_anthropic,
     list_response,
 )
-from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001
@@ -180,7 +180,7 @@ def test_the_block_lists_channels_then_the_defaults() -> None:
     assert f"<#{MAX_ENVIRONMENT_LINES}>" not in text and "-# and 2 more" in text, (
         "the list is bounded and counts what it cut"
     )
-    assert text.index("Server default → **shared**") < text.index("Deployment default"), (
+    assert text.index("Server default → **shared**") < text.index("Daimon-wide default"), (
         "the server default comes before the deployment fall-through"
     )
     assert "-# Not used while a server default is set." in text, (
@@ -194,7 +194,7 @@ def test_the_block_with_nothing_set_names_only_the_deployment_default() -> None:
     assert text is not None, "the block fits the whole card's budget"
     assert "-# no channel picks its own environment yet" in text, "no channel rows"
     assert "-# no server default" in text, "no tenant row"
-    assert "Deployment default → **default**" in text and "not in effect" not in text, (
+    assert "Daimon-wide default → **default**" in text and "not in effect" not in text, (
         "with no rows at all, every channel runs where it did before"
     )
 

@@ -14,7 +14,14 @@ from daimon.core.turn.outcomes import TurnObservation
 from mux.state.memory import MemoryStateStore
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .test_provider_dispatch import ACCOUNT, PROFILE, SESSION, TENANT, admission, deps_for
+from .test_provider_dispatch import (
+    ACCOUNT,
+    PROFILE,
+    SESSION,
+    TENANT,
+    admission,
+    deps_for_pinned_mux,
+)
 
 _NOW = datetime(2026, 10, 12, tzinfo=UTC)
 
@@ -73,7 +80,9 @@ async def test_delayed_binding_owner_is_cancelled_by_the_original_preparation_de
     default_deadline,
 ):
     store = WaitingStore()
-    deps = replace(deps_for(None, async_sessionmaker()), channel_backends=True, state_store=store)
+    deps = replace(
+        deps_for_pinned_mux(None, async_sessionmaker()), channel_backends=True, state_store=store
+    )
     current = replace(admission(), origin_channel_id="channel")
     if provider == "anthropic":
         current = replace(current, backend_revision=None)
@@ -124,7 +133,7 @@ async def test_default_and_disabled_preparation_never_wait_on_the_binding_owner(
 ):
     store = WaitingStore()
     deps = replace(
-        deps_for(None, async_sessionmaker()),
+        deps_for_pinned_mux(None, async_sessionmaker()),
         turn_path=path,
         channel_backends=enabled,
         state_store=store,

@@ -86,7 +86,7 @@ async def probe_mcp_server(
     Used at the token form to refuse a rejected token before it is stored,
     and before an OAuth flow to learn where the server's metadata lives.
     """
-    assert_public_https_url(mcp_server_url, what="mcp server url")
+    assert_public_https_url(mcp_server_url, what="connection URL")
     headers = {
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": _PROTOCOL_VERSION,
@@ -166,7 +166,7 @@ async def discover_authorization_server(
     http: httpx.AsyncClient, *, mcp_server_url: str, resource_metadata_url: str | None = None
 ) -> OAuthDiscovery:
     """Resolve the MCP URL to its authorization server's endpoints."""
-    assert_public_https_url(mcp_server_url, what="mcp server url")
+    assert_public_https_url(mcp_server_url, what="connection URL")
     resource: ProtectedResourceMetadata | None = None
     for url in protected_resource_urls(mcp_server_url, resource_metadata_url):
         resource = await _fetch_metadata(http, url, ProtectedResourceMetadata)
@@ -220,7 +220,7 @@ async def read_mcp_catalogue(
     """
     import json
 
-    assert_public_https_url(mcp_server_url, what="mcp server url")
+    assert_public_https_url(mcp_server_url, what="connection URL")
     headers = {
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": _PROTOCOL_VERSION,

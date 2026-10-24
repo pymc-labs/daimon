@@ -28,7 +28,6 @@ from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.testing.admin_bindings import AdminBindings, provision_admin_run
 from daimon.testing.admin_resources import ResourceAdminBindings
 from daimon.testing.cli_resources import cli_check_holds
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.gemini_cli_resources import (
     GEMINI_OPERATOR_PROFILE as OPT_IN_OPERATOR_PROFILE,
 )
@@ -38,14 +37,15 @@ from daimon.testing.gemini_cli_resources import (
 from daimon.testing.gemini_cli_resources import (
     opt_in_gemini_operator_profile as opt_in_operator_profile,
 )
-from daimon.testing.isolated_sdk import build_gemini_client
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.ids import ModelRef
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
+from mux.testing.isolated_sdk import build_gemini_client
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 pytest_plugins = ["daimon.testing.db"]
@@ -524,9 +524,9 @@ async def test_mixed_gemini_runtime_keeps_existing_anthropic_agent_get_bytes(
     from daimon.adapters.cli.commands.agents import agents_get
     from daimon.adapters.cli.tenant import TenantSelector
     from daimon.core.channel_backend import channel_ref, clear_channel_backend, current_backend
-    from daimon.testing import ma_agent
-    from daimon.testing.ma import list_response
-    from daimon.testing.ma_transport import RecordedRequest, ScriptedReply
+    from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma import list_response
+    from mux.testing.drivers.anthropic.ma_transport import RecordedRequest, ScriptedReply
     from rich.console import Console
 
     other = None

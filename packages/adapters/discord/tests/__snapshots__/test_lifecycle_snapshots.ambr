@@ -46,7 +46,7 @@
               tuple(
                 'Details',
                 list([
-                  '`🖋️ Running a command`',
+                  '`⏳ Running a command`',
                 ]),
               ),
             ]),

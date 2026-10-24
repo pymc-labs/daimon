@@ -15,11 +15,12 @@ from daimon.core.config import load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.context_prompt import DEFAULT_FRAGMENTS
 from daimon.core.db import build_engine, build_session_factory
+from daimon.core.stores.accounting_outbox import list_pending_usage
 from daimon.core.stores.turn_usage import list_turn_usage, usage_by_channel
 from daimon.core.usage_sweep import settle_backlog
 from rich.console import Console
 
-usage_app = typer.Typer(help="Content-free turn telemetry (measurement only).")
+usage_app = typer.Typer(help="Content-free usage telemetry and pending billing observations.")
 
 
 @usage_app.command("turns")
@@ -177,3 +178,61 @@ def usage_settle_backlog_command(
         )
 
     asyncio.run(run())
+
+
+@usage_app.command("pending")
+def usage_pending_command(
+    tenant_id: UUID,
+    limit: Annotated[int, typer.Option(min=1, max=1000)] = 100,
+    cursor: Annotated[
+        str | None, typer.Option(help="Continue from the previous next_cursor.")
+    ] = None,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """List billing observations awaiting usage, price or infrastructure reconciliation."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def query() -> None:
+        engine = build_engine(
+            str(settings.database.url),
+            pool_size=settings.database.pool_size,
+            max_overflow=settings.database.max_overflow,
+            pool_timeout=settings.database.pool_timeout,
+        )
+        try:
+            async with build_session_factory(engine)() as session:
+                try:
+                    page = await list_pending_usage(
+                        session, tenant_id=tenant_id, limit=limit, cursor=cursor
+                    )
+                except ValueError as error:
+                    raise typer.BadParameter(str(error)) from error
+            if as_json:
+                console.print(page.model_dump_json(), soft_wrap=True, highlight=False, markup=False)
+                return
+            emit_rows(
+                console,
+                page.rows,
+                columns=(
+                    "binding_id",
+                    "session_id",
+                    "observation_id",
+                    "revision",
+                    "model",
+                    "completeness",
+                    "reason",
+                    "observed_at",
+                ),
+                as_json=False,
+            )
+            console.print(
+                f"truncated: {str(page.truncated).lower()}  invalid_rows: {page.invalid_rows}",
+                markup=False,
+            )
+            if page.next_cursor is not None:
+                console.print(f"next_cursor: {page.next_cursor}", markup=False)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(query())

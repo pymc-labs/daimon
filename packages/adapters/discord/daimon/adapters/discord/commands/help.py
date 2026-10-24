@@ -5,7 +5,7 @@ command tree plus the `@bot` configure-by-chat entrypoint. Open to all
 guild members (no `manage_guild` requirement); guild registration is
 still checked.
 
-The slash list is a hand-edited module constant.
+The slash list is built from `platform_words`, plus `/github home`.
 
 Note: `from __future__ import annotations` is intentionally omitted.
 discord.py evaluates parameter annotations at import time to extract
@@ -17,6 +17,7 @@ from typing import cast
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.checks import require_registered_guild
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.platform_words import DESCRIPTIONS, WORDS
 
 import discord
 from discord import Interaction, app_commands
@@ -25,20 +26,24 @@ from discord.ext import commands
 BotInteraction = Interaction[commands.Bot]
 
 
-def _body(bot_display_name: str) -> str:
-    return """\
-/here            Who answers here and what it can use
-/agent-setup     Your agents and where they answer
-/github connect  Connect GitHub repos
-/github home     Your repos, GitHub account and waiting requests
-/memory          What the agent remembers
-/model           This conversation's model
-/routines        Scheduled jobs
-/dm-me           Continue privately (an admin turns it on)
-/billing         Your usage and credit
-/privacy         See, export or delete your data
-/help            This list\
-"""
+# Not an action in the shared table: the second command of `/github`.
+_GITHUB_HOME = ("/github home", "Your repos, GitHub account and waiting requests")
+
+
+def _command_rows() -> list[tuple[str, str]]:
+    """`(command, description)` for every Discord command, in the table's order."""
+    rows: list[tuple[str, str]] = []
+    for action, command in WORDS["discord"].commands.items():
+        rows.append((command.word, DESCRIPTIONS[action]))
+        if action == "github":
+            rows.append(_GITHUB_HOME)
+    return rows
+
+
+def _body() -> str:
+    rows = _command_rows()
+    width = max(len(word) for word, _ in rows) + 2
+    return "\n".join(f"{word.ljust(width)}{description}" for word, description in rows)
 
 
 def _conversational(bot_display_name: str) -> str:
@@ -54,7 +59,7 @@ def build_help_view(bot_display_name: str = "daimon") -> discord.ui.LayoutView:
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
         discord.ui.TextDisplay("## 📖 Commands\n\n-# Only you can see this."),
         layout.hairline(),
-        discord.ui.TextDisplay(_body(bot_display_name)),
+        discord.ui.TextDisplay(_body()),
         layout.hairline(),
         discord.ui.TextDisplay(_conversational(bot_display_name)),
     )
@@ -73,7 +78,7 @@ class HelpCog(commands.Cog):
         super().__init__()
         self.bot: commands.Bot = bot
 
-    @app_commands.command(name="help", description="List commands")
+    @app_commands.command(name="help", description=DESCRIPTIONS["help"])
     @require_registered_guild
     async def help(self, interaction: BotInteraction) -> None:
         runtime = _get_runtime(interaction)

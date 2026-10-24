@@ -23,8 +23,8 @@ from daimon.core.config import (
 from daimon.core.defaults.loader import DeploymentDefault
 from daimon.core.errors import BootstrapError
 from daimon.core.hub_identity import HubTenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette

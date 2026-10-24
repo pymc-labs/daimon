@@ -48,10 +48,11 @@ from daimon.core.stores.turn_origins import create_origin, get_active_origin
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_origin import turn_origin
-from daimon.testing import ma_agent, ma_session, ma_session_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
@@ -60,7 +61,7 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
     not_found_response,
 )
-from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -214,6 +215,8 @@ async def _chat_turn(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN if admin else Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
             chat_session_id="test-session",
@@ -269,14 +272,14 @@ async def test_a_skill_that_changed_since_its_preview_is_not_uploaded(
 
 #: What a preview says for each reason a chat turn can't show the card.
 _NO_CARD_REASONS = {
-    "no_origin_context": "did not pass this turn's origin_context_id",
-    "unverified_origin": "is not this turn's",
-    "not_a_chat_turn": "does not come from a chat turn",
+    "no_origin_context": "did not pass its origin_context_id",
+    "unverified_origin": "is not this chat's",
+    "not_a_chat_turn": "does not come from a chat",
     "agent_key": "runs on an agent key",
-    "no_live_session": "has no live session",
+    "no_live_session": "has no live conversation",
     "other_agents_session": "runs a different agent",
     "session_not_gated": "does not ask before add_skill yet",
-    "session_unreadable": "could not read this thread's session",
+    "session_unreadable": "could not read this thread's conversation",
 }
 
 
@@ -320,10 +323,10 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
 
     preview = await add()
     summary = preview.summary
-    assert "content_hash=" not in summary and "/agent-setup" in summary
+    assert "content_hash=" not in summary and "open helper and use Add skill" in summary
     assert "this conversation can't show one" in summary
     assert _NO_CARD_REASONS[where] in summary, "the preview names why no card can show"
-    assert "turned off on this deployment" not in summary, "the deployment has cards on"
+    assert "turned off here" not in summary, "the deployment has cards on"
     with pytest.raises(ToolError, match="this conversation can't show one") as refused:
         await add(content_hash=preview.preview.content_hash)
     assert _NO_CARD_REASONS[where] in str(refused.value)
@@ -470,7 +473,7 @@ async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
 ) -> None:
     world = await _world(db_session_factory)
     member = world.auth(admin=False)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs its owner or an admin"):
         await _add_skill_impl(
             world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
         )
@@ -483,7 +486,7 @@ async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
             agent_name="helper",
             mode="agent",
         )
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs its owner or an admin"):
         await _add_skill_impl(
             world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
         )
@@ -494,7 +497,7 @@ async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
     [
         ("discord", "https://evil.example/skill.zip", "Discord attachment link"),
         ("discord", "http://cdn.discordapp.com/a/b/skill.zip", "Discord attachment link"),
-        (None, "https://cdn.discordapp.com/a/b/skill.zip", "only from Discord, Slack or Teams"),
+        (None, "https://cdn.discordapp.com/a/b/skill.zip", "Attachments aren't available here"),
         ("teams", "https://cdn.discordapp.com/a/b/skill.zip", "SharePoint or OneDrive link"),
         ("teams", "http://contoso.sharepoint.com/s/skill.zip", "SharePoint or OneDrive link"),
         ("teams", "https://contoso.sharepoint.com.evil.example/x", "SharePoint or OneDrive link"),
@@ -677,6 +680,8 @@ async def _setup_thread_origin(world: _World, factory: async_sessionmaker[AsyncS
             configuration_target_ma_agent_id="agent_helper",
             configuration_target_name="helper",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
             is_setup=True,
@@ -708,11 +713,12 @@ async def test_with_approval_cards_off_the_preview_says_the_deployment_turned_th
 
     preview = await add()
     summary = preview.summary
-    assert "/agent-setup" in summary and "content_hash=" not in summary
-    assert "approval cards are turned off on this deployment" in summary
-    assert "tool_safety.enabled" in summary, "the operator is told which setting"
+    assert "open helper and use Add skill" in summary and "content_hash=" not in summary
+    assert "approval cards are turned off here" in summary
+    assert "whoever runs this Daimon install can turn them on" in summary, "who can fix it"
+    assert "tool_safety" not in summary, "no operator setting is shown"
     assert "this conversation can't show one" not in summary
-    with pytest.raises(ToolError, match="approval cards are turned off on this deployment"):
+    with pytest.raises(ToolError, match="approval cards are turned off here"):
         await add(content_hash=preview.preview.content_hash)
     assert world.created == [], "the confirm staged and uploaded nothing"
 
@@ -760,7 +766,7 @@ async def test_a_member_cannot_change_an_agent_only_a_thread_uses(
             responder_name="helper",
             kind="handoff",
         )
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
         await _add_skill_impl(
             world.runtime,
             world.auth(admin=False, platform="discord"),
@@ -842,6 +848,8 @@ async def _reply(
         responder_ma_agent_id="agent_helper",
         responder_name="helper",
         role=auth.role,
+        sender_foreign=False,
+        shared_channel=False,
         message_text=text,
         chat_session_id="test-session",
     ) as origin:
@@ -913,10 +921,10 @@ async def test_with_cards_off_nobody_else_confirms_and_nowhere_else(
         auth, account_id=other.id, role=Role.ADMIN, is_admin=True, platform_user_id="777"
     )
     async with _reply(world, someone_else, "yes") as theirs:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, someone_else, theirs, content_hash=content_hash)
     async with _reply(world, auth, "yes", thread_id="666666666666666666") as elsewhere:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, auth, elsewhere, content_hash=content_hash)
     assert world.created == []
 
@@ -964,10 +972,10 @@ async def test_with_cards_off_any_other_next_message_cancels(
     preview = await _add_from(world, auth, origin)
 
     async with _reply(world, auth, text) as reply:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
     async with _reply(world, auth, "yes") as late_yes:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, auth, late_yes, content_hash=preview.preview.content_hash)
     assert world.created == []
 
@@ -982,7 +990,7 @@ async def test_with_cards_off_a_yes_after_the_ttl_confirms_nothing(
     preview = await _add_from(world, auth, origin)
 
     async with _reply(world, auth, "yes") as reply:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
     assert world.created == []
 
@@ -995,7 +1003,7 @@ async def test_with_cards_off_the_model_cannot_confirm_without_the_persons_yes(
     auth, origin = await _cards_off_turn(world)
     preview = await _add_from(world, auth, origin)
 
-    with pytest.raises(ToolError, match="did not start with the person replying"):
+    with pytest.raises(ToolError, match="is not the person replying"):
         await _add_from(world, auth, origin, content_hash=preview.preview.content_hash)
     with pytest.raises(ToolError, match="approval cards are turned off"):
         await _add_from(world, auth, None, content_hash=preview.preview.content_hash)
@@ -1105,7 +1113,7 @@ async def test_a_member_cannot_version_a_skill_a_default_fork_shares(
             mode="agent",
         )
 
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
         await _preview_then_confirm(world, admin=False, skill_md=_MD + "More.\n")
     assert len(world.created) == 1, "nothing new was uploaded"
 
@@ -1309,7 +1317,7 @@ async def test_with_cards_off_a_member_still_cannot_add_to_a_shared_agent(
         )
     auth, origin = await _cards_off_turn(world, owned=False)
 
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
         await _add_from(world, auth, origin)
     assert world.created == []
 

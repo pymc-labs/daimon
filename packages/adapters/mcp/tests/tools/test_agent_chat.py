@@ -7,7 +7,7 @@ Covers:
    list_events exposes the transcript, while ask folds the same flow.
 3. Isolation: a handle whose session agent is not the caller's agent — whether
    cross-tenant or a same-tenant sibling (WR-03) — raises
-   ToolError("session not found"); list_sessions is scoped to the caller's agent.
+   ToolError("conversation not found"); list_sessions is scoped to the caller's agent.
 4. Confused-deputy: no tool accepts an agent_id parameter (identity is read
    server-side from the verified claim).
 """
@@ -88,18 +88,9 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
-    MARouter,
-    build_fake_anthropic,
-    json_body,
-    list_response,
-    send_events_response,
-)
-from daimon.testing.ma_models import SessionStatus
+from daimon.testing.ma_models import ma_agent
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -107,6 +98,19 @@ from fastmcp.server.transforms import Visibility
 from fastmcp.server.transforms.search.base import serialize_tools_for_output_markdown
 from fastmcp.tools import ToolResult
 from mcp.types import ImageContent
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    json_body,
+    list_response,
+    send_events_response,
+)
+from mux.testing.drivers.anthropic.ma_models import (
+    EMPTY_CLOUD_CONFIG,
+    SessionStatus,
+    ma_model_usage,
+    ma_session,
+)
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -747,6 +751,64 @@ async def test_start_turn_then_poll_get_session_and_read_transcript(
     )
 
 
+async def test_list_events_never_returns_a_turn_origin_id() -> None:
+    """get_events on a session reads its history; the origin id in its prompt and tool
+    calls proves a call comes from that turn and must not be handed to another."""
+    origin_id = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                ma_agent(
+                    id=_MA_AGENT_ID,
+                    name="test-agent",
+                    metadata={"daimon_tenant": str(_TENANT_ID), "daimon_name": "test-agent"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET", r"/v1/sessions/([^/]+)", lambda _r, _m: httpx.Response(200, json=_session_json())
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)/events",
+        lambda _r, _m: httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "sevt_u",
+                        "type": "user.message",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": '<turn_controls>\n{"origin_context_id": '
+                                f'"{origin_id}"}}\n</turn_controls>\nhello',
+                            }
+                        ],
+                    },
+                    {
+                        "id": "sevt_t",
+                        "type": "agent.mcp_tool_use",
+                        "name": "microsoft_get",
+                        "input": {"origin_context_id": origin_id},
+                    },
+                ],
+                "next_page": None,
+            },
+        ),
+    )
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+
+    page = await _list_events_impl(runtime, _auth(), "ses_test001", None, None, "asc")
+
+    shown = page.model_dump_json()
+    assert origin_id not in shown and "hello" in shown
+
+
 def _started(
     handle: str, *, at: dt.datetime = dt.datetime(2026, 6, 23, 0, 0, tzinfo=dt.UTC)
 ) -> dict[str, str]:
@@ -909,7 +971,7 @@ async def test_ask_surfaces_terminal_non_idle_status_without_waiting(db_session,
             "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
             new=AsyncMock(),
         ) as list_events,
-        pytest.raises(ToolError, match=r"terminal status 'terminated'.*ses_terminated001"),
+        pytest.raises(ToolError, match=r"final status 'terminated'.*ses_terminated001"),
     ):
         await _ask_impl(runtime, auth, "Question", sleep=sleep)
 
@@ -922,6 +984,80 @@ async def test_ask_surfaces_terminal_non_idle_status_without_waiting(db_session,
     assert len(rows) == 1
     assert rows[0].reason == TerminationReason.SESSION_TERMINATED
     assert rows[0].session_id == "ses_terminated001"
+
+
+_REFUSAL_IDLE = {
+    "id": "sevt_idle",
+    "type": "session.status_idle",
+    "stop_details": {"type": "refusal", "category": "cyber"},
+}
+_PLAIN_IDLE = {"id": "sevt_idle", "type": "session.status_idle"}
+_INTERIM = {"id": "sevt_msg", "type": "agent.message", "content": [{"type": "text", "text": "x"}]}
+
+
+@pytest.mark.parametrize(
+    ("events", "reason"),
+    [
+        ([_REFUSAL_IDLE], "refused"),
+        ([_REFUSAL_IDLE, _INTERIM], "refused"),
+        ([_PLAIN_IDLE], "ceiling"),
+    ],
+    ids=["refusal", "refusal_after_text", "plain_idle"],
+)
+async def test_ask_ends_a_refused_turn_without_waiting(
+    db_session, db_engine, events: list[dict[str, Any]], reason: str
+) -> None:
+    """A refusal idles with no reply to wait for; only its `stop_details` says so."""
+    from daimon.core.stores.turn_outcomes import list_for_tenant
+    from daimon.core.turn.outcomes import drain_outcomes
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    runtime = MagicMock()
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    runtime.session_factory = async_sessionmaker(db_engine)
+    auth = replace(_auth(), tenant_id=tenant.id)
+    page = MagicMock(items=[SessionEventOut.model_validate(e) for e in events], next_page=None)
+    elapsed = 0.0
+
+    async def advance(seconds: float) -> None:
+        nonlocal elapsed
+        elapsed += seconds
+
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._start_turn_impl",
+            new=AsyncMock(return_value=_started("ses_refused001")),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._get_session_impl",
+            new=AsyncMock(return_value=MagicMock(status="idle")),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
+            new=AsyncMock(return_value=page),
+        ) as list_events,
+        pytest.raises(ToolError, match="declined" if reason == "refused" else "120 seconds"),
+    ):
+        await _ask_impl(
+            runtime,
+            auth,
+            "Question",
+            poll_interval_seconds=60.0,
+            clock=lambda: elapsed,
+            sleep=advance,
+        )
+
+    refused = reason == "refused"
+    assert elapsed == (0.0 if refused else 120.0), "a refusal must not wait out the timeout"
+    assert list_events.await_count == (1 if refused else 3), "one read per idle poll"
+    kwargs = list_events.await_args.kwargs
+    assert kwargs["types"] == ["agent.message", "session.status_idle"], kwargs
+    assert kwargs["created_at_gte"] == _started("ses_refused001")["turn_started_at"], kwargs
+    await drain_outcomes()
+    async with runtime.session_factory() as session:
+        rows = await list_for_tenant(session, tenant.id)
+    assert [row.reason for row in rows] == [reason], "the outcome names why the ask ended"
 
 
 async def test_ask_tool_result_preserves_images_and_structured_urls() -> None:
@@ -1060,7 +1196,7 @@ async def test_deliver_turn_charts_bounds_the_transcript_walk() -> None:
             new=AsyncMock(side_effect=endless_page),
         ) as list_events,
         patch("daimon.adapters.mcp.tools.agent_chat._MAX_EVENT_PAGES", 2),
-        pytest.raises(ToolError, match="no completed turn boundary"),
+        pytest.raises(ToolError, match="no start of the finished reply"),
     ):
         await _deliver_turn_charts_impl(runtime, auth, "ses_endless001")
 
@@ -1214,7 +1350,7 @@ async def test_deliver_turn_charts_rejects_session_without_completed_reply() -> 
             "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
             new=AsyncMock(return_value=events),
         ),
-        pytest.raises(ToolError, match="no completed turn"),
+        pytest.raises(ToolError, match="no finished reply"),
     ):
         await _deliver_turn_charts_impl(runtime, auth, "ses_no_reply")
 
@@ -1437,7 +1573,7 @@ async def test_get_session_raises_session_not_found_for_cross_tenant_handle() ->
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(runtime, auth, "ses_cross")
 
 
@@ -1506,7 +1642,7 @@ async def test_get_session_raises_session_not_found_for_same_tenant_other_agent_
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(runtime, auth, "ses_sibling")
 
 
@@ -1540,7 +1676,7 @@ async def test_continue_turn_raises_session_not_found_for_same_tenant_other_agen
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _continue_turn_impl(runtime, auth, "ses_sibling", "hi")
 
 
@@ -1794,6 +1930,7 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
         "tenant_id": str(tenant_id),
         "role": "user",
         "agent_id": str(agent_uuid),
+        "platform": "discord",
         "platform_user_id": "discord-user-over-balance",
         "client_id": "test",
     }
@@ -2378,7 +2515,7 @@ async def test_start_turn_with_bundle_when_jwt_secret_unset_is_refused(
     auth = _auth()
     handle = _mint_bundle()
 
-    with pytest.raises(ToolError, match="not configured"):
+    with pytest.raises(ToolError, match="not set up"):
         await _start_turn_impl(runtime, auth, "hi", handle)
 
 
@@ -2636,7 +2773,7 @@ async def test_continue_turn_rejects_a_closed_app_vault_before_send() -> None:
             "daimon.adapters.mcp.tools.agent_chat.touch_unmapped_app_session",
             new=AsyncMock(return_value=False),
         ),
-        pytest.raises(ToolError, match="session is closed"),
+        pytest.raises(ToolError, match="conversation is closed"),
     ):
         await _continue_turn_impl(runtime, _auth(), "ses_test001", "again")
     assert sent == []
@@ -2815,7 +2952,7 @@ async def test_archive_my_session_rejects_a_sibling_agents_session_and_issues_no
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _archive_my_session_impl(runtime, auth, "ses_sibling")
 
     assert archive_calls == [], "a rejected ownership check must issue no archive call"
@@ -2944,7 +3081,7 @@ async def test_cancel_turn_rejects_a_sibling_agents_session_and_issues_zero_send
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _cancel_turn_impl(runtime, auth, "ses_sibling")
 
     assert send_calls == [], "a rejected ownership check must issue no interrupt send"
@@ -3181,7 +3318,7 @@ async def test_get_turn_cost_rejects_a_sibling_agents_session_and_lists_no_event
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_turn_cost_impl(
             runtime, auth, "ses_sibling", "2026-09-01T10:00:00Z", "sevt_boundary"
         )
@@ -3392,7 +3529,7 @@ async def test_list_sessions_omits_other_accounts_sessions_of_the_same_agent() -
 async def test_get_my_session_rejects_another_accounts_session_of_the_same_agent() -> None:
     runtime = _runtime(build_fake_anthropic(_other_accounts_session_router().dispatch))
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(runtime, _auth(), "ses_other")
 
 
@@ -3406,7 +3543,7 @@ async def test_list_events_rejects_another_accounts_session_and_reads_no_transcr
     router = _other_accounts_session_router(on_events=on_events)
     runtime = _runtime(build_fake_anthropic(router.dispatch))
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _list_events_impl(runtime, _auth(), "ses_other", None, 100, "asc")
 
     assert event_reads == []
@@ -3424,9 +3561,9 @@ async def test_continue_and_cancel_reject_another_accounts_session_with_zero_sen
     router = _other_accounts_session_router(on_send=on_send)
     runtime = _runtime(build_fake_anthropic(router.dispatch))
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _continue_turn_impl(runtime, _auth(), "ses_other", "hi")
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _cancel_turn_impl(runtime, _auth(), "ses_other")
 
     assert send_calls == []
@@ -3442,7 +3579,7 @@ async def test_archive_my_session_rejects_another_accounts_session_with_no_archi
     router = _other_accounts_session_router(on_archive=on_archive)
     runtime = _runtime(build_fake_anthropic(router.dispatch))
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _archive_my_session_impl(runtime, _auth(), "ses_other")
 
     assert archive_calls == []
@@ -3964,7 +4101,7 @@ async def test_start_then_continue_rotates_the_mounted_chat_token_inside_the_rea
     from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
     from daimon.core.config import GithubAppSettings, McpSettings
     from daimon.core.mcp_auth import token_jti
-    from daimon.testing.ma import make_fake_memory_store_handler
+    from mux.testing.drivers.anthropic.ma import make_fake_memory_store_handler
 
     factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     async with factory.begin() as db:

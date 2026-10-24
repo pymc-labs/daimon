@@ -20,8 +20,8 @@ from daimon.core.stores import access_policy
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -141,7 +141,7 @@ async def test_set_agent_rule_needs_a_server_admin_and_an_agent(
 ) -> None:
     tenant_id, account_id, runtime = await _world(committing_sessionmaker)
     member = _auth(tenant_id, account_id)
-    with pytest.raises(ToolError, match="Only a server or workspace admin"):
+    with pytest.raises(ToolError, match="Only an admin"):
         await _set_agent_rule_impl(runtime, member, agent_name="own", runs_in=[ROOM])
     admin = _auth(tenant_id, account_id, admin=True)
     with pytest.raises(ToolError, match="There is no agent named ghost"):

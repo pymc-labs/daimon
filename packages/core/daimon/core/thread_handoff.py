@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -349,6 +350,7 @@ async def hand_over_thread(
         existing_binding_kind=binding.kind if binding is not None else None,
         origin_responder_ma_agent_id=current_responder_ma_agent_id,
         access=access,
+        caller_is_admin=caller.admin.is_server_admin and not caller.via_agent_key,
     )
     if isinstance(decision, HandoffRefused):
         raise ThreadHandoffRefused(decision)
@@ -402,17 +404,17 @@ def render_handoff_refused(refusal: HandoffRefused, *, channel: str) -> str:
     reasons: dict[str, str] = {
         "setup_thread": "This is a setup conversation, so it always answers as Daimon.",
         "writers_none": "Daimon doesn't post here, so no agent can take this over.",
-        "invoker_not_allowed": "This workspace limits who can use Daimon, and you aren't on "
+        "invoker_not_allowed": "Daimon is limited to certain people here, and you aren't on "
         "that list.",
         "runs_elsewhere": f"{name} only runs in other channels, so it can't answer here.",
         "own_agents_only": f"{channel} only runs its own agents, and {name} isn't one of them.",
-        "unreachable": f"{name} doesn't answer anywhere in this workspace any more.",
+        "unreachable": f"{name} doesn't answer anywhere here any more.",
         "same_agent": f"{name} already answers in this conversation.",
         "admin_required": (
-            f"{name} isn't an agent of {channel}. A server admin can hand this conversation to it."
+            f"{name} isn't an agent of {channel}. An admin can hand this conversation to it."
         ),
-        "not_a_reader": f"Only turns inside {channel} read it and {name} isn't one of its "
-        "agents, so only a server admin can hand this conversation to it.",
+        "not_a_reader": f"Only conversations inside {channel} can read it and {name} isn't "
+        "one of its agents, so only an admin can hand this conversation to it.",
     }
     return f"{reasons[refusal.reason]} Nothing was changed."
 
@@ -455,12 +457,27 @@ async def switch_thread_on_request(
     and `hand_over_thread` decides it under the lock for the clicker, with
     their live admin role (`caller.is_server_admin`). `channel` names the parent channel.
     """
+    async with guard_selfhosted_channel(
+        sessionmaker,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=parent_channel_id,
+        thread_id=thread_id,
+        caller_id=caller.platform_user_id,
+        force=ma_agent_id.startswith("sh_agent_"),
+    ) as selfhosted:
+        if selfhosted:
+            return SwitchOutcome(
+                switched=False,
+                text="Handing over a self-hosted conversation is not available yet. "
+                "Start a new conversation with the selected agent. Nothing was changed.",
+            )
     try:
         agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
     except DaimonError:
         return SwitchOutcome(
             switched=False,
-            text="That agent is no longer available in this workspace. Nothing was changed.",
+            text="That agent is no longer available here. Nothing was changed.",
         )
     name = agent.metadata.get(MA_METADATA_KEY_NAME)
     if not name:

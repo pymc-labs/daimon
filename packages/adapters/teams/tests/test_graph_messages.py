@@ -112,8 +112,8 @@ class Routed:
         self.teams = teams
         self.paths: list[tuple[str, Any]] = []
 
-    async def graph(self, message: GraphMessage) -> None:
-        await self._run(self.teams.handle_graph_message(message, CHANNEL))
+    async def graph(self, message: GraphMessage, *, mentions: bool = False) -> None:
+        await self._run(self.teams.handle_graph_message(message, CHANNEL, mentions=mentions))
 
     async def boot(self) -> None:
         """Start the app, so it reclaims what an exited one held."""
@@ -320,3 +320,24 @@ async def test_an_at_mention_from_graph_is_left_to_bot_framework(
     assert [path for path, _ in routed.paths] == ["turn"], (
         "the mention runs once, from Bot Framework"
     )
+
+
+async def test_a_boot_catch_up_runs_the_at_mention_bot_framework_missed_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A mention posted while the adapter restarted never reached Bot Framework's handler:
+    the boot's read admits it, without the bot's own mention in its text, and a late
+    Bot Framework delivery of the same activity runs nothing more."""
+    routed = Routed(_app(db_session_factory))
+    mention = {"id": 0, "mentioned": {"application": {"id": BOT_CLIENT_ID}}}
+    html = '<p><at id="0">Daimon</at> help <at id="1">Grace</at></p>'
+    other = {"id": 1, "mentioned": {"user": {"id": "grace", "displayName": "Grace"}}}
+    message = _graph("1700000000003", html, mentions=[mention, other])
+    await routed.graph(message, mentions=True)
+    [(path, inbound)] = routed.paths
+    assert path == "turn" and not inbound.unprompted, "the mention starts a turn"
+    assert inbound.text == "help @Grace", "only the bot's own mention is dropped"
+
+    await routed.graph(message, mentions=True)
+    await routed.bot_framework(_private_reply("1700000000003", mention=True))
+    assert len(routed.paths) == 1, "read twice and delivered late, it still runs once"

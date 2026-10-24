@@ -21,6 +21,7 @@ from typing import Final, Protocol
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.billing import BillingConfig, is_over_cap
+from daimon.core.channel_backend import effective_thread_backend
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import ThreadParticipationSettings
 from daimon.core.pricing import MODEL_PRICING
@@ -135,6 +136,19 @@ class ParticipationGates:
         `recent` is read only once every gate has passed.
         """
         async with self._sessionmaker() as session:
+            # Participation is optional; never send a self-hosted conversation
+            # to the Anthropic classifier or its agent-rule lookup.
+            backend = await effective_thread_backend(
+                session,
+                tenant_id=tenant_id,
+                platform=self._platform,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                caller_id=caller_id,
+            )
+            if backend == "selfhosted":
+                log.info("thread_participation.skipped", reason="selfhosted", thread_id=thread_id)
+                return False
             in_window = await count_auto_responses_since(
                 session,
                 tenant_id=tenant_id,

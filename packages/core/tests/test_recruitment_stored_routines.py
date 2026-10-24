@@ -13,8 +13,8 @@ from daimon.core.config import RecruitmentSettings
 from daimon.core.errors import UserFacingError
 from daimon.core.stores.routines import create_routine, get_routine, record_result
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from rich.console import Console
 
 

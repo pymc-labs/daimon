@@ -48,7 +48,8 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
@@ -56,7 +57,6 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ADMIN = Subject(is_admin=True)
@@ -560,7 +560,7 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
             default_agent_name=None,
         )
 
-    with pytest.raises(UserFacingError, match="Only a workspace or server admin"):
+    with pytest.raises(UserFacingError, match="Only an admin"):
         await fork_agent(
             client,
             db_session_factory,
@@ -950,7 +950,7 @@ async def test_set_agent_rule_limits_where_an_agent_runs(
         default=DEFAULT,
     )
     assert change.answers_outside, "shared is still c3's default"
-    assert "still set to answer outside" in " ".join(change.notes)
+    assert "still the default outside" in " ".join(change.notes)
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.agent_rules == {"shared": AgentRule(runs_in=("c2",))}
     assert await _agent_rule(client, db_session_factory, tenant.id, "shared", None) is None

@@ -30,6 +30,7 @@ from daimon.core.mcp_auth import (
     chat_token_label,
     registered_agent_claims_match,
 )
+from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
@@ -43,9 +44,34 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 TOKEN_KIND_CLAIM = "daimon_token_kind"
 TOKEN_JTI_CLAIM = "daimon_token_jti"
 SCOPES_CLAIM = "daimon_scopes"
+FOREIGN_HOME_CLAIM = "daimon_foreign_home"
 
 REFUSAL_AUDIT_TOOL = "auth/verify"
 """The audit row's tool name for a refusal: the verifier never sees the tool."""
+
+
+def _hold_refusal(
+    row: McpTokenRow, *, hold_claim: object, vault_chat: bool, held_label: bool
+) -> str | None:
+    """Why a token's hold claim and its row disagree, or None when they agree.
+
+    A held credential is a vault chat token whose row is bound to the channel the
+    signed claim names: row and claim must say the same, so neither a claim
+    forged on an unheld row nor a row bound without its claim counts. Nothing
+    else may carry the claim, and a bound chat row is never admitted without it.
+    """
+    if hold_claim is None:
+        bound = vault_chat and (row.channel_id is not None or held_label)
+        return "hold_claim_missing" if bound else None
+    if not vault_chat or not held_label:
+        return "hold_claim_unexpected"
+    try:
+        hold = parse_hold_claim(hold_claim)
+    except ValueError:
+        return "hold_claim_malformed"
+    if (row.platform, row.channel_id) != (hold.platform, hold.channel_id):
+        return "hold_binding_mismatch"
+    return None
 
 
 def token_row_refusal(
@@ -54,8 +80,13 @@ def token_row_refusal(
     claims: Mapping[str, object],
     identity: AccountIdentityRow,
     now: datetime,
+    hold_claim: object = None,
 ) -> str | None:
     """Why a registry row does not admit this token, or None when it does.
+
+    ``hold_claim`` is the signed hold claim the token carried, if any. A held
+    chat token is admitted only when it matches the row's channel binding; it is
+    exempt from the ``admin_required`` rule below, which stays for agent keys.
 
     An operator token acts for a server admin, so the account must still be
     one by stored role, and must have the platform user id every billing and
@@ -68,11 +99,18 @@ def token_row_refusal(
         return "expired"
     if row.platform is not None and row.platform != identity.platform:
         return "platform_mismatch"  # a channel binding this deployment never minted
+    held_label = row.kind == "agent" and row.label == chat_token_label(row.jti, held=True)
+    vault_chat = held_label or (row.kind == "agent" and row.label == chat_token_label(row.jti))
+    hold_refusal = _hold_refusal(
+        row, hold_claim=hold_claim, vault_chat=vault_chat, held_label=held_label
+    )
+    if hold_refusal is not None:
+        return hold_refusal
     if row.kind == "agent":
         if row.account_id != identity.account_id or row.tenant_id != identity.tenant_id:
             return "account_mismatch"
         chat = claims.get("chat_agent_id")
-        if row.label == chat_token_label(row.jti):
+        if vault_chat:
             expiry, issued = claims.get("exp"), claims.get("iat")
             if (
                 chat != row.agent_id
@@ -92,7 +130,7 @@ def token_row_refusal(
                 return "chat_binding_mismatch"
         elif claims.get("agent_id") != row.agent_id:
             return "agent_mismatch"
-        if row.channel_id is not None and identity.role is not Role.ADMIN:
+        if row.channel_id is not None and not vault_chat and identity.role is not Role.ADMIN:
             return "admin_required"
         return None
     if claims.get("kind") != row.kind:
@@ -190,6 +228,9 @@ class DaimonJWTVerifier(JWTVerifier):
         access = await super().verify_token(token)
         if access is None:
             return _reject_token("signature_or_expiry", {})
+        # The hold claim is read once, then dropped with the other reserved keys:
+        # it reaches the identity only through the row-checked copy set below.
+        hold_claim = access.claims.pop(HOLD_CLAIM, None)
         # Only the registry row sets these, never a claim.
         for key in (
             TOKEN_KIND_CLAIM,
@@ -197,6 +238,7 @@ class DaimonJWTVerifier(JWTVerifier):
             SCOPES_CLAIM,
             "bound_channel_id",
             "platform_role_ids",
+            FOREIGN_HOME_CLAIM,
         ):
             access.claims.pop(key, None)
         sub = access.claims.get("sub")
@@ -248,19 +290,32 @@ class DaimonJWTVerifier(JWTVerifier):
                     reason="bounded_non_internal_rollout",
                     **_token_diagnostics(access.claims),
                 )
+        if row is None and hold_claim is not None:
+            return _reject_token("hold_claim_unexpected", access.claims)
         if row is not None:
             refusal = token_row_refusal(
-                row, claims=access.claims, identity=identity_row, now=datetime.now(UTC)
+                row,
+                claims=access.claims,
+                identity=identity_row,
+                now=datetime.now(UTC),
+                hold_claim=hold_claim,
             )
             if refusal is not None:
                 await self._audit_refusal(row, identity=identity_row, reason=refusal)
                 return _reject_token(refusal, access.claims)
         access.claims["tenant_id"] = str(identity_row.tenant_id)
         access.claims["role"] = identity_row.role.value
+        # Server-set from the registry row's surface, never from the token or a label.
+        access.claims["no_confirmation_surface"] = (
+            row is not None and row.surface == "provider_turn"
+        )
         access.claims["platform"] = identity_row.platform
         access.claims["external_id"] = identity_row.external_id
         if identity_row.platform_user_id is not None:
             access.claims["platform_user_id"] = identity_row.platform_user_id
+        if identity_row.foreign_home_id is not None:
+            # Read live from the principal, so a client is restricted on every call.
+            access.claims[FOREIGN_HOME_CLAIM] = identity_row.foreign_home_id
         if row is not None:
             access.claims[TOKEN_KIND_CLAIM] = row.kind
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)
@@ -268,6 +323,9 @@ class DaimonJWTVerifier(JWTVerifier):
                 access.claims[SCOPES_CLAIM] = list(row.scopes)
             if row.channel_id is not None:
                 access.claims["bound_channel_id"] = row.channel_id
+            if hold_claim is not None:
+                # Checked against the row above: the only copy downstream may read.
+                access.claims[HOLD_CLAIM] = hold_claim
         return access
 
     async def _audit_refusal(

@@ -45,10 +45,14 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import scoped_config_write
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
+    build_fake_anthropic,
+    build_stub_anthropic,
+    list_response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # `make_tenant` derives the tenant id from `workspace_id` the exact same way
@@ -200,7 +204,7 @@ async def test_defaults_managed_target_member_refuses_with_shared_agent_message(
     assert refused is True, "a member must not bind a repo to a defaults-managed agent"
     assert _sent_message(interaction) == _SHARED_AGENT_MESSAGE
     assert _sent_message(interaction) == (
-        "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+        "Connecting a repo to this agent needs an admin.\n\n"
         "Ask me to draft a request for an admin, or to make you a new agent."
     ), "section 4's words, the same on every platform"
 

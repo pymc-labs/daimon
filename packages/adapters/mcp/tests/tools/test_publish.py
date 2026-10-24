@@ -89,7 +89,7 @@ def _make_runtime(settings: Settings) -> McpRuntime:
 
 async def test_publish_report_impl_raises_when_jwt_secret_unset() -> None:
     runtime = _make_runtime(_make_settings(jwt_secret=None))
-    with pytest.raises(ToolError, match="not configured"):
+    with pytest.raises(ToolError, match="Reports can't be published"):
         await _publish_report_impl(
             runtime,
             tenant_id=uuid.uuid4(),

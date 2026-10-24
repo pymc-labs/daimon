@@ -21,8 +21,8 @@ from daimon.core.errors import DaimonError
 from daimon.core.skills.fetch import FetchResult
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.testing.archives import make_tarball
-from daimon.testing.ma import MARouter, list_response
-from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 
 _TENANT = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 

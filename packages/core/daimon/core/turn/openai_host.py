@@ -50,15 +50,22 @@ from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import ProviderBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
-from mux.drivers.openai import OpenAIDriver
-from mux.drivers.openai._common import Authorization
-from mux.drivers.openai.mcp_auth import MCPSecretResolver
-from mux.drivers.openai.session_controls import SessionControls
-from mux.drivers.openai.transport import Transport
+from mux.drivers.openai import (
+    Authorization,
+    MCPSecretResolver,
+    OpenAIDriver,
+    SessionControls,
+    Transport,
+)
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
+from mux.profiles.openai import NATIVE_MODELS
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
-from mux.state.store import StateStore
+from mux.state.store import ERA_REF, StateStore, adopted_identity
+
+#: HTTP answers that reject a session create outright: no session exists afterwards.
+#: A 409 or 429 may follow an accepted create, so those stay `outcome_unknown`.
+_DEFINITE_REJECTIONS = frozenset({"400", "401", "403", "404", "422"})
 
 
 async def unknown_infrastructure(observation: UsageObservation) -> Decimal | None:
@@ -93,12 +100,12 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
     if (
         revision.profile not in PROFILES
         or revision.backend != "openai"
-        or revision.model != "gpt-6-luna"
+        or revision.model not in NATIVE_MODELS
     ):
         raise UnsupportedCapability(("openai_host_model",), PROFILE)
     if (
         not runtime.account_scope_id.strip()
-        or runtime.controls.model != "gpt-6-luna"
+        or runtime.controls.model != revision.model
         or runtime.controls.multi_agent_enabled is not False
         or runtime.controls.container_size != ("small" if revision.profile == PROFILE else None)
         or not isinstance(runtime.journal, OpenAIRecoveryJournal)
@@ -106,7 +113,7 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
     ):
         raise UnsupportedCapability(("openai_host_controls_and_durable_state",), PROFILE)
     if runtime.price is not None and (
-        runtime.price.provider != "openai" or runtime.price.model != "gpt-6-luna"
+        runtime.price.provider != "openai" or runtime.price.model != revision.model
     ):
         raise ValueError("OpenAI host price differs from admitted model")
     return runtime
@@ -262,7 +269,13 @@ async def _create(
         )
     # Stable per empty slot, including after a crash. Changed config/plan gets a
     # digest conflict, not a fresh operation which might create a second session.
-    key = "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json()))
+    # A released slot's era suffix keeps an earlier era's creation from replaying.
+    _, era = adopted_identity(await store.get_binding(slot, include_released=True), "")
+    key = await _create_key(
+        store,
+        request.scope,
+        "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json())) + era,
+    )
     digest = request_digest(
         {"spec": spec.model_dump(mode="json"), "controls": runtime.controls.model_dump(mode="json")}
     )
@@ -291,10 +304,26 @@ async def _create(
             raise AdmissionDenied(reason="backend_unsupported")
         await store.claim_send(request.scope, key, now=request.now(), fence=lease)
         try:
+            # Bounds this one create call (inside the 5 min lease), not the worker's
+            # runtime, which is the deadline.
             async with asyncio.timeout(
                 min(120, (request.deadline - request.now()).total_seconds())
             ):
                 native = await backend.sessions.create(request.scope, spec, key=key)
+        except ProviderError as error:
+            # A definite rejection created no session: the slot's next create gets a
+            # fresh key (`_create_key`), even with a changed plan. Anything else may have
+            # reached OpenAI and is never resent blindly.
+            rejected = error.native_code in _DEFINITE_REJECTIONS
+            await store.advance_operation(
+                request.scope,
+                key,
+                "failed" if rejected else "outcome_unknown",
+                now=request.now(),
+                fence=lease,
+                result={"rejected": True} if rejected else None,
+            )
+            raise
         except BaseException:
             await store.advance_operation(
                 request.scope, key, "outcome_unknown", now=request.now(), fence=lease
@@ -314,6 +343,21 @@ async def _create(
         await store.release_lease(lease)
 
 
+async def _create_key(store: StateStore, scope: Scope, base: str) -> str:
+    """The slot's create key: past each create OpenAI rejected outright, a fresh one.
+
+    A rejected create (`failed`, `rejected`) proves no session exists, so a new key
+    may send again; any other recorded state keeps its key and its digest check.
+    """
+    key, attempt = base, 0
+    while (record := await store.get_operation(scope, key)) is not None and (
+        record.operation.status == "failed" and record.result.get("rejected") is True
+    ):
+        attempt += 1
+        key = f"{base}:rejected-{attempt}"
+    return key
+
+
 async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     try:
         return await _prepare_openai(request)
@@ -325,6 +369,21 @@ async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         raise AdmissionDenied(reason="backend_unsupported") from error
 
 
+async def _check_daily_model_cap(
+    request: ProviderPreparationRequest, runtime: OpenAIHostRuntime, revision: ConfigRevision
+) -> None:
+    """OpenAI sessions carry no native spend limit on this project: the daily model cap."""
+    from daimon.core.turn.daily_model_cap import check_daily_model_cap
+
+    await check_daily_model_cap(
+        request,
+        provider=revision.backend,
+        model=revision.model,
+        price=runtime.price,
+        cap=request.deps.openai_daily_model_cap_usd,
+    )
+
+
 async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     revision = request.admission.backend_revision
     runtime = runtime_for(
@@ -334,6 +393,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         raise AdmissionDenied(reason="backend_unsupported")
     if (
         request.admission.shared_owner is not None
+        or request.admission.hold is not None
         or revision.thread_mode != "per_caller"
         or request.transfer is not None
     ):
@@ -370,6 +430,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             ("daimon_tool_rules",), revision.profile
         )
     request = replace(request, admission=current)
+    await _check_daily_model_cap(request, runtime, revision)
     # Resolve a host-authorized native plan before creating a private transport.
     spec = await runtime.session_plan(request)
     _check_spec(spec, runtime, request.scope, revision)
@@ -479,8 +540,12 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             raise ScopeViolation(native.ref.id, "OpenAI creation returned a foreign session")
         if native.state == "terminated":
             raise ContinuityLost(native.ref.id, ("OpenAI session terminated during creation",))
+        binding_id, era = adopted_identity(
+            await store.get_binding(slot, include_released=True),
+            str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
+        )
         binding = ProviderBinding(
-            id=str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
+            id=binding_id,
             thread=slot.thread,
             provider="openai",
             profile=revision.profile,
@@ -488,13 +553,14 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
                 **native.binding.native_refs,
                 "agent": spec.agent.id,
                 "account_scope": runtime.account_scope_id,
-                "model": "gpt-6-luna",
+                "model": revision.model or "",
                 "plan_digest": plan_digest,
                 **(
                     {"daimon_chat_session_id": chat_session_id}
                     if chat_session_id is not None
                     else {}
                 ),
+                **({ERA_REF: era} if era else {}),
             },
             generation=1,
             config_revision=revision.local,
@@ -523,6 +589,9 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         else None
     )
 
+    # runtime_for admitted exactly one native model; usage is priced at its rate.
+    model_id = revision.model or ""
+
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != ref or observation.thread_id is not None:
             raise ScopeViolation(ref.id, "OpenAI host usage differs from bound root session")
@@ -537,7 +606,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             infrastructure_usd=infrastructure,
             billing_grain="turn",
             managed_session_id=ref.id,
-            model_id="gpt-6-luna",
+            model_id=model_id,
             markup=request.deps.markup,
             channel_id=revision.channel.channel_id,
         )
@@ -546,9 +615,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             from mux.contracts.ids import ModelRef
 
             footer_cost.note(
-                observation.model_copy(
-                    update={"model": ModelRef(provider="openai", id="gpt-6-luna")}
-                ),
+                observation.model_copy(update={"model": ModelRef(provider="openai", id=model_id)}),
                 price=runtime.price,
                 infrastructure_usd=infrastructure,
                 settled=settled,

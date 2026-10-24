@@ -46,7 +46,7 @@ class ArchiveChannelCopyResult:
 def _channel(auth: AuthIdentity, channel_id: str) -> str:
     platform = auth.platform
     if platform not in ("discord", "slack", "teams"):
-        raise ToolError("Channels exist only on Discord, Slack and Teams. Nothing was changed.")
+        raise ToolError("Channels aren't available here. Nothing was changed.")
     try:
         channel = normalize_channel_id(
             platform, parse_channel_target(platform, channel_id).channel_id
@@ -102,8 +102,8 @@ def register_channel_copy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
     ) -> ArchiveChannelCopyResult:
         """Archive the agent copied as a channel's own, when that channel closes. For
-        example, retire #client-acme's agent once the engagement ends. Requires a server
-        or workspace admin.
+        example, retire #client-acme's agent once the engagement ends. Requires an
+        admin.
 
         Only an agent ``set_channel_rule`` copied for a channel can be archived here,
         never a built-in agent or a default. Pass ``channel_id``, the channel it was made

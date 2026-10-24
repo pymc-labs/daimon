@@ -6,7 +6,7 @@ that can be unit-tested without a FastMCP Context.
 
 Tenant scope: a session belongs to the caller's tenant iff its ``agent.id`` is
 in ``{a.id for a in list_agents_by_tenant(...)}``. Cross-tenant ``get`` /
-``events`` raise ``ToolError("session not found")`` — terse and identical for
+``events`` raise ``ToolError("conversation not found")`` — terse and identical for
 unknown vs. forbidden so existence isn't leaked.
 """
 
@@ -36,6 +36,7 @@ from daimon.adapters.mcp.tools._session_access import (
 )
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.turn_origin import redact_turn_origin_ids
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.errors import ScopeViolation
@@ -97,6 +98,16 @@ class SessionEventOut(BaseModel):
     # the SDK's typed content union — the caller folds agent.message text itself.
     content: list[dict[str, Any]] | None = None
 
+    @classmethod
+    def from_event(cls, event: BaseModel) -> SessionEventOut:
+        """An event as the model may read it: turn-origin ids redacted.
+
+        An origin id proves a call comes from one live turn, and it sits in that turn's
+        prompt and its tool calls. Another session's transcript must not hand it over.
+        """
+        raw = redact_turn_origin_ids(event.model_dump(mode="json"))
+        return cls.model_validate(raw)
+
 
 def _session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
     """True for this account and, when agent-scoped, this executing agent.
@@ -133,7 +144,7 @@ async def _verify_caller_owns_session(
     Deliberately not relaxed for admins. Manage Server is a permission over the
     server's configuration, not over other people's conversations.
 
-    Raises ``ToolError("session not found")`` for every rejection — the same
+    Raises ``ToolError("conversation not found")`` for every rejection — the same
     message used for a genuinely missing session, so neither existence nor
     ownership is leaked. A session of the caller's own that ran in a sealed
     channel is then refused unless ``origin_context_id`` names a turn inside
@@ -142,14 +153,14 @@ async def _verify_caller_owns_session(
     try:
         s = await retrieve_session(runtime.client, session_id, scope=mcp_scope(auth))
     except ScopeViolation:
-        raise ToolError("session not found") from None
+        raise ToolError("conversation not found") from None
     tenant_agent_ids = {
         a.id for a in await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     }
     if s.agent.id not in tenant_agent_ids:
-        raise ToolError("session not found")
+        raise ToolError("conversation not found")
     if not _session_belongs_to_caller(s, auth):
-        raise ToolError("session not found")
+        raise ToolError("conversation not found")
     await require_session_outside_seals(runtime, auth, s, origin_context_id=origin_context_id)
     return s
 
@@ -238,9 +249,7 @@ async def _list_session_events_impl(
         runtime.client, session_id, query=list_kwargs, scope=mcp_scope(auth)
     )
     return Page[SessionEventOut](
-        items=[
-            SessionEventOut.model_validate(event.model_dump(mode="json")) for event in cursor.data
-        ],
+        items=[SessionEventOut.from_event(event) for event in cursor.data],
         next_page=cursor.next_page,
     )
 

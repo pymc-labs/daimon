@@ -23,6 +23,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.agent_chat import (
     _resolve_ma_agent,  # pyright: ignore[reportPrivateUsage]
 )
@@ -55,7 +56,7 @@ logger = structlog.get_logger()
 def _require_agent_id(auth: AuthIdentity) -> uuid.UUID:
     """Return ``auth.agent_id`` or raise ``ToolError`` if absent."""
     if auth.agent_id is None:
-        raise ToolError("agent_id missing — token was not minted for an agent session")
+        raise ToolError("agent_id missing — this token is not an agent's")
     return auth.agent_id
 
 
@@ -136,8 +137,10 @@ async def _self_write_file_impl(
     return row
 
 
-REDACTED_VALUE = "[redacted: values are available in the session .env, never in tool output]"
-LISTED_VALUE = "[not listed: values are available in the session .env]"
+REDACTED_VALUE = (
+    "[redacted: values are in the .env file in your project files, never in tool output]"
+)
+LISTED_VALUE = "[not listed: values are in the .env file in your project files]"
 
 
 def _withhold_value(row: AgentFileRow) -> AgentFileRow:
@@ -206,7 +209,7 @@ async def _require_member_may_remove(
         runtime.client, tenant_id=auth.tenant_id, agent_id=agent_id
     )
     refusal = ToolError(
-        f"Removing {key} needs a workspace or server admin: this agent is shared, and "
+        f"Removing {key} needs {admin_noun(auth.platform)}: this agent is shared, and "
         "an agent key acts as a member. Nothing was removed. Ask a person to remove "
         f"{key} with remove_agent_key."
     )

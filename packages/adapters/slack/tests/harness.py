@@ -5,8 +5,10 @@ tests that drive `_orchestrate` / `_run_thread_turn`.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from decimal import Decimal
+from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
@@ -17,8 +19,9 @@ from daimon.core.config import TurnQueueSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import build_fake_anthropic, make_agent_env_echo_handler, make_fake_ma_handler
+from daimon.testing.ma import make_agent_env_echo_handler
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -59,7 +62,7 @@ def make_orchestrate_app(
     max_concurrent_turns_per_tenant: int = 3,
     deployment_default: DeploymentDefault | None = None,
     crypto_key: str | None = None,
-    connect_nudge_url: str | None = None,
+    app_root_url: str | None = None,
 ) -> tuple[SlackApp, AsyncAnthropic]:
     """Build a SlackApp for orchestration tests.
 
@@ -76,9 +79,8 @@ def make_orchestrate_app(
     ``crypto_key`` is None by default; pass one when the test also drives
     ``_handle_app_mention``, whose per-event token decrypt needs a real key.
 
-    ``connect_nudge_url`` is None by default, which short-circuits
-    ``_maybe_post_connect_nudge``; pass the app root URL to run the nudge
-    path (a real signing secret is set alongside it).
+    ``app_root_url`` is None by default; pass the app root URL when a test needs the
+    deployment to be able to mint links (a real signing secret is set alongside it).
     """
     settings = MagicMock()
     settings.crypto.keys = (SecretStr(crypto_key),) if crypto_key is not None else ()
@@ -87,8 +89,8 @@ def make_orchestrate_app(
     settings.slack.history_page_limit = 100
     settings.slack.bot_display_name = "daimon"
     settings.mcp.public_url = None
-    settings.mcp.app_root_url = connect_nudge_url
-    if connect_nudge_url is not None:
+    settings.mcp.app_root_url = app_root_url
+    if app_root_url is not None:
         settings.slack.signing_secret = SecretStr("test-signing-secret")
     settings.defaults_root = MagicMock()
     settings.billing.markup = Decimal("1.0")
@@ -120,3 +122,19 @@ def make_orchestrate_app(
         deployment_default=resolved_deployment_default,
     )
     return SlackApp(runtime=runtime), anthropic_client
+
+
+_CONVERSATIONS_INFO_PATTERN = re.compile(r"https://slack\.com/api/conversations\.info.*")
+
+
+def register_conversations_info(mock: Any, *, is_ext_shared: bool) -> None:
+    """Answer ``conversations.info`` (GET) with the channel's Slack Connect flag.
+
+    Not registered by default: a test that does not say whether its channel is
+    shared gets Slack's lookup failing, which admission treats as "no signal".
+    """
+    mock.get(  # pyright: ignore[reportUnknownMemberType]
+        _CONVERSATIONS_INFO_PATTERN,
+        payload={"ok": True, "channel": {"id": "C_ANY", "is_ext_shared": is_ext_shared}},
+        repeat=True,
+    )

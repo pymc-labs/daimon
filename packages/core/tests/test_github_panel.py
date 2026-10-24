@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.core._models import (
     Account,
+    AgentGitHubGrantDraft,
     GitHubNewRepoNotice,
     PlatformPrincipal,
     Tenant,
@@ -23,11 +25,12 @@ from daimon.core.github_panel import (
     activate_grants,
     connect_link,
     pending_connect_link,
+    safe_github_error,
     stage_panel_grant,
     sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores import github_access, github_app_installations
+from daimon.core.stores import github_access, github_app_installations, github_panel_grants
 from daimon.core.stores.github_connect import digest, get_invitation
 from daimon.core.stores.github_connected_repos import (
     disconnect_repo,
@@ -44,7 +47,78 @@ from daimon.core.stores.github_new_repo_notices import (
     finish_notice,
 )
 from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+
+@pytest.mark.asyncio
+async def test_panel_batch_and_confirmation_serialize_on_tenant_lock(
+    db_engine: AsyncEngine, db_clean: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        tenant_id, agent_id = await _setup(session)
+        for repo_id in (101, 102):
+            session.add(
+                AgentGitHubGrantDraft(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    repo_id=repo_id,
+                    operation="upsert",
+                    baseline_access="write",
+                    ceiling_access="write",
+                    is_working_repo=False,
+                )
+            )
+    first_staged, release_first = asyncio.Event(), asyncio.Event()
+    real_stage = github_access.stage_grant
+
+    async def paused_stage(*args: object, **kwargs: object) -> object:
+        result = await real_stage(*args, **kwargs)  # type: ignore[arg-type]
+        if kwargs["repo_id"] == 101:
+            first_staged.set()
+            await release_first.wait()
+        return result
+
+    monkeypatch.setattr(github_access, "stage_grant", paused_stage)
+
+    async def panel() -> None:
+        async with factory.begin() as session:
+            await github_panel_grants.activate_grants(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                account_id=None,
+                agent_name="Helper",
+            )
+
+    async def confirmation() -> None:
+        async with factory.begin() as session:
+            await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
+            await github_access.lock_repo_grants_batch(session, tenant_id=tenant_id, repo_ids={102})
+            await github_access.lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
+
+    panel_task = asyncio.create_task(panel())
+    try:
+        await asyncio.wait_for(first_staged.wait(), timeout=5)
+        confirm_task = asyncio.create_task(confirmation())
+        await asyncio.sleep(0.05)
+        assert not confirm_task.done()
+    finally:
+        release_first.set()
+    await asyncio.wait_for(asyncio.gather(panel_task, confirm_task), timeout=5)
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        github_access.InstallationLimitError,
+        github_access.SessionVaultBudgetError,
+        github_access.ReadOnlyMultiInstallationError,
+    ],
+)
+def test_grant_admission_error_copy_is_safe_to_show(error_type: type[ValueError]) -> None:
+    message = "Remove a repo or an account first."
+    assert safe_github_error(error_type(message)) == message
 
 
 async def _setup(
@@ -107,7 +181,7 @@ async def test_server_repo_settings_clamp_live_access_and_disconnect(
     overview = await connected_summary(db_session, tenant_id=tenant_id)
     assert overview.count == 2 and overview.owners == ("example",)
     assert overview.agent_count == 1
-    with pytest.raises(ValueError, match="Only a server"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await set_repo_ability(
             db_session, tenant_id=tenant_id, repo_id=101, ability="read", account_id=member_id
         )
@@ -323,7 +397,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         )
     )
     await db_session.flush()
-    with pytest.raises(ValueError, match="workspace admin"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await connect_link(
             db_session,
             settings=settings,
@@ -335,7 +409,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
     account = await db_session.get(Account, member_id)
     assert account is not None
     assert account.role == "user"
-    with pytest.raises(ValueError, match="workspace admin"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await sync_connect_admin(
             db_session,
             tenant_id=tenant_id,
@@ -365,7 +439,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         platform_user_id="former-holder",
         verified_tenant_admin=True,
     )
-    with pytest.raises(ValueError, match="workspace admin"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await connect_link(
             db_session,
             settings=settings,

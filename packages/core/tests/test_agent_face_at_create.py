@@ -17,9 +17,9 @@ from daimon.core.agent_identity import ensure_agent_face, queue_agent_face
 from daimon.core.authz import Subject
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.stores.agent_avatars import get_agent_avatar
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 # A user's agent: not managed, and not the deployment default.

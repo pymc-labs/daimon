@@ -43,14 +43,14 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
-from daimon.testing import ma_agent, ma_environment
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.discord_ingress import ConcurrentCheckpoint, DiscordIngress, IngressHTTP
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, list_response
-from daimon.testing.ma_transport import ScriptedTransport
+from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import Provider, Scope
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import event
@@ -373,8 +373,8 @@ async def test_source_ingress_and_title(
 
 async def test_real_anthropic_path_reads_original_channel_context(owned: OwnedIngress) -> None:
     """Controlled native fixture proves host wiring, not a catalog completion pin."""
-    from daimon.testing.ma import FakeMAState, make_fake_memory_store_handler
     from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+    from mux.testing.drivers.anthropic.ma import FakeMAState, make_fake_memory_store_handler
 
     agent = ma_agent(tenant_id=owned.tenant_id, name="qa-agent")
     state = FakeSessionsState(
@@ -938,8 +938,8 @@ class BusyWire:
     """Owned fake MA server; captures roots from actual SDK send acknowledgments."""
 
     def __init__(self, owned: OwnedIngress, answers: list[str]) -> None:
-        from daimon.testing.ma import FakeMAState, make_fake_memory_store_handler
         from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+        from mux.testing.drivers.anthropic.ma import FakeMAState, make_fake_memory_store_handler
 
         agent = ma_agent(tenant_id=owned.tenant_id, name="qa-agent")
         self.state = FakeSessionsState(
@@ -1232,7 +1232,7 @@ async def test_real_cap_admin_three_admissions_wait_then_release(
                 for p in waiting.ingress.posts
             )
             assert all("Queued" not in post_text(waiting, m["id"]) for m in messages[:2])
-            assert not re.search(r"(?i)too many chats in flight|try again later", text)
+            assert not re.search(r"(?i)too many chats at once|try again later", text)
             clock.advance(29)
             one.release.set()
             three = await wire.running(3)

@@ -130,6 +130,8 @@ class SessionSnapshot(BaseModel):
             "github_repo_map_resource_id",
             "github_repo_script_file_id",
             "github_repo_script_resource_id",
+            "mcp_hold",
+            "memory_scope",
         ):
             if not data.get(name):
                 data.pop(name, None)
@@ -174,6 +176,17 @@ class SessionSnapshot(BaseModel):
     personal_memory_store_id: str | None = None
     vault_id: str | None
     chat_session_id: str | None = None
+    # The hold (`daimon.core.mcp_hold.hold_key`) of the Daimon credential the
+    # session mounts. None for the ordinary credential, a shared thread's
+    # credential-free session and every session from before holds existed. Held
+    # and unheld turns never share a session: a difference is an identity change.
+    mcp_hold: str | None = None
+    # The memory isolation scope the session was built for
+    # (`memory_resource.memory_scope`): None unscoped (every session from before
+    # scopes, and every unheld one), `channel:<platform>:<id>` for a held place.
+    # Kept apart from `memory_store_id` so the scope is known even when the
+    # store failed to provision and nothing mounted.
+    memory_scope: str | None = None
 
     # Mutable axis — a difference here can be applied to the live session.
     tools_sha256: str
@@ -280,6 +293,10 @@ def fingerprint_identity(snapshot: SessionSnapshot) -> str:
         # Only when set, so every snapshot without one keeps the fingerprint
         # it was recorded with.
         fields = (*fields, "personal_memory_store_id")
+    if snapshot.mcp_hold is not None:
+        fields = (*fields, "mcp_hold")
+    if snapshot.memory_scope is not None:
+        fields = (*fields, "memory_scope")
     return _fingerprint(snapshot, fields)
 
 
@@ -323,10 +340,22 @@ def snapshot_from_created_session(
     repo_token_issued_at: int | None,
     vault_id: str | None,
     sent_skills: Sequence[MaSkill],
+    sent_system: str | None = None,
     github_mode: Literal["legacy", "app"] = "app",
     personal_memory_store_ids: Collection[str] = (),
+    mcp_hold: str | None = None,
+    memory_scope: str | None = None,
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
+
+    `memory_scope` is the isolation scope the creator built the session for,
+    whether or not a store mounted.
+
+    `mcp_hold` is the hold key of the Daimon credential the creator mounted
+    (None when it mounted the ordinary one, or none).
+
+    `sent_system` is the system prompt sent as the session's own override
+    (`daimon.core.platform_system`); it is hashed instead of the agent's.
 
     `personal_memory_store_ids` are the personal stores the creator may have
     mounted; a memory-store resource is classed as personal only by its id,
@@ -341,7 +370,7 @@ def snapshot_from_created_session(
     desired snapshot (built from the agent's `"latest"`) would read as drift
     on every turn after.
     """
-    return _snapshot_from_session(
+    snapshot = _snapshot_from_session(
         session,
         skills_sha256=hash_skills(sent_skills),
         env_sha256=env_sha256,
@@ -351,6 +380,10 @@ def snapshot_from_created_session(
         github_mode=github_mode,
         personal_memory_store_ids=personal_memory_store_ids,
     )
+    snapshot = snapshot.model_copy(update={"mcp_hold": mcp_hold, "memory_scope": memory_scope})
+    if sent_system is None:
+        return snapshot
+    return snapshot.model_copy(update={"system_sha256": hash_system(sent_system)})
 
 
 def snapshot_from_retrieved_session(
@@ -579,12 +612,15 @@ def desired_snapshot(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    mcp_hold: str | None = None,
+    memory_scope: str | None = None,
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
     token_issued_at_by_installation: dict[int, int] | None = None,
     tool_safety: ToolSafetyPolicy,
     public_url: str | None = None,
     channel_skills: Sequence[MaSkill] = (),
+    system_override: str | None = None,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 
@@ -600,12 +636,14 @@ def desired_snapshot(
     the deployment's, for the same reason: both arrays are hashed as
     `create_session` gates them (`session_tools`). `channel_skills` are the
     turn's channel's extra skills, hashed with the agent's (`session_skills`).
+    `system_override` is the prompt sent in place of the agent's own, hashed
+    instead of it.
     """
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
         model_speed=getattr(agent.model, "speed", None) or "standard",
-        system_sha256=hash_system(agent.system),
+        system_sha256=hash_system(agent.system if system_override is None else system_override),
         skills_sha256=hash_skills(session_skills(agent, channel_skills)),
         environment_id=environment_id,
         github_mode=github_mode,
@@ -626,6 +664,8 @@ def desired_snapshot(
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id,
         chat_session_id=chat_session_id,
+        mcp_hold=mcp_hold,
+        memory_scope=memory_scope,
         tools_sha256=hash_tools(
             session_tools(
                 agent,

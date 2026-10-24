@@ -39,7 +39,7 @@ _VIEW_ID = "V_TEST"
 _USERS_INFO_PATTERN = re.compile(r"https://slack\.com/api/users\.info.*")
 
 
-def _override_users_info_admin(mock: Any) -> None:
+def _override_users_info_admin(mock: Any, *, team_id: str = _TEAM_ID) -> None:
     """Replace the conftest non-admin users.info stub with an admin one.
 
     aioresponses matches by insertion order and the conftest baseline is
@@ -68,6 +68,7 @@ def _override_users_info_admin(mock: Any) -> None:
             "user": {
                 "id": _ADMIN_USER_ID,
                 "name": "admin",
+                "team_id": team_id,
                 "is_admin": True,
                 "is_owner": False,
                 "is_primary_owner": False,
@@ -504,7 +505,7 @@ async def test_handle_routine_action_output_by_admin_non_creator_checks_privacy(
 ) -> None:
     """Admins can read routed shared output, but cannot read legacy private output."""
     client_fake: Any = fake_slack_web_client
-    _override_users_info_admin(client_fake.mock)
+    _override_users_info_admin(client_fake.mock, team_id="T_OUT_ADMIN")
 
     tenant_id, fernet_key, _ = await _seed_team(db_session, team_id="T_OUT_ADMIN")
     routine = await create_routine(

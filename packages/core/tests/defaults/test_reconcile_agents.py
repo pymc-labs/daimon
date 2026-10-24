@@ -23,9 +23,9 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import Action
 from daimon.core.specs import AgentSpec, SkillRef
-from daimon.testing.ma import MARouter, list_response
-from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 
 TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 _DEFAULT_MCP_URL = "https://daimon.example/mcp"

@@ -244,12 +244,12 @@ async def test_collect_purge_preview_lists_principals_as_example_when_account_ha
 
     preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
 
-    assert preview.linked_principals.example == "Discord:1234, CLI:os_user=alice", (
+    assert preview.linked_principals.example == "1234, CLI:os_user=alice", (
         "example must enumerate platform principals first, then CLI principals, comma-joined"
     )
 
 
-async def test_collect_purge_preview_linked_principals_example_uses_platform_capitalization(
+async def test_collect_purge_preview_linked_principals_example_names_no_chat_platform(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -266,9 +266,8 @@ async def test_collect_purge_preview_linked_principals_example_uses_platform_cap
 
     preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
 
-    assert preview.linked_principals.example is not None
-    assert preview.linked_principals.example.startswith("Discord:"), (
-        "platform name must be capitalized in display"
+    assert preview.linked_principals.example == "42", (
+        "the panel must not name a chat platform: it may be another one than the viewer's"
     )
 
 
@@ -815,6 +814,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "github_user_links": "github_user_links",
         "mcp_tokens": "mcp_tokens",
         "gemini_records": "gemini_records",
+        "selfhosted_operations": "selfhosted_operations",
         "slack_user_tokens": "slack_user_tokens",
         "slack_turn_contexts": "slack_turn_contexts",
         "direct_message_conversations": "direct_message_conversations",
@@ -863,6 +863,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
         "watches": "owner_account_id FK; explicit erasure also deletes evidence and pending wakes",
+        "selfhosted_resource_operations": "account UUID stored as account_id text",
         "neutral_agent_revisions": "accounts.id FK cascade",
         "neutral_skill_versions": "accounts.id FK cascade",
         "cli_principals": "account_id FK -> accounts.id",
@@ -896,6 +897,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # and is automatically erased by accounts.id ON DELETE CASCADE.
             # The store tests verify this; it needs no separately reported category.
             "turn_origins",
+            # Who may edit an agent: no content, and ON DELETE CASCADE with
+            # accounts.id, after which the agent is admin-only again.
+            "agent_owner",
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",
@@ -985,4 +989,70 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         f"daimon.core.purge nor on the documented carve-out allowlist. Wire a delete "
         f"into purge.py (+ PurgeReport/PurgePreview) or add the table to the allowlist "
         f"in this test with a justification. In-scope because: {uncovered}"
+    )
+
+
+async def test_account_purge_removes_selfhosted_receipts_and_keeps_shared_resources(
+    db_session, db_session_factory
+):
+    from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+    from mux.contracts.ids import ModelRef, PageRequest, Scope
+    from mux.contracts.resources import AgentFilter, AgentSpec
+    from mux.profiles.selfhosted import LOOP
+
+    tenant = await make_tenant(db_session)
+    first = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    agents = SelfHostedAgents(db_session_factory)
+    for account, name in ((first, "first"), (other, "other")):
+        caller = Scope(
+            tenant_id=str(tenant.id),
+            account_id=str(account.id),
+            principal_id=name,
+            authorization_id="test",
+        )
+        await agents.create(
+            caller,
+            AgentSpec(name=name, model=ModelRef(provider=LOOP.provider, id="gpt-6-luna")),
+            key="create",
+        )
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=first.id)
+    assert preview.selfhosted_operations.count == 1
+    report = await purge_account(sm=db_session_factory, account_id=first.id)
+    assert report.db.selfhosted_operations == 1
+    remaining = await collect_purge_preview(sm=db_session_factory, account_id=other.id)
+    assert remaining.selfhosted_operations.count == 1
+    caller = Scope(
+        tenant_id=str(tenant.id),
+        account_id=str(other.id),
+        principal_id="other",
+        authorization_id="test",
+    )
+    assert len((await agents.list(caller, filters=AgentFilter(), page=PageRequest())).data) == 2
+    assert (
+        await purge_account(sm=db_session_factory, account_id=first.id)
+    ).db.selfhosted_operations == 0
+
+
+async def test_collect_purge_preview_linked_principals_example_uses_platform_capitalization(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session,
+        platform="discord",
+        external_id="42",
+        tenant=tenant,
+        account=account,
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+
+    assert preview.linked_principals.example is not None
+    assert preview.linked_principals.example.startswith("Discord:"), (
+        "platform name must be capitalized in display"
     )

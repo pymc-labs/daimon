@@ -7,36 +7,17 @@ No try/except -- exceptions propagate to the adapter boundary.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
 
 from daimon.core._models import ThreadAutoResponse, ThreadParticipationScope
+from daimon.core.scope_cascade import CascadeModes
+from daimon.core.stores._scope_modes import clear_scope_mode, get_scope_modes, set_scope_mode
 from daimon.core.stores.domain import ThreadAutoResponseRow
 from daimon.core.thread_participation import ParticipationMode, ParticipationScope
-from sqlalchemy import CursorResult, delete, func, or_, select, tuple_
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# The workspace row needs no id of its own: tenant_id already names it.
-_WORKSPACE_SCOPE_ID = ""
-
-
-def _scope_id(scope: ParticipationScope, scope_id: str | None) -> str:
-    if scope is ParticipationScope.WORKSPACE:
-        return _WORKSPACE_SCOPE_ID
-    if scope_id is None:
-        raise ValueError(f"{scope.value} scope needs a scope_id")
-    return scope_id
-
-
-@dataclass(frozen=True)
-class ParticipationModes:
-    """The explicit settings at each tier, `None` where nothing was set."""
-
-    workspace: ParticipationMode | None
-    channel: ParticipationMode | None
-    thread: ParticipationMode | None
+ParticipationModes = CascadeModes
 
 
 async def get_participation_modes(
@@ -48,31 +29,13 @@ async def get_participation_modes(
     thread_id: str | None,
 ) -> ParticipationModes:
     """One read for the whole cascade: the workspace row plus this channel's and thread's rows."""
-    keys: list[tuple[str, str]] = [(ParticipationScope.WORKSPACE.value, _WORKSPACE_SCOPE_ID)]
-    if channel_id is not None:
-        keys.append((ParticipationScope.CHANNEL.value, channel_id))
-    if thread_id is not None:
-        keys.append((ParticipationScope.THREAD.value, thread_id))
-    rows = (
-        await session.execute(
-            select(ThreadParticipationScope.scope, ThreadParticipationScope.mode).where(
-                ThreadParticipationScope.tenant_id == tenant_id,
-                ThreadParticipationScope.platform == platform,
-                or_(
-                    *(
-                        tuple_(ThreadParticipationScope.scope, ThreadParticipationScope.scope_id)
-                        == k
-                        for k in keys
-                    )
-                ),
-            )
-        )
-    ).all()
-    found = {scope: ParticipationMode(mode) for scope, mode in rows}
-    return ParticipationModes(
-        workspace=found.get(ParticipationScope.WORKSPACE.value),
-        channel=found.get(ParticipationScope.CHANNEL.value),
-        thread=found.get(ParticipationScope.THREAD.value),
+    return await get_scope_modes(
+        session,
+        ThreadParticipationScope,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel_id,
+        thread_id=thread_id,
     )
 
 
@@ -85,23 +48,15 @@ async def set_participation_mode(
     scope_id: str | None,
     mode: ParticipationMode,
 ) -> None:
-    stmt = (
-        pg_insert(ThreadParticipationScope)
-        .values(
-            tenant_id=tenant_id,
-            platform=platform,
-            scope=scope.value,
-            scope_id=_scope_id(scope, scope_id),
-            mode=mode.value,
-            updated_at=func.now(),
-        )
-        .on_conflict_do_update(
-            constraint="pk_thread_participation_scopes",
-            set_={"mode": mode.value, "updated_at": func.now()},
-        )
+    await set_scope_mode(
+        session,
+        ThreadParticipationScope,
+        tenant_id=tenant_id,
+        platform=platform,
+        scope=scope,
+        scope_id=scope_id,
+        mode=mode,
     )
-    await session.execute(stmt)
-    await session.flush()
 
 
 async def clear_participation_mode(
@@ -113,16 +68,14 @@ async def clear_participation_mode(
     scope_id: str | None,
 ) -> bool:
     """Drop the explicit setting so the scope inherits again. Returns whether a row existed."""
-    result = await session.execute(
-        delete(ThreadParticipationScope).where(
-            ThreadParticipationScope.tenant_id == tenant_id,
-            ThreadParticipationScope.platform == platform,
-            ThreadParticipationScope.scope == scope.value,
-            ThreadParticipationScope.scope_id == _scope_id(scope, scope_id),
-        )
+    return await clear_scope_mode(
+        session,
+        ThreadParticipationScope,
+        tenant_id=tenant_id,
+        platform=platform,
+        scope=scope,
+        scope_id=scope_id,
     )
-    await session.flush()
-    return cast(CursorResult[Any], result).rowcount == 1
 
 
 async def record_auto_response(

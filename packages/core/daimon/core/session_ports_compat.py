@@ -24,9 +24,7 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import PageRequest, Revision, Scope
 from mux.contracts.ports import SessionResources
 from mux.contracts.resources import ResourceBinding, Session, SessionFilter, SessionSpec
-from mux.drivers.anthropic.resources.sessions_admin import (
-    SessionResources as NativeSessionResources,
-)
+from mux.drivers.anthropic import NativeSessionResources
 from pydantic import JsonValue
 
 

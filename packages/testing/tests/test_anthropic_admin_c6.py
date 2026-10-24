@@ -26,10 +26,15 @@ from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.testing.admin_bindings import AdminBindings, provision_admin_run
 from daimon.testing.anthropic_admin import AgentFixture, AnthropicAdminBindings, MemberAgentEdit
 from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.ma import FakeMAState, MARouter, list_response, make_fake_ma_handler
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma import (
+    FakeMAState,
+    MARouter,
+    list_response,
+    make_fake_ma_handler,
+)
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 pytest_plugins = ["daimon.testing.db"]
@@ -287,7 +292,7 @@ async def test_d5_real_member_edit_and_independent_revision_readback(case: Case)
     case.binding.trace.assert_consumed()
     assert receipt.status == "refused" and receipt.code == "ADMIN_MEMBER_EDIT_REFUSED"
     expected_error = (
-        "Changing 'qa-unbound-c6' needs a workspace or server admin. "
+        "Changing 'qa-unbound-c6' needs its owner or a server admin. "
         "Ask one to make the requested change. Do not retry."
     )
     assert receipt.observations["errors"] == [
@@ -448,7 +453,7 @@ async def test_readback_refuses_revision_race_instead_of_cached_unchanged(case: 
     from daimon.core.errors import StoreError
     from daimon.core.mux_backend import resource_scope
     from daimon.core.mux_compat import update_agent
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     await case.create("qa-unbound-c6")
     before = await case.edge.read_agent("qa-unbound-c6")
@@ -500,7 +505,7 @@ async def test_runtime_collaborators_must_match_owned_run(case: Case, kind: str)
 
     runtime = case.edge.runtime
     if kind == "client":
-        from daimon.testing.ma import build_stub_anthropic
+        from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 
         client = build_stub_anthropic()
         runtime = dataclasses.replace(runtime, anthropic=client)

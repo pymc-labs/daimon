@@ -53,10 +53,10 @@ from daimon.core.setup_conversations import setup_target_label, shared_keys_sent
 from daimon.core.stores.agent_avatars import AvatarRow
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, build_stub_anthropic
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PUBLIC_URL = "https://mcp.example.com"
@@ -885,7 +885,7 @@ async def test_rendered_details_actions_keep_the_card_agent_after_selection_chan
     )
 
 
-@pytest.mark.parametrize("snapshot_is_admin", [True, False], ids=["demoted-admin", "member"])
+@pytest.mark.parametrize("snapshot_is_admin", [True], ids=["demoted-admin"])
 async def test_coding_tools_refuses_a_live_member_with_the_explanatory_refusal(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -896,7 +896,8 @@ async def test_coding_tools_refuses_a_live_member_with_the_explanatory_refusal(
 ) -> None:
     """The view's is_admin is a snapshot; the click decides on the live member and mints nothing.
 
-    The button is visible to members on purpose, so its refusal has to explain itself.
+    Members don't see the button (see below); an admin demoted after the panel opened
+    still can press it, so its refusal has to explain itself.
     """
     await _seed_tenant_and_account(
         db_session, tenant_id=tenant_id, account_id=account_id, external_id="guild-details-member"
@@ -917,7 +918,7 @@ async def test_coding_tools_refuses_a_live_member_with_the_explanatory_refusal(
     interaction = _member_interaction()
 
     button = _find_button(view, "🧰 Use from your coding tools")
-    assert button.disabled is False, "members see the button; the refusal explains the gate"
+    assert button.disabled is False
     await button.callback(interaction)
 
     kwargs = interaction.response.send_message.call_args.kwargs
@@ -992,3 +993,21 @@ async def _seed_tenant_and_account(
     )
     account = await make_account(db_session, tenant=tenant, id=account_id)
     return tenant, account
+
+
+async def test_a_member_sees_no_buttons_that_only_refuse(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    """Coding tools and Add skill are admin changes, so a member's Details offers neither."""
+    await _seed_tenant_and_account(
+        db_session, tenant_id=tenant_id, account_id=account_id, external_id="guild-details-member2"
+    )
+    details = _details(name="churn-explorer")
+    state = _state(details, account_id=account_id, is_admin=False)
+    view = DetailsView(state, runtime=_make_runtime(db_session_factory), allowed_user_id=42)
+    labels = {child.label for child in view.walk_children() if isinstance(child, discord.ui.Button)}
+    assert "🧰 Use from your coding tools" not in labels
+    assert "➕ Add skill" not in labels

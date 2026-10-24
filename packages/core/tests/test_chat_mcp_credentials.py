@@ -47,7 +47,7 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(
 
     async def handler(req):
         if req.method == "GET" and req.url.path == "/v1/sessions/sess_renew":
-            from daimon.testing import ma_session
+            from mux.testing.drivers.anthropic.ma_models import ma_session
 
             return httpx.Response(
                 200,
@@ -154,7 +154,8 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(
         from daimon.core.session_snapshot import snapshot_from_created_session
         from daimon.core.session_update_ops import apply_update_ops
         from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-        from daimon.testing import ma_agent, ma_session
+        from daimon.testing.ma_models import ma_agent
+        from mux.testing.drivers.anthropic.ma_models import ma_session
         from pydantic import SecretStr
 
         native_agent = ma_agent(id="agent_renew")
@@ -222,7 +223,8 @@ async def test_reuse_refreshes_both_app_vaults_but_never_injects_an_external_slo
     from daimon.core.session_snapshot import snapshot_from_created_session
     from daimon.core.session_update_ops import apply_update_ops
     from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-    from daimon.testing import ma_agent, ma_session
+    from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma_models import ma_session
     from pydantic import SecretStr
     from sqlalchemy import func, select
 

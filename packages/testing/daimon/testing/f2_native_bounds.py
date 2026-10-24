@@ -14,7 +14,7 @@ from anthropic.resources.beta import AsyncAgents, AsyncSessions
 from anthropic.types.beta import AgentCreateParams, BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.session_create_params import SessionCreateParams
 from daimon.testing.anthropic_live import MODEL, LiveRefused
-from daimon.testing.conformance.default_capability import DEFAULT_TOOLS, MCP_TOOLS
+from mux.testing.conformance.default_capability import DEFAULT_TOOLS, MCP_TOOLS
 
 
 def native_budget() -> dict[str, object]:

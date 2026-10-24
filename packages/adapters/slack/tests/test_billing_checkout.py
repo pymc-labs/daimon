@@ -161,6 +161,7 @@ async def test_handle_topup_select_admin_posts_checkout_and_sends_ephemeral(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,
@@ -229,6 +230,7 @@ async def test_handle_topup_select_admin_ephemeral_text_contains_url(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,
@@ -297,6 +299,7 @@ async def test_handle_topup_select_non_admin_issues_no_checkout_post(
         "user": {
             "id": "U_REGULAR",
             "name": "regular_user",
+            "team_id": _TEAM_ID,
             "is_admin": False,
             "is_owner": False,
             "is_primary_owner": False,
@@ -351,6 +354,7 @@ async def test_handle_topup_select_invalid_amount_issues_no_checkout_post(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,
@@ -410,6 +414,7 @@ async def test_handle_topup_select_updates_modal_when_checkout_route_is_missing(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,
@@ -464,6 +469,7 @@ async def test_handle_topup_select_admin_success_sends_no_views_update(
         "user": {
             "id": _USER_ID,
             "name": "admin_user",
+            "team_id": _TEAM_ID,
             "is_admin": True,
             "is_owner": False,
             "is_primary_owner": False,

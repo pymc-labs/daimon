@@ -7,18 +7,18 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from daimon.testing.drivers.gemini.conformance_hooks import recover_send
-from daimon.testing.drivers.gemini.fake import MemoryStorage
-from daimon.testing.isolated_sdk import build_gemini_client
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, Session, SessionSpec
 from mux.drivers.gemini import GeminiManagedAgents
-from mux.drivers.gemini.transport import SDKTransport
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL, SDKTransport
 from mux.errors import OperationConflict, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import CrashPoint, MemoryStateStore, SimulatedCrash
+from mux.testing.drivers.gemini.conformance_hooks import recover_send
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.isolated_sdk import build_gemini_client
 
 pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
 
@@ -159,7 +159,7 @@ async def test_real_sdk_claim_and_ack_crashes_never_blindly_resend(
             content = INPUT[0].content[0]
             assert isinstance(content, TextPart)
             assert body["input"] == [{"type": "text", "text": content.text}]
-            assert body["tools"] == []
+            assert body["tools"] == [NO_TOOLS_TOOL]
             assert body["agent_config"]["model"] == "gemini-3.8-flash"
 
 

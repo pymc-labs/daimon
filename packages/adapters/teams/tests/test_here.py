@@ -12,7 +12,7 @@ from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.here_card import assemble_here_card
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (

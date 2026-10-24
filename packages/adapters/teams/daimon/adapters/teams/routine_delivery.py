@@ -42,6 +42,7 @@ from daimon.core.routine_delivery import (
     teams_thread_id,
 )
 from daimon.core.routine_files import payload_for, unsupported_files_note
+from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -77,7 +78,8 @@ def make_teams_routine_poster(
                 return DeliveryOutcome(status="skipped", note=reason)
             chat = await teams.open_chat(member)
             for chunk in split_fenced(
-                render_fallback_dm(row, reason) + unsupported_files_note(payload_for(row)),
+                render_fallback_dm(row, reason, platform="teams")
+                + unsupported_files_note(payload_for(row)),
                 TEAMS_LIMIT,
                 word_boundary=True,
             ):
@@ -98,10 +100,12 @@ def make_teams_routine_poster(
         if not isinstance(cleared, TenantAccessPolicy):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
-        keep_inside = keeps_routine_inside(cleared, row)
+        # An isolated or shared channel's result never leaves it, not even by DM.
+        held = await result_is_held(sessionmaker, row, platform="teams")
+        keep_inside = keeps_routine_inside(cleared, row) or held
 
         async def fallback(reason: str) -> DeliveryOutcome:
-            if keep_inside:  # an isolated channel's result never leaves it, not even by DM
+            if keep_inside:
                 return DeliveryOutcome(status="skipped", note=reason)
             return await dm_fallback(row, reason)
 
@@ -127,7 +131,9 @@ def make_teams_routine_poster(
                 "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
             )
             return await fallback("creator_cannot_post")
-        text = render_fallback_post(row) + unsupported_files_note(payload_for(row))
+        text = render_fallback_post(row, platform="teams") + unsupported_files_note(
+            payload_for(row)
+        )
         conversation = teams_thread_id(target)
         try:
             ids = [
@@ -138,7 +144,8 @@ def make_teams_routine_poster(
             if err.response.status_code in (400, 403, 404):
                 return await fallback("destination_unavailable")
             raise
-        if feed is not None and creator is not None and ids:
+        # The activity-feed notice quotes the result to the creator outside the channel.
+        if feed is not None and creator is not None and ids and not held:
             headline, _, body = text.partition("\n\n")
             feed.notify(
                 conversation,

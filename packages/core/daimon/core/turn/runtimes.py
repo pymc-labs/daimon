@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from importlib.metadata import entry_points
 from types import MappingProxyType
@@ -18,6 +18,11 @@ if TYPE_CHECKING:
     from daimon.core.turn.prepare import ProviderPreparationRequest
 
 RuntimeFactory = Callable[["ProviderPreparationRequest"], TurnRuntime]
+# Async provider setup a turn needs before its (sync) runtime is built, e.g.
+# creating a tenant's hosted environment once. Runs only on a real turn's preparation.
+RuntimePreparation = Callable[
+    ["ProviderPreparationRequest"], Awaitable["ProviderPreparationRequest"]
+]
 
 
 class RuntimeDeployment(Protocol):
@@ -47,6 +52,7 @@ class _RuntimeRegistration:
     factory: RuntimeFactory
     authorizations: DeploymentLoader | None = None
     tariffs: Callable[[], Mapping[tuple[str, str], ProviderPrice]] | None = None
+    prepare: RuntimePreparation | None = None
 
 
 _RUNTIME_FACTORIES: dict[str, _RuntimeRegistration] = {}
@@ -59,6 +65,7 @@ def register_channel_runtime(
     authorizations: DeploymentLoader | None = None,
     tariffs: Callable[[], Mapping[tuple[str, str], ProviderPrice]] | None = None,
     fallback: bool = False,
+    prepare: RuntimePreparation | None = None,
 ) -> None:
     """Register a constructor; provider defaults preserve explicit host overrides."""
     if profile == "anthropic.managed_agents":
@@ -67,7 +74,7 @@ def register_channel_runtime(
         if fallback:
             return
         raise ValueError(f"channel runtime already registered: {profile}")
-    _RUNTIME_FACTORIES[profile] = _RuntimeRegistration(factory, authorizations, tariffs)
+    _RUNTIME_FACTORIES[profile] = _RuntimeRegistration(factory, authorizations, tariffs, prepare)
 
 
 def ensure_channel_runtime(profile: str, *, ready: Callable[[], bool] | None = None) -> bool:
@@ -115,6 +122,32 @@ def channel_runtime_prices() -> Mapping[tuple[str, str], ProviderPrice]:
                     raise UnsupportedCapability(("conflicting_runtime_price",), profile)
                 prices[key] = rate
     return MappingProxyType(prices)
+
+
+async def prepare_channel_runtime(
+    request: ProviderPreparationRequest,
+) -> ProviderPreparationRequest:
+    """Run the admitted profile's async setup, if it has one, before its runtime is built.
+
+    Injected runtimes (tests, explicit host overrides) skip it: they need no setup.
+    """
+    revision = request.admission.backend_revision
+    runtimes = request.deps.turn_runtimes
+    if revision is None:
+        return request
+    if isinstance(runtimes, ScopedTurnRuntimes):
+        if runtimes.has_runtime(revision.profile):
+            return request
+    elif revision.profile in runtimes:
+        return request
+    # Install the profile first, as building its runtime would: a process's first
+    # turn on it must still get its setup.
+    if not ensure_channel_runtime(revision.profile):
+        return request
+    registration = _RUNTIME_FACTORIES[revision.profile]
+    if registration.prepare is None:
+        return request
+    return await registration.prepare(request)
 
 
 def build_channel_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
@@ -175,6 +208,10 @@ class ScopedTurnRuntimes(Mapping[str, TurnRuntime]):
             raise ScopeViolation(request.thread_id, "preparation differs from runtime scope")
         if self.resolved is None:
             self._request = request
+
+    def has_runtime(self, profile: str) -> bool:
+        """Whether `profile` already has a runtime (injected or built), without building one."""
+        return profile in self._runtimes
 
     @property
     def resolved(self) -> TurnRuntime | None:

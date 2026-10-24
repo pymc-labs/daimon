@@ -16,6 +16,8 @@ STATIC_DIR = Path(__file__).with_name("static")
 _NAMES = frozenset(
     {
         "building",
+        "building-2",
+        "book-marked",
         "chevron-left",
         "chevron-right",
         "circle-check",
@@ -26,7 +28,9 @@ _NAMES = frozenset(
         "hourglass",
         "info",
         "link",
+        "lock",
         "plus",
+        "pin",
         "trash-2",
         "folder",
         "ellipsis",

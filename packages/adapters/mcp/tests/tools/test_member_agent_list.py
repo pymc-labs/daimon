@@ -23,10 +23,10 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.turn_origins import create_origin
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -66,6 +66,8 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
             configuration_target_ma_agent_id="ag_shared",
             configuration_target_name="shared",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + dt.timedelta(minutes=-1 if origin_kind == "expired" else 10),
             chat_session_id="test-session",
@@ -180,6 +182,8 @@ async def test_agent_reads_withhold_setup_details_from_non_admin(
             configuration_target_ma_agent_id="ag_shared",
             configuration_target_name="shared",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + dt.timedelta(minutes=10),
             chat_session_id="test-session",
@@ -296,6 +300,8 @@ async def test_routing_explanation_hides_draft_targets_and_other_threads_from_me
             configuration_target_ma_agent_id="ag_draft",
             configuration_target_name="draft",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + dt.timedelta(minutes=10),
             chat_session_id="test-session",

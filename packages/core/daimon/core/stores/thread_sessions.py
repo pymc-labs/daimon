@@ -27,7 +27,7 @@ from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from daimon.core._models import ThreadSession, UsageEvent
+from daimon.core._models import JournalSession, ThreadSession, UsageEvent
 from daimon.core.errors import SessionRetired
 from daimon.core.session_snapshot import (
     SessionSnapshot,
@@ -140,7 +140,7 @@ async def list_live_sessions_for_agent(
 
 GITHUB_KEY_RESTART_LINE = (
     "GitHub connection updated. Chat restarted. Earlier messages are still here; "
-    "unsaved work in the old workspace is gone."
+    "unsaved work from before is gone."
 )
 
 
@@ -588,6 +588,20 @@ async def get_thread_session_by_id(
     return ThreadSessionRow.model_validate(orm)
 
 
+async def session_owner_tenants(session: AsyncSession, *, ma_session_id: str) -> set[_uuid.UUID]:
+    """Every tenant recorded as owning a provider session, live or retired.
+
+    A chat or routine thread records its session in `thread_sessions`; a
+    mux-journalled session records its owner in `journal_session`. An empty
+    set means nothing records the session (e.g. one made by
+    `daimon sessions create`).
+    """
+    threads = select(ThreadSession.tenant_id).where(ThreadSession.ma_session_id == ma_session_id)
+    journals = select(JournalSession.tenant_id).where(JournalSession.session_id == ma_session_id)
+    rows = await session.execute(threads.union(journals))
+    return set(rows.scalars())
+
+
 async def update_agent_identity(session: AsyncSession, *, id: _uuid.UUID, ma_agent_id: str) -> None:
     """Record the identity observed on MA without replacing session history."""
     await session.execute(
@@ -838,7 +852,7 @@ async def require_writable_session(db: AsyncSession, session_id: str) -> None:
             )
         ).first()
         if status != "live" or successor is not None:
-            raise SessionRetired("This session was replaced. Continue in its successor.")
+            raise SessionRetired("This conversation moved. Continue in the new one.")
 
 
 async def read_session_seals(

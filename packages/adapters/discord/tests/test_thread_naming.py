@@ -34,10 +34,11 @@ from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.thread_naming import THREAD_NAMING_MODEL
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_session, resolved_agent_env_router
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.membership import FixtureMembershipResolver
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -113,6 +114,29 @@ async def test_generate_thread_name_returns_title_and_meters_haiku_call_to_autho
     ], "the naming call must be metered to the tenant under the author, keyed on the message"
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant.id)
     assert balance < Decimal("5.00"), "the tenant ledger must carry the naming debit"
+
+
+async def test_generate_thread_name_never_names_another_chat_app(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+
+    name = await generate_thread_name(
+        fallback=_FALLBACK,
+        message_text="how do I move our Slack channels here?",
+        message_id=4243,
+        anthropic=build_fake_anthropic(_naming_router("Slack channel migration").dispatch),
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform_user_id="555",
+        markup=Decimal("1.0"),
+        max_input_chars=2000,
+        timeout_seconds=5.0,
+    )
+
+    assert name == "Another app channel migration"
 
 
 async def test_generate_thread_name_falls_back_but_still_meters_when_model_answers_blank(
@@ -458,3 +482,80 @@ async def test_on_message_creates_thread_under_generated_title_only_when_there_i
         "settings must reach the call unchanged"
     )
     assert handed["anthropic"] is runtime.anthropic, "the runtime client is reused"
+
+
+@pytest.mark.parametrize("mismatch", [False, True], ids=["bind_failure", "responder_mismatch"])
+async def test_selfhosted_opening_uses_text_title_without_touching_anthropic(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    mismatch: bool,
+) -> None:
+    from dataclasses import replace
+    from datetime import UTC, datetime
+    from typing import cast
+
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.errors import SessionAgentMismatch, SessionPreparationFailed
+    from daimon.testing.factories import make_account
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+    from mux.contracts.ids import ChannelRef
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"selfhosted opening accessed Anthropic.{name}")
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("5"),
+        reason="trial",
+        idempotency_key=f"trial:{tenant.id}",
+    )
+    await db_session.commit()
+    revision = ConfigRevision.create(
+        ChannelRef(tenant_id=str(tenant.id), platform="discord", channel_id="789"),
+        1,
+        resolve_default(
+            BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
+        ),
+    )
+    admission = Admission(
+        account_id=account.id,
+        agent=ma_agent(id="sh_agent_test"),
+        environment=ma_environment(),
+        config=ResolvedConfig(agent_name="test", environment_name="default"),
+        backend_revision=revision,
+        backend_revision_origin="channel",
+    )
+    runtime = replace(
+        _runtime(db_session_factory, router=MARouter(), thread_naming=ThreadNamingSettings()),
+        anthropic=cast(AsyncAnthropic, NoAnthropic()),
+    )
+    runtime = replace(runtime, turn_deps=replace(runtime.turn_deps, fleet_enabled=False))
+    bot = _bot(runtime)
+    message = _channel_message(guild_id=12345, content="<@999> keep this private\nsecond line")
+    message.id = 8001
+    message.create_thread.return_value = _thread(thread_id=8001)
+    refused: Exception = SessionPreparationFailed(
+        reasons=("test_stop_after_open",), stage="test", retry_after=datetime.now(UTC)
+    )
+    if mismatch:
+        refused = SessionAgentMismatch(
+            mapping_id=account.id,
+            session_id="sh_session_test",
+            source_agent_id="sh_agent_previous",
+            destination_agent_id="sh_agent_test",
+        )
+    with (
+        patch("daimon.adapters.discord.bot.admit", AsyncMock(return_value=admission)),
+        patch("daimon.adapters.discord.bot.bind_session", AsyncMock(side_effect=refused)) as bind,
+        patch.object(bot, "_wait_for_orphan_recovery", AsyncMock()),
+    ):
+        await bot._orchestrate_observed(message, "12345", tenant.id)  # pyright: ignore[reportPrivateUsage]
+    message.create_thread.assert_awaited_once_with(
+        name="Keep this private", auto_archive_duration=10080
+    )
+    bind.assert_awaited_once()

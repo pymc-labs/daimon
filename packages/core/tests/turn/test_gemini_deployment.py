@@ -8,7 +8,7 @@ import os
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, cast
@@ -39,9 +39,8 @@ from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiSto
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtimes import build_channel_runtime
-from daimon.testing.drivers.gemini.fake import MemoryStorage
+from daimon.core.turn_hold import TurnHold
 from daimon.testing.factories import make_tenant
-from daimon.testing.isolated_sdk import build_gemini_client
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
@@ -62,8 +61,12 @@ from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgent
 from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.storage import ArtifactRecord, Storage
-from mux.drivers.gemini.transport import Transport
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Transport
 from mux.errors import ScopeViolation
+from mux.profiles import selectable_models
+from mux.profiles.gemini import ARGON_MODEL
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.isolated_sdk import build_gemini_client
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -125,11 +128,24 @@ def entry(selected: ProviderPreparationRequest, tmp_path: Path) -> dict[str, Jso
 
 @pytest.fixture
 def worker_target(
-    tmp_path: Path, request: pytest.FixtureRequest
+    tmp_path: Path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec]:
     root = parent("gemini")
-    if getattr(request, "param", None) == "cheap":
-        model = ModelRef(provider="gemini", id="gemini-3.5-flash-lite")
+    variant = getattr(request, "param", None)
+    if variant == "argon":
+
+        class InArgonWindow(datetime):
+            @classmethod
+            def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+                return datetime(2026, 11, 30, tzinfo=UTC)
+
+        # Argon is tariff-gated; its intro price is current through 2026-11-30.
+        monkeypatch.setattr(pricing, "datetime", InArgonWindow)
+    if variant in ("cheap", "argon"):
+        model = ModelRef(
+            provider="gemini",
+            id="gemini-3.5-flash-lite" if variant == "cheap" else "gemini-4-argon",
+        )
         selection = resolve_default(
             BackendConfig(backend="gemini", profile=PROFILE, model=model.id)
         )
@@ -192,10 +208,87 @@ def test_cheap_worker_model_is_canonical_and_admitted_before_compilation(
     assert worker.spec.model == ModelRef(provider="gemini", id=revision.model)
     deployment = plan.worker_deployment(worker, revision)
     assert deployment.agent == worker.spec
-    assert deployment.max_total_tokens == WORKER_MAX_TOTAL_TOKENS == 4096
+    assert deployment.max_total_tokens == WORKER_MAX_TOTAL_TOKENS == 65_536
     assert compile_agent(deployment.agent, max_total_tokens=deployment.max_total_tokens)[
         "agent_config"
-    ] == {"type": "antigravity", "model": "gemini-3.5-flash-lite", "max_total_tokens": 4096}
+    ] == {"type": "antigravity", "model": "gemini-3.5-flash-lite", "max_total_tokens": 65_536}
+
+
+def test_the_unbounded_worker_token_cap_fits_the_worker_hold() -> None:
+    """10 min of work needs more than 4096 tokens; 65,536 still fits the $0.49 hold.
+
+    Every token of an unbounded turn priced at the highest tariff of any model the
+    unbounded path runs (Flash and Flash-Lite) is the worst case.
+    """
+    from daimon.core.turn.runtime_defaults import (
+        _GEMINI_WORKER_HOLD,  # pyright: ignore[reportPrivateUsage]
+    )
+    from mux.drivers.gemini import FLASH_PRIMARY
+    from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+
+    prices = pricing.provider_prices(INLINE_REUSE.profile_id)
+    for model in (FLASH_PRIMARY, WORKER_MODEL):
+        price = prices[(INLINE_REUSE.provider, model)]
+        worst = WORKER_MAX_TOTAL_TOKENS * max(price.input, price.output) / Decimal(10**6)
+        assert worst <= Decimal(_GEMINI_WORKER_HOLD), (model, worst)
+
+
+@pytest.mark.parametrize("worker_target", ("argon",), indirect=True)
+def test_argon_worker_compiles_only_on_the_bounded_envelope(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+) -> None:
+    plan, revision, worker = worker_target
+    check_backend(revision, worker=True)
+    assert worker.backend.model == revision.model == "gemini-4-argon"
+    # Unbounded (the total-token cap path is Flash's), Argon is refused.
+    with pytest.raises(AdmissionDenied):
+        plan.worker_deployment(worker, revision)
+    # A bounded envelope whose worst case at Argon's tariff fits the $0.05 hold:
+    # 10k input at $2/M + 2048 output at $10/M = $0.04048.
+    bounded = replace(
+        worker,
+        limits=worker.limits.model_copy(
+            update={"max_input_tokens": 10_000, "max_output_tokens": 2048, "max_turns": 1}
+        ),
+    )
+    deployment = plan.worker_deployment(bounded, revision)
+    assert deployment.agent.model == ModelRef(provider="gemini", id="gemini-4-argon")
+    assert deployment.max_total_tokens is None
+    assert (deployment.max_input_tokens, deployment.max_output_tokens) == (10_000, 2048)
+    # The markup counts too: a $0.06 budget at 2x markup buys only $0.03 of provider cost.
+    priced = replace(
+        bounded, limits=bounded.limits.model_copy(update={"budget_usd": Decimal("0.06")})
+    )
+    assert plan.worker_deployment(priced, revision, markup=Decimal(1)) == deployment
+    with pytest.raises(AdmissionDenied):
+        plan.worker_deployment(priced, revision, markup=Decimal(2))
+
+
+@pytest.mark.parametrize(
+    ("worker_target", "max_input", "max_output"),
+    (
+        # Flash: 262144 * $0.75/M + 65536 * $3.75/M = $0.44 against a $0.05 hold.
+        ("flash", 262144, 65536),
+        # Argon: 30k * $2/M + 2048 * $10/M = $0.08 against a $0.05 hold.
+        ("argon", 30_000, 2048),
+    ),
+    indirect=["worker_target"],
+)
+def test_explicit_worker_caps_whose_worst_case_exceeds_the_hold_are_refused(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+    max_input: int,
+    max_output: int,
+) -> None:
+    plan, revision, worker = worker_target
+
+    def capped(max_input: int, max_output: int) -> ResolvedWorkerSpec:
+        update = {"max_input_tokens": max_input, "max_output_tokens": max_output, "max_turns": 1}
+        return replace(worker, limits=worker.limits.model_copy(update=update))
+
+    # Control: the same worker with an envelope that fits is admitted.
+    assert plan.worker_deployment(capped(1000, 1024), revision).max_output_tokens == 1024
+    with pytest.raises(AdmissionDenied):
+        plan.worker_deployment(capped(max_input, max_output), revision)
 
 
 @pytest.mark.parametrize("missing", ("backend", "model"))
@@ -233,7 +326,7 @@ def test_resolved_drops_compile_remote_without_execution_or_memory(
     deployment = plan.worker_deployment(worker, revision)
     assert deployment.agent == worker.spec
     assert deployment.config_digest == revision.digest
-    assert compile_agent(deployment.agent)["tools"] == []
+    assert compile_agent(deployment.agent)["tools"] == [NO_TOOLS_TOOL]
     assert compile_environment(deployment.environment) == {"type": "remote", "sources": []}
     assert worker.resources == ()
     assert worker.spec.system is not None
@@ -259,7 +352,7 @@ def test_worker_materialization_compiles_the_canonical_spec_under_operator_ceili
     assert deployment.agent.name != enabled.agent_name
     assert deployment.agent.system != enabled.system
     assert deployment.agent.system == worker.permissions.spec.system
-    assert compile_agent(deployment.agent)["tools"] == []
+    assert compile_agent(deployment.agent)["tools"] == [NO_TOOLS_TOOL]
 
 
 def test_worker_materialization_cannot_add_an_unreviewed_non_execution_tool(
@@ -420,6 +513,7 @@ def provider(request: pytest.FixtureRequest) -> Literal["openai", "gemini"]:
         "drift",
         "sealed",
         "publish",
+        "held",
         "identity",
         "revision",
         "tenant",
@@ -519,8 +613,8 @@ async def test_worker_native_readback_checks_stripped_tools_mounts_and_protected
         owned.wire.agent[field] = original
 
     # Persist the independently read-back native acknowledgement at the owned storage edge.
+    import mux.drivers.gemini as sdk_deployment
     from daimon.core.turn import gemini_deployment
-    from mux.drivers.gemini import deployment as sdk_deployment
 
     storage = MemoryStorage()
     async with storage.transaction() as records:
@@ -591,6 +685,14 @@ async def test_worker_native_readback_checks_stripped_tools_mounts_and_protected
                     request,
                     admission=replace(request.admission, origin_seal_ids=frozenset({UUID(int=1)})),
                 )
+            elif preparation == "held":
+                request = replace(
+                    request,
+                    admission=replace(
+                        request.admission,
+                        hold=TurnHold(platform="slack", channel_id="C-SYN-1", client=True),
+                    ),
+                )
             elif preparation == "publish":
                 request = replace(
                     request, admission=replace(request.admission, asks_before_publishing=True)
@@ -650,7 +752,7 @@ async def test_worker_native_readback_checks_stripped_tools_mounts_and_protected
             key="worker-input",
         )
         assert transport.requests[0]["agent"] == checked.agent.ref.id
-        assert transport.requests[0]["tools"] == []
+        assert transport.requests[0]["tools"] == [NO_TOOLS_TOOL]
         assert transport.requests[0]["environment"] == {"type": "remote", "sources": []}
         async with storage.transaction() as records:
             assert records.sessions[prepared.session_ref.id].spec.resources == ()
@@ -881,7 +983,7 @@ async def test_only_explicit_tools_compile_and_scope_is_pinned(
     runtime = build_channel_runtime(selected)
     assert isinstance(runtime.journal, GeminiJournal) and runtime.journal.deployment is not None
     native = compile_agent(runtime.journal.deployment.agent)
-    assert native["tools"] == ([{"type": "google_search"}] if tools else [])
+    assert native["tools"] == ([{"type": "google_search"}] if tools else [NO_TOOLS_TOOL])
     assert runtime.journal.state_store is selected.deps.state_store
     assert isinstance(runtime.usage_store, GeminiUsageRuntime)
     expected = {model: price for (_, model), price in pricing.provider_prices(PROFILE).items()}
@@ -989,7 +1091,22 @@ async def test_holds_survive_restart_and_refusal_never_releases_budget(
     )
     with pytest.raises(AdmissionDenied) as error:
         await accounting().before_attempt(model=model, attempt=1)
-    assert error.value.reason == "channel_budget_exceeded"
+    assert error.value.reason == "provider_hold_cap_reached"
+
+
+async def test_argon_attempt_holds_and_near_miss_ids_refuse(tmp_path: Path) -> None:
+    hold = SQLiteFlashAccounting(
+        tmp_path / "holds.sqlite",
+        namespace="account",
+        hold_usd=Decimal(".05"),
+        cap_usd=Decimal(".10"),
+    )
+    for near in ("gemini-4-argon-preview", "gemini-4"):
+        with pytest.raises(AdmissionDenied):
+            await hold.before_attempt(model=ModelRef(provider="gemini", id=near), attempt=1)
+    argon = ModelRef(provider="gemini", id=ARGON_MODEL)
+    await hold.before_attempt(model=argon, attempt=1)
+    await hold.after_attempt(receipt=FlashAttempt(argon, 1, "accepted", interaction_id="argon"))
 
 
 async def test_unknown_hold_commits_before_native_dispatch_and_survives_crash(
@@ -1087,18 +1204,53 @@ async def test_policy_refusal_precedes_selected_key_and_transport(
     assert not (tmp_path / "records.sqlite").exists()
 
 
-@pytest.mark.parametrize("output_cap", (None, 4096))
+def argon_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:  # pyright: ignore[reportIncompatibleMethodOverride]
+            assert tz is UTC
+            return day
+
+    monkeypatch.setattr(pricing, "datetime", Clock)
+
+
+def argon_selected(
+    selected: ProviderPreparationRequest, monkeypatch: pytest.MonkeyPatch, day: datetime
+) -> ProviderPreparationRequest:
+    """Select Argon on the channel and move the tariff clock to `day`."""
+    argon_clock(monkeypatch, day)
+    revision = selected.admission.backend_revision
+    assert revision is not None
+    config = ConfigRevision.create(
+        revision.channel,
+        1,
+        resolve_default(BackendConfig(backend="gemini", profile=PROFILE, model=ARGON_MODEL)),
+    )
+    return replace(
+        selected,
+        admission=replace(
+            selected.admission, backend_revision=config, backend=check_backend(config)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "output_cap,model", ((None, FLASH_PRIMARY), (4096, FLASH_PRIMARY), (None, ARGON_MODEL))
+)
 async def test_application_constructs_gemini_and_reuses_persisted_native_binding(
     selected: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     db_clean: None,
     output_cap: int | None,
+    model: str,
 ) -> None:
     import httpx
 
     from .test_gemini_codec import interaction
 
+    if model == ARGON_MODEL:
+        selected = argon_selected(selected, monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
     plan = entry(selected, tmp_path)
     if output_cap is not None:
         plan.update(
@@ -1115,12 +1267,13 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
         assert request.headers["x-goog-api-key"] == "offline-selected-key"
         if request.method == "POST":
             body = json.loads(request.content)
-            assert body["tools"] == []
+            # A capped model request has no built-ins; an agent allows the sentinel.
+            assert body["tools"] == ([NO_TOOLS_TOOL] if output_cap is None else [])
             if output_cap is None:
-                assert body["agent_config"]["model"] == FLASH_PRIMARY
+                assert body["agent_config"]["model"] == model
                 assert "generation_config" not in body
             else:
-                assert body["model"] == FLASH_PRIMARY
+                assert body["model"] == model
                 assert body["generation_config"] == {"max_output_tokens": 4096}
                 assert not {"agent", "agent_config", "environment"} & body.keys()
             assert "spend_control" not in body
@@ -1162,6 +1315,8 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
             reuse_existing=True,
         )
         assert prepared.runtime is not None and isinstance(prepared.runtime.journal, GeminiJournal)
+        deployment = prepared.runtime.journal.deployment
+        assert deployment is not None and deployment.agent.model.id == model
         if session_id is not None:
             assert prepared.ma_session_id == session_id
         session_id = prepared.ma_session_id
@@ -1268,11 +1423,11 @@ async def test_worker_materialization_runs_the_real_headless_driver(
     assert body["system_instruction"] == selected.worker.spec.system
     inputs = [call for call in calls if call.method == "POST"]
     assert len(inputs) == 1 and json.loads(inputs[0].content)["agent"] == body["id"]
-    assert json.loads(inputs[0].content)["tools"] == []
+    assert json.loads(inputs[0].content)["tools"] == [NO_TOOLS_TOOL]
     assert json.loads(inputs[0].content)["agent_config"] == {
         "type": "antigravity",
         "model": selected.worker.spec.model.id,
-        "max_total_tokens": 4096,
+        "max_total_tokens": 65_536,
     }
     operation = f"fleet:{worker.run_id}:spawn:{worker.ordinal}"
     store = selected.deps.state_store
@@ -1303,11 +1458,11 @@ async def test_real_worker_materialization_refuses_without_input_or_recreation(
     monkeypatch: pytest.MonkeyPatch,
     fault: str,
 ) -> None:
+    import mux.drivers.gemini as sdk_deployment
     from daimon.core.fleet import FleetConflict
     from daimon.core.headless_runner import run_worker
     from daimon.core.neutral_resources import WorkerSpecRefused
     from daimon.core.stores import fleet
-    from mux.drivers.gemini import deployment as sdk_deployment
 
     (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
     if fault == "disabled":
@@ -1608,6 +1763,26 @@ async def test_worker_runtime_refuses_a_deadline_beyond_the_cancel_bound_before_
     assert not owned.wire.requests and not calls
 
 
+async def test_argon_after_its_intro_tariff_refuses_before_runtime_discovery(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Admitted inside the window; the tariff expires before the runtime is built.
+    selected = argon_selected(selected, monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
+    argon_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
+    getter = os.environ.get
+
+    def no_manifest(name: str, default: str | None = None) -> str | None:
+        if name == "DAIMON_TURN__PROVIDER_RUNTIME_FILE":
+            pytest.fail("unpriced Argon discovered its runtime")
+        return getter(name, default)
+
+    monkeypatch.setattr(os.environ, "get", no_manifest)
+    with pytest.raises(AdmissionDenied) as refused:
+        build_gemini_runtime(selected)
+    assert refused.value.reason == "backend_unsupported"
+
+
 async def test_cheap_model_does_not_enable_an_ordinary_channel_runtime(
     selected: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
@@ -1617,6 +1792,58 @@ async def test_cheap_model_does_not_enable_an_ordinary_channel_runtime(
     revision = selected.admission.backend_revision
     assert revision is not None and selected.worker is None
     changed = revision.model_copy(update={"model": WORKER_MODEL})
+    selected = replace(selected, admission=replace(selected.admission, backend_revision=changed))
+    getter = os.environ.get
+
+    def no_manifest(name: str, default: str | None = None) -> str | None:
+        if name == "DAIMON_TURN__PROVIDER_RUNTIME_FILE":
+            pytest.fail("unsupported ordinary model discovered its runtime")
+        return getter(name, default)
+
+    monkeypatch.setattr(os.environ, "get", no_manifest)
+    with pytest.raises(AdmissionDenied) as refused:
+        build_gemini_runtime(selected)
+    assert refused.value.reason == "backend_unsupported"
+
+
+@pytest.mark.parametrize("model", selectable_models("gemini"))
+def test_every_agent_selectable_model_composes_an_uncapped_host_turn(model: str) -> None:
+    """What the card offers is what the host runs: an agent's turn is uncapped."""
+    from daimon.core.mux_backend import TurnRuntime
+    from daimon.core.turn.gemini import (  # pyright: ignore[reportPrivateUsage]
+        GeminiDeployment,
+        GeminiJournal,
+        _runtime_model,
+    )
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, EnvironmentSpec
+
+    deployment = GeminiDeployment(
+        "digest",
+        1,
+        "project",
+        AgentSpec(name="agent", model=ModelRef(provider="gemini", id=model)),
+        EnvironmentSpec(name="remote"),
+    )
+    runtime = TurnRuntime(
+        transport_factory=lambda *_: None,
+        journal=GeminiJournal(storage=None, state_store=None, deployment=deployment),  # pyright: ignore[reportArgumentType]
+        usage_store=None,
+    )
+    assert _runtime_model(runtime) == model
+
+
+@pytest.mark.parametrize("model", ["gemini-3.8-pro", "gemini-2.5-flash"])
+async def test_an_unselectable_model_does_not_enable_an_ordinary_runtime(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+) -> None:
+    # Ordinary turns run the selectable models (Flash, Flash-Lite, Argon); others,
+    # Pro included, refuse before any runtime discovery.
+    revision = selected.admission.backend_revision
+    assert revision is not None and selected.worker is None
+    changed = revision.model_copy(update={"model": model})
     selected = replace(selected, admission=replace(selected.admission, backend_revision=changed))
     getter = os.environ.get
 
@@ -1722,7 +1949,7 @@ def test_output_cap_omission_preserves_existing_plan_serialization(
 
 @pytest.mark.parametrize("host", ["discord", "mcp"])
 async def test_normal_fleet_factories_load_real_installed_native_tariffs(
-    db_nullpool_engine, db_schema, monkeypatch, host
+    db_committing_engine, db_schema, monkeypatch, host
 ):
     from daimon.adapters.discord import runtime as discord_runtime
     from daimon.adapters.mcp.server import create_mcp_app
@@ -1730,15 +1957,15 @@ async def test_normal_fleet_factories_load_real_installed_native_tariffs(
     from daimon.core.turn import runtimes
     from daimon.testing.asgi import asgi_lifespan
     from daimon.testing.db import build_test_engine
-    from daimon.testing.ma import build_stub_anthropic
     from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
     from google.genai import Client
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
     from openai import AsyncOpenAI
 
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1795,7 +2022,7 @@ async def test_normal_fleet_factories_load_real_installed_native_tariffs(
         async with client:
             app = create_mcp_app(
                 settings=settings,
-                sessionmaker=async_sessionmaker(db_nullpool_engine, expire_on_commit=False),
+                sessionmaker=async_sessionmaker(db_committing_engine, expire_on_commit=False),
                 auth=StaticTokenVerifier(tokens={}),
                 anthropic=client,
             )
@@ -1811,7 +2038,7 @@ async def test_normal_fleet_factories_load_real_installed_native_tariffs(
 )
 @pytest.mark.parametrize("priced", [False, True])
 async def test_real_financial_admission_requires_the_owner_native_model_row(
-    db_nullpool_engine, db_clean, provider, model, priced
+    db_committing_engine, db_clean, provider, model, priced
 ):
     from daimon.core.stores import fleet
     from mux.profiles import backend_selection
@@ -1819,7 +2046,7 @@ async def test_real_financial_admission_requires_the_owner_native_model_row(
 
     from ..test_fleet_budget import add, reserve, root, setup
 
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     original = root(provider)
     choice = backend_selection(provider).model_copy(update={"model": model})
     ref = ModelRef(provider=provider, id=model)
@@ -1854,6 +2081,8 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     manifest(monkeypatch, tmp_path / "runtime.json", [openai_entry()])
     monkeypatch.setenv("N4_OFFLINE_OPENAI_KEY", "offline")
     wire = Wire()
+    # The OpenAI profile has no native session cap: the row's limit isn't sent.
+    wire.expected_spend_limit = None
     clients = clients_for(monkeypatch, wire.handle)
     runtime = build_channel_runtime(application)
     config = application.admission.backend_revision
@@ -1897,7 +2126,7 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
         owned.manifest_path.write_text(json.dumps([values]))
     if journal_owner == "implicit":
         selected = replace(selected, deps=replace(selected.deps, state_store=None))
-    assert selected.worker.limits.max_input_tokens == 262144
+    assert selected.worker.limits.max_input_tokens == 16384
     result = await run_worker(
         selected,
         parent=root,
@@ -1913,7 +2142,7 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
     sent = json.loads(inputs[0].content)
     assert sent["model"] == "gemini-3.8-flash"
     assert sent["system_instruction"] == selected.worker.spec.system
-    assert sent["generation_config"] == {"max_output_tokens": 65536}
+    assert sent["generation_config"] == {"max_output_tokens": 8192}
     assert not {"agent", "agent_config", "environment", "previous_interaction_id"} & sent.keys()
     assert len([r for r in owned.wire.requests if r.method == "POST"]) == 1
 
@@ -1934,7 +2163,7 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
 
 
 @pytest.mark.parametrize("explicit_worker_request", [False, True], indirect=True)
-async def test_worker_cancelled_before_binding_records_preparation_refusal_without_native_io(
+async def test_worker_cancelled_before_binding_records_its_cancel_without_native_io(
     materialization_worker_request,
     monkeypatch,
 ):
@@ -1960,7 +2189,8 @@ async def test_worker_cancelled_before_binding_records_preparation_refusal_witho
         selected.deps.sessionmaker, tenant_id=worker.tenant_id, run_id=worker.run_id
     )
     ended = next(row for row in rows if row.id == worker.id)
-    assert ended.status == "failed" and ended.error_code == "preparation_refused"
+    # A cancel from outside is never a refusal (#1413 review B3).
+    assert ended.status == "failed" and ended.error_code == "watch_ended"
     assert ended.binding_id is None and ended.turns_used == 0 and ended.attempts == 0
     assert (len(calls), len(owned.wire.requests)) == before
 
@@ -2040,3 +2270,216 @@ async def test_hosted_gemini_worker_refuses_a_foreign_journal_before_provider_io
         )
     assert exc.value.reason == "journal_owner_mismatch"
     assert (len(calls), len(owned.wire.requests)) == before
+
+
+@pytest.mark.parametrize("platform", ["teams", "discord", "slack"])
+async def test_a_new_gemini_thread_sends_its_platforms_system_prompt_with_fragments_intact(
+    platform: str,
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_clean: None,
+) -> None:
+    """The inline agent is created with this platform's variant of the plan's system, and
+    the tenant's context-fragment block after it is sent byte for byte."""
+    import re
+
+    import yaml
+    from daimon.core.agent_guidance import apply_credential_guidance
+    from daimon.core.context_prompt import FRAGMENT_MARKER, ContextFragment, encode_fragments
+
+    from .test_gemini_codec import interaction
+    from .test_gemini_runtime_transport import clients_for
+
+    config = selected.admission.backend_revision
+    assert config is not None
+    moved = ConfigRevision.create(
+        config.channel.model_copy(update={"platform": platform}),
+        1,
+        resolve_default(BackendConfig(backend="gemini", profile=PROFILE, model=FLASH_PRIMARY)),
+    )
+    selected = replace(
+        selected,
+        platform=platform,
+        admission=replace(selected.admission, backend_revision=moved, backend=check_backend(moved)),
+    )
+    defaults = Path(__file__).resolve().parents[4] / "defaults" / "agents" / "daimon.yaml"
+    shipped = apply_credential_guidance(yaml.safe_load(defaults.read_text())["system"])
+    other = "Slack" if platform != "slack" else "Discord"
+    system = encode_fragments(
+        shipped,
+        {"routine": ContextFragment(text=f"Post the summary to {other} first.", mode="extend")},
+    )
+    plan = entry(selected, tmp_path)
+    plan["system"] = system
+    manifest(monkeypatch, tmp_path / "manifest.json", [plan])
+    monkeypatch.setenv("N4_OFFLINE_GEMINI_KEY", "offline-selected-key")
+    posts: list[dict[str, JsonValue]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            posts.append(json.loads(request.content))
+        return httpx.Response(200, json=interaction("one"))
+
+    clients_for(monkeypatch, handle)
+    async with selected.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=selected.tenant_id)
+    deps = replace(selected.deps, state_store=None)
+    prepared = await bind_session_impl(
+        deps,
+        selected.admission,
+        tenant_id=selected.tenant_id,
+        platform=platform,
+        external_user_id=selected.external_user_id,
+        thread_id=selected.thread_id,
+        session_account_id=selected.session_account_id,
+        reuse_existing=True,
+    )
+
+    async def reseed() -> str:
+        pytest.fail("Gemini turn used Anthropic recovery")
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=selected.tenant_id,
+        platform=platform,
+        thread_id=selected.thread_id,
+        external_user_id=selected.external_user_id,
+        user_message="question",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        operation_key="offline-gemini:platform-system",
+    )
+
+    sent = cast(str, posts[0]["system_instruction"])
+    head, marker, fragments = sent.partition(FRAGMENT_MARKER)
+    assert marker == FRAGMENT_MARKER
+    assert fragments == system.partition(FRAGMENT_MARKER)[2], "the fragment block is intact"
+    assert f"Post the summary to {other} first." in fragments
+    foreign = "|".join(p for p in ("discord", "slack", "teams") if p != platform)
+    assert re.search(foreign, head, re.IGNORECASE) is None
+    assert head != shipped
+
+
+async def test_fleet_r7_plain_language_gemini_worker_default_deadline_is_admitted(
+    materialization_worker_request: tuple[_ClaimedWorker, str],
+) -> None:
+    """r7: a run's default deadline past Gemini's cap refused every plain Gemini worker."""
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from daimon.core.neutral_resources import (
+        WorkerLimits,
+        default_worker_limits,
+        worker_runtime_ceiling,
+    )
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    (selected, root, _, _, _, _), _ = materialization_worker_request
+    now = selected.now()
+    run_ceiling = WorkerLimits(
+        budget_usd=Decimal("1"), deadline=now + timedelta(minutes=20), max_turns=1
+    )
+    with pytest.raises(AdmissionDenied):
+        build_gemini_runtime(replace(selected, deadline=run_ceiling.deadline))
+    assert worker_runtime_ceiling(replace(root, max_worker_seconds=None), "gemini") == 600
+    limits = default_worker_limits(
+        run_ceiling,
+        None,
+        (),
+        provider="gemini",
+        budget_usd=Decimal("0.49"),
+        now=now,
+        max_runtime_s=worker_runtime_ceiling(replace(root, max_worker_seconds=None), "gemini"),
+    )
+    assert limits.deadline == now + timedelta(minutes=10)
+    source = await capture_preparation_source(selected)
+
+    async def forbidden() -> None:
+        raise AssertionError("building the runtime invoked its financial guard")
+
+    runtime = build_gemini_runtime(
+        replace(selected, source=source, before_native=forbidden, deadline=limits.deadline)
+    )
+    assert runtime.materialize_worker is not None
+
+
+@pytest.mark.parametrize("explicit_worker_request", ["derived"], indirect=True)
+async def test_fleet_r9_plain_gemini_worker_with_the_real_root_prompt_takes_the_bounded_path(
+    materialization_worker_request,
+):
+    """r9: a plain-language Gemini worker inherited a ~24k-char root prompt and got the
+    unbounded 4096-token agent, which Google refused (HTTP 400). Derived limits keep it
+    on the bounded path, inside its budget and the deployment's $0.49 per-turn hold."""
+    from decimal import Decimal
+
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.neutral_resources import gemini_worker_cost_usd
+
+    (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
+    limits, system = selected.worker.limits, selected.worker.spec.system
+    assert len(system) >= 24_000
+    assert limits.max_input_tokens == len(system.encode()) + 4096
+    worst = gemini_worker_cost_usd(
+        selected.worker.spec.model.id, limits.max_input_tokens, limits.max_output_tokens
+    )
+    assert worst <= limits.budget_usd and worst <= Decimal("0.49")
+    result = await run_worker(
+        selected,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the assigned task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    inputs = [r for r in calls if r.url.path.endswith("/interactions") and r.method == "POST"]
+    assert len(inputs) == 1
+    sent = json.loads(inputs[0].content)
+    assert sent["system_instruction"] == system
+    assert sent["generation_config"] == {"max_output_tokens": limits.max_output_tokens}
+    # No managed agent, so no 4096-token total cap for the prompt to overflow.
+    assert not {"agent", "agent_config", "environment"} & sent.keys()
+
+
+async def test_a_used_up_daily_model_cap_refuses_before_google_is_called(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_clean: None,
+) -> None:
+    """Gemini usage reaches no ledger debit; the daily model cap stops the turn first."""
+    import httpx
+
+    from .test_gemini_runtime_transport import clients_for
+
+    manifest(monkeypatch, tmp_path / "manifest.json", [entry(selected, tmp_path)])
+    monkeypatch.setenv("N4_OFFLINE_GEMINI_KEY", "offline-selected-key")
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(500)
+
+    clients_for(monkeypatch, handle)
+    async with selected.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=selected.tenant_id)
+    deps = replace(selected.deps, state_store=None, gemini_daily_model_cap_usd=Decimal(0))
+
+    with pytest.raises(AdmissionDenied) as refused:
+        await bind_session_impl(
+            deps,
+            selected.admission,
+            tenant_id=selected.tenant_id,
+            platform=selected.platform,
+            external_user_id=selected.external_user_id,
+            thread_id=selected.thread_id,
+            session_account_id=selected.session_account_id,
+            reuse_existing=True,
+        )
+    model = selected.admission.backend_revision.model
+    assert (refused.value.reason, refused.value.provider) == ("provider_daily_cap_reached", model)
+    assert not [call for call in calls if call.method == "POST"], "nothing was created"

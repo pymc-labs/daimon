@@ -9,7 +9,6 @@ from pathlib import Path
 
 from daimon.core.channel_backend import check_backend
 from daimon.testing.admin_bindings import AdminBindings
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.outcome_oracle import TurnEvidence
 from daimon.testing.provider_fixtures import (
     BackendFixture,
@@ -23,6 +22,7 @@ from mux.contracts.ids import Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.drivers.openai.transport import SDKTransport
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 if __package__:
     from .catalog_product_context import ProductContext

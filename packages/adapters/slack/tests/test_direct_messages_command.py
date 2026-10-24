@@ -34,7 +34,7 @@ async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     client.conversations_open.assert_not_called()
     start_dm.assert_not_called()
     client.chat_postEphemeral.assert_awaited_once()
-    assert "Only turns inside" in client.chat_postEphemeral.await_args.kwargs["text"]
+    assert "Only conversations inside" in client.chat_postEphemeral.await_args.kwargs["text"]
 
 
 def _client() -> MagicMock:
@@ -55,7 +55,9 @@ async def test_the_dm_opens_with_the_two_line_continue_notice(
     monkeypatch.setattr(direct_messages, "require_dm_enabled", AsyncMock())
     monkeypatch.setattr(direct_messages, "sealed_channel_ids", AsyncMock(return_value=frozenset()))
     monkeypatch.setattr(
-        direct_messages, "admit", AsyncMock(return_value=MagicMock(source_sealed=False))
+        direct_messages,
+        "admit",
+        AsyncMock(return_value=MagicMock(source_sealed=False, source_shared=False)),
     )
     monkeypatch.setattr(direct_messages, "start_dm", AsyncMock())
 

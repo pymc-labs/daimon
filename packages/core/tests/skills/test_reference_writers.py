@@ -33,7 +33,8 @@ from daimon.core.stores.user_skills import list_user_skills_for_agent, upsert_us
 from daimon.testing.archives import make_tarball
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_cli_principal, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
@@ -42,7 +43,6 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
     skill_response,
 )
-from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 SKILL = "skill_existing"
@@ -93,9 +93,9 @@ class _Workspace:
 
 @pytest.fixture
 async def sm(
-    db_nullpool_engine: AsyncEngine, db_clean: None
+    db_committing_engine: AsyncEngine, db_clean: None
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    yield async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    yield async_sessionmaker(db_committing_engine, expire_on_commit=False)
 
 
 async def _tenant(sm: async_sessionmaker[AsyncSession]) -> TenantRow:

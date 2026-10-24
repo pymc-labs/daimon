@@ -14,6 +14,7 @@ import httpx
 import pytest
 import structlog
 from daimon.adapters.teams import app as app_module
+from daimon.adapters.teams import card as card_module
 from daimon.adapters.teams import reactions
 from daimon.adapters.teams.admissions import HOLDING
 from daimon.adapters.teams.app import TeamsApp
@@ -25,6 +26,7 @@ from daimon.adapters.teams.commands import (
 )
 from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
+from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -34,6 +36,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import Role, TurnCardIntentRow
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.tenants import set_plain_text_mentions, set_turn_cap
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
@@ -42,10 +45,11 @@ from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, MissingTurnConfigError
 from daimon.core.turn.outcomes import drain_outcomes
+from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.slots import holding, wait_for_slot
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
-from microsoft_teams.api import MessageActivity
+from microsoft_teams.api import AdaptiveCardActionCardResponse, MessageActivity
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -710,7 +714,7 @@ async def test_a_card_post_failure_after_admission_still_finishes_the_outcome(
     )
 
 
-def _click(key: str, clicker: str) -> Any:
+def _click(key: str, clicker: str | None) -> Any:
     action = SimpleNamespace(data={"action": "cancel_turn", "turn": key})
     activity = SimpleNamespace(
         value=SimpleNamespace(action=action), from_=SimpleNamespace(aad_object_id=clicker)
@@ -775,19 +779,149 @@ async def test_a_refusal_whose_receipt_cannot_be_recorded_is_not_sent(
     reply.assert_not_awaited()
 
 
+def _cancel_entry(
+    teams: TeamsApp, key: str, *, sender: FakeSender, author: str = AAD_OBJECT_ID
+) -> tuple[app_module._CancelEntry, asyncio.Event]:  # pyright: ignore[reportPrivateUsage]
+    """A registered turn whose status card is posted, as the lifecycle leaves it."""
+    cancel = asyncio.Event()
+    lifecycle = TeamsTurnLifecycle(
+        sender=sender, conversation_id=CONVERSATION_ID, service_url=None, cancel_key=key
+    )
+    entry = app_module._CancelEntry(cancel, author, lifecycle)  # pyright: ignore[reportPrivateUsage]
+    teams._cancel_registry[key] = entry  # pyright: ignore[reportPrivateUsage]
+    return entry, cancel
+
+
+def _stopping_card(response: Any) -> str:
+    assert isinstance(response, AdaptiveCardActionCardResponse), response
+    return response.value.model_dump_json(by_alias=True)
+
+
 async def test_only_the_author_can_cancel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    teams = _app(db_session_factory, FakeSender())
-    cancel = asyncio.Event()
-    teams._cancel_registry["key-1"] = (cancel, AAD_OBJECT_ID)
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    entry, cancel = _cancel_entry(teams, "key-1", sender=sender)
+    await entry.lifecycle.post_initial()
 
     refused = await teams.handle_cancel(_click("key-1", OTHER_AAD_OBJECT_ID))
     assert refused.value == app_module._CANCEL_NOT_AUTHOR and not cancel.is_set()
+    assert not entry.lifecycle.stopping, "another person's click leaves the card alone"
     ended = await teams.handle_cancel(_click("key-2", AAD_OBJECT_ID))
     assert ended.value == app_module._CANCEL_TURN_ENDED
     accepted = await teams.handle_cancel(_click("key-1", AAD_OBJECT_ID.upper()))
-    assert accepted.value == app_module._CANCELLING and cancel.is_set()
+    assert cancel.is_set() and entry.lifecycle.stopping
+    stopping = _stopping_card(accepted)
+    assert card_module.STOPPING_HEADLINE in stopping, "the clicker sees it at once"
+    assert card_module.CANCEL_VERB not in stopping, "no Stop button on the stopping card"
+    assert len(sender.sent) == 1, "the click handler sends nothing itself"
+    await entry.lifecycle._card_edits.stopping  # pyright: ignore[reportPrivateUsage]
+    assert len(sender.sent) == 2 and sender.activities[-1].id == "m-1", (
+        "the lifecycle edits the card"
+    )
+    assert card_module.STOPPING_HEADLINE in sender.activities[-1].model_dump_json()
+
+
+async def test_a_current_deployment_admin_can_stop_anyones_reply(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    teams._teams = teams._teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
+    owners = AsyncMock(return_value=frozenset({OTHER_AAD_OBJECT_ID}))
+    teams.runtime = dataclasses.replace(teams.runtime, team_owners=owners)
+    entry, cancel = _cancel_entry(teams, "key-1", sender=sender)
+    await entry.lifecycle.post_initial()
+
+    accepted = await teams.handle_cancel(_click("key-1", OTHER_AAD_OBJECT_ID))
+    assert cancel.is_set() and entry.lifecycle.stopping, "an owner of the admin team stops it"
+    assert card_module.STOPPING_HEADLINE in _stopping_card(accepted)
+    owners.assert_awaited_with(ADMIN_TEAM)
+
+
+@pytest.mark.parametrize("case", ["non_admin", "owners_unreadable", "no_entra_id"])
+async def test_a_non_admin_or_an_unreadable_role_cannot_stop_anothers_reply(
+    db_session_factory: async_sessionmaker[AsyncSession], case: str
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    teams._teams = teams._teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
+    owners = (
+        AsyncMock(side_effect=GroupLookupFailed("http error (status 503)"))
+        if case == "owners_unreadable"
+        else AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
+    )
+    teams.runtime = dataclasses.replace(teams.runtime, team_owners=owners)
+    entry, cancel = _cancel_entry(teams, "key-1", sender=sender)
+    await entry.lifecycle.post_initial()
+
+    clicker = None if case == "no_entra_id" else OTHER_AAD_OBJECT_ID
+    refused = await teams.handle_cancel(_click("key-1", clicker))
+    expected = (
+        app_module._CANCEL_ROLE_UNKNOWN  # pyright: ignore[reportPrivateUsage]
+        if case == "owners_unreadable"
+        else app_module._CANCEL_NOT_AUTHOR  # pyright: ignore[reportPrivateUsage]
+    )
+    assert refused.value == expected, "an outage is not read as 'not an admin'"
+    assert not cancel.is_set() and not entry.lifecycle.stopping
+    if case == "no_entra_id":
+        owners.assert_not_awaited()  # a click with no Entra id is never checked as an admin
+
+
+async def test_a_stop_click_after_the_closing_notice_started_is_told_the_reply_finished(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    entry, cancel = _cancel_entry(teams, "key-1", sender=sender)
+    await entry.lifecycle.post_initial()
+    await entry.lifecycle.on_terminal_success(TurnState())  # Registered until the turn's cleanup.
+
+    late = await teams.handle_cancel(_click("key-1", AAD_OBJECT_ID))
+    assert late.value == app_module._CANCEL_TURN_ENDED and not cancel.is_set()
+    assert not entry.lifecycle.stopping and "Stopped." in sender.activities[-1].model_dump_json()
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_stop_survives_dead_session_recovery(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The retry's lifecycle takes the registry entry over and still reads "Stopping…"."""
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    seen: dict[str, Any] = {}
+
+    async def run(*_args: Any, recovery_lifecycle: Any, **_kwargs: Any) -> RunOutcome:
+        [key] = teams._cancel_registry  # pyright: ignore[reportPrivateUsage]
+        seen["click"] = await teams.handle_cancel(_click(key, AAD_OBJECT_ID))
+        adopted = recovery_lifecycle(asyncio.Event())
+        seen["entry"] = teams._cancel_registry[key]  # pyright: ignore[reportPrivateUsage]
+        seen["adopted"] = adopted
+        await adopted._card_edits.stopping  # pyright: ignore[reportPrivateUsage]
+        seen["edited"] = sender.activities[-1].model_copy(deep=True)
+        later = await teams.handle_cancel(_click(key, AAD_OBJECT_ID))
+        seen["again"] = later
+        await adopted.on_terminal_success(TurnState())
+        return RunOutcome(
+            state=TurnState(), ma_session_id="sess-teams-1", mapping_id=None, recovered=True
+        )
+
+    with (
+        patched_admission(),
+        patch.object(app_module, "run_prepared_turn", AsyncMock(side_effect=run)),
+    ):
+        await teams._run_turn(make_inbound(), TENANT)  # pyright: ignore[reportPrivateUsage]
+
+    assert seen["entry"].lifecycle is seen["adopted"], "a later click reaches the new attempt"
+    assert seen["adopted"].stopping
+    assert card_module.STOPPING_HEADLINE in seen["edited"].model_dump_json(), "into the same card"
+    assert seen["edited"].id == "m-1" and 'Stop"' not in seen["edited"].model_dump_json()
+    assert card_module.STOPPING_HEADLINE in _stopping_card(seen["again"])
+    assert "Stopped." in sender.activities[-1].model_dump_json(), (
+        "the closing notice has the last word"
+    )
+    assert teams._cancel_registry == {}  # pyright: ignore[reportPrivateUsage]
 
 
 async def _open_intents(db_factory: async_sessionmaker[AsyncSession]) -> list[TurnCardIntentRow]:
@@ -869,6 +1003,35 @@ async def test_a_denied_turn_says_why_without_a_card(
         "Your team's Daimon credit has run out.\n\nAn admin can top up with `billing` in a 1:1 chat with me."
     ], "the refusal says why, in the organisation's nouns"
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize("named", [True, False])
+async def test_a_refusal_that_sends_the_person_to_an_admin_says_who_the_admins_are(
+    db_session_factory: async_sessionmaker[AsyncSession], named: bool
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    teams.runtime.settings.teams = teams.runtime.settings.teams.model_copy(
+        update={"admin_team_id": ADMIN_TEAM}
+    )
+    if named:
+        async with db_session_factory.begin() as session:
+            await record_teams_installation(
+                session,
+                tenant_id=TENANT,
+                team_id="19:admins@thread.tacv2",
+                group_id=ADMIN_TEAM,
+                name="Leads",
+            )
+    err = MissingTurnConfigError(
+        missing=("agent",), agent_name_tier=None, environment_name_tier=None
+    )  # pyright: ignore[reportArgumentType]
+    with patch.object(app_module, "admit", AsyncMock(side_effect=err)):
+        await teams._run_turn(make_inbound(), TENANT)
+    [notice] = [a.text for a in sender.activities]
+    assert notice.startswith("Daimon isn't set up in this channel yet.\n\nAsk an admin to ")
+    assert notice.endswith("\n\nAdmins are the owners of the Leads team.") is named
 
 
 def _unprompted_reply() -> TeamsInbound:
@@ -1020,7 +1183,7 @@ async def test_a_queued_turn_posts_its_card_then_waits_behind_it(
         await asyncio.sleep(0.05)
         run.assert_not_called()
         if stop:
-            ((cancel, _author),) = teams._cancel_registry.values()
+            [(cancel, _author, _lifecycle)] = teams._cancel_registry.values()
             cancel.set()
             async with asyncio.timeout(5):
                 await task
@@ -1049,14 +1212,14 @@ def test_a_channel_without_setup_gets_one_plain_notice(missing: tuple[str, ...])
         environment_name_tier=None,
     )
     assert app_module._admission_refusal(err, uuid.uuid4()) == (  # pyright: ignore[reportPrivateUsage]
-        "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `setup`."
+        "Daimon isn't set up in this channel yet.\n\nAsk an admin to send `setup` in a 1:1 chat with me."
     )
 
 
 def test_a_stale_setup_says_it_is_out_of_date() -> None:
     err = MAResolverMissError(kind="agent", tenant_id=uuid.uuid4(), daimon_tag="gone")
     assert app_module._admission_refusal(err, uuid.uuid4()) == (  # pyright: ignore[reportPrivateUsage]
-        "This channel's setup is out of date.\n\nAsk an admin to check `setup`."
+        "This channel's setup is out of date.\n\nAsk an admin to check `setup` in a 1:1 chat with me."
     )
 
 

@@ -38,14 +38,12 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.thread_sessions import list_orphaned_turns
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import build_turn_router, ma_session
+from daimon.testing import build_turn_router
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
-    MARouter,
-    build_fake_anthropic,
-)
 from daimon.testing.membership import FixtureMembershipResolver
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _AGENT_TEXT = "Hello from the agent!"

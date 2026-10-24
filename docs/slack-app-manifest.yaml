@@ -32,7 +32,7 @@ features:
       description: Continue privately (an admin turns it on)
       should_escape: false
     - command: /help
-      description: List commands
+      description: This list
       should_escape: false
     - command: /here
       description: Who answers here and what it can use
@@ -104,6 +104,10 @@ settings:
       - group_deleted
       - app_uninstalled
       - tokens_revoked
+      # Slack Connect: record shared channels; see docs/slack.md.
+      - channel_shared
+      - channel_unshared
+      - member_joined_channel
   interactivity:
     is_enabled: true
   socket_mode_enabled: true

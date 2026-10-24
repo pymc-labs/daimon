@@ -9,12 +9,12 @@ from dataclasses import dataclass, field
 from typing import IO
 
 import pytest
-from daimon.testing.isolated_sdk import SDK_ENV_VARS
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import Method, Object
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
+from mux.testing.isolated_sdk import SDK_ENV_VARS
 
 
 @pytest.fixture(autouse=True)

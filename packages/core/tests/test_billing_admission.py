@@ -24,7 +24,7 @@ from daimon.core import billing
 from daimon.core._models import UsageEvent
 from daimon.core.stores import tenant_user_caps, usage_events
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_model_usage
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

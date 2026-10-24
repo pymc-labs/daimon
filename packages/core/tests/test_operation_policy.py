@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import get_args
 
+import pytest
 from daimon.core.operation_policy import (
     OperationKind,
     TargetFacts,
@@ -122,6 +123,17 @@ def test_needs_reachability_read_matches_decide_operation() -> None:
                     is_admin=is_admin,
                     target=_facts(managed=is_daimon_managed, reachable=False),
                 )
+                outcome_owned = decide_operation(
+                    operation,
+                    is_admin=is_admin,
+                    target=_facts(managed=is_daimon_managed, reachable=False).model_copy(
+                        update={"owned_by_caller": True}
+                    ),
+                )
+                assert outcome_owned == outcome_unreachable, (
+                    f"needs_reachability_read skipped the owner read for {operation} "
+                    f"(admin={is_admin}, managed={is_daimon_managed})"
+                )
                 assert outcome_reachable == outcome_unreachable, (
                     f"needs_reachability_read said {operation} (admin={is_admin}, "
                     f"managed={is_daimon_managed}) does not depend on reachability, "
@@ -168,3 +180,39 @@ def test_skill_add_and_remove_follow_the_spec_family() -> None:
         assert decide_operation(operation, is_admin=False, target=unrouted) == "needs_admin", (
             f"{operation}: unbound agents require an admin"
         )
+
+
+_OWNED = TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=False, owned_by_caller=True)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["agent_spec_edit", "skill_add", "skill_remove", "mcp_connect", "mcp_replace", "mcp_remove"],
+)
+def test_the_owner_may_change_its_agents_spec_and_connections(operation: OperationKind) -> None:
+    assert decide_operation(operation, is_admin=False, target=_OWNED) == "allow"
+    unowned = _OWNED.model_copy(update={"owned_by_caller": False})
+    assert decide_operation(operation, is_admin=False, target=unowned) == "needs_admin"
+
+
+@pytest.mark.parametrize(
+    "operation", ["repo_bind", "skill_repo_connect", "github_connect", "github_grant"]
+)
+def test_the_owner_may_not_spend_the_workspaces_github_installation(
+    operation: OperationKind,
+) -> None:
+    assert decide_operation(operation, is_admin=False, target=_OWNED) == "needs_admin"
+
+
+def test_ownership_never_unlocks_a_defaults_managed_agent() -> None:
+    managed = _OWNED.model_copy(update={"is_daimon_managed": True})
+    assert decide_operation("agent_spec_edit", is_admin=False, target=managed) == "managed_agent"
+    assert decide_operation("mcp_connect", is_admin=False, target=managed) == "managed_agent"
+
+
+def test_a_member_s_change_to_an_unmanaged_agent_reads_its_owner() -> None:
+    assert needs_reachability_read("agent_spec_edit", is_admin=False, is_daimon_managed=False)
+    assert needs_reachability_read("mcp_connect", is_admin=False, is_daimon_managed=False)
+    assert not needs_reachability_read("repo_bind", is_admin=False, is_daimon_managed=False)
+    assert not needs_reachability_read("key_add", is_admin=False, is_daimon_managed=False)
+    assert not needs_reachability_read("agent_spec_edit", is_admin=False, is_daimon_managed=True)

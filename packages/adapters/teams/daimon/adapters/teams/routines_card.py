@@ -40,6 +40,11 @@ FORM_FIELDS = {
     "message": "What to ask the agent",
 }
 _EMPTY_HINT = 'No routines yet.\n\nAsk your agent: "Schedule a daily summary at 9am."'
+_CRON_LABEL = "Schedule (advanced: cron, like 0 9 * * 1-5)"
+_CREATE_HINT = (
+    'Easiest: ask me in a channel, like "every weekday at 9am, post the sales numbers".\n\n'
+    "Or fill in the form."
+)
 # Core caps the panel at 25 rows; 18 fit Teams' 28 KB with emoji labels and a status line.
 _ROWS_SHOWN = 18
 
@@ -152,6 +157,7 @@ def create_form(
     """The New routine form, refilled with `values` and topped by `error` on a retry."""
     body: list[CardElement] = [error_text(error)] if error else []
     body += [
+        TextBlock(text=_CREATE_HINT, wrap=True),
         ChoiceSetInput(
             id="agent",
             label=FORM_FIELDS["agent"],
@@ -160,15 +166,15 @@ def create_form(
             choices=[Choice(title=name, value=name) for name in agent_names],
         ),
         TextBlock(
-            text="Five fields: minute, hour, day of month, month, day of week. "
-            "0 9 * * * means every day at 09:00.",
+            text="Minute, hour, day of month, month, day of week. "
+            "0 9 * * 1-5 is weekdays at 09:00.",
             is_subtle=True,
             wrap=True,
         ),
         TextInput(
             id="cron",
-            label=FORM_FIELDS["cron"],
-            placeholder="0 18 * * *",
+            label=_CRON_LABEL,
+            placeholder="0 9 * * 1-5",
             is_required=True,
             value=values.get("cron"),
         ),

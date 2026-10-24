@@ -61,7 +61,7 @@ _REPO_KINDS: Final[frozenset[str]] = frozenset({"repo", "skill_repo"})
 _TITLE_FALLBACK: Final[dict[CredentialRequestKind, str]] = {
     "env": "Add a key",
     "env_file": "Keys from a file",
-    "mcp": "Your MCP token",
+    "mcp": "Your connection token",
     "repo": "Your GitHub token",
     "skill_repo": "Your GitHub token",
 }

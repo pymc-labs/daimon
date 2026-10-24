@@ -32,6 +32,7 @@ from daimon.adapters.mcp.oauth_slack import (
     _install_landing_html,
     _page,
     _success_html,
+    _welcome_dm_text,
     build_oauth_slack_routes,
 )
 from daimon.adapters.mcp.server import create_mcp_app
@@ -200,7 +201,7 @@ def test_success_html_escapes_workspace_name_xss() -> None:
     Sending a <script> payload must produce &lt;script&gt; in the body,
     never the raw tag that a browser would execute.
     """
-    response = _success_html(workspace="<script>alert(1)</script>", signup_credit=Decimal("5.00"))
+    response = _success_html(workspace="<script>alert(1)</script>", credit=Decimal("5.00"))
     body = response.body.decode()
     assert "<script>alert(1)</script>" not in body, (
         "raw <script> must not appear in success page body (XSS)"
@@ -209,26 +210,26 @@ def test_success_html_escapes_workspace_name_xss() -> None:
 
 
 def test_success_html_title() -> None:
-    response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
+    response = _success_html(workspace="Acme Corp", credit=Decimal("5.00"))
     body = response.body.decode()
     assert "<title>Daimon: Daimon installed</title>" in body
 
 
 def test_success_html_interpolates_workspace_name() -> None:
-    response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
+    response = _success_html(workspace="Acme Corp", credit=Decimal("5.00"))
     body = response.body.decode()
     assert "Installed in Acme Corp" in body, "success page h1 should include workspace name"
 
 
 def test_success_html_no_button() -> None:
-    response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
+    response = _success_html(workspace="Acme Corp", credit=Decimal("5.00"))
     body = response.body.decode()
     # The success page deliberately has no CTA button
     assert 'class="btn"' not in body, "success page should not have a CTA button"
 
 
 def test_success_html_close_tab_copy() -> None:
-    response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
+    response = _success_html(workspace="Acme Corp", credit=Decimal("5.00"))
     body = response.body.decode()
     assert "close this tab" in body.lower(), (
         "success page should tell the user they can close the tab"
@@ -237,16 +238,41 @@ def test_success_html_close_tab_copy() -> None:
 
 def test_success_html_mentions_promo_codes_only_when_one_is_redeemable() -> None:
     """A deployment without promo codes keeps its install page unchanged."""
-    plain = bytes(_success_html(workspace="Acme", signup_credit=Decimal("5")).body).decode()
+    plain = bytes(_success_html(workspace="Acme", credit=Decimal("5")).body).decode()
     promo = bytes(
-        _success_html(workspace="Acme", signup_credit=Decimal("5"), promo_codes=True).body
+        _success_html(workspace="Acme", credit=Decimal("5"), promo_codes=True).body
     ).decode()
     assert "promo code" not in plain, "no codes, no mention"
     assert "admins can redeem it in <code>/billing</code>" in promo, "admins are pointed at it"
 
 
+def test_success_html_says_how_to_add_the_bot_to_a_channel() -> None:
+    body = bytes(_success_html(workspace="Acme", credit=Decimal("5")).body).decode()
+    assert (
+        "Invite it to a channel with <code>/invite @daimon</code>, then mention it there." in body
+    )
+
+
+def test_welcome_dm_text_says_what_it_does_one_thing_to_try_and_the_setup_phrase() -> None:
+    assert _welcome_dm_text(display_name="daimon", credit=Decimal("10"), promo_codes=False) == (
+        "*👋 Daimon is ready*\n"
+        "I answer questions about data and write code, charts and notebooks.\n"
+        "Try it: invite me to a channel with `/invite @daimon`, then mention me there "
+        "with a question, or attach a CSV and ask me to summarise it.\n"
+        'To set things up, mention me and say "help me set up".\n'
+        "You have $10 of credit. Each answer shows what's left."
+    )
+
+
+def test_welcome_dm_text_leaves_out_credit_when_there_is_none_and_escapes_the_name() -> None:
+    text = _welcome_dm_text(display_name="a<b>", credit=None, promo_codes=True)
+    assert "of credit" not in text
+    assert "`/invite @a&lt;b&gt;`" in text
+    assert text.endswith("Have a promo code? An admin can redeem it in `/billing`.")
+
+
 def test_success_html_status_200() -> None:
-    response = _success_html(workspace="Acme Corp", signup_credit=Decimal("5.00"))
+    response = _success_html(workspace="Acme Corp", credit=Decimal("5.00"))
     assert response.status_code == 200, "success page should return 200"
 
 
@@ -1116,10 +1142,103 @@ async def test_callback_user_connect_mismatch_attempts_revoke_and_still_returns_
     assert row_u2 is None, "no token row should ever be stored for the foreign authed_user"
 
 
-def test_success_html_escapes_configured_bot_name() -> None:
-    response = _success_html(
-        workspace="Acme", signup_credit=Decimal("5.00"), display_name="research<bot>"
+def _slack_posts(m: aioresponses, path: str) -> list[dict[str, object]]:
+    return [
+        req.kwargs["json"]
+        for (method, url), reqs in m.requests.items()
+        if method == "POST" and url.path == path
+        for req in reqs
+    ]
+
+
+async def _install_with_welcome(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    m: aioresponses,
+    *,
+    authed_user: dict[str, object] | None,
+) -> httpx.Response:
+    handler = _make_slack_exchange_handler(authed_user=authed_user)
+
+    def make_client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=10.0)  # type: ignore[arg-type]
+
+    app = _build_isolated_slack_app(
+        sessionmaker,
+        settings=_build_slack_settings(),
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        client_factory=make_client,
     )
+    state = mint_state(signing_secret=_SIGNING_SECRET, now=time.time())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        return await client.get(f"/oauth/slack/callback?code={_SLACK_CODE}&state={state}")
+
+
+async def test_install_welcomes_the_installing_user_in_a_dm(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    with aioresponses() as m:
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            "https://slack.com/api/chat.postMessage", payload={"ok": True}, repeat=True
+        )
+        r = await _install_with_welcome(sessionmaker, m, authed_user={"id": _SLACK_USER_ID})
+
+    assert r.status_code == 200
+    posts = _slack_posts(m, "/api/chat.postMessage")
+    assert len(posts) == 1, "one welcome per install"
+    assert posts[0]["channel"] == _SLACK_USER_ID, "the DM goes to the person who installed"
+    text = str(posts[0]["text"])
+    assert "invite me to a channel with `/invite @daimon`" in text
+    assert 'say "help me set up"' in text
+
+
+async def test_a_reinstall_sends_no_second_welcome(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    with aioresponses() as m:
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            "https://slack.com/api/chat.postMessage", payload={"ok": True}, repeat=True
+        )
+        first = await _install_with_welcome(sessionmaker, m, authed_user={"id": _SLACK_USER_ID})
+        again = await _install_with_welcome(sessionmaker, m, authed_user={"id": _SLACK_USER_ID})
+
+    assert first.status_code == again.status_code == 200
+    assert len(_slack_posts(m, "/api/chat.postMessage")) == 1, "a reinstall is no first use"
+
+
+async def test_install_without_an_installing_user_sends_no_dm(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    with aioresponses() as m:
+        r = await _install_with_welcome(sessionmaker, m, authed_user=None)
+
+    assert r.status_code == 200
+    assert _slack_posts(m, "/api/chat.postMessage") == []
+
+
+async def test_install_succeeds_when_the_welcome_dm_fails(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    with aioresponses() as m:
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            "https://slack.com/api/chat.postMessage",
+            payload={"ok": False, "error": "missing_scope"},
+        )
+        r = await _install_with_welcome(sessionmaker, m, authed_user={"id": _SLACK_USER_ID})
+
+    assert r.status_code == 200, "a failed DM must not turn the finished install into an error"
+    assert _SLACK_TEAM_NAME in r.text
+    assert len(_slack_posts(m, "/api/chat.postMessage")) == 1
+
+
+def test_success_html_names_no_credit_without_a_prepaid_balance() -> None:
+    body = bytes(_success_html(workspace="Acme", credit=None).body).decode()
+    assert "credit is ready" not in body
+
+
+def test_success_html_escapes_configured_bot_name() -> None:
+    response = _success_html(workspace="Acme", credit=Decimal("5.00"), display_name="research<bot>")
     body = response.body.decode()
     assert "@research&lt;bot&gt;" in body, "success instructions must escape the configured name"
     assert "@daimon" not in body, "success instructions must not retain a hardcoded bot mention"

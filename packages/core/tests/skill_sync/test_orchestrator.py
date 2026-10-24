@@ -48,13 +48,13 @@ from daimon.core.stores.user_skills import (
 from daimon.testing.archives import make_tarball
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_cli_principal
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
     not_found_response,
 )
-from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

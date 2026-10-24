@@ -25,8 +25,13 @@ from daimon.core.reader_agent import (
     ensure_reader_variant,
 )
 from daimon.core.specs import AgentSpec, SkillRef
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    json_body,
+    list_response,
+)
 
 TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
 ACCOUNT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a2")

@@ -54,6 +54,7 @@
             "seal_ids": [],
             "thread_id": null
           },
+          "platform": "discord",
           "privacy": {
             "channel_id": "C_ENV",
             "parent_id": "C_ENV",

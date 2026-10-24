@@ -25,17 +25,17 @@ from daimon.testing.anthropic_fixtures import (
     load_anthropic_fixtures,
 )
 from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.isolated_sdk import build_async_anthropic
-from daimon.testing.ma import (
-    FakeMAState,
-    combine_handlers,
-    make_fake_memory_store_handler,
-    resolved_agent_env_router,
-)
+from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from daimon.testing.provider_fixtures import ScenarioFixture
 from daimon.testing.provider_replay import Record, SourcePin, WireReply
+from mux.testing.drivers.anthropic.ma import (
+    FakeMAState,
+    combine_handlers,
+    make_fake_memory_store_handler,
+)
+from mux.testing.isolated_sdk import build_async_anthropic
 from pydantic import JsonValue, TypeAdapter, model_validator
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 

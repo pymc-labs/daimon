@@ -426,7 +426,12 @@ async def test_ephemeral_token_retention_preserves_grace_and_external_history(
 ) -> None:
     from datetime import timedelta
 
-    from daimon.core.mcp_auth import CHAT_TOKEN_LABEL_PREFIX, PANEL_TOKEN_LABEL, chat_token_label
+    from daimon.core.mcp_auth import (
+        CHAT_TOKEN_LABEL_PREFIX,
+        HELD_CHAT_TOKEN_LABEL_PREFIX,
+        PANEL_TOKEN_LABEL,
+        chat_token_label,
+    )
 
     tenant_id, account_id = await _seed_tenant_and_account(db_session)
     now = datetime.now(UTC)
@@ -434,6 +439,7 @@ async def test_ephemeral_token_retention_preserves_grace_and_external_history(
     ids: dict[str, uuid.UUID] = {}
     for name, kind, expiry in (
         ("chat", "agent", old),
+        ("held_chat", "agent", old),
         ("revoked_chat", "agent", old),
         ("panel", "cli", old),
         ("grace", "agent", now - timedelta(hours=1)),
@@ -450,7 +456,7 @@ async def test_ephemeral_token_retention_preserves_grace_and_external_history(
             if name == "external"
             else None
             if name in {"cli", "operator"}
-            else chat_token_label(jti)
+            else chat_token_label(jti, held=name == "held_chat")
         )
         await store.create_mcp_token_row(
             db_session,
@@ -469,19 +475,19 @@ async def test_ephemeral_token_retention_preserves_grace_and_external_history(
         await store.prune_expired_ephemeral_tokens(
             db_session,
             expires_before=now - timedelta(days=1),
-            chat_label_prefix=CHAT_TOKEN_LABEL_PREFIX,
+            chat_label_prefixes=(CHAT_TOKEN_LABEL_PREFIX, HELD_CHAT_TOKEN_LABEL_PREFIX),
             panel_label=PANEL_TOKEN_LABEL,
         )
-        == 3
+        == 4
     )
     for name, jti in ids.items():
         row = await store.get_mcp_token(db_session, jti=jti)
-        assert (row is None) == (name in {"chat", "revoked_chat", "panel"})
+        assert (row is None) == (name in {"chat", "held_chat", "revoked_chat", "panel"})
     assert (
         await store.prune_expired_ephemeral_tokens(
             db_session,
             expires_before=now - timedelta(days=1),
-            chat_label_prefix=CHAT_TOKEN_LABEL_PREFIX,
+            chat_label_prefixes=(CHAT_TOKEN_LABEL_PREFIX, HELD_CHAT_TOKEN_LABEL_PREFIX),
             panel_label=PANEL_TOKEN_LABEL,
         )
         == 0

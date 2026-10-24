@@ -24,7 +24,7 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.slack_turn_contexts import get_slack_turn_channels
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn.state import TextBlock, TurnState
-from daimon.testing import ma_session, ma_session_agent
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_orchestrate_app

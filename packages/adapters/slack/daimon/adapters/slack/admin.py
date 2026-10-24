@@ -12,7 +12,7 @@ resolves once per interaction; no cross-interaction cache.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final, cast
 
 import aiohttp
@@ -43,10 +43,28 @@ def _is_admin_signal(user: dict[str, Any]) -> bool:
 class SlackRequester:
     """What one ``users.info`` call says about the person who sent a turn."""
 
+    #: True only for a verified host-workspace member carrying an admin signal;
+    #: an external or unverified user is never an admin, whatever their own
+    #: workspace says about them.
     is_admin: bool
     #: ``profile.display_name``, else ``profile.real_name``, else ``name``;
     #: ``None`` when Slack returned none of them.
     display_name: str | None
+    #: ``users.info`` ``team_id``: the user's home workspace; ``None`` when absent.
+    team_id: str | None
+    #: ``users.info`` ``is_stranger``: a Slack Connect user from outside the host
+    #: workspace sharing a channel with it.
+    is_stranger: bool
+    #: The workspace hosting the app, which the user must belong to.
+    host_team_id: str
+
+    @property
+    def is_host_member(self) -> bool:
+        """True for a verified member of the host workspace.
+
+        A missing ``team_id`` is not verified: the claim must be positive.
+        """
+        return self.team_id == self.host_team_id and not self.is_stranger
 
 
 def _display_name(user: dict[str, Any]) -> str | None:
@@ -66,32 +84,16 @@ def _display_name(user: dict[str, Any]) -> str | None:
     return None
 
 
-async def resolve_requester(client: AsyncWebClient, *, user_id: str) -> SlackRequester | None:
-    """Return the requester's admin signal and display name, or ``None`` if the lookup failed.
+async def _lookup_user(client: AsyncWebClient, *, user_id: str) -> dict[str, Any] | None:
+    """Call ``users.info`` and return the user dict, or ``None`` if the lookup failed.
 
-    Calls ``users.info`` via the injected per-event client; never caches the
-    result on a module or runtime. This is the one place that calls
-    ``users.info`` and catches its failures — ``resolve_admin_status`` and
-    ``resolve_is_admin`` below are implemented on top of it so there remains
-    exactly one network call and one catch site.
+    The one network call and the one catch site: ``resolve_requester`` and
+    ``resolve_is_admin`` are both built on it.
 
     Both failure classes are caught. ``SlackApiError`` covers an API-level
     refusal (a missing ``users:read`` scope, a rate limit). ``aiohttp``
     transport errors and timeouts cover the network itself, and are NOT
-    ``SlackApiError`` subclasses — before they were caught here, a transient
-    connection reset propagated out of the mention path and killed the turn.
-
-    Unlike ``resolve_is_admin``, this distinguishes "not an admin" from "the
-    lookup itself failed" (``None``) — callers that must not treat a transient
-    Slack error as a demotion need that distinction.
-
-    Args:
-        client:  Per-event ``AsyncWebClient`` (injected; never cached).
-        user_id: Slack user ID from the verified Socket Mode payload.
-
-    Returns:
-        A ``SlackRequester`` from ``users.info``, or ``None`` if the lookup
-        failed at either the API or the transport layer.
+    ``SlackApiError`` subclasses.
     """
     try:
         resp = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
@@ -99,35 +101,66 @@ async def resolve_requester(client: AsyncWebClient, *, user_id: str) -> SlackReq
         log.warning("slack.is_admin.lookup_failed", user=user_id, exc_info=exc)
         return None
     u: dict[str, Any] = resp["user"]  # pyright: ignore[reportUnknownVariableType, reportAssignmentType]  # SlackResponse subscript is untyped
-    return SlackRequester(is_admin=_is_admin_signal(u), display_name=_display_name(u))
+    return u
 
 
-async def resolve_admin_status(client: AsyncWebClient, *, user_id: str) -> bool | None:
-    """Return the workspace-admin signal, or ``None`` if the lookup failed.
+async def resolve_requester(
+    client: AsyncWebClient, *, user_id: str, host_team_id: str
+) -> SlackRequester | None:
+    """Return what ``users.info`` says about the requester, or ``None`` if the lookup failed.
 
-    Thin wrapper over ``resolve_requester`` for callers that only need the
-    admin signal: ``True``/``False`` from ``users.info``, ``None`` when the
-    lookup failed at the API or transport layer.
+    Calls ``users.info`` once via the injected per-event client; never caches
+    the result. ``None`` (lookup failed) is distinct from "not an admin", so
+    callers that must not treat a transient Slack error as a demotion can tell
+    them apart.
+
+    ``is_admin`` is True only when the user is a verified member of
+    ``host_team_id`` and carries an admin signal.
+
+    Args:
+        client:       Per-event ``AsyncWebClient`` (injected; never cached).
+        user_id:      Slack user ID from the verified Socket Mode payload.
+        host_team_id: The workspace that hosts the app.
     """
-    requester = await resolve_requester(client, user_id=user_id)
+    u = await _lookup_user(client, user_id=user_id)
+    if u is None:
+        return None
+    raw_team = u.get("team_id")
+    requester = SlackRequester(
+        is_admin=False,
+        display_name=_display_name(u),
+        team_id=raw_team if isinstance(raw_team, str) and raw_team else None,
+        is_stranger=bool(u.get("is_stranger")),
+        host_team_id=host_team_id,
+    )
+    return replace(requester, is_admin=requester.is_host_member and _is_admin_signal(u))
+
+
+async def resolve_admin_status(
+    client: AsyncWebClient, *, user_id: str, host_team_id: str
+) -> bool | None:
+    """Return the host-workspace admin signal, or ``None`` if the lookup failed.
+
+    Thin wrapper over ``resolve_requester``: ``True`` only for a verified host
+    member with an admin signal, ``False`` otherwise, ``None`` when the lookup
+    failed at the API or transport layer.
+    """
+    requester = await resolve_requester(client, user_id=user_id, host_team_id=host_team_id)
     return None if requester is None else requester.is_admin
 
 
-async def resolve_is_admin(client: AsyncWebClient, *, user_id: str) -> bool:
-    """Return True if the Slack user is a workspace admin, fail-closed.
+async def resolve_is_admin(client: AsyncWebClient, *, user_id: str, host_team_id: str) -> bool:
+    """Return True only for a verified host-workspace member with an admin signal.
 
-    Thin wrapper over ``resolve_admin_status`` that collapses "not an admin"
-    and "lookup failed" into ``False`` — this is the ONE deliberate
-    sentinel-return at the adapter boundary, justified by the fail-closed
-    security requirement, and it is unchanged for this function's existing
-    callers.
-
-    Args:
-        client:  Per-event ``AsyncWebClient`` (injected; never cached).
-        user_id: Slack user ID from the verified Socket Mode payload.
+    Collapses "not an admin" and "lookup failed" into ``False``: the ONE
+    deliberate sentinel-return at the adapter boundary, justified by the
+    fail-closed security requirement. A member of another workspace (Slack
+    Connect) is never an admin here, whatever their own workspace says: the
+    host team is required, so no caller can skip the check.
 
     Returns:
-        ``True`` if the user is a workspace admin, owner, or primary owner;
+        ``True`` if the user is a host-workspace admin, owner, or primary owner;
         ``False`` otherwise, including on any ``users.info`` failure.
     """
-    return bool(await resolve_admin_status(client, user_id=user_id))
+    requester = await resolve_requester(client, user_id=user_id, host_team_id=host_team_id)
+    return requester is not None and requester.is_admin

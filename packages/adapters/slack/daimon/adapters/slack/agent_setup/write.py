@@ -79,7 +79,7 @@ async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str
         # memory store with it.
         raise DaimonError(
             f"*{name}* is a built-in agent and cannot be deleted. "
-            "Fork it first, then delete the fork."
+            "Make a copy first, then delete the copy."
         )
     await archive_agent(runtime.anthropic, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
     await agent_lifecycle.archive_memory_store_best_effort(

@@ -786,7 +786,7 @@ channel, else `Channel name unavailable`; never the `19:…` id.
 
 The panel has no `·` separators: the admin subtitle is two lines (`October
 2026`, `$48.17 spent by 9 people`), an expiry date reads `$20.00 on Oct 12`,
-and a top-up amount is `$10` with `about 100 turns` under it.
+and a top-up amount is `$10` with `about 100 answers` under it.
 
 A privacy deletion removes the person's stored name with the rest of their
 records, in every tenant their account has a principal in, and drops any name
@@ -907,7 +907,7 @@ native session and bound observation recorder. Usage frames can arrive without
 a display event; nullable measurements and pending accounting stay intact.
 The default Anthropic session continues to use its SDK span recorder.
 OpenAI probe reconciliation can read captured Admin Costs and Completions Usage
-exports through `python -m daimon.testing.conformance.usage_reconciliation --costs costs.json
+exports through `python -m mux.testing.conformance.usage_reconciliation --costs costs.json
 --usage usage.json --attestation attestation.json --guard-config budget.json
 --spend-ledger spend.md`. This command reads files only and emits an assessment
 and, when eligible, an unsigned proposal bound to the current hold. Lead approval
@@ -1144,7 +1144,14 @@ worker event after its admission transaction commits. It fans out
 these decisions at four Hz by default, including producer time in the interval,
 and remains active across completed or cancelled cohorts until the run owner
 sets the run-finished event. Unavailable usage fails closed and cancels all
-registered workers. The watcher has no separate worker
+registered workers. A busy tenant fleet lock is not by itself unavailable usage:
+on each busy poll the watcher logs the holding transaction
+(`fleet.budget_lock_busy`) and decides from `read_fleet_budget_snapshot`, the same
+producer read from a REPEATABLE READ, READ ONLY snapshot with no tenant or row
+locks and no writes, so contention never stops overrun cancellation. It still
+fails closed when one transaction holds the lock for `BUDGET_LOCK_BUSY_LIMIT_S`
+(10 s) or the lock stays busy for `BUDGET_LOCK_CONTENDED_LIMIT_S` (60 s), and
+after `BUDGET_READ_TIMEOUT_LIMIT` consecutive slow reads. The watcher has no separate worker
 deadline: `run_prepared_turn` owns it. Complete native execution, operator-funded
 admission, replacement inventory and exact final settlement remain unavailable
 here. These interfaces create no ledger charge or provider-native hard cap;
@@ -1179,6 +1186,9 @@ existing serialized intent.
 An authenticated parent's optional `provider_limits_usd` fences each provider's
 sibling worker exposure within the run. A missing or zero line refuses that
 provider; a funded reservation cannot borrow unused capacity from another line.
+Provider lines must not add up to more than the grant's run budget: financial
+admission refuses every spawn of such a run, so the fleet grant preview refuses
+the grant first (`fleet provider limits exceed budget`).
 The same financial producer sums whole unknown reservations and measured
 overruns before admission, under its existing lock and exact decimal context.
 These worker sublimits do not reserve root inference or install credential-line
@@ -1187,7 +1197,7 @@ controls; a financial snapshot alone never certifies a provider spending cap.
 
 An optional `native_budget_usd` requests a native session spend control, in
 positive exact cents. It is a soft control, separate from the held worker
-budget. Its worker must have one host input and a deadline within 120 seconds;
+budget. Its worker must have one host input and a deadline within 600 seconds;
 the existing input claim counts that input before dispatch and retains the
 count after an uncertain acknowledgement. Additional turn-input mutations are
 refused, while cancellation and archive remain available. A child cannot drop
@@ -1240,7 +1250,10 @@ replacement key is used.
 Profile accounting modes select the existing settlement protocol. Request-span
 profiles retain their legacy arithmetic, projections and idempotency keys.
 Native totals require complete attributed usage, verified prices and measured
-infrastructure before settlement; unknown charges stay pending. Native root
+infrastructure before settlement; unknown charges stay pending. Native requests
+settle the same way over incremental model-request observations, which is what
+the self-hosted driver emits; native totals and native root totals settle turn
+observations. Each mode names its grain (`AccountingMode.usage_grain`). Native root
 totals additionally permit the existing independently proven disjoint child
 inventory; this does not enable delegation configuration. Usage DTOs carry only
 a provider, so accounting reads the registered profiles' shared mode and refuses
@@ -1252,8 +1265,19 @@ from `daimon.core.pricing.provider_prices(profile)`. Their provider identities c
 is evaluated against the UTC date. These immutable source rows
 were checked on 2026-10-14 against the official OpenAI model/Agents usage pages
 and Gemini pricing/Antigravity pages listed in `PROVIDER_PRICING_SOURCES`.
-Coverage is `gpt-6-luna`, `gemini-3.5-flash-lite`, and `gemini-3.8-flash`;
-unsupported models stay unpriced. Flash promotional rates expire at 2027-01-01.
+Coverage is `gpt-6-luna`, `gpt-6-astra`, `gemini-3.5-flash-lite`, and
+`gemini-3.8-flash`; unsupported models stay unpriced. `gpt-6-astra` (checked
+2026-10-22: input $10, output $50, cached input $1, cache writes $12.50 per 1M
+tokens) has the same 272,000-token threshold as Luna: above it OpenAI doubles
+input and cache rates and charges 1.5x output. A larger Astra aggregate is
+priced wholly at those long-context rates (it may mix tiers, so this is an
+upper bound); a larger Luna aggregate stays unpriced. An Astra session always
+runs under a native spend limit: a deployment row or worker that supplies none
+is refused at admission. Flash promotional rates expire at 2027-01-01.
+`gemini-4-argon` carries only its introductory rate (checked 2026-10-22: input
+$2, output $10, cached input $0.10 = 95% off, per 1M tokens), valid through
+2026-11-30. No post-intro rate is checked in. From 2026-12-01 Argon is unpriced
+and its turns are refused at admission until a new dated row lands.
 These token rates exclude tool, cache-storage and container/session charges.
 The runtime still needs complete measured infrastructure before exact billing.
 
@@ -1305,3 +1329,159 @@ the maximum applicable input/cache-write rate and every output token at the
 output rate. Cache discounts can reduce actual cost but cannot expand the
 worker's token authority. Existing worker cash holds, funding checks and
 unknown-usage handling remain authoritative.
+
+## Self-hosted request reconciliation
+
+The self-hosted driver records each durable `model_request_started` as a pending
+request with unknown usage (revision 1). A later measurement supersedes it as
+revision 2 under the same observation id; replay never creates another charge.
+An explicit `usage_unavailable` also keeps that request pending. Missing token
+counts remain unknown, including after cancellation or a harness restart.
+
+A terminal turn with no request inventory or usage is retained for operator
+reconciliation. A cancellation stays interrupted; other outcomes report an error. Its terminal event remains replayable,
+and later turns can use the session. Operators must investigate these unresolved
+turns rather than treating them as zero-cost work.
+
+## Selfhosted Azure usage
+
+The selfhosted accounting API settles incremental `model_request` observations
+through the transactional usage outbox and credit ledger. A stable observation
+ID represents each harness request: replay, polling and corrections must retain
+it. Higher revisions apply only the signed difference. Cached input is a subset
+of inclusive input, and reasoning is already included in output. Markup applies
+once to the resulting cost.
+
+Azure deployment names are arbitrary. Configure
+`DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` as a JSON object mapping deployments to
+underlying models, and `DAIMON_BILLING__SELFHOSTED__MODELS` as a JSON object keyed
+by underlying model ID. Each model contains a **list of historical tariffs**.
+Each tariff requires `effective_from` (ISO date), `input`, `output` and
+`cache_read` (USD per million tokens), with optional exclusive `valid_before`.
+A newer effective date ends the previous open window. Retain historical entries;
+duplicate dates, overlapping windows, aliases shadowing another model, empty
+histories and deployments targeting unpriced models fail settings validation.
+Input/output rates must be positive; cache-read can explicitly be zero. Supply
+verified regional/contract Azure rates. There is no built-in Azure tariff or
+public OpenAI fallback.
+
+`require_selfhosted_price` provides a refusal gate; the runtime **must call it
+before paid work**. The registered `selfhosted.loop` core runtime checks this
+before every harness HTTP call and commits `admit_selfhosted_usage` before the
+turn POST. It derives the admission key from the durable wire turn id and uses
+the same key for streaming usage, replay and reconciliation. The operator must
+explicitly enable selfhosted admission and grant the channel configuration in
+the runtime manifest; tariff settings alone do not enable execution. The
+manifest requires a nonnegative `infrastructure_usd` cost per request, including
+an explicit zero when infrastructure is funded separately. Admission commits the deployment, underlying model, tariff identity
+(model plus effective date), rates and authorized session in the existing
+operation store. Repeating that admission key retrieves its original snapshot.
+
+`record_selfhosted_usage` takes that `admission_key`, not live tariff settings.
+The first receipt persists its admission snapshot; all corrections and recovery
+use the same snapshot, even if the deployment is remapped, a rate is edited,
+or a newer tariff takes effect. Receipts may name the admitted deployment or
+its admitted underlying model. Accounting uses the admitted underlying model
+for every revision, including unknown usage, so an alias change on recovery
+does not change the accounting identity. The native meter stays untouched;
+the receipt context retains each revision's original model alias for audit.
+The saved admission explicitly includes `deployment`, `underlying_model` and
+`tariff_effective_from`. A missing,
+late or corrupt admission, or an unexpected model, stays pending with a reason;
+current settings cannot retroactively establish what was admitted.
+
+Corrections retain the stored accounting identity even when tariff context is
+corrupt. Their token counts and native meters remain durable and pending with
+a reason; repairing the context can settle the same revision without another
+debit. Tariff validity uses the saved host admission date and effective tariff,
+so accepted harness clock lag across midnight cannot strand measured usage.
+The original harness timestamp remains unchanged in the accounting record.
+
+A receipt first recorded without a valid admission key may adopt an existing,
+valid admission once during replay. Its original request timestamps must fit
+that admission; a later correction cannot hide a request made before admission.
+After association, another key cannot replace its tariff. Unsettled accounting
+aliases are normalised during adoption; native meters and source aliases are
+retained. `DAIMON_BILLING__SELFHOSTED__ADMISSION_CLOCK_SKEW_S` allows harness clock
+lag (default 5 seconds, configurable from 0 to 60), frozen with the admission.
+The tolerance accepts a harness timestamp 300 ms behind the host without
+creating an admission or consulting current prices.
+
+The recorder requires an explicit `infrastructure_usd` argument: `None` means
+unknown and keeps settlement pending; audited zero means the operator funds
+compute separately. The token counters cannot establish compute cost. Unknown
+or partial usage stays pending even with populated counters. Missing usage is
+never replaced by zero. Turn telemetry retains unknown cost and unpriced calls.
+
+Inspect pending billing observations with:
+
+```bash
+daimon usage pending TENANT_UUID --limit 1000 --json
+daimon usage pending TENANT_UUID --limit 1000 --cursor PREVIOUS_NEXT_CURSOR --json
+```
+
+The read-only JSON envelope contains `rows`, `truncated`, `next_cursor` and
+`invalid_rows`. Rows include a reason, such as `usage_unknown`,
+`infrastructure_unknown`, `admission_missing`, `model_mismatch` or
+`tariff_context_invalid`. Pages follow creation time with stable identity ties;
+the cursor is tenant-bound. The default limit is 100 and maximum is 1000 per
+page. A malformed body is flagged as `invalid_observation`, with no body-derived
+session/model data, so other gaps remain visible. A settled higher revision
+removes its superseded gap while retaining all audit snapshots.
+
+Recovery replays authoritative harness usage through the recorder. An unchanged
+pending snapshot may settle when verified compute becomes available; repaired
+usage requires a higher measured revision of the same request ID. The CLI only
+reports gaps: it provides no apply/repair command. Runtime journal replay owns
+reconciliation. A missing admitted tariff needs authoritative original admission
+evidence; admitting a new tariff after the request does not repair it.
+
+The runtime advances a per-binding replay cursor only after recording the
+receipts through that position. Later turns read from that cursor, while a
+recovered invocation retains its original baseline. Reconciliation therefore
+processes new receipts without re-recording lifetime session usage.
+
+The Anthropic usage sweep is not a selfhosted recovery path. The harness journals
+request intention before model I/O. On reconcile, an unmatched intention becomes
+an unknown observation with the same stable request ID. Retain it pending until
+authoritative usage is recovered; never infer token counts from a terminal turn
+or a missing receipt.
+
+## Self-hosted harness request accounting
+
+The Azure Responses harness durably records `model_request_started` with a
+stable request ID before model I/O. A response that reports usage produces
+exactly one `usage` event for that ID, with measured input, cached input, output
+and reasoning counts. Retries and separate tool-loop requests have distinct
+request IDs. Idempotent turn replay reads the journal without requesting a new
+model response or charging another observation.
+
+A failed or cancelled request with no reported usage closes with
+`error(kind="usage_unavailable", request_id=...)`. This is unknown usage, never
+invented zero tokens. A successful response without usage fails the turn with
+`usage_missing`. On recovery/reconcile, any start without a closing observation
+also remains unknown under its original ID. A terminal turn with no request
+observations is unresolved; turn completion does not supply token counts.
+Operators must reconcile these pending observations against provider usage
+before final settlement. The window between receiving provider usage and
+committing the usage event remains a known reconciliation gap.
+
+Self-hosted turn cleanup attempts bounded harness cancellation when the host
+reader ends before a terminal event. The frozen tariff admission remains durable.
+Replay records late receipts from earlier turns under their original turn
+admission key, including on a later invocation of the same session. A journaled
+model start without measured usage remains an unknown pending observation until
+its measured revision arrives; elapsed host deadlines do not discard it.
+
+### Codex loop compaction metering
+
+With `HARNESS_LOOP=codex`, internal checkpoint compaction requests are metered
+model requests. Ordinary requests and compaction requests each have their own
+budget of `min(max_tool_calls + 2, 128)` per turn. Compaction does not consume
+ordinary continuation slots, so the worst-case request allowance is twice the
+ordinary cap, bounded at 256 total requests per turn.
+
+Every provider request, including compaction, journals `model_request_started`
+before model I/O and exactly one closing outcome under the same request ID:
+measured `usage` or unknown `usage_unavailable`. Compaction usage follows the
+same accounting and reconciliation rules as ordinary requests.

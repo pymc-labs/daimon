@@ -151,7 +151,7 @@ def render_rule_refusal(
     name = agent_name or "the agent answering here"
     match reason:
         case "admin_required":
-            return "Only a server or workspace admin can change channel and agent rules."
+            return "Only an admin can change channel and agent rules."
         case "invalid":
             return "That rule can't be set there."
         case "own_on_both":
@@ -689,6 +689,8 @@ async def set_channel_rule(
             subject=subject,
             default_agent_name=default.agent_name,
             extra_metadata={MA_METADATA_KEY_CHANNEL_COPY: channel_id},
+            # The channel's copy stands in for the same agent: same owner.
+            owner="source",
         )
     else:
         taken = {
@@ -800,7 +802,7 @@ class AgentRuleChange:
             notes = [f"{self.agent_name} runs only in {', '.join(self.runs_in)}."]
         if self.answers_outside:
             notes.append(
-                "It is still set to answer outside them, where its turns are now refused; "
+                "It is still the default outside them, where it now won't answer; "
                 "change those defaults too."
             )
         return tuple(notes)

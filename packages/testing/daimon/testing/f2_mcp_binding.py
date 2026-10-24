@@ -14,8 +14,10 @@ from uuid import UUID
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti, validate_agent_mcp_token
 from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.domain import McpTokenSurface
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from mux.contracts.ids import Provider, ResourceRef, Scope
+from mux.profiles import MANAGED_AGENTS
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -47,6 +49,16 @@ class AgentMCPAuthority:
     redact: Callable[[tuple[str, ...]], None] = field(repr=False)
     canonical_source: ResourceRef | None = None
     chat_execution: bool = False
+
+
+def binding_surface(authority: AgentMCPAuthority) -> McpTokenSurface | None:
+    """A pinned OpenAI/Gemini row's chat credential has no confirmation card either.
+
+    An Anthropic turn keeps its card, so its credential never takes this surface.
+    """
+    if authority.chat_execution and authority.provider != MANAGED_AGENTS.provider:
+        return "provider_turn"
+    return None
 
 
 class AgentMCPBinding:
@@ -156,6 +168,7 @@ class AgentMCPBinding:
                 secret=secret.encode(),
                 now=now,
                 chat_execution=binding.chat_execution,
+                surface=binding_surface(binding),
                 ttl_days=ttl / 86400,  # pyright: ignore[reportArgumentType]
             )
             binding.redact((token,))

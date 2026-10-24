@@ -44,16 +44,16 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_tool_rules, session_settle_state
 from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy
-from daimon.testing import (
-    ma_agent,
-    ma_environment,
-    ma_session,
-    with_coordinator,
-    with_hidden_capability,
-)
+from daimon.testing import ma_agent, ma_environment, with_coordinator, with_hidden_capability
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, send_events_response
+from daimon.testing.ma import MARouter
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import (
+    build_fake_anthropic,
+    json_body,
+    ma_session,
+    send_events_response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TENANT_ID = uuid.uuid4()

@@ -91,14 +91,16 @@ def test_build_button_label_env() -> None:
 
 
 def test_build_button_label_mcp() -> None:
-    assert build_button_label("mcp", "linear") == "Add MCP token: linear"
+    assert build_button_label("mcp", "linear") == "Add connection token: linear"
 
 
 def test_build_button_label_truncates_long_target_within_discord_label_limit() -> None:
     label = build_button_label("mcp", "x" * 200)
 
     assert len(label) <= MAX_BUTTON_LABEL_CHARS, "label must fit Discord's 80-char button limit"
-    assert label.startswith("Add MCP token: "), "truncation must not lose the human-readable prefix"
+    assert label.startswith("Add connection token: "), (
+        "truncation must not lose the human-readable prefix"
+    )
 
 
 def test_build_button_label_repo() -> None:
@@ -166,7 +168,7 @@ def test_build_button_label_honours_slack_label_limit() -> None:
 
     label = build_button_label("mcp", "x" * 200, max_chars=MAX_SLACK_BUTTON_LABEL_CHARS)
     assert len(label) == MAX_SLACK_BUTTON_LABEL_CHARS == 75
-    assert label.startswith("Add MCP token: ")
+    assert label.startswith("Add connection token: ")
     assert label.endswith("…")
 
 

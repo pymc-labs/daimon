@@ -12,8 +12,8 @@ from daimon.core.defaults.reconcile_skills import reconcile_skill
 from daimon.core.defaults.report import Action
 from daimon.core.stores.seeded_skills import load_seeded_skill
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response
-from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

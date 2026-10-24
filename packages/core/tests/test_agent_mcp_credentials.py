@@ -202,13 +202,13 @@ async def test_a_fork_of_the_agent_hides_the_copied_server_from_the_person_who_s
 
 
 async def test_owned_credential_metadata_omits_token_columns_and_foreign_refs(
-    db_preflight, db_nullpool_engine
+    db_preflight, db_committing_engine
 ):
     from daimon.core.stores import agent_mcp_credentials as credentials
     from daimon.testing.db import require_owned_sessionmaker
     from sqlalchemy import event
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     agent_id = uuid.uuid4()
     async with sessions.begin() as db:
@@ -233,14 +233,14 @@ async def test_owned_credential_metadata_omits_token_columns_and_foreign_refs(
     def capture(connection, cursor, statement, parameters, context, many):
         queries.append(statement)
 
-    event.listen(db_nullpool_engine.sync_engine, "before_cursor_execute", capture)
+    event.listen(db_committing_engine.sync_engine, "before_cursor_execute", capture)
     try:
         async with sessions() as db:
             refs = await credentials.list_credential_revisions(
                 db, tenant_id=tenant.id, agent_id=agent_id
             )
     finally:
-        event.remove(db_nullpool_engine.sync_engine, "before_cursor_execute", capture)
+        event.remove(db_committing_engine.sync_engine, "before_cursor_execute", capture)
     assert refs == ((owned.id, _SERVER_URL, owned.updated_at),)
     assert all("encrypted_token" not in sql for sql in queries)
     assert "ciphertext" not in repr(refs)

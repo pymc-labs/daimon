@@ -176,6 +176,9 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_skill": "content_hash",
     "lead_intake_resolve": "resolution",
     "request_agent_backend_switch": "preview_digest",
+    "request_fleet_config": "preview_digest",
+    "request_provider_allowlist": "preview_digest",
+    "request_channel_pin_clear": "preview_digest",
     # Every call names its action, so every call asks.
     "microsoft_send": "action",
     # Every call names its method; asks only with tool safety on.
@@ -188,9 +191,30 @@ WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
 )
 
 
+def confirmation_gated_tools() -> frozenset[str]:
+    """Daimon tools that only run after a person confirms on a card (or publish)."""
+    return (
+        frozenset(CONFIRMED_DAIMON_TOOLS)
+        | frozenset(PUBLISH_TOOLS)
+        | WATCH_CONFIRMED_TOOLS
+        | {"lead_intake_resolve", "set_routine_sandbox_tools"}
+    )
+
+
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     """Project authoritative backend-selection eligibility into session controls."""
-    return frozenset({"request_agent_backend_switch"}) if enabled else frozenset()
+    return (
+        frozenset(
+            {
+                "request_agent_backend_switch",
+                "request_fleet_config",
+                "request_provider_allowlist",
+                "request_channel_pin_clear",
+            }
+        )
+        if enabled
+        else frozenset()
+    )
 
 
 def microsoft_send_tools(*, enabled: bool, tool_safety_on: bool = False) -> frozenset[str]:
@@ -441,12 +465,14 @@ class ToolSafetyPolicy(BaseModel):
     confirmation_timeout_s: int = Field(
         default=600,
         ge=30,
-        le=3600,
+        le=86400,
         description=(
             "How long an approval card waits for the requester's Approve or Deny, in "
-            "seconds, before it expires and the call is refused. Production keeps the "
-            "10-minute default; staging can set it short (60-90) so a precheck or load "
-            "test does not hold a turn for ten minutes."
+            "seconds (up to 24 hours), before it expires and the call is refused. A card "
+            "never outlives its turn: it shows and keeps the earlier of this and the "
+            "turn's own deadline. Production keeps the 10-minute default; staging can set "
+            "it short (60-90) so a precheck or load test does not hold a turn for ten "
+            "minutes."
         ),
     )
 
@@ -482,6 +508,7 @@ class ToolCall(BaseModel):
     server_name: str | None
     tool_name: str
     input: dict[str, object] = Field(default_factory=dict)
+    permission: Literal["allow", "ask", "deny"] | None = None
 
     @property
     def key(self) -> str:
@@ -708,6 +735,35 @@ def heal_reserved_server(
 
 
 def decide_tool_call(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    *,
+    attended: bool,
+    trusted_servers: frozenset[str] = frozenset(),
+    annotations: ToolAnnotations | None = None,
+    confirmed_tools: frozenset[str] = frozenset(),
+    agent_rule: ResolvedAgentToolRule | None = None,
+) -> ToolVerdict:
+    """Provider permission can tighten a host verdict, never grant consent."""
+    verdict = _decide_tool_call(
+        policy,
+        call,
+        attended=attended,
+        trusted_servers=trusted_servers,
+        annotations=annotations,
+        confirmed_tools=confirmed_tools,
+        agent_rule=agent_rule,
+    )
+    if call.permission == "deny":
+        return ToolVerdict(outcome="deny", effect=verdict.effect, reason="agent_rule_deny")
+    if call.permission == "ask" and verdict.outcome == "allow":
+        return ToolVerdict(
+            outcome="ask" if attended else "deny", effect=verdict.effect, reason="agent_rule_ask"
+        )
+    return verdict
+
+
+def _decide_tool_call(
     policy: ToolSafetyPolicy,
     call: ToolCall,
     *,

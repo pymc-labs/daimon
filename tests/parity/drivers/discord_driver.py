@@ -78,10 +78,11 @@ from daimon.core.stores.domain import CredentialRequestRow, Role
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_session
-from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.membership import FixtureMembershipResolver
 from daimon.testing.turn_fakes import deps_for
+from daimon.testing.turn_leg import turn_leg
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -90,7 +91,7 @@ from .protocol import PanelAction, parity_account_id, pin_agent
 from .views import CapturedView, normalize_line, read_discord_modal, read_discord_view
 
 _BALANCE_BLOCKED_TEXT = (
-    "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
+    "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
 )
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 
@@ -321,6 +322,7 @@ class DiscordDriver:
         settings.recruitment = RecruitmentSettings()
         settings.agent_identity.enabled = True
         settings.mcp = McpSettings()
+        settings.turn = turn_leg()  # the selected leg, a real TurnSettings
         settings.billing.markup = Decimal("1.0")
         settings.billing.signup_credit = Decimal("0")
         settings.crypto.keys = []
@@ -702,6 +704,8 @@ class DiscordDriver:
                 configuration_target_ma_agent_id=agent_id,
                 configuration_target_name=agent_name,
                 role=Role.ADMIN,
+                sender_foreign=False,
+                shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
                 chat_session_id="parity-card-session",

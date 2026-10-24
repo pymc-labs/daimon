@@ -65,6 +65,63 @@ def binding_slot(binding: ProviderBinding) -> Slot:
     return Slot(thread=binding.thread, account_id=binding.legacy_account_id)
 
 
+RELEASED_REF = "released"
+"""The `native_refs` key of a released binding: the slot no longer pins a provider."""
+
+ERA_REF = "era"
+"""The `native_refs` key a host stamps on a slot it adopted: the era suffix of its keys."""
+
+
+def is_released(binding: ProviderBinding | None) -> bool:
+    """A released slot reads as unbound; its next first bind keeps its identity."""
+    return binding is not None and binding.native_refs.get(RELEASED_REF) == "1"
+
+
+def released_successor(current: ProviderBinding) -> ProviderBinding:
+    """The next generation of `current` with no provider session: the thread's
+    next turn selects its provider afresh and starts a fresh native session.
+
+    Written through `put_binding`'s compare-and-swap like any rebind.
+    """
+    return current.model_copy(
+        update={"generation": current.generation + 1, "native_refs": {RELEASED_REF: "1"}}
+    )
+
+
+def adopt_released(
+    current: ProviderBinding | None, binding: ProviderBinding, *, expected_generation: int
+) -> tuple[ProviderBinding, int]:
+    """A first bind (generation 1 over "unbound") of a released slot becomes its successor.
+
+    A slot's binding id is permanent (every journal and usage row keys on it),
+    so the successor keeps the released identity at the next generation. A host
+    that adopts a slot uses `adopted_identity` for its ids and provider keys, so
+    one provider era's cached creations are never replayed in another. Anything
+    else is returned unchanged for `check_binding_successor` to judge.
+    """
+    if (
+        is_released(current)
+        and current is not None
+        and expected_generation == 0
+        and binding.generation == 1
+        and not is_released(binding)
+    ):
+        return (
+            binding.model_copy(update={"id": current.id, "generation": current.generation + 1}),
+            current.generation,
+        )
+    return binding, expected_generation
+
+
+def adopted_identity(released: ProviderBinding | None, derived_id: str) -> tuple[str, str]:
+    """The binding id a host binds a slot under, and the suffix for its provider
+    idempotency keys: the released slot's own id and generation, else the host's."""
+    if is_released(released):
+        assert released is not None
+        return released.id, f":g{released.generation}"
+    return derived_id, ""
+
+
 def check_binding_successor(
     current: ProviderBinding | None, binding: ProviderBinding, *, expected_generation: int
 ) -> None:
@@ -72,7 +129,9 @@ def check_binding_successor(
 
     The slot's generation must still be `expected_generation` (0 for an
     unbound slot), the new binding must be the next generation, and a
-    rebind keeps the binding's `id`.
+    rebind keeps the binding's `id`. A first bind of a released slot has
+    already been made its successor by `adopt_released`, so it is judged as
+    one; there is no other exception.
     """
     actual = current.generation if current else 0
     if actual != expected_generation:
@@ -100,8 +159,11 @@ class StateStore(Protocol):
 
     # Bindings: unique on (slot, generation); compare-and-swap on generation.
     # A binding id names one slot only.
-    async def get_binding(self, slot: Slot) -> ProviderBinding | None:
-        """The slot's current (highest-generation) binding."""
+    async def get_binding(
+        self, slot: Slot, *, include_released: bool = False
+    ) -> ProviderBinding | None:
+        """The slot's current (highest-generation) binding; None for a released
+        slot unless `include_released`."""
         ...
 
     async def put_binding(
@@ -149,8 +211,11 @@ class StateStore(Protocol):
         fence: Lease | None,
         resource: ResourceRef | None = None,
         result: Mapping[str, JsonValue] | None = None,
+        expected_status: OperationStatus | None = None,
+        expected_updated_at: datetime | None = None,
     ) -> OperationRecord:
-        """Record an observed status along `operations.TRANSITIONS`."""
+        """Record an observed status along `operations.TRANSITIONS`; with an
+        expected status/time, only if the operation is still as read."""
         ...
 
     # Slot leases.
@@ -210,3 +275,19 @@ async def bind_new_slot(store: StateStore, binding: ProviderBinding) -> Provider
         if winner is None:
             raise
         return winner
+
+
+__all__ = [
+    "ConfigRevisionConflict",
+    "ERA_REF",
+    "RELEASED_REF",
+    "SESSION_REF",
+    "StateStore",
+    "adopt_released",
+    "adopted_identity",
+    "bind_new_slot",
+    "binding_slot",
+    "check_binding_successor",
+    "is_released",
+    "released_successor",
+]

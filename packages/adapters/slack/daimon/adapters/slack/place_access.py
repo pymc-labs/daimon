@@ -8,9 +8,10 @@ record, so someone who never ran a turn has no stored role and is a plain
 member. A user group a stored admin role names is looked up again, with no
 database session open, because a slow Slack must not hold a connection.
 
-External Slack Connect members never get here: app.py refuses their
-block_actions before dispatch, and each view_submission evaluator refuses
-theirs.
+A member of another workspace (Slack Connect) gets here only from the few
+controls app.py lets them reach (`daimon.adapters.slack.external_access`):
+rating an answer to their own request. They are read as a client, never as
+the stored admin their account might once have been.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from typing import Literal
 
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, Subject, authorize, build_turn_place
+from daimon.core.authz import Action, Subject, authorize, build_subject, build_turn_place
 from daimon.core.native_admins import StoredAdmin, read_stored_admin
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import find_platform_principal
@@ -81,17 +82,24 @@ class PlaceAccess:
 
 
 async def resolve_clicker(
-    runtime: SlackRuntime, client: AsyncWebClient, *, tenant_id: uuid.UUID, user_id: str
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    external: bool = False,
 ) -> tuple[Subject, uuid.UUID | None]:
     """The clicker as authorization sees them, and their account id.
 
     For a caller that decides access inside its own write transaction: the
     group lookup is network I/O and has to happen before that opens.
+    `external` is a member of another workspace: a client, whatever role is stored.
     """
     async with runtime.sessionmaker() as session:
         stored, account_id = await stored_clicker(session, tenant_id=tenant_id, user_id=user_id)
-    subject = stored.subject()
-    return subject, account_id
+    if external:
+        return build_subject(is_admin=False, platform_user_id=user_id, client=True), account_id
+    return stored.subject(), account_id
 
 
 async def check_place_access(

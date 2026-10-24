@@ -287,8 +287,8 @@ async def test_non_list_tools_are_refused_before_native_io(tools: JsonValue) -> 
 async def test_sdk_submits_the_cheap_named_worker_with_low_agent_budget() -> None:
     from contextlib import AsyncExitStack
 
-    from daimon.testing.isolated_sdk import build_gemini_client
     from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+    from mux.testing.isolated_sdk import build_gemini_client
 
     captured: list[httpx.Request] = []
 
@@ -329,11 +329,11 @@ async def test_sdk_submits_the_cheap_named_worker_with_low_agent_budget() -> Non
 async def test_sdk_model_output_cap_is_verified_in_actual_request_bytes(defect: str | None) -> None:
     from contextlib import AsyncExitStack
 
-    from daimon.testing.isolated_sdk import build_gemini_client
     from mux.contracts.ids import ModelRef
     from mux.contracts.resources import AgentSpec
     from mux.drivers.gemini.core import compile_agent
     from mux.errors import UnsupportedCapability
+    from mux.testing.isolated_sdk import build_gemini_client
 
     captured: list[httpx.Request] = []
 
@@ -379,10 +379,9 @@ async def test_sdk_model_output_cap_is_verified_in_actual_request_bytes(defect: 
 async def test_sdk_output_cap_never_downgrades_on_refusal_or_fallback(failure: int) -> None:
     from contextlib import AsyncExitStack
 
-    from daimon.testing.isolated_sdk import build_gemini_client
     from mux.drivers.gemini.flash import FLASH_MODELS, FlashTransport
-
-    from .test_flash import Accounting
+    from mux.testing.drivers.gemini.accounting import Accounting
+    from mux.testing.isolated_sdk import build_gemini_client
 
     captured: list[httpx.Request] = []
 
@@ -423,7 +422,7 @@ async def test_sdk_output_cap_never_downgrades_on_refusal_or_fallback(failure: i
 async def test_sdk_counts_full_worker_prompt_including_system_and_cache(count):
     from contextlib import AsyncExitStack
 
-    from daimon.testing.isolated_sdk import build_gemini_client
+    from mux.testing.isolated_sdk import build_gemini_client
 
     captured = []
 
@@ -456,3 +455,176 @@ async def test_sdk_counts_full_worker_prompt_including_system_and_cache(count):
     assert body["generateContentRequest"]["contents"] == [
         {"role": "user", "parts": [{"text": "Complete this task"}]}
     ]
+
+
+HIGH_DEMAND = {
+    "error": {
+        "code": "api_error",
+        "message": "The model is currently experiencing high demand. Please try again later.",
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "category", "native_code"),
+    [
+        (500, HIGH_DEMAND, "overloaded", "high_demand"),
+        (500, {"error": {"code": 500, "message": "internal"}}, "upstream", None),
+        (500, {"error": {"code": "api_error", "message": "internal"}}, "upstream", None),
+        (503, HIGH_DEMAND, "overloaded", "503"),
+        (400, HIGH_DEMAND, "invalid_request", None),
+    ],
+)
+async def test_sdk_interaction_read_classifies_high_demand_without_retrying(
+    status: int, body: dict[str, JsonValue], category: str, native_code: str | None
+) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).get("i1")
+        assert (exc.value.category, exc.value.native_code) == (category, native_code)
+        assert exc.value.retryable == (status >= 500)
+        assert len(calls) == 1 and calls[0].method == "GET"
+        await client.aio.aclose()
+
+
+async def test_sdk_high_demand_create_never_falls_back_to_another_model() -> None:
+    from contextlib import AsyncExitStack
+
+    from mux.drivers.gemini.flash import FLASH_MODELS, FlashTransport
+    from mux.testing.isolated_sdk import build_gemini_client
+
+    from .test_flash import Accounting
+
+    captured: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(500, json=HIGH_DEMAND)
+
+    async with AsyncExitStack() as stack:
+        client = build_gemini_client(transport=httpx.MockTransport(handle), api_key="offline")
+        stack.callback(client.close)
+        stack.push_async_callback(client.aio.aclose)
+        transport = FlashTransport(SDKTransport(client), Accounting())
+        with pytest.raises(ProviderError) as exc:
+            await transport.create(
+                {
+                    "model": FLASH_MODELS[0],
+                    "generation_config": {"max_output_tokens": 4096},
+                    "tools": [],
+                    "input": [{"type": "text", "text": "question"}],
+                }
+            )
+    assert (exc.value.category, exc.value.native_code) == ("overloaded", "high_demand")
+    assert len(captured) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "category"),
+    [(500, "upstream"), (408, "upstream"), (503, "overloaded"), (400, "invalid_request")],
+)
+async def test_sdk_errors_record_the_http_status_for_logs(status: int, category: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"message": "SECRET", "code": status}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).get("i1")
+        assert exc.value.category == category
+        assert exc.value.native_error_code == f"http_{status}"
+        assert "SECRET" not in str(exc.value)
+        await client.aio.aclose()
+
+
+def _quota_body(
+    limit: int, model: str = "gemini-4-argon", *, line_end: str = ", ", also: str | None = None
+) -> dict[str, JsonValue]:
+    """Google's 429 shape (smoke 2026-10-23), trimmed to the fields read.
+
+    `line_end` ends the "limit: N" line; `also` names a second model's violation
+    (one 429 can name several, and then no single model is named on the card).
+    """
+    quota = "free_tier_requests"
+    models = [model, *([also] if also else [])]
+    return {
+        "error": {
+            "code": 429,
+            "status": "RESOURCE_EXHAUSTED",
+            "message": (
+                "You exceeded your current quota.\n* Quota exceeded for metric: "
+                f"generativelanguage.googleapis.com/generate_content_{quota}, "
+                f"limit: {limit}{line_end}model: {model}\nPlease retry in 17h26m16s."
+            ),
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [
+                        {
+                            "quotaMetric": f"generativelanguage.googleapis.com/generate_content_{quota}",
+                            "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                            "quotaDimensions": {"location": "global", "model": named},
+                        }
+                        for named in models
+                    ],
+                },
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "62776s"},
+            ],
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "native_code", "retryable", "model"),
+    [
+        (_quota_body(0), "quota_zero", False, "gemini-4-argon"),
+        (_quota_body(10), "quota_exhausted", True, "gemini-4-argon"),
+        (_quota_body(0, line_end="\n"), "quota_zero", False, "gemini-4-argon"),
+        (_quota_body(100), "quota_exhausted", True, "gemini-4-argon"),
+        (_quota_body(0, also="gemini-3.8-flash"), "quota_zero", False, None),
+        ({"error": {"code": 429, "message": "slow down"}}, None, True, None),
+    ],
+)
+async def test_a_429_names_a_zero_quota_apart_from_a_rate_limit(
+    body: dict[str, JsonValue], native_code: str | None, retryable: bool, model: str | None
+) -> None:
+    """A model the plan gives no quota is never retried; a spent quota refills."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(429, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).get("i1")
+        error = exc.value
+        assert (error.category, error.native_code) == ("rate_limited", native_code)
+        assert error.retryable is retryable
+        assert error.native_param == model
+        assert error.native_error_code == "http_429"
+        assert len(calls) == 1
+        await client.aio.aclose()

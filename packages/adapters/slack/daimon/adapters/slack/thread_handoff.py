@@ -89,7 +89,7 @@ async def handle_hand_over_click(runtime: SlackRuntime, payload: dict[str, Any])
             client,
             tenant_id=tenant_id,
             user_id=user_id,
-            is_admin=await resolve_is_admin(client, user_id=user_id),
+            is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
         ),
         default=runtime.deployment_default,
         channel=f"<#{channel_id}>",

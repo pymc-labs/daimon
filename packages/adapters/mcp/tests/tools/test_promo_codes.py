@@ -115,7 +115,7 @@ async def test_non_admin_is_refused_before_redeeming(
     """A non-admin gets a tool error and the code grants nothing."""
     auth = await _setup(db_session, is_admin=False)
     await _code(db_session, "WELCOME-2026", timed=False)
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+    with pytest.raises(ToolError, match="requires an admin"):
         await _redeem_promo_code_impl(_runtime(db_session_factory), auth, "WELCOME-2026")
     assert await tenant_ledger.get_balance(db_session, tenant_id=auth.tenant_id) == 0, (
         "a refused non-admin should add no credit"

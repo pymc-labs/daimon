@@ -30,7 +30,9 @@ from daimon.core.mcp_credential_sweep import (
     partition_daimon_mcp_vault_ids,
     sweep_stale_admin_credentials,
 )
+from daimon.core.mcp_hold import hold_vault_suffix
 from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.core.turn_hold import TurnHold
 from daimon.testing.factories import make_account, make_tenant
 
 # asyncio_mode = "auto" in pyproject.toml — no pytestmark needed; async tests run automatically.
@@ -417,10 +419,20 @@ async def test_sweep_dry_run_is_the_default(db_session_factory) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_sweep_skips_unparseable_suffix_vault(db_session_factory) -> None:
-    """A daimon-mcp vault with a non-UUID first suffix segment is skipped and
-    recorded in unparseable_vault_ids — never deleted or recreated."""
-    bad_display = "daimon-mcp:not-a-uuid:whatever"
+@pytest.mark.parametrize(
+    "bad_display",
+    [
+        "daimon-mcp:not-a-uuid:whatever",
+        # A held turn's vault: its credential is re-minted with its hold, never swept
+        # into an unheld one.
+        f"daimon-mcp:{uuid.uuid4()}:{uuid.uuid4()}"
+        + hold_vault_suffix(TurnHold(platform="slack", channel_id="C-SYN", client=True)),
+    ],
+    ids=["not-a-uuid", "held-vault"],
+)
+async def test_sweep_skips_unparseable_suffix_vault(db_session_factory, bad_display: str) -> None:
+    """A daimon-mcp vault with a non-UUID first suffix segment, or a held turn's vault,
+    is skipped and recorded in unparseable_vault_ids — never deleted or recreated."""
 
     mutating_calls: list[str] = []
 
@@ -643,7 +655,7 @@ async def test_sweep_isolates_one_vault_failure_and_continues(
 async def test_retired_vault_is_not_archived_while_any_live_session_mounts_it(
     db_session_factory, mounted
 ):
-    from daimon.testing import ma_session
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     display = f"daimon-mcp:{uuid.uuid4()}"
     archives = []

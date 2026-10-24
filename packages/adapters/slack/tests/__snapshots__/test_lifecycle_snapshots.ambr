@@ -183,7 +183,7 @@
               dict({
                 'text': '''
                   *Details*
-                  `🖋️ Running a command`
+                  `⏳ Running a command`
                 ''',
                 'type': 'mrkdwn',
               }),
@@ -245,6 +245,7 @@
                   'type': 'plain_text',
                 }),
                 'type': 'button',
+                'value': 'U_AUTHOR',
               }),
               dict({
                 'action_id': 'feedback_vote:down',
@@ -253,6 +254,7 @@
                   'type': 'plain_text',
                 }),
                 'type': 'button',
+                'value': 'U_AUTHOR',
               }),
             ]),
             'type': 'actions',

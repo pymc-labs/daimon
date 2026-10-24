@@ -16,13 +16,13 @@ from daimon.core.authz import Subject
 from daimon.core.channel_rules import set_channel_rule
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.scope import DeploymentDefault
-from daimon.testing.isolated_sdk import build_async_anthropic, build_async_openai
 from mux.contracts.ids import Scope
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ScopeViolation
+from mux.testing.isolated_sdk import build_async_anthropic, build_async_openai
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TENANT = uuid.uuid4()

@@ -22,7 +22,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol, cast
@@ -44,7 +44,7 @@ from daimon.core.teams_markdown import has_math
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
+from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
@@ -57,7 +57,7 @@ from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
 from microsoft_teams.api import Account, Attachment, MessageActivityInput, SentActivity
-from microsoft_teams.cards import Action, ExecuteAction
+from microsoft_teams.cards import Action, AdaptiveCard, ExecuteAction
 from mux.contracts.events import Event
 from mux.profiles import emits_legacy_events_for
 from pydantic import SecretStr
@@ -152,6 +152,16 @@ def _may_have_outputs(state: TurnState) -> bool:
     )
 
 
+@dataclass
+class _CardEdits:
+    """What every attempt of one turn shares about its card: recovery swaps attempts, not cards."""
+
+    # Edits of the live status card, one at a time: a render's, then Stop's.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The background edit that shows "Stopping…"; terminal edits wait for it.
+    stopping: asyncio.Task[None] | None = None
+
+
 class TeamsTurnLifecycle(OutputGate):
     """Implements `daimon.core.turn.lifecycle.TurnLifecycle`. One per turn attempt."""
 
@@ -173,6 +183,7 @@ class TeamsTurnLifecycle(OutputGate):
         agent_name_prefix: str | None = None,
         ask_human: bool = False,
         direct_chat: bool = False,
+        foreign: bool = False,
         agent_name: str | None = None,
         model_id: str | None = None,
         markup: Decimal = Decimal(1),
@@ -209,6 +220,8 @@ class TeamsTurnLifecycle(OutputGate):
         self._requester = requester if self._ping else None
         self._agent_name_prefix = agent_name_prefix
         self._direct_chat = direct_chat
+        # The asker is from another organisation: no 1:1 chat to send them to.
+        self._foreign = foreign
         # Nobody asked, so nothing is owed: no card, no notice, no failure post.
         self._unprompted = unprompted
         self._request_id = request_id
@@ -223,6 +236,10 @@ class TeamsTurnLifecycle(OutputGate):
         # person is already watching instead of posting a second one.
         self._message_id = adopt_message_id
         self._last_flush = 0.0
+        # Edits of the live status card, one at a time: a render's, then Stop's.
+        self._card_edits = _CardEdits()
+        # The attempt dead-session recovery replaced; its close closes this card too.
+        self._previous: TeamsTurnLifecycle | None = None
         self._terminal = False
         self.final_message_id: str | None = None
         # The card no longer shows a live turn, so the boot sweep must not
@@ -293,6 +310,67 @@ class TeamsTurnLifecycle(OutputGate):
                 )
             )
 
+    @property
+    def stopping(self) -> bool:
+        """Stop was clicked on this attempt (or the attempt it replaced)."""
+        return self._state.stopping
+
+    def request_stop(self) -> AdaptiveCard | None:
+        """Stop was clicked: the live card, as "Stopping…", or None once the turn has ended.
+
+        The driver stops rendering the moment it sees Stop, so the chat's card
+        is edited here, in the background, once. Order is kept by the lock the
+        renders share and by the terminal hooks, which wait for this edit
+        (`_settle_stopping`): "Working…" cannot land after "Stopping…", nor
+        "Stopping…" after the closing notice.
+        """
+        if self._closed:
+            return None
+        self._state = card.on_stop(self._state)
+        if self._card_edits.stopping is None:
+            self._card_edits.stopping = asyncio.create_task(
+                self._show_stopping(), name="teams.turn.stopping-card"
+            )
+        return card.live_card(self._state, now=self._clock(), cancel_key=self._cancel_key)
+
+    def inherit_stop(self, previous: TeamsTurnLifecycle) -> None:
+        """Take over from the attempt dead-session recovery replaces.
+
+        A Stop clicked on `previous` still reads "Stopping…" here; a card edit of
+        either finishes before the other's next, and either's close waits for the
+        "Stopping…" edit and stops it once sent: the run may close `previous`.
+        """
+        self._card_edits = previous._card_edits  # pyright: ignore[reportPrivateUsage]
+        self._previous = previous
+        if previous.stopping:
+            self.request_stop()
+
+    async def _show_stopping(self) -> None:
+        """Edit the card to "Stopping…" unless the turn has closed it. Never raises."""
+        async with self._card_edits.lock:
+            if self._closed or self._message_id is None:
+                return
+            try:
+                await self._send(self._status(), message_id=self._message_id)
+            except TEAMS_SEND_ERRORS:
+                log.warning("teams.turn.stopping_edit_failed", exc_info=True)
+
+    async def _settle_stopping(self) -> None:
+        """Wait out the "Stopping…" edit, so a terminal edit follows it. `_terminal` is set."""
+        if (task := self._card_edits.stopping) is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(task)
+
+    @property
+    def _closed(self) -> bool:
+        """This attempt, or one it replaced, has ended the turn on the card."""
+        attempt: TeamsTurnLifecycle | None = self
+        while attempt is not None:
+            if attempt._terminal or attempt.card_closed:
+                return True
+            attempt = attempt._previous
+        return False
+
     def _status(self) -> MessageActivityInput:
         return card.status_card(self._state, now=self._clock(), cancel_key=self._cancel_key)
 
@@ -316,7 +394,13 @@ class TeamsTurnLifecycle(OutputGate):
         text = self._provider_draft.text(event)
         if text is not None:
             self._state = (
-                card.on_message(self._state, text) if text else replace(self._state, draft=None)
+                (
+                    card.on_message(self._state, text)
+                    if self._provider_draft.takes_new_item()
+                    else card.on_draft(self._state, text)
+                )
+                if text
+                else replace(self._state, draft=None)
             )
 
     async def on_render(self, state: TurnState) -> None:
@@ -328,7 +412,8 @@ class TeamsTurnLifecycle(OutputGate):
         if now - self._last_flush < _DEBOUNCE_S:
             return
         self._last_flush = now
-        await self._send(self._status(), message_id=self._message_id)
+        async with self._card_edits.lock:
+            await self._send(self._status(), message_id=self._message_id)
 
     def _note_tools(self, state: TurnState) -> None:
         finished = state.finished_tool_ids
@@ -352,6 +437,7 @@ class TeamsTurnLifecycle(OutputGate):
         if self._terminal:
             return
         self._terminal = True
+        await self._settle_stopping()
         if self._unprompted and self._message_id is None:
             log.info("teams.turn.unprompted_notice_dropped")
             return
@@ -438,6 +524,7 @@ class TeamsTurnLifecycle(OutputGate):
         """
         self._note_tools(state)
         self._terminal = True
+        await self._settle_stopping()
         answer = self._answer_text(state)
         degraded = render_degraded_notice(state.mcp_failures)
         replaced = False
@@ -633,14 +720,19 @@ class TeamsTurnLifecycle(OutputGate):
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
+            nouns = RefusalNouns.for_platform(
+                "teams", place="dm" if self._direct_chat else "channel", foreign=self._foreign
+            )
             notice = render_termination_notice(
                 reason,
                 state=state,
                 request_id=request_id,
                 error=err,
                 in_dm=self._direct_chat,
-                setup_command="`setup`",
-                billing_command=TEAMS_BILLING_COMMAND,
+                setup_command=nouns.setup,
+                billing_command=nouns.billing,
+                setup_verb=nouns.verb,
+                admin=nouns.who,
                 agent_name=self._agent_name,
             )
             if notice is not None:

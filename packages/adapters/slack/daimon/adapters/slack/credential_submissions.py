@@ -161,6 +161,7 @@ async def refuse_if_shared_and_not_admin_for_request(
     client: AsyncWebClient,
     *,
     tenant_id: uuid.UUID,
+    team_id: str,
     agent_id: uuid.UUID,
     channel_id: str,
     user_id: str,
@@ -183,6 +184,7 @@ async def refuse_if_shared_and_not_admin_for_request(
         client,
         operation="repo_bind",
         tenant_id=tenant_id,
+        team_id=team_id,
         agent_id=agent_id,
         channel_id=channel_id,
         user_id=user_id,
@@ -235,7 +237,12 @@ async def _dispatch_pending(trigger: ContinuationTrigger, *, kind: str) -> None:
 
 
 async def _replacement_refused_at_submit(
-    runtime: SlackRuntime, client: AsyncWebClient, *, row: CredentialRequestRow, user_id: str
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    row: CredentialRequestRow,
+    team_id: str,
+    user_id: str,
 ) -> bool:
     """Re-decide a replacement's role check at submit time. True when refused.
 
@@ -249,7 +256,7 @@ async def _replacement_refused_at_submit(
     family answers `allow` for an admin before anything else is consulted — and
     a target that can no longer be resolved fails closed.
     """
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
     facts = TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=False)
     if not is_admin:
         agent = await find_agent_by_derived_uuid(
@@ -279,7 +286,12 @@ async def _replacement_refused_at_submit(
 
 
 async def _decide_mcp_connect_at_submit(
-    runtime: SlackRuntime, client: AsyncWebClient, *, row: CredentialRequestRow, user_id: str
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    row: CredentialRequestRow,
+    team_id: str,
+    user_id: str,
 ) -> McpConnectDecision:
     """Re-decide an MCP token submission against the person submitting it.
 
@@ -307,7 +319,7 @@ async def _decide_mcp_connect_at_submit(
             client,
             tenant_id=row.tenant_id,
             user_id=user_id,
-            is_admin=await resolve_is_admin(client, user_id=user_id),
+            is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
         ),
         default=runtime.deployment_default,
         shares_token=True,
@@ -423,7 +435,9 @@ async def run_env_credential_submission(
     thread_ts = request.origin_thread_id
 
     async def replacement_refused() -> bool:
-        return await _replacement_refused_at_submit(runtime, client, row=request, user_id=user_id)
+        return await _replacement_refused_at_submit(
+            runtime, client, row=request, team_id=team_id, user_id=user_id
+        )
 
     plan = await prepare_env_submit(
         runtime.sessionmaker, row=request, replacement_refused=replacement_refused
@@ -433,7 +447,7 @@ async def run_env_credential_submission(
     # The name a member may store is re-checked against the submitter's live
     # role. `key_add` needs no gate, but the NAME does: a tool-control or
     # redirect name is refused for a member even on a brand-new key.
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
     name_problem = env_name_problem(request.target, is_admin=is_admin)
     if name_problem is not None:
         await post_ephemeral(
@@ -670,7 +684,7 @@ async def run_env_file_credential_submission(
     try:
         # `decode_env_bytes` re-measures the real bytes against the same cap
         # the submission checked the client's reported size against.
-        is_admin = await resolve_is_admin(client, user_id=user_id)
+        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
         entries = parse_env_file(decode_env_bytes(body), member_writable_only=not is_admin)
     except EnvFileRejected as err:
         log.info(
@@ -902,14 +916,16 @@ async def run_mcp_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=(
-                "This deployment is not finished being set up. Ask the operator to finish "
+                "Daimon isn't fully set up yet. Ask the operator to finish "
                 "setup, then try again. Nothing was saved."
             ),
         )
         return
 
     connect, now = await prepare_mcp_submit(
-        decide=lambda: _decide_mcp_connect_at_submit(runtime, client, row=request, user_id=user_id),
+        decide=lambda: _decide_mcp_connect_at_submit(
+            runtime, client, row=request, team_id=team_id, user_id=user_id
+        ),
         clock=lambda: datetime.now(UTC),
     )
     try:
@@ -1371,6 +1387,7 @@ async def run_skill_repo_credential_submission(
         client,
         operation="skill_repo_connect",
         tenant_id=request.tenant_id,
+        team_id=team_id,
         agent_id=request.agent_id,
         channel_id=channel_id,
         user_id=user_id,
@@ -1473,7 +1490,7 @@ async def run_skill_repo_credential_submission(
                 path=path,
                 tenant_id=consumed.tenant_id,
                 seeded_skill_names=seeded_skill_names,
-                is_admin=await resolve_is_admin(client, user_id=user_id),
+                is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
                 token=value,
             )
         except DaimonError as err:
@@ -1621,6 +1638,7 @@ async def run_repo_bind_credential_submission(
         runtime,
         client,
         tenant_id=request.tenant_id,
+        team_id=team_id,
         agent_id=request.agent_id,
         channel_id=channel_id,
         thread_ts=thread_ts,
@@ -1719,7 +1737,7 @@ async def run_repo_bind_credential_submission(
                 thread_ts=thread_ts,
                 channel_id=channel_id,
                 user_id=user_id,
-                text=("Binding the working repo failed. Try again using the same form."),
+                text=("Linking the working repo failed. Try again using the same form."),
             )
             return
 

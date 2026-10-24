@@ -88,7 +88,7 @@ async def run_channel_skills_submission(
     async def refuse(text: str) -> None:
         await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=text)
 
-    if not await resolve_is_admin(client, user_id=user_id):
+    if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
         await audit(outcome="denied", reason="needs_admin")
         await refuse(CHANNEL_SKILLS_NEED_ADMIN_MESSAGE)
         return

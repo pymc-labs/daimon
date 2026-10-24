@@ -32,8 +32,8 @@ from daimon.core.config import (
     SlackSettings,
 )
 from daimon.core.scope import DeploymentDefault
-from daimon.testing.ma import build_stub_anthropic
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from syrupy.assertion import SnapshotAssertion
@@ -43,6 +43,10 @@ from syrupy.assertion import SnapshotAssertion
 # leaves a group unconfigured) — checked before the snapshot comparison so
 # that failure mode is loud rather than a quietly smaller snapshot.
 _MUST_CONTAIN = {
+    "create_watch",
+    "list_watches",
+    "lead_intake_resolve",
+    "set_routine_sandbox_tools",
     "create_environment",
     "send_message",
     "sync_skills",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from daimon.core.errors import TurnError
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.render import (
@@ -45,6 +46,17 @@ def test_diff_reports_text_append_when_last_text_block_grew() -> None:
     assert delta.text_appends == [TextAppend(block_index=0, appended_text=" world")]
     assert delta.block_additions == []
     assert delta.block_status_changes == []
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_diff_reports_a_second_agent_message_as_an_added_block() -> None:
+    prev = apply(TurnState(), make_agent_message(event_id="sevt_1", text="hello"))
+
+    curr = apply(prev, make_agent_message(event_id="sevt_2", text=" world"))
+
+    delta = diff(prev, curr)
+    assert delta.text_appends == []
+    assert [added.block_index for added in delta.block_additions] == [1]
 
 
 def test_diff_reports_block_added_when_new_tool_use_appears() -> None:

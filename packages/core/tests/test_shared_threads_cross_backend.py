@@ -56,7 +56,6 @@ from daimon.core.turn.openai_host import OpenAIHostRuntime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision
 from mux.contracts.events import Event, NativeProvenance
@@ -67,6 +66,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.errors import ScopeViolation
 from mux.state.journal import JournalEntry
 from mux.state.lease import Slot
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

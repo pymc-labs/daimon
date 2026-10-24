@@ -121,7 +121,7 @@ def build_custom_id(short_id: str, action: str) -> str:
     if len(custom_id) > MAX_CUSTOM_ID_CHARS:
         raise ValueError(
             f"custom_id {custom_id!r} is {len(custom_id)} characters, "
-            f"exceeding Discord's {MAX_CUSTOM_ID_CHARS}-character cap"
+            f"exceeding the {MAX_CUSTOM_ID_CHARS}-character cap"
         )
     if not (
         NAV_CUSTOM_ID_PATTERN.fullmatch(custom_id)

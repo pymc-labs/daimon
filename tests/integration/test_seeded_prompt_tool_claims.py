@@ -50,7 +50,7 @@ from daimon.core.stores import accounts
 from daimon.core.stores.domain import Role
 from daimon.testing import INIT_BODY, INIT_HEADERS, asgi_lifespan, parse_jsonrpc_response
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp

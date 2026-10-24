@@ -534,10 +534,14 @@ async def _run_turn_with_stalled_card_retire(
         BetaManagedAgentsSessionStatusIdleEvent,
     )
     from daimon.core.tool_safety import ToolSafetyPolicy
-    from daimon.core.turn import run_turn
     from daimon.core.turn.approvals import interactive_decider
     from daimon.core.turn.posture import BillingExempt, PolicyApproval
-    from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
+    from daimon.testing.turn_fakes import (
+        FakeAnthropic,
+        RecordingLifecycle,
+        YieldEvent,
+        run_turn_on_leg,
+    )
 
     monkeypatch.setattr(driver_mod, "CLEANUP_BUDGET_S", 0.2)
     at = datetime.now(UTC)
@@ -576,7 +580,7 @@ async def _run_turn_with_stalled_card_retire(
     ]
     started = asyncio.get_running_loop().time()
     final = await asyncio.wait_for(
-        run_turn(
+        run_turn_on_leg(
             privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=fa,  # type: ignore[arg-type]
             session_id="sess_1",
@@ -802,7 +806,7 @@ async def test_complete_backend_loss_list_survives_native_card_rendering(state):
         update={
             "admin": True,
             "action": "Switch Research. " + losses,
-            "denied_action": "Model backend unchanged",
+            "denied_action": "Model provider unchanged",
             "consequence": losses,
             "detail_lines": ("Optional skill: " + "x" * 1000,),
         }
@@ -932,3 +936,75 @@ async def test_lead_details_reload_on_every_click_and_ignore_cached_prompt_lines
         await _buttons(view)[-1].callback(click)
         assert click.followup.send.await_args.args[0] == f"live evidence v{version}"
     assert load.await_count == 2
+
+
+def test_an_approval_card_shows_the_call_exactly_even_when_it_names_another_app() -> None:
+    """The one text left unscrubbed: the card must show what will run, not a reworded copy.
+
+    A scrubbed card over an unscrubbed call would misstate what the person approves."""
+    call = ToolCall(
+        tool_use_id="tu_1",
+        server_name="linear",
+        tool_name="create_issue",
+        input={"title": "Move the Slack bot to Teams", "description": "Not Discord"},
+    )
+    prompt = prompt_for_tool_call(call, requester_platform_user_id="111", now=datetime.now(UTC))
+    card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
+    view = build_confirmation_view(card, prompt)
+
+    assert 'Create issue "Move the Slack bot to Teams"?' in _texts(view)[0]
+    assert card.detail_lines == (
+        "Title: Move the Slack bot to Teams",
+        "Description: Not Discord",
+    )
+
+
+async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+    from mux.contracts.ids import ChannelRef
+
+    tenant, account = uuid4(), uuid4()
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    channel = MagicMock(spec=discord.TextChannel)
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    admission = SimpleNamespace(origin_channel_id="1561246827452571728")
+    discord_confirmation_hook(
+        channel,
+        runtime=runtime,
+        admission=admission,  # pyright: ignore[reportArgumentType]
+        tenant_id=tenant,
+        account_id=account,
+    )
+    assert factory.call_args.kwargs["pin_channel"] == ChannelRef(
+        tenant_id=str(tenant), platform="discord", channel_id="1561246827452571728"
+    )
+    discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
+    assert factory.call_args.kwargs["pin_channel"] is None, "no admitted channel, no pin card"
+
+
+async def test_a_card_still_open_replies_once_mentioning_only_its_requester(monkeypatch) -> None:
+    """ROOT 2: a long card pings its requester once in the card's thread."""
+    from daimon.core.posted_controls import lifecycle
+
+    monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.02)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
+    prompt = _prompt(expires_in=timedelta(seconds=0.3))
+    message = SimpleNamespace(id=7, edit=AsyncMock(), reply=AsyncMock())
+    channel = MagicMock()
+    channel.send = AsyncMock(return_value=message)
+    answer = await discord_confirmation_hook(channel)(prompt)
+    assert answer == "expired"
+    (call,) = message.reply.await_args_list
+    assert call.args[0] == (
+        f"<@{prompt.requester_platform_user_id}> This is still waiting for your click."
+    )
+    mentions = call.kwargs["allowed_mentions"].to_dict()
+    assert mentions.get("parse") == ["users"] and call.kwargs["mention_author"] is False

@@ -23,15 +23,16 @@ from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
-from daimon.testing.ma import (
-    MARouter,
+from daimon.testing.ma import MARouter
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.testing.drivers.anthropic.ma import (
     build_fake_anthropic,
     list_response,
     send_events_response,
     sse_response,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 
 from .conftest import make_end_turn, make_status_idle

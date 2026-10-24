@@ -8,9 +8,13 @@ clients are never discovered implicitly.
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
+import structlog
 from daimon.core.native_footer_cost import NativeFooterCostContext
+from daimon.core.platform_system import system_for_platform
+from daimon.core.pricing import ProviderPrice, provider_cost_of
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import (
@@ -19,6 +23,7 @@ from daimon.core.turn.gemini import (
     GeminiUsageRuntime,
     gemini_backend,
 )
+from daimon.core.turn.gemini_state import HoldSettlement, interaction_of
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.extensions import ExtensionConfig
@@ -27,6 +32,9 @@ from mux.contracts.resources import SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
+from mux.state.store import ERA_REF, adopted_identity
+
+log = structlog.get_logger(__name__)
 
 
 async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
@@ -60,6 +68,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     if (
         config.thread_mode != "per_caller"
         or admission.shared_owner is not None
+        or admission.hold is not None
         or admission.origin_seal_ids
         or (
             admission.memory_read_only and (target is None or "memory" not in target.declared_drops)
@@ -74,9 +83,22 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     ):
         raise UnsupportedCapability(("gemini_durable_runtime",), PROFILE)
     journal, usage = runtime.journal, runtime.usage_store
+    # Gemini usage reaches no ledger debit, and a root interaction has no token
+    # envelope: the daily model cap refuses plainly here, before anything is
+    # created. A fallback of the first request is checked too (`CappedFlashAccounting`).
+    from daimon.core.turn.daily_model_cap import check_daily_model_cap
+
+    await check_daily_model_cap(
+        request,
+        provider=config.backend,
+        model=config.model,
+        price=usage.prices.get(config.model) if config.model is not None else None,
+        cap=request.deps.gemini_daily_model_cap_usd,
+    )
     deployment = journal.deployment
     if request.worker is not None or admission.backend_revision_origin == "agent":
         from daimon.core.turn.gemini_deployment import load_gemini_deployment
+        from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
 
         if request.counterpart is None or request.source is None or target is None:
             raise AdmissionDenied(reason="backend_unsupported")
@@ -88,7 +110,12 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             or replace(deployment, native_agent=None) != expected
             or checked.agent.spec != expected.agent
             or (
+                plan.root_materialization
+                and checked.catalog_id != root_counterpart_catalog_id(request)
+            )
+            or (
                 not plan.worker_materialization
+                and not plan.root_materialization
                 and (
                     checked.catalog_id != plan.counterpart_catalog_id
                     or checked.local_revision != plan.counterpart_catalog_revision
@@ -124,7 +151,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             prior.id,
             ("bound Gemini session cannot be replaced by fresh preparation",),
         )
-    binding_id = str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
+    derived_id = str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
+    # A released slot keeps its id; its era suffix keeps earlier creations from
+    # replaying. Only a binding this host adopted (it carries its era) may differ
+    # from the derived id.
+    binding_id, era = (
+        (prior.id if ERA_REF in prior.native_refs else derived_id, "")
+        if prior is not None
+        else adopted_identity(await store.get_binding(slot, include_released=True), derived_id)
+    )
     if prior is not None and (
         prior.id != binding_id
         or prior.provider != "gemini"
@@ -141,12 +176,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     if prior is None:
         agent = deployment.native_agent
         if agent is None:
-            agent = await backend.agents.create(
-                request.scope, deployment.agent, key=f"{binding_id}:agent"
-            )
+            # The inline agent is created once per thread, with this platform's variant of
+            # the system prompt; a named catalog agent above is shared and keeps its own.
+            spec = deployment.agent
+            if (variant := system_for_platform(spec.system, request.platform)) is not None:
+                spec = spec.model_copy(update={"system": variant})
+            agent = await backend.agents.create(request.scope, spec, key=f"{binding_id}{era}:agent")
         environment = (
             await backend.environments.create(
-                request.scope, deployment.environment, key=f"{binding_id}:environment"
+                request.scope, deployment.environment, key=f"{binding_id}{era}:environment"
             )
             if deployment.max_output_tokens is None
             else None
@@ -166,15 +204,25 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                     )
                 },
             ),
-            key=f"{binding_id}:session",
+            key=f"{binding_id}{era}:session",
         )
-        binding = session.binding.model_copy(update={"legacy_account_id": request.scope.account_id})
+        binding = session.binding.model_copy(
+            update={
+                "legacy_account_id": request.scope.account_id,
+                "native_refs": {**session.binding.native_refs, **({ERA_REF: era} if era else {})},
+            }
+        )
         try:
-            await store.put_binding(binding, expected_generation=0)
+            # A released slot is adopted at its next generation: keep what was written.
+            binding = await store.put_binding(binding, expected_generation=0)
         except BindingConflict:
             winner = await store.get_binding(slot)
-            if winner != binding:
+            if (
+                winner is None
+                or winner.model_copy(update={"generation": binding.generation}) != binding
+            ):
                 raise
+            binding = winner
         session_ref = session.ref
     else:
         binding = prior
@@ -218,6 +266,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != session_ref or observation.model is None:
             raise ScopeViolation(observation.id, "Gemini billing received foreign usage")
+        _warn_on_grounding(observation, tenant_id=request.tenant_id, binding_id=binding_id)
         # A moving alias has no verified resolved-price identity in this slice.
         # Preserve its counts in the outbox; never settle it using a guessed tariff.
         price = (
@@ -246,6 +295,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 infrastructure_usd=usage.infrastructure_usd,
                 settled=settled,
             )
+        await _settle_hold(usage.accounting, observation, price)
         return settled
 
     return PreparedTurn(
@@ -262,4 +312,62 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         runtime=runtime
         if request.worker is not None or admission.backend_revision_origin == "agent"
         else None,
+        # Revokes a per-turn MCP credential however the turn ends.
+        _finalize=runtime.end_of_turn,
     )
+
+
+def _warn_on_grounding(
+    observation: UsageObservation, *, tenant_id: object, binding_id: str
+) -> None:
+    """Grounding (search) calls carry a per-query price no tariff or daily cap counts.
+
+    Agent requests never offer them, so any count here is a leak to look at. The
+    usage reports them as a list of `{type, count}` (google-genai `GroundingToolCount`).
+    """
+    raw = observation.native_meter.get("grounding_tool_count")
+    entries = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    counts = {
+        str(item.get("type")): count
+        for item in entries
+        if isinstance(count := item.get("count"), int) and not isinstance(count, bool)
+    }
+    total = sum(counts.values())
+    if total > 0:
+        structlog.get_logger(__name__).warning(
+            "turn.gemini_grounding_unexpected",
+            tenant_id=str(tenant_id),
+            binding_id=binding_id,
+            observation_id=observation.id,
+            grounding_tool_count=total,
+            grounding_types=sorted(counts),
+        )
+
+
+async def _settle_hold(
+    accounting: object, observation: UsageObservation, price: ProviderPrice | None
+) -> None:
+    """Release the attempt's cap hold once its interaction has ended with a measured cost.
+
+    Billing above already recorded the usage; this only frees cap headroom. A running
+    snapshot, a partial meter or an unpriced alias leaves the hold for HOLD_TTL.
+    """
+    interaction = interaction_of(observation)
+    if (
+        not isinstance(accounting, HoldSettlement)
+        or interaction is None
+        or price is None
+        # A running snapshot may still grow: only the terminal reading frees the hold.
+        or not observation.final
+    ):
+        return
+    assert observation.model is not None
+    actual = provider_cost_of(observation, price, infrastructure_usd=Decimal(0))
+    if actual is None:
+        return
+    try:
+        await accounting.settle(
+            interaction_id=interaction, model=observation.model.id, actual_usd=actual
+        )
+    except Exception:  # expiry is the fallback; never fail a billed turn
+        log.warning("provider_hold_settle_failed", interaction_id=interaction, exc_info=True)

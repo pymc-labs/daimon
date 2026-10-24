@@ -502,3 +502,61 @@ bot response makes the chat fail the 30-second quiet check before any post.
 team and channel before any command is sent. Offline tests use fake MSAL and
 `httpx.MockTransport`. The driver does not delete messages or change team
 membership, so clean up messages manually if needed.
+
+## QA Teams from your agent
+
+The persona token caches and the target config can live in GCP Secret Manager,
+so a coding agent needs no local files, no browser and no sign-in. Set
+`token_store` in the config to
+`{"kind": "secret_manager", "project": "<project>", "secret_prefix": "teams-qa"}`
+and store the config itself as a secret. Each persona's MSAL cache is the
+secret `<prefix>-token-<persona>`. A silent refresh that changes a cache adds
+a new version; concurrent writers are last-write-wins, which is safe because
+every recent refresh token stays valid. Versions beyond the newest three are
+destroyed when the caller may do so, otherwise left in place.
+
+Prerequisites: read access and add-version access on those secrets, and
+`gcloud auth application-default login`. Pass the config with
+`--config-secret projects/<project>/secrets/<name>` or set
+`DAIMON_TEAMS_QA_CONFIG_SECRET`.
+
+```bash
+export DAIMON_TEAMS_QA_CONFIG_SECRET=projects/<project>/secrets/<name>
+uv run python -m qa.live.teams status --persona admin
+uv run python -m qa.live.teams graph --persona admin /me/joinedTeams
+uv run python -m qa.live.teams graph --persona admin --method POST \
+  /teams/<qa-team-id>/channels --body '{"displayName": "qa-scratch"}'
+```
+
+`graph` makes one Microsoft Graph call as the persona and prints one JSON
+line: `{"ok": true, "persona": "admin", "status": 200, "body": {...}}`. It
+handles the persona's token, which is never printed, and requests every
+delegated permission the QA app is consented for. A path may start with
+`/v1.0/` (the default), `/beta/` or the full `https://graph.microsoft.com`
+URL; `--body` takes JSON. Reads may go anywhere the persona can see. Writes
+are refused unless they target the configured QA team (`/teams/<team-id>/...`)
+or the persona's own 1:1 chat with the bot, and deleting or archiving the QA
+team itself is refused. Failures are `{"ok": false, "error": "<reason>", ...}`
+with a non-zero exit; `reauth_required` means a persona must sign in again
+with `login`. A write that fails in transit returns `post_outcome_unknown`:
+read before retrying.
+
+To drive the bot, find the persona's 1:1 chat with it (a `oneOnOne` chat
+from `/me/chats` holding a message from the bot's app ID), post with
+`POST /chats/<chat-id>/messages`, and poll `GET /chats/<chat-id>/messages`.
+The bot first posts a "Working on it…" card with a Stop action and edits it
+in place, so a reply has settled once that action is gone and
+`lastModifiedDateTime` stops changing. In a channel the bot answers commands
+privately, where Graph cannot read them; free-text @mentions there get thread
+replies, and each costs a model turn.
+
+`refresh --all` silently redeems each persona's refresh token and writes the
+new cache back without posting anything. The `Teams QA token refresh`
+workflow runs it weekly on staging. If it reports `reauthentication
+required`, run the printed `login` command once for that persona.
+
+For exploratory sessions, anything inside the QA team is fair game: its
+channels, settings and messages, and each persona's 1:1 with the staging bot.
+Stay out of other teams, never message or add real people, and never print a
+token cache. Bare command words such as `routines` or `billing` are
+code-routed and take no model turn; any other text does. `smoke --all` is the only fixed live check.

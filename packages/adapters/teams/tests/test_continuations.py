@@ -33,8 +33,8 @@ from daimon.core.turn.errors import AdmissionDenialReason, SessionAgentMismatch,
 from daimon.core.turn.notices import admission_refusal_text
 from daimon.core.turn.slots import release_turn_slot
 from daimon.testing.factories import make_account
-from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (

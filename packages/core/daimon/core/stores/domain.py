@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 import structlog
 from daimon.core.session_snapshot import SessionSnapshot
+from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope
 from mux.contracts.profile import Capability
 from mux.contracts.resources import (
@@ -99,6 +100,9 @@ class AccountIdentityRow(BaseModel):
     )  # platform_principals.external_id (LEFT JOIN on tenant's platform; null when none)
     # accounts.platform_role_ids as of the account's last chat turn.
     platform_role_ids: tuple[str, ...] = ()
+    # platform_principals.foreign_home_id: the principal was verified to belong to another
+    # organisation (sticky), so it is a client on every call, even with no running turn.
+    foreign_home_id: str | None = None
 
 
 class ChannelSkillRow(BaseModel):
@@ -138,6 +142,7 @@ class PlatformPrincipalRow(BaseModel):
     account_id: uuid.UUID
     created_at: datetime
     active_agent_name: str | None = None
+    foreign_home_id: str | None = None
 
 
 class PrincipalLinkRow(BaseModel):
@@ -835,6 +840,19 @@ class AgentMemoryStoreRow(BaseModel):
     created_at: datetime
 
 
+class AgentChannelMemoryStoreRow(BaseModel):
+    """Pydantic row for AgentChannelMemoryStore (a held channel's memory)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    platform: str
+    channel_id: str
+    memory_store_id: str
+    created_at: datetime
+
+
 class GitHubAppInstallationRow(BaseModel):
     """Pydantic row for GitHubAppInstallation."""
 
@@ -1030,6 +1048,8 @@ class WizardSessionRow(BaseModel):
 
 
 McpTokenKind = Literal["agent", "operator", "cli"]
+#: What a registered credential runs on, when not an ordinary chat/CLI/operator token.
+McpTokenSurface = Literal["provider_turn"]
 """An agent-scoped key, a scoped operator token, or a CLI token."""
 
 
@@ -1058,6 +1078,8 @@ class McpTokenRow(BaseModel):
     # The channel the token was minted in (`mcp_auth.coding_token_channel`).
     platform: str | None = None
     channel_id: str | None = None
+    # `provider_turn`: minted for an OpenAI/Gemini turn, which has no confirmation card.
+    surface: McpTokenSurface | None = None
 
 
 class FileUploadRow(BaseModel):
@@ -1150,6 +1172,8 @@ class TurnOriginRow(BaseModel):
     role: Role
     created_at: datetime
     expires_at: datetime
+    sender_foreign: bool = False
+    shared_channel: bool = False
 
 
 class _Facts(BaseModel):
@@ -1171,6 +1195,9 @@ class SourceRepresentation(_Facts):
     unavailable_mcp_tools: tuple[str, ...] = ()
     unavailable_builtin_tools: tuple[str, ...] = ()
     environment: EnvironmentSpec | None = None
+    # Whole capabilities a partial representation (an agent template) leaves out;
+    # consent must declare each one.
+    unavailable_capabilities: tuple[str, ...] = ()
 
 
 class BackendAgent(_Facts):
@@ -1207,6 +1234,9 @@ class TenantBackendPolicy(_Facts):
     tenant_id: uuid.UUID
     revision: str
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
+    # False: the tenant follows the deployment's keyed providers. A snapshot from
+    # before this field reads as an admin's choice, as it was then.
+    explicit: bool = True
 
 
 class _BackendDropConsent(_Facts):
@@ -1232,11 +1262,21 @@ class _BackendConsentFacts(_Facts):
         return self.drop_consent.declared_drops if self.drop_consent is not None else ()
 
 
+#: Stored in `fleet_grant` when an owner or admin turned fleet off. Without it a
+#: revision with no grant reads as the deployment's default fleet (on).
+FLEET_OFF: dict[str, JsonValue] = {"disabled": True}
+
+
 class AgentBackendRevision(_BackendConsentFacts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     local: int = Field(ge=1)
     backend: Provider | None
+    model: str | None = None
+    # The agent's own settings; None is the backend's default.
+    profile: str | None = None
+    requires: dict[Capability, CapabilityRequirement] | None = None
+    thread_mode: ThreadMode | None = None
     agent_name: str
     preview_digest: str
     digest: str
@@ -1247,7 +1287,7 @@ class AgentBackendRevision(_BackendConsentFacts):
 
     @model_validator(mode="after")
     def _read_fleet_grant(self) -> AgentBackendRevision:
-        if self.fleet_grant is None:
+        if self.fleet_grant is None or self.fleet_off:
             return self
         from daimon.core.neutral_resources import AgentFleetGrant
 
@@ -1266,6 +1306,11 @@ class AgentBackendRevision(_BackendConsentFacts):
             )
         return self
 
+    @property
+    def fleet_off(self) -> bool:
+        """Fleet was turned off explicitly; the default never applies to it."""
+        return self.fleet_grant == FLEET_OFF
+
 
 class CompatibilityPreview(_BackendConsentFacts):
     tenant_id: uuid.UUID
@@ -1280,6 +1325,12 @@ class CompatibilityPreview(_BackendConsentFacts):
     cost_line: str
     allowed: bool
     digest: str
+    # Set only when an admin picked a model other than the provider default.
+    target_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    # The agent's own profile, requirements and thread mode, only when any is set.
+    target_settings: dict[str, JsonValue] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
 
 

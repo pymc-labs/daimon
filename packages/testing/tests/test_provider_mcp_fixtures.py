@@ -13,8 +13,6 @@ from typing import Protocol, cast
 
 import httpx
 import pytest
-from daimon.testing.drivers.gemini.fake import MemoryStorage
-from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 from daimon.testing.outcome_oracle import RunEvidence, TerminalEvidence, TurnEvidence, evaluate
 from daimon.testing.provider_fixtures import (
     BackendFixture,
@@ -44,6 +42,8 @@ from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 from openai import AsyncOpenAI
 from pydantic import TypeAdapter, ValidationError
 
@@ -64,7 +64,7 @@ class SchemaValidator(Protocol):
 
 
 class Preparation:
-    """Exactly three native preparation routes, then the strict scenario tape."""
+    """Native agent/vault/session preparation, then the strict scenario tape."""
 
     def __init__(
         self, fixture: BackendFixture, wire: WireReplay, *, fault: str | None = None
@@ -75,6 +75,8 @@ class Preparation:
         self.agent_posts = self.session_posts = self.agent_gets = 0
         self.resolutions: list[tuple[Scope, str, str]] = []
         self.secret = "offline-mcp-fixture"
+        self.vaults: dict[str, Object] = {}
+        self.credentials: dict[str, Object] = {}
         self.session_ids = list(dict.fromkeys(t.session_id for t in fixture.turns))
 
     async def resolve(self, scope: Scope, reference: str, destination: str) -> str:
@@ -87,6 +89,39 @@ class Preparation:
         return self.secret
 
     def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/vaults":
+            assert request.method == "POST", "private session vaults need no inventory lookup"
+            body = OBJECT.validate_json(request.content)
+            assert body["metadata"] == {
+                "mux_tenant": SCOPE.tenant_id,
+                "mux_account": SCOPE.account_id,
+            }
+            identity = "qa-vault-" + str(len(self.vaults))
+            self.vaults[identity] = {"id": identity, **body}
+            return httpx.Response(200, json=self.vaults[identity])
+        if request.url.path.startswith("/v1/vaults/"):
+            identity = request.url.path.split("/")[3]
+            assert identity in self.vaults
+            if request.url.path.endswith("/credentials"):
+                assert request.method == "POST" and self.fixture.mcp_binding is not None
+                body = OBJECT.validate_json(request.content)
+                connection = self.fixture.mcp_binding.connections[0]
+                assert body["name"] == connection.name
+                assert body["auth"] == {
+                    "type": "static_bearer",
+                    "token": self.secret,
+                    "mcp_server_url": connection.url,
+                }
+                self.credentials[identity] = {
+                    "id": "qa-credential-" + identity,
+                    "vault_id": identity,
+                    "created_at": 0,
+                    "name": body["name"],
+                    "auth": {"type": "static_bearer", "mcp_server_url": connection.url},
+                }
+                return httpx.Response(200, json=self.credentials[identity])
+            assert request.method == "GET"
+            return httpx.Response(200, json=self.vaults[identity])
         if request.url.path == "/v1/agents" and request.method == "POST":
             assert self.agent_posts == 0
             self.agent_posts += 1
@@ -112,6 +147,13 @@ class Preparation:
             assert self.session_posts < len(self.session_ids)
             body = OBJECT.validate_json(request.content)
             assert body["agent_id"] == "qa-agent"
+            assert self.secret not in request.content.decode()
+            assert "authorization" not in request.content.decode()
+            vault_ids = body["vault_ids"]
+            assert isinstance(vault_ids, list) and len(vault_ids) == 1
+            vault_id = vault_ids[0]
+            assert isinstance(vault_id, str) and vault_id in self.vaults
+            credential = self.credentials[vault_id]
             override = object_json(body["agent"])
             tools = override["tools"]
             assert isinstance(tools, list)
@@ -122,10 +164,10 @@ class Preparation:
                     "allowed_tools": c.tool_policy["allowed_tools"],
                     "required": True,
                     "connection_origin": "service",
+                    "credential_id": credential["id"],
                     "transport": {
                         "type": "http",
                         "server_url": c.url,
-                        "authorization": "Bearer " + self.secret,
                     },
                 }
                 for c in self.fixture.mcp_binding.connections
@@ -220,6 +262,7 @@ async def test_admitted_recipes_prepare_authenticated_sessions_and_decode_native
         preparation.session_ids
     )
     assert preparation.agent_gets == len(preparation.session_ids)
+    assert len(preparation.vaults) == len(preparation.credentials) == len(preparation.session_ids)
     assert fixture.mcp_binding is not None
     assert len(preparation.resolutions) == len(preparation.session_ids) * len(
         fixture.mcp_binding.connections

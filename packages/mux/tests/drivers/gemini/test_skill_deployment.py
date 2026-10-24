@@ -11,8 +11,6 @@ from typing import NoReturn
 import httpx
 import pytest
 import yaml
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
-from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_gemini_client
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -28,6 +26,8 @@ from mux.drivers.gemini.skill_deployment import (
 from mux.drivers.gemini.transport import SDKTransport, Transport
 from mux.errors import OperationConflict, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
+from mux.testing.isolated_sdk import AmbientSDKConfigurationError, build_gemini_client
 from pydantic import BaseModel, JsonValue
 
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="allowed")

@@ -167,6 +167,29 @@ async def test_actual_sdk_retains_selected_identity_and_copy_wire_defaults(
     assert copy.is_closed() and client.is_closed()
 
 
+async def test_no_project_sends_no_project_header_and_a_blank_one_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """None leaves the key's own default project; only None omits it."""
+    monkeypatch.setattr(os, "environ", {})
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "selected"})
+
+    monkeypatch.setattr(deployment, "_http_transport", lambda: httpx.MockTransport(handle))
+    with pytest.raises(ValueError, match="project"):
+        deployment.configured_transport(api_key="selected-key", project=" ")
+    deployment.configured_transport(api_key="selected-key", project=None)
+    client = deployment._ConfiguredTransport("selected-key", None)._client()  # pyright: ignore[reportPrivateUsage]
+    try:
+        assert await SDKTransport(client).request("GET", "/agents/selected") == {"id": "selected"}
+        assert "OpenAI-Project" not in requests[0].headers
+    finally:
+        await client.close()
+
+
 async def test_owned_real_http_policy_keeps_verified_tls_without_key_logging(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

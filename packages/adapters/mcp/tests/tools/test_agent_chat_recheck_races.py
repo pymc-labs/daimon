@@ -19,11 +19,11 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing import AGENT_ID, build_turn_router
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import session_response
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.transforms import Visibility
+from mux.testing.drivers.anthropic.ma import session_response
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 
 from .test_agent_chat import _runtime
 

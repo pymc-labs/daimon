@@ -370,6 +370,8 @@ async def test_a_billed_transcript_counts_toward_the_turns_channel_budget(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
             chat_session_id="test-session",

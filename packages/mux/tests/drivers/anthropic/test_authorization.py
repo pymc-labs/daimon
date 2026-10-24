@@ -3,7 +3,6 @@
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.ports import SkillVersions
 from mux.contracts.resources import AgentFilter, AgentPatch, EnvironmentFilter, EnvironmentPatch
@@ -11,6 +10,7 @@ from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.walk import ResourceWalk
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_models import ma_agent, ma_environment
 
 A = Scope(tenant_id="A", account_id="account-A", principal_id="host", authorization_id="auth-A")
 B = Scope(tenant_id="B", account_id="account-B", principal_id="host", authorization_id="auth-B")

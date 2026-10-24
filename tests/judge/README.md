@@ -21,7 +21,7 @@ turning invalid output into a task grade.
 
 Use a Codex ChatGPT subscription login (`auth_mode=chatgpt`); API-key auth is
 refused. The script strips API-key environment variables and provider endpoint
-overrides, ignores Codex user config, pins `gpt-6.1-sol`, uses a temporary empty
+overrides, ignores Codex user config, defaults to `gpt-6.1-sol`, uses a temporary empty
 working directory with a read-only sandbox, and requests schema-constrained JSON.
 The task is never replayed through a provider API. Transcript payloads are
 untrusted evidence, not judge instructions. Never put credentials into recordings.
@@ -29,7 +29,17 @@ untrusted evidence, not judge instructions. Never put credentials into recording
 The installed CLI's `codex exec --help` verifies `--output-schema`,
 `--output-last-message`, `--ephemeral`, `--ignore-user-config`, and `--sandbox`.
 
-Run explicitly:
+Override the model with `--model` or `DAIMON_JUDGE_MODEL` (the flag wins).
+The repo-wide default remains Sol. All Azure self-host program evaluations
+must select `gpt-6-luna` under C12:
+
+```sh
+uv run python tests/judge/harness.py recordings.json --output grades.json --model gpt-6-luna
+DAIMON_JUDGE_MODEL=gpt-6-luna DAIMON_JUDGE_RECORDINGS=recordings.json \
+  DAIMON_JUDGE_OUTPUT=grades.json uv run pytest tests/judge/test_manual.py -m judge
+```
+
+Run explicitly outside that program:
 
 ```sh
 uv run python tests/judge/harness.py recordings.json --output grades.json --reps 3
@@ -53,7 +63,7 @@ Input is a JSON array, one transcript per backend/profile/task:
 This minimal example is insufficient evidence for task success; real recordings
 need both turns, tool effects, checksums and terminal observations. Outputs retain
 backend/profile, each repetition's scores, pass counts, rubric/task/transcript
-hashes, the pinned judge model and grading date. Same-family judge bias for OpenAI
+hashes, the selected judge model and grading date. Same-family judge bias for OpenAI
 recordings remains subject to the lead's ~20% Opus spot check (QUESTIONS Q30).
 
 `catalog_runner.py` maps an external QA catalog to headless invocation plans,

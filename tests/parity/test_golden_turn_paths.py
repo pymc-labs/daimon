@@ -7,6 +7,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
@@ -54,7 +55,7 @@ def test_pending_mux_fails_before_starting_a_child(monkeypatch: pytest.MonkeyPat
     def unexpected(*args: object, **kwargs: object) -> None:
         pytest.fail("pending mux must not replay the legacy path")
 
-    monkeypatch.setattr(subprocess, "run", unexpected)
+    monkeypatch.setattr(subprocess, "Popen", unexpected)
     with pytest.raises(RuntimeError, match="public turn bridge has not landed"):
         RUNNER.replay("plain_turn", turn_path="mux")
 
@@ -71,19 +72,30 @@ def test_selected_modes_override_ambient_flags_and_compare_one_shared_file(
     seen: list[str] = []
     changed = False
 
-    def replay_child(
-        command: list[str], *, env: dict[str, str], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        requested = env["DAIMON_ORACLE_TURN_PATH"]
-        assert env["DAIMON_TURN__PATH"] == requested
-        assert "oracle_plugin" in command and "turn_path_plugin" in command
-        seen.append(requested)
-        Path(env["DAIMON_ORACLE_OUTPUT"]).write_text(
-            baseline.replace("0.0000001234", "0.0000001235") if changed else baseline
-        )
-        return subprocess.CompletedProcess(command, 0, stdout="")
+    class ReplayChild:
+        """Stands in for the child pytest: writes the transcript the oracle plugin would."""
 
-    monkeypatch.setattr(subprocess, "run", replay_child)
+        def __init__(self, command: list[str], *, env: dict[str, str], **kwargs: object) -> None:
+            requested = env["DAIMON_ORACLE_TURN_PATH"]
+            assert env["DAIMON_TURN__PATH"] == requested
+            assert "oracle_plugin" in command and "turn_path_plugin" in command
+            seen.append(requested)
+            manifest = json.loads(Path(env["DAIMON_ORACLE_MANIFEST"]).read_text())
+            assert [entry["key"] for entry in manifest["entries"]] == ["plain_turn"]
+            self.output_dir = Path(manifest["output_dir"])
+            Path(manifest["output_dir"], "plain_turn.json").write_text(
+                baseline.replace("0.0000001234", "0.0000001235") if changed else baseline
+            )
+
+        returncode = 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, None]:
+            write_child_state(
+                self.output_dir, expected={"plain_turn": 1}, completed={"plain_turn": 1}
+            )
+            return "", None
+
+    monkeypatch.setattr(subprocess, "Popen", ReplayChild)
     RUNNER.check("plain_turn", turn_path="legacy")
     RUNNER.check("plain_turn", turn_path="mux")
     assert seen == ["legacy", "mux"]
@@ -92,6 +104,174 @@ def test_selected_modes_override_ambient_flags_and_compare_one_shared_file(
         RUNNER.check("plain_turn", turn_path="mux")
     assert list(tmp_path.glob("*.json")) == [golden]
     assert golden.read_text() == baseline
+
+
+def write_child_state(
+    output_dir: Path,
+    *,
+    expected: dict[str, int],
+    completed: dict[str, int],
+    failures: dict[str, str] | None = None,
+) -> None:
+    """What oracle_plugin.write_state leaves behind after each report."""
+    (output_dir / "state.json").write_text(
+        json.dumps({"expected": expected, "completed": completed, "failures": failures or {}})
+    )
+
+
+def fake_child(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    returncode: int,
+    transcripts: tuple[str, ...] = (),
+    expected: dict[str, int] | None = None,
+    completed: dict[str, int] | None = None,
+    failures: dict[str, str] | None = None,
+    log: str = "child log line\n",
+    spawned: list[list[str]] | None = None,
+) -> None:
+    """Replace the child pytest with one that leaves exactly this on disk, then exits."""
+
+    class Child:
+        def __init__(self, command: list[str], *, env: dict[str, str], **kwargs: object) -> None:
+            if spawned is not None:
+                spawned.append(command)
+            manifest = json.loads(Path(env["DAIMON_ORACLE_MANIFEST"]).read_text())
+            self.out = Path(manifest["output_dir"])
+            self.returncode: int | None = None
+            for name in transcripts:
+                (self.out / f"{name}.json").write_text("{}\n")
+            if expected is not None:
+                write_child_state(
+                    self.out, expected=expected, completed=completed or {}, failures=failures
+                )
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, None]:
+            self.returncode = returncode
+            return log, None
+
+    monkeypatch.setattr(subprocess, "Popen", Child)
+
+
+@pytest.mark.parametrize(
+    ("completed", "failures", "expect_recorded"),
+    (
+        # plain_turn's teardown failed (recorded), then the child was killed in tool_use.
+        ({"plain_turn": 1}, {"plain_turn": "TEARDOWN BOOM"}, "TEARDOWN BOOM"),
+        # Killed during plain_turn's own teardown: transcript written, no pass was recorded.
+        ({}, {}, "child aborted (returncode -9) while running plain_turn"),
+    ),
+)
+def test_killed_child_cannot_turn_a_failure_or_unfinished_scenario_into_a_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    completed: dict[str, int],
+    failures: dict[str, str],
+    expect_recorded: str,
+) -> None:
+    fake_child(
+        monkeypatch,
+        returncode=-9,
+        transcripts=("plain_turn",),
+        expected={"plain_turn": 1, "tool_use": 1},
+        completed=completed,
+        failures=failures,
+        log="LAST CHILD LINE\n",
+    )
+    with pytest.raises(AssertionError, match="Oracle scenario plain_turn") as caught:
+        RUNNER.replay_batch([("plain_turn", None), ("tool_use", None)])
+    assert expect_recorded in str(caught.value)
+    with tempfile.TemporaryDirectory() as scratch:
+        batch = RUNNER.Batch([("plain_turn", None), ("tool_use", None)], "legacy", Path(scratch))
+        assert batch.wait() == {}
+        assert expect_recorded in batch.problems["plain_turn"]
+        later = batch.problems["tool_use"]
+        assert "child aborted (returncode -9)" in later and "tool_use" in later
+        assert "LAST CHILD LINE" in later
+
+
+def test_child_that_dies_before_collecting_reports_it_never_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_child(monkeypatch, returncode=2, log="ImportError: no module\n")
+    with pytest.raises(AssertionError, match=r"child aborted \(returncode 2\) before running"):
+        RUNNER.replay_batch([("plain_turn", None)])
+
+
+def test_pytest_failure_exit_still_reports_only_the_failed_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_child(
+        monkeypatch,
+        returncode=1,
+        transcripts=("plain_turn", "tool_use"),
+        expected={"plain_turn": 1, "tool_use": 1},
+        completed={"plain_turn": 1, "tool_use": 1},
+        failures={"tool_use": "TOOL USE BOOM"},
+    )
+    with tempfile.TemporaryDirectory() as scratch:
+        batch = RUNNER.Batch([("plain_turn", None), ("tool_use", None)], "legacy", Path(scratch))
+        assert list(batch.wait()) == ["plain_turn"]
+        assert batch.problems == {"tool_use": "TOOL USE BOOM"}
+
+
+def test_child_environment_drops_ambient_pytest_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-k nothing")
+    assert "PYTEST_ADDOPTS" not in RUNNER._child_env("legacy", Path("manifest.json"))
+
+
+@pytest.fixture
+def one_batch_replays(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
+    monkeypatch.setattr(RUNNER, "mux_turn_bridge_available", lambda: False)
+    monkeypatch.setattr(RUNNER, "plan", lambda paths: [("legacy", [("plain_turn", None)])])
+    return RUNNER.SharedReplays(tmp_path / "replays")
+
+
+def test_stale_transcript_cannot_beat_a_fresh_failure_on_retry(
+    monkeypatch: pytest.MonkeyPatch, one_batch_replays: Any
+) -> None:
+    stale = one_batch_replays.root / "legacy"
+    stale.mkdir()
+    (stale / "plain_turn.json").write_text("STALE PASS\n")
+    fake_child(
+        monkeypatch,
+        returncode=1,
+        transcripts=("plain_turn",),
+        expected={"plain_turn": 1},
+        completed={"plain_turn": 1},
+        failures={"plain_turn": "FRESH FAILURE"},
+    )
+    with pytest.raises(AssertionError, match="FRESH FAILURE"):
+        one_batch_replays.transcript("plain_turn", "legacy")
+
+
+def test_store_replaces_the_other_suffix(one_batch_replays: Any) -> None:
+    one_batch_replays._store("legacy", "plain_turn", None, "PASS\n", "")
+    one_batch_replays._store("legacy", "plain_turn", None, None, "FAIL")
+    directory = one_batch_replays.root / "legacy"
+    assert not (directory / "plain_turn.json").exists()
+    assert (directory / "plain_turn.err").read_text() == "FAIL"
+    one_batch_replays._store("legacy", "plain_turn", None, "PASS\n", "")
+    assert not (directory / "plain_turn.err").exists()
+
+
+def test_a_crashing_batch_fails_its_jobs_and_is_not_replayed_again(
+    monkeypatch: pytest.MonkeyPatch, one_batch_replays: Any
+) -> None:
+    attempts: list[object] = []
+
+    class Broken:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            attempts.append(args)
+
+        def wait(self) -> dict[str, str]:
+            raise OSError("cannot read results")
+
+    monkeypatch.setattr(RUNNER, "Batch", Broken)
+    for _ in range(2):
+        with pytest.raises(AssertionError, match="cannot read results"):
+            one_batch_replays.transcript("plain_turn", "legacy")
+    assert len(attempts) == 1
+    assert (one_batch_replays.root / "done").exists()
 
 
 @pytest.mark.parametrize(("turn_path", "mutation"), (("mux", None), ("legacy", "slack_eyes")))
@@ -156,13 +336,8 @@ async def test_fixture_injects_selected_path_and_explicit_scope_into_real_aliase
         await source.run_turn(path=other_path)
 
 
-def test_actual_mock_recorder_omits_only_control_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(
-        RUNNER.SCENARIOS,
-        "controls_probe",
-        "tests/golden/test_turn_path_instrumentation.py::test_controls_are_forwarded_without_erasing_semantic_kwargs",
-    )
-    data = json.loads(RUNNER.replay("controls_probe"))
+def test_actual_mock_recorder_omits_only_control_kwargs(golden_replays: Any) -> None:
+    data = json.loads(golden_replays.transcript("controls_probe", "legacy"))
     effects = [effect for effect in data["effects"] if effect["operation"] == "run_turn"]
     assert len(effects) == 1
     kwargs = effects[0]["payload"]["kwargs"]
@@ -177,16 +352,10 @@ def test_actual_mock_recorder_omits_only_control_kwargs(monkeypatch: pytest.Monk
 
 @pytest.mark.parametrize("lease_count", (0, 1, 3))
 def test_actual_oracle_isolates_neutral_state_uuid_defaults(
-    monkeypatch: pytest.MonkeyPatch, lease_count: int
+    golden_replays: Any, lease_count: int
 ) -> None:
-    monkeypatch.setitem(
-        RUNNER.SCENARIOS,
-        "uuid_probe",
-        "tests/golden/test_turn_path_instrumentation.py::"
-        f"test_lease_inserts_preserve_host_uuid_sequence[{lease_count}]",
-    )
     # Child assertions exercise mapped defaults and real Postgres lease inserts.
-    RUNNER.replay("uuid_probe")
+    assert golden_replays.transcript(f"uuid_probe_{lease_count}", "legacy")
 
 
 @pytest.mark.parametrize("available", (False, True))
@@ -196,17 +365,26 @@ def test_cli_both_covers_every_scenario_and_labels_pending_mux(
     monkeypatch.setattr(sys, "argv", ["runner.py", "--turn-path", "both"])
     monkeypatch.setattr(RUNNER, "mux_turn_bridge_available", lambda: available)
     seen: list[tuple[str, str]] = []
+    batches: list[tuple[str, int]] = []
+    current_path = [""]
 
-    def check(name: str, *, turn_path: str, **kwargs: object) -> None:
-        seen.append((name, turn_path))
+    def replay_batch(jobs: list[tuple[str, str | None]], *, turn_path: str) -> dict[str, str]:
+        current_path[0] = turn_path
+        batches.append((turn_path, len(jobs)))
+        return {name: "" for name, _ in jobs}
 
-    monkeypatch.setattr(RUNNER, "check", check)
+    def compare(name: str, transcript: str, **kwargs: object) -> None:
+        seen.append((name, current_path[0]))
+
+    monkeypatch.setattr(RUNNER, "replay_batch", replay_batch)
+    monkeypatch.setattr(RUNNER, "compare", compare)
     assert RUNNER.main() == 0
-    assert seen == [
+    assert batches == [(path, 33) for path in (("legacy", "mux") if available else ("legacy",))]
+    assert sorted(seen) == sorted(
         (scenario, path)
         for scenario in RUNNER.SCENARIOS
         for path in (("legacy", "mux") if available else ("legacy",))
-    ]
+    )
     output = capsys.readouterr().out
     assert output.count("(legacy): matched") == 33
     assert output.count("(mux): matched") == (33 if available else 0)

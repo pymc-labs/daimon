@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 from daimon.core.defaults.preflight import check_model_accepted, check_models_accepted
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 
 
 def _err(status: int, type_: str, message: str) -> httpx.Response:

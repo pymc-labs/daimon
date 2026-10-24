@@ -1,0 +1,1796 @@
+[
+  {
+    "backend": "codex",
+    "scenario": "approve",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "missing_approval",
+      "tool_execution_count"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "codex-approve",
+        "request_id": "38eee2d1-e102-4c3b-a078-2d57412e87a2",
+        "started_seq_before_network": 16,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_04aa839e9f6873f8016ad853ff825487d1ae65f5f2d9d48d63",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 6882,
+          "input_tokens_details": {
+            "cache_write_tokens": 6879,
+            "cached_tokens": 0
+          },
+          "output_tokens": 31,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 6913
+        }
+      }
+    ],
+    "attempt": "attempt-01",
+    "inventory_events": [
+      {
+        "seq": 16,
+        "session_id": "luna-live",
+        "turn_id": "codex-approve",
+        "at": "2026-10-21T05:56:15.328264Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "38eee2d1-e102-4c3b-a078-2d57412e87a2",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 17,
+        "session_id": "luna-live",
+        "turn_id": "codex-approve",
+        "at": "2026-10-21T05:56:16.443363Z",
+        "type": "usage",
+        "data": {
+          "request_id": "38eee2d1-e102-4c3b-a078-2d57412e87a2",
+          "model": "gpt-6-luna",
+          "input_tokens": 6882,
+          "output_tokens": 31,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 18,
+        "session_id": "luna-live",
+        "turn_id": "codex-approve",
+        "at": "2026-10-21T05:56:16.750596Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_native_tool",
+            "message": "Native Codex tools are disabled"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "cancel",
+    "outcome": "interrupted",
+    "errors": [],
+    "api_observations": [
+      {
+        "turn_id": "codex-cancel",
+        "request_id": "fb6cda9a-ab71-40f6-8cd0-2a807c702d57",
+        "started_seq_before_network": 43,
+        "stream": true,
+        "http_status": 200
+      }
+    ],
+    "attempt": "attempt-01",
+    "inventory_events": [
+      {
+        "seq": 43,
+        "session_id": "luna-live",
+        "turn_id": "codex-cancel",
+        "at": "2026-10-21T05:56:26.114603Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "fb6cda9a-ab71-40f6-8cd0-2a807c702d57",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 45,
+        "session_id": "luna-live",
+        "turn_id": "codex-cancel",
+        "at": "2026-10-21T05:56:33.990121Z",
+        "type": "error",
+        "data": {
+          "kind": "usage_unavailable",
+          "request_id": "fb6cda9a-ab71-40f6-8cd0-2a807c702d57",
+          "message": "Model request ended without usage",
+          "retryable": false
+        }
+      },
+      {
+        "seq": 46,
+        "session_id": "luna-live",
+        "turn_id": "codex-cancel",
+        "at": "2026-10-21T05:56:34.472227Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "interrupted"
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "deny",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "codex-deny",
+        "request_id": "ef8bc258-9ce2-48c6-9dd5-6b4235aac869",
+        "started_seq_before_network": 20,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_04aa839e9f6873f8016ad85401573487d1b0ea32b9fdf71298",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 6936,
+          "input_tokens_details": {
+            "cache_write_tokens": 6933,
+            "cached_tokens": 0
+          },
+          "output_tokens": 24,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 6960
+        }
+      },
+      {
+        "turn_id": "codex-deny",
+        "request_id": "879f8609-1703-4aa2-8ca6-57ed5c60fab8",
+        "started_seq_before_network": 25,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_04aa839e9f6873f8016ad85402973487d1b11c7b47bb4bda4a",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 6979,
+          "input_tokens_details": {
+            "cache_write_tokens": 43,
+            "cached_tokens": 6933
+          },
+          "output_tokens": 6,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 6985
+        }
+      }
+    ],
+    "attempt": "attempt-01",
+    "inventory_events": [
+      {
+        "seq": 20,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:56:17.185209Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "ef8bc258-9ce2-48c6-9dd5-6b4235aac869",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 21,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:56:18.404264Z",
+        "type": "usage",
+        "data": {
+          "request_id": "ef8bc258-9ce2-48c6-9dd5-6b4235aac869",
+          "model": "gpt-6-luna",
+          "input_tokens": 6936,
+          "output_tokens": 24,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 25,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:56:18.427993Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "879f8609-1703-4aa2-8ca6-57ed5c60fab8",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 29,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:56:19.435193Z",
+        "type": "usage",
+        "data": {
+          "request_id": "879f8609-1703-4aa2-8ca6-57ed5c60fab8",
+          "model": "gpt-6-luna",
+          "input_tokens": 6979,
+          "output_tokens": 6,
+          "cached_input_tokens": 6933,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 30,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:56:19.608129Z",
+        "type": "error",
+        "data": {
+          "kind": "OSError",
+          "message": "Harness turn failed",
+          "retryable": false
+        }
+      },
+      {
+        "seq": 31,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:56:19.882578Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "OSError",
+            "message": "Harness turn failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "isolated_bash",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "tool_isolation_not_proven"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "codex-isolated_bash",
+        "request_id": "5a59dab3-f82f-44b2-9610-2c2cc0ec521f",
+        "started_seq_before_network": 33,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_04aa839e9f6873f8016ad854044ea487d1960953eb0185cf5f",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 7053,
+          "input_tokens_details": {
+            "cache_write_tokens": 7050,
+            "cached_tokens": 0
+          },
+          "output_tokens": 123,
+          "output_tokens_details": {
+            "reasoning_tokens": 56
+          },
+          "total_tokens": 7176
+        }
+      }
+    ],
+    "attempt": "attempt-01",
+    "inventory_events": [
+      {
+        "seq": 33,
+        "session_id": "luna-live",
+        "turn_id": "codex-isolated_bash",
+        "at": "2026-10-21T05:56:20.115248Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "5a59dab3-f82f-44b2-9610-2c2cc0ec521f",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 34,
+        "session_id": "luna-live",
+        "turn_id": "codex-isolated_bash",
+        "at": "2026-10-21T05:56:22.487290Z",
+        "type": "usage",
+        "data": {
+          "request_id": "5a59dab3-f82f-44b2-9610-2c2cc0ec521f",
+          "model": "gpt-6-luna",
+          "input_tokens": 7053,
+          "output_tokens": 123,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 56
+        }
+      },
+      {
+        "seq": 35,
+        "session_id": "luna-live",
+        "turn_id": "codex-isolated_bash",
+        "at": "2026-10-21T05:56:22.718210Z",
+        "type": "error",
+        "data": {
+          "kind": "OSError",
+          "message": "Harness turn failed",
+          "retryable": false
+        }
+      },
+      {
+        "seq": 36,
+        "session_id": "luna-live",
+        "turn_id": "codex-isolated_bash",
+        "at": "2026-10-21T05:56:22.992919Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "OSError",
+            "message": "Harness turn failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "mcp_auto",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "tool_execution_count"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "codex-mcp_auto",
+        "request_id": "95e3c451-d209-4857-9392-bd76c03e978b",
+        "started_seq_before_network": 12,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_04aa839e9f6873f8016ad853fd755487d1b10974638fc8812f",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 6834,
+          "input_tokens_details": {
+            "cache_write_tokens": 6831,
+            "cached_tokens": 0
+          },
+          "output_tokens": 32,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 6866
+        }
+      }
+    ],
+    "attempt": "attempt-01",
+    "inventory_events": [
+      {
+        "seq": 12,
+        "session_id": "luna-live",
+        "turn_id": "codex-mcp_auto",
+        "at": "2026-10-21T05:56:13.292980Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "95e3c451-d209-4857-9392-bd76c03e978b",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 13,
+        "session_id": "luna-live",
+        "turn_id": "codex-mcp_auto",
+        "at": "2026-10-21T05:56:14.492749Z",
+        "type": "usage",
+        "data": {
+          "request_id": "95e3c451-d209-4857-9392-bd76c03e978b",
+          "model": "gpt-6-luna",
+          "input_tokens": 6834,
+          "output_tokens": 32,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 14,
+        "session_id": "luna-live",
+        "turn_id": "codex-mcp_auto",
+        "at": "2026-10-21T05:56:14.786944Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_native_tool",
+            "message": "Native Codex tools are disabled"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "multi_request",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "multi_request_not_observed"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "codex-multi_request",
+        "request_id": "9eec1f85-e420-41bd-82ea-56f8ddd5ae12",
+        "started_seq_before_network": 38,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_04aa839e9f6873f8016ad85407651c87d1ab5881cffaaeb408",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 7176,
+          "input_tokens_details": {
+            "cache_write_tokens": 7173,
+            "cached_tokens": 0
+          },
+          "output_tokens": 30,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 7206
+        }
+      }
+    ],
+    "attempt": "attempt-01",
+    "inventory_events": [
+      {
+        "seq": 38,
+        "session_id": "luna-live",
+        "turn_id": "codex-multi_request",
+        "at": "2026-10-21T05:56:23.248543Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "9eec1f85-e420-41bd-82ea-56f8ddd5ae12",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 39,
+        "session_id": "luna-live",
+        "turn_id": "codex-multi_request",
+        "at": "2026-10-21T05:56:25.517254Z",
+        "type": "usage",
+        "data": {
+          "request_id": "9eec1f85-e420-41bd-82ea-56f8ddd5ae12",
+          "model": "gpt-6-luna",
+          "input_tokens": 7176,
+          "output_tokens": 30,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 40,
+        "session_id": "luna-live",
+        "turn_id": "codex-multi_request",
+        "at": "2026-10-21T05:56:25.604189Z",
+        "type": "error",
+        "data": {
+          "kind": "OSError",
+          "message": "Harness turn failed",
+          "retryable": false
+        }
+      },
+      {
+        "seq": 41,
+        "session_id": "luna-live",
+        "turn_id": "codex-multi_request",
+        "at": "2026-10-21T05:56:25.884320Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "OSError",
+            "message": "Harness turn failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "plain",
+    "outcome": "completed",
+    "errors": [],
+    "api_observations": [
+      {
+        "turn_id": "codex-plain",
+        "request_id": "2baf0d75-4746-45d9-8092-b9248d1d6126",
+        "started_seq_before_network": 2,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_04aa839e9f6873f8016ad853fb7a0487d1ba79f65e584e21af",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 6570,
+          "input_tokens_details": {
+            "cache_write_tokens": 6567,
+            "cached_tokens": 0
+          },
+          "output_tokens": 9,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 6579
+        }
+      }
+    ],
+    "attempt": "attempt-01",
+    "inventory_events": [
+      {
+        "seq": 2,
+        "session_id": "luna-live",
+        "turn_id": "codex-plain",
+        "at": "2026-10-21T05:56:11.289748Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "2baf0d75-4746-45d9-8092-b9248d1d6126",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 9,
+        "session_id": "luna-live",
+        "turn_id": "codex-plain",
+        "at": "2026-10-21T05:56:12.744410Z",
+        "type": "usage",
+        "data": {
+          "request_id": "2baf0d75-4746-45d9-8092-b9248d1d6126",
+          "model": "gpt-6-luna",
+          "input_tokens": 6570,
+          "output_tokens": 9,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 10,
+        "session_id": "luna-live",
+        "turn_id": "codex-plain",
+        "at": "2026-10-21T05:56:13.043076Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "completed"
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "approve",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "missing_approval",
+      "tool_execution_count"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "codex-approve",
+        "request_id": "1a1deeab-a274-4b19-b62d-99b124806a82",
+        "started_seq_before_network": 27,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_0c1d568c2e8e89eb016ad854578a2c87d1b7efd61c6fbf2c0a",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 7014,
+          "input_tokens_details": {
+            "cache_write_tokens": 7011,
+            "cached_tokens": 0
+          },
+          "output_tokens": 31,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 7045
+        },
+        "output_items": [
+          {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "namespace": null
+          }
+        ]
+      }
+    ],
+    "attempt": "attempt-02",
+    "inventory_events": [
+      {
+        "seq": 27,
+        "session_id": "luna-live",
+        "turn_id": "codex-approve",
+        "at": "2026-10-21T05:57:43.363052Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "1a1deeab-a274-4b19-b62d-99b124806a82",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 28,
+        "session_id": "luna-live",
+        "turn_id": "codex-approve",
+        "at": "2026-10-21T05:57:45.514538Z",
+        "type": "usage",
+        "data": {
+          "request_id": "1a1deeab-a274-4b19-b62d-99b124806a82",
+          "model": "gpt-6-luna",
+          "input_tokens": 7014,
+          "output_tokens": 31,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 29,
+        "session_id": "luna-live",
+        "turn_id": "codex-approve",
+        "at": "2026-10-21T05:57:45.554042Z",
+        "type": "error",
+        "data": {
+          "kind": "OSError",
+          "message": "Harness turn failed",
+          "retryable": false
+        }
+      },
+      {
+        "seq": 30,
+        "session_id": "luna-live",
+        "turn_id": "codex-approve",
+        "at": "2026-10-21T05:57:45.831284Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "OSError",
+            "message": "Harness turn failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "cancel",
+    "outcome": "interrupted",
+    "errors": [],
+    "api_observations": [
+      {
+        "turn_id": "codex-cancel",
+        "request_id": "38cc780c-1a5d-459b-b859-71f2681362dd",
+        "started_seq_before_network": 44,
+        "stream": true,
+        "http_status": 200
+      }
+    ],
+    "attempt": "attempt-02",
+    "inventory_events": [
+      {
+        "seq": 44,
+        "session_id": "luna-live",
+        "turn_id": "codex-cancel",
+        "at": "2026-10-21T05:57:53.826453Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "38cc780c-1a5d-459b-b859-71f2681362dd",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 49,
+        "session_id": "luna-live",
+        "turn_id": "codex-cancel",
+        "at": "2026-10-21T05:58:00.831296Z",
+        "type": "error",
+        "data": {
+          "kind": "usage_unavailable",
+          "request_id": "38cc780c-1a5d-459b-b859-71f2681362dd",
+          "message": "Model request ended without usage",
+          "retryable": false
+        }
+      },
+      {
+        "seq": 50,
+        "session_id": "luna-live",
+        "turn_id": "codex-cancel",
+        "at": "2026-10-21T05:58:01.335095Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "interrupted"
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "deny",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "missing_approval"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "codex-deny",
+        "request_id": "67069a14-81e6-4504-b8d0-031ae09d96c1",
+        "started_seq_before_network": 32,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_0c1d568c2e8e89eb016ad8545a427487d184528adafb5cc849",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 7067,
+          "input_tokens_details": {
+            "cache_write_tokens": 7064,
+            "cached_tokens": 0
+          },
+          "output_tokens": 31,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 7098
+        },
+        "output_items": [
+          {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "namespace": null
+          }
+        ]
+      }
+    ],
+    "attempt": "attempt-02",
+    "inventory_events": [
+      {
+        "seq": 32,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:57:46.095122Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "67069a14-81e6-4504-b8d0-031ae09d96c1",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 33,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:57:47.887654Z",
+        "type": "usage",
+        "data": {
+          "request_id": "67069a14-81e6-4504-b8d0-031ae09d96c1",
+          "model": "gpt-6-luna",
+          "input_tokens": 7067,
+          "output_tokens": 31,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 34,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:57:48.187535Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_native_tool",
+            "message": "Native Codex tools are disabled"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "isolated_bash",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "tool_isolation_not_proven"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "codex-isolated_bash",
+        "request_id": "336740f3-6689-40e2-bb80-92608dfc9fc3",
+        "started_seq_before_network": 36,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_0c1d568c2e8e89eb016ad8545c97c487d1b2840ea7539cad1f",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 7078,
+          "input_tokens_details": {
+            "cache_write_tokens": 7075,
+            "cached_tokens": 0
+          },
+          "output_tokens": 65,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 7143
+        },
+        "output_items": [
+          {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "namespace": null
+          }
+        ]
+      }
+    ],
+    "attempt": "attempt-02",
+    "inventory_events": [
+      {
+        "seq": 36,
+        "session_id": "luna-live",
+        "turn_id": "codex-isolated_bash",
+        "at": "2026-10-21T05:57:48.415795Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "336740f3-6689-40e2-bb80-92608dfc9fc3",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 37,
+        "session_id": "luna-live",
+        "turn_id": "codex-isolated_bash",
+        "at": "2026-10-21T05:57:49.824313Z",
+        "type": "usage",
+        "data": {
+          "request_id": "336740f3-6689-40e2-bb80-92608dfc9fc3",
+          "model": "gpt-6-luna",
+          "input_tokens": 7078,
+          "output_tokens": 65,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 38,
+        "session_id": "luna-live",
+        "turn_id": "codex-isolated_bash",
+        "at": "2026-10-21T05:57:50.120905Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_native_tool",
+            "message": "Native Codex tools are disabled"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "mcp_auto",
+    "outcome": "completed",
+    "errors": [],
+    "api_observations": [
+      {
+        "turn_id": "codex-mcp_auto",
+        "request_id": "0b3457c8-e82d-4f97-a8b6-0ce800169de7",
+        "started_seq_before_network": 12,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_0c1d568c2e8e89eb016ad854530acc87d1b89820f019e613ff",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 6834,
+          "input_tokens_details": {
+            "cache_write_tokens": 6831,
+            "cached_tokens": 0
+          },
+          "output_tokens": 25,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 6859
+        },
+        "output_items": [
+          {
+            "type": "function_call",
+            "name": "harness_probe__echo",
+            "namespace": null
+          }
+        ]
+      },
+      {
+        "turn_id": "codex-mcp_auto",
+        "request_id": "e5fdd731-49ad-4152-ab85-bacab7892600",
+        "started_seq_before_network": 16,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_0c1d568c2e8e89eb016ad85454dbfc87d1a30573c23c9e3855",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 6929,
+          "input_tokens_details": {
+            "cache_write_tokens": 95,
+            "cached_tokens": 6831
+          },
+          "output_tokens": 10,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 6939
+        },
+        "output_items": [
+          {
+            "type": "message",
+            "name": null,
+            "namespace": null
+          }
+        ]
+      }
+    ],
+    "attempt": "attempt-02",
+    "inventory_events": [
+      {
+        "seq": 12,
+        "session_id": "luna-live",
+        "turn_id": "codex-mcp_auto",
+        "at": "2026-10-21T05:57:38.862609Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "0b3457c8-e82d-4f97-a8b6-0ce800169de7",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 13,
+        "session_id": "luna-live",
+        "turn_id": "codex-mcp_auto",
+        "at": "2026-10-21T05:57:40.673167Z",
+        "type": "usage",
+        "data": {
+          "request_id": "0b3457c8-e82d-4f97-a8b6-0ce800169de7",
+          "model": "gpt-6-luna",
+          "input_tokens": 6834,
+          "output_tokens": 25,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 16,
+        "session_id": "luna-live",
+        "turn_id": "codex-mcp_auto",
+        "at": "2026-10-21T05:57:40.713248Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "e5fdd731-49ad-4152-ab85-bacab7892600",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 24,
+        "session_id": "luna-live",
+        "turn_id": "codex-mcp_auto",
+        "at": "2026-10-21T05:57:42.593460Z",
+        "type": "usage",
+        "data": {
+          "request_id": "e5fdd731-49ad-4152-ab85-bacab7892600",
+          "model": "gpt-6-luna",
+          "input_tokens": 6929,
+          "output_tokens": 10,
+          "cached_input_tokens": 6831,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 25,
+        "session_id": "luna-live",
+        "turn_id": "codex-mcp_auto",
+        "at": "2026-10-21T05:57:43.097048Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "completed"
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "multi_request",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "multi_request_not_observed"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "codex-multi_request",
+        "request_id": "b40d843b-2de5-4f18-8385-993f315b5310",
+        "started_seq_before_network": 40,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_0c1d568c2e8e89eb016ad8545e8b6087d181dddb7a3dae3894",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 7200,
+          "input_tokens_details": {
+            "cache_write_tokens": 7197,
+            "cached_tokens": 0
+          },
+          "output_tokens": 177,
+          "output_tokens_details": {
+            "reasoning_tokens": 99
+          },
+          "total_tokens": 7377
+        },
+        "output_items": [
+          {
+            "type": "reasoning",
+            "name": null,
+            "namespace": null
+          },
+          {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "namespace": null
+          }
+        ]
+      }
+    ],
+    "attempt": "attempt-02",
+    "inventory_events": [
+      {
+        "seq": 40,
+        "session_id": "luna-live",
+        "turn_id": "codex-multi_request",
+        "at": "2026-10-21T05:57:50.383634Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "b40d843b-2de5-4f18-8385-993f315b5310",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 41,
+        "session_id": "luna-live",
+        "turn_id": "codex-multi_request",
+        "at": "2026-10-21T05:57:53.059351Z",
+        "type": "usage",
+        "data": {
+          "request_id": "b40d843b-2de5-4f18-8385-993f315b5310",
+          "model": "gpt-6-luna",
+          "input_tokens": 7200,
+          "output_tokens": 177,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 99
+        }
+      },
+      {
+        "seq": 42,
+        "session_id": "luna-live",
+        "turn_id": "codex-multi_request",
+        "at": "2026-10-21T05:57:53.578293Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_native_tool",
+            "message": "Native Codex tools are disabled"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "plain",
+    "outcome": "completed",
+    "errors": [],
+    "api_observations": [
+      {
+        "turn_id": "codex-plain",
+        "request_id": "9c79f67b-5e10-42a4-a909-cf4544f9e8bb",
+        "started_seq_before_network": 2,
+        "stream": true,
+        "http_status": 200,
+        "response_id": "resp_0c1d568c2e8e89eb016ad85451807087d19792dadf623ccf51",
+        "provider_model": "gpt-6-luna",
+        "raw_usage": {
+          "input_tokens": 6575,
+          "input_tokens_details": {
+            "cache_write_tokens": 6572,
+            "cached_tokens": 0
+          },
+          "output_tokens": 9,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 6584
+        },
+        "output_items": [
+          {
+            "type": "message",
+            "name": null,
+            "namespace": null
+          }
+        ]
+      }
+    ],
+    "attempt": "attempt-02",
+    "inventory_events": [
+      {
+        "seq": 2,
+        "session_id": "luna-live",
+        "turn_id": "codex-plain",
+        "at": "2026-10-21T05:57:37.304688Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "9c79f67b-5e10-42a4-a909-cf4544f9e8bb",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 9,
+        "session_id": "luna-live",
+        "turn_id": "codex-plain",
+        "at": "2026-10-21T05:57:38.300326Z",
+        "type": "usage",
+        "data": {
+          "request_id": "9c79f67b-5e10-42a4-a909-cf4544f9e8bb",
+          "model": "gpt-6-luna",
+          "input_tokens": 6575,
+          "output_tokens": 9,
+          "cached_input_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "seq": 10,
+        "session_id": "luna-live",
+        "turn_id": "codex-plain",
+        "at": "2026-10-21T05:57:38.596997Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "completed"
+        }
+      }
+    ]
+  },
+  {
+    "backend": "agents_sdk",
+    "scenario": "approve",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "missing_approval",
+      "tool_execution_count"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "agents_sdk-approve",
+        "request_id": "38e4ece1-269b-4450-b37d-542470930a14",
+        "started_seq_before_network": 10,
+        "stream": false,
+        "http_status": 200
+      }
+    ],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 10,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-approve",
+        "at": "2026-10-21T05:59:57.808376Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "38e4ece1-269b-4450-b37d-542470930a14",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 11,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-approve",
+        "at": "2026-10-21T05:59:59.481780Z",
+        "type": "error",
+        "data": {
+          "kind": "usage_unavailable",
+          "message": "Model request ended without usage",
+          "retryable": false,
+          "request_id": "38e4ece1-269b-4450-b37d-542470930a14"
+        }
+      },
+      {
+        "seq": 12,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-approve",
+        "at": "2026-10-21T05:59:59.759558Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "usage_unavailable",
+            "message": "Model request ended without usage"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "agents_sdk",
+    "scenario": "cancel",
+    "outcome": "interrupted",
+    "errors": [],
+    "api_observations": [
+      {
+        "turn_id": "agents_sdk-cancel",
+        "request_id": "ff743ce3-2971-4773-b701-7a7fd08b2af1",
+        "started_seq_before_network": 26,
+        "stream": false
+      }
+    ],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 26,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-cancel",
+        "at": "2026-10-21T06:00:09.812856Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "ff743ce3-2971-4773-b701-7a7fd08b2af1",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 27,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-cancel",
+        "at": "2026-10-21T06:00:10.144165Z",
+        "type": "error",
+        "data": {
+          "kind": "usage_unavailable",
+          "message": "Model request ended without usage",
+          "retryable": false,
+          "request_id": "ff743ce3-2971-4773-b701-7a7fd08b2af1"
+        }
+      },
+      {
+        "seq": 28,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-cancel",
+        "at": "2026-10-21T06:00:10.426843Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "interrupted"
+        }
+      }
+    ]
+  },
+  {
+    "backend": "agents_sdk",
+    "scenario": "deny",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "missing_approval"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "agents_sdk-deny",
+        "request_id": "7481817c-f1b2-49b4-b29f-94331ec99acd",
+        "started_seq_before_network": 14,
+        "stream": false,
+        "http_status": 200
+      }
+    ],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 14,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-deny",
+        "at": "2026-10-21T05:59:59.855610Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "7481817c-f1b2-49b4-b29f-94331ec99acd",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 15,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-deny",
+        "at": "2026-10-21T06:00:04.196722Z",
+        "type": "error",
+        "data": {
+          "kind": "usage_unavailable",
+          "message": "Model request ended without usage",
+          "retryable": false,
+          "request_id": "7481817c-f1b2-49b4-b29f-94331ec99acd"
+        }
+      },
+      {
+        "seq": 16,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-deny",
+        "at": "2026-10-21T06:00:04.488844Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "usage_unavailable",
+            "message": "Model request ended without usage"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "agents_sdk",
+    "scenario": "isolated_bash",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "tool_isolation_not_proven"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "agents_sdk-isolated_bash",
+        "request_id": "66bb240c-a4c8-4536-a92c-7f6d33bc873f",
+        "started_seq_before_network": 18,
+        "stream": false,
+        "http_status": 200
+      }
+    ],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 18,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-isolated_bash",
+        "at": "2026-10-21T06:00:04.628832Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "66bb240c-a4c8-4536-a92c-7f6d33bc873f",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 19,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-isolated_bash",
+        "at": "2026-10-21T06:00:06.548004Z",
+        "type": "error",
+        "data": {
+          "kind": "usage_unavailable",
+          "message": "Model request ended without usage",
+          "retryable": false,
+          "request_id": "66bb240c-a4c8-4536-a92c-7f6d33bc873f"
+        }
+      },
+      {
+        "seq": 20,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-isolated_bash",
+        "at": "2026-10-21T06:00:06.831488Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "usage_unavailable",
+            "message": "Model request ended without usage"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "agents_sdk",
+    "scenario": "mcp_auto",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "tool_execution_count"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "agents_sdk-mcp_auto",
+        "request_id": "48b4ee92-27b5-4eec-b82a-938a1f0baa58",
+        "started_seq_before_network": 6,
+        "stream": false,
+        "http_status": 200
+      }
+    ],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 6,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-mcp_auto",
+        "at": "2026-10-21T05:59:55.196784Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "48b4ee92-27b5-4eec-b82a-938a1f0baa58",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 7,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-mcp_auto",
+        "at": "2026-10-21T05:59:57.432132Z",
+        "type": "error",
+        "data": {
+          "kind": "usage_unavailable",
+          "message": "Model request ended without usage",
+          "retryable": false,
+          "request_id": "48b4ee92-27b5-4eec-b82a-938a1f0baa58"
+        }
+      },
+      {
+        "seq": 8,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-mcp_auto",
+        "at": "2026-10-21T05:59:57.712783Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "usage_unavailable",
+            "message": "Model request ended without usage"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "agents_sdk",
+    "scenario": "multi_request",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "multi_request_not_observed"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "agents_sdk-multi_request",
+        "request_id": "48e3626e-7aa9-44f6-bc31-8a48c2299878",
+        "started_seq_before_network": 22,
+        "stream": false,
+        "http_status": 200
+      }
+    ],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 22,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-multi_request",
+        "at": "2026-10-21T06:00:07.033966Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "48e3626e-7aa9-44f6-bc31-8a48c2299878",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 23,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-multi_request",
+        "at": "2026-10-21T06:00:09.440296Z",
+        "type": "error",
+        "data": {
+          "kind": "usage_unavailable",
+          "message": "Model request ended without usage",
+          "retryable": false,
+          "request_id": "48e3626e-7aa9-44f6-bc31-8a48c2299878"
+        }
+      },
+      {
+        "seq": 24,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-multi_request",
+        "at": "2026-10-21T06:00:09.732623Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "usage_unavailable",
+            "message": "Model request ended without usage"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "agents_sdk",
+    "scenario": "plain",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream"
+    ],
+    "api_observations": [
+      {
+        "turn_id": "agents_sdk-plain",
+        "request_id": "1b67413a-5ff1-47a1-a52e-97b404235840",
+        "started_seq_before_network": 2,
+        "stream": false,
+        "http_status": 200
+      }
+    ],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 2,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-plain",
+        "at": "2026-10-21T05:59:53.173383Z",
+        "type": "model_request_started",
+        "data": {
+          "request_id": "1b67413a-5ff1-47a1-a52e-97b404235840",
+          "model": "gpt-6-luna"
+        }
+      },
+      {
+        "seq": 3,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-plain",
+        "at": "2026-10-21T05:59:54.786630Z",
+        "type": "error",
+        "data": {
+          "kind": "usage_unavailable",
+          "message": "Model request ended without usage",
+          "retryable": false,
+          "request_id": "1b67413a-5ff1-47a1-a52e-97b404235840"
+        }
+      },
+      {
+        "seq": 4,
+        "session_id": "luna-live",
+        "turn_id": "agents_sdk-plain",
+        "at": "2026-10-21T05:59:55.070883Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "usage_unavailable",
+            "message": "Model request ended without usage"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "approve",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "missing_approval",
+      "tool_execution_count"
+    ],
+    "api_observations": [],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 6,
+        "session_id": "luna-live",
+        "turn_id": "codex-approve",
+        "at": "2026-10-21T05:59:50.522062Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_protocol",
+            "message": "Codex app-server request failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "cancel",
+    "outcome": "errored",
+    "errors": [
+      "cancel_not_interrupted",
+      "cancel_not_triggered"
+    ],
+    "api_observations": [],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 14,
+        "session_id": "luna-live",
+        "turn_id": "codex-cancel",
+        "at": "2026-10-21T05:59:52.632984Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_protocol",
+            "message": "Codex app-server request failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "deny",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "missing_approval"
+    ],
+    "api_observations": [],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 8,
+        "session_id": "luna-live",
+        "turn_id": "codex-deny",
+        "at": "2026-10-21T05:59:51.058420Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_protocol",
+            "message": "Codex app-server request failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "isolated_bash",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "tool_isolation_not_proven"
+    ],
+    "api_observations": [],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 10,
+        "session_id": "luna-live",
+        "turn_id": "codex-isolated_bash",
+        "at": "2026-10-21T05:59:51.576311Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_protocol",
+            "message": "Codex app-server request failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "mcp_auto",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "tool_execution_count"
+    ],
+    "api_observations": [],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 4,
+        "session_id": "luna-live",
+        "turn_id": "codex-mcp_auto",
+        "at": "2026-10-21T05:59:49.978054Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_protocol",
+            "message": "Codex app-server request failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "multi_request",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream",
+      "multi_request_not_observed"
+    ],
+    "api_observations": [],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 12,
+        "session_id": "luna-live",
+        "turn_id": "codex-multi_request",
+        "at": "2026-10-21T05:59:52.111784Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_protocol",
+            "message": "Codex app-server request failed"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "backend": "codex",
+    "scenario": "plain",
+    "outcome": "errored",
+    "errors": [
+      "turn_not_completed",
+      "missing_message_stream"
+    ],
+    "api_observations": [],
+    "attempt": "attempt-03",
+    "inventory_events": [
+      {
+        "seq": 2,
+        "session_id": "luna-live",
+        "turn_id": "codex-plain",
+        "at": "2026-10-21T05:59:49.356934Z",
+        "type": "turn_ended",
+        "data": {
+          "outcome": "errored",
+          "error": {
+            "kind": "codex_protocol",
+            "message": "Codex app-server request failed"
+          }
+        }
+      }
+    ]
+  }
+]

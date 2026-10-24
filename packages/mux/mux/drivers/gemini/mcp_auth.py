@@ -21,7 +21,11 @@ GCSSecretResolver = Callable[[Scope, tuple[str, ...]], Awaitable[str]]
 type Object = dict[str, JsonValue]
 _REF = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}\Z")
+# Gemini rejects any other mcp_server name on every interaction read:
+# "MCP server name must be lowercase and snake case".
+_SERVER_NAME = re.compile(r"[a-z][a-z0-9_]{0,127}\Z")
 _PROFILE = "gemini.inline_reuse"
+LEGACY_SERVER_NAME = "mcp_server_name"
 
 
 @dataclass(frozen=True)
@@ -74,11 +78,23 @@ def destination(value: object) -> bool:
         return False
 
 
+def native_server_name(name: str) -> str:
+    """Deterministic Gemini-safe server name: daimon-mcp -> daimon_mcp."""
+    native = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    return native if native[:1].isalpha() else "mcp_" + native
+
+
+def server_names(connections: Sequence[MCPConnection]) -> dict[str, str]:
+    """Native mcp_server name -> the declared connection name, for normalization."""
+    return {native_server_name(c.name): c.name for c in connections}
+
+
 def compile_mcp(connections: Sequence[MCPConnection], *, enabled: bool) -> list[JsonValue]:
     bound = any(c.credential_ref is not None for c in connections)
     if bound and (not enabled or len(connections) != 1):
         refuse("one_resolver_bound_mcp_server")
     tools: list[JsonValue] = []
+    native_names: set[str] = set()
     for connection in connections:
         if (
             connection.transport != "streamable_http"
@@ -86,7 +102,15 @@ def compile_mcp(connections: Sequence[MCPConnection], *, enabled: bool) -> list[
             or not _NAME.fullmatch(connection.name)
         ):
             refuse("https_mcp_destination")
-        tool: Object = {"type": "mcp_server", "name": connection.name, "url": connection.url}
+        name = native_server_name(connection.name)
+        if not _SERVER_NAME.fullmatch(name):
+            refuse("mcp_server_name")
+        if name in native_names:
+            # Two declared servers would be indistinguishable to Gemini and
+            # in its tool-call steps; never guess which one a call used.
+            refuse("mcp_server_name_collision")
+        native_names.add(name)
+        tool: Object = {"type": "mcp_server", "name": name, "url": connection.url}
         if bound:
             reference = connection.credential_ref
             if reference is None or not _REF.fullmatch(reference):
@@ -132,12 +156,11 @@ def validate_tools(value: JsonValue) -> None:
                 {"type", "name", "url", "allowed_tools"},
             ):
                 refuse("unbound_mcp_authentication")
-            if (
-                not destination(tool["url"])
-                or not isinstance(tool["name"], str)
-                or not _NAME.fullmatch(tool["name"])
-            ):
+            if not destination(tool["url"]) or not isinstance(tool["name"], str):
                 refuse("https_mcp_destination")
+            if not _SERVER_NAME.fullmatch(tool["name"]):
+                # Requests saved before names were mapped (e.g. daimon-mcp).
+                refuse(LEGACY_SERVER_NAME)
         else:
             refuse("mcp_adjacent_tool_type")
 
@@ -421,6 +444,22 @@ async def refresh_bound_request(request: Object) -> Object:
     return fresh
 
 
+def _gained_no_tools_sentinel(persisted: Object, expected: Object) -> bool:
+    """A session saved before the no-tools sentinel: the same intent, but `tools: []`.
+
+    Its next send uses the fresh compilation, which closes Gemini's built-ins; the
+    empty list it was saved with meant they were open. Nothing else may differ.
+    """
+    from mux.drivers.gemini.transport import NO_TOOLS_TOOL
+
+    return (
+        persisted.get("tools") == []
+        and expected.get("tools") == [NO_TOOLS_TOOL]
+        and {k: v for k, v in persisted.items() if k != "tools"}
+        == {k: v for k, v in expected.items() if k != "tools"}
+    )
+
+
 def validate_intent(
     persisted: Object, expected: Object, connections: Sequence[MCPConnection], *, enabled: bool
 ) -> None:
@@ -432,5 +471,5 @@ def validate_intent(
     matches = [t for t in native if isinstance(t, dict) and t.get("type") == "mcp_server"]
     if matches != compiled:
         refuse("changed_mcp_request_intent")
-    if persisted != expected:
+    if persisted != expected and not _gained_no_tools_sentinel(persisted, expected):
         refuse("changed_mcp_request_intent")

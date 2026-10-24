@@ -37,7 +37,7 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, Operation, SendReceipt, StopObservation
 from mux.contracts.resources import Agent
-from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+from mux.drivers.anthropic import SessionReads
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import Field, JsonValue, model_validator
 

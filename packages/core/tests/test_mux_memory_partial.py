@@ -9,7 +9,7 @@ import httpx
 import pytest
 from daimon.core import ma_resolver, memory_view
 from daimon.core.mux_backend import resource_scope
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 TENANT = uuid.UUID(int=1)
 SCOPE = resource_scope(tenant_id=str(TENANT))

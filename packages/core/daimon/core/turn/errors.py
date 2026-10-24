@@ -8,6 +8,8 @@ unchanged; adapters add specific handlers on top in the cutover plans.
 
 from __future__ import annotations
 
+import re
+import sys
 import uuid
 from datetime import datetime
 from typing import Literal
@@ -23,9 +25,36 @@ AdmissionDenialReason = Literal[
     "writers_none",
     "runs_elsewhere",
     "own_agents_only",
+    # The requester is from another organisation: Daimon answers them only in the
+    # channel they share, never in a private conversation.
+    "client_requester",
     # The channel's backend configuration (`daimon.core.channel_backend`) names
     # a profile that cannot meet it, or one this release cannot run yet.
     "backend_unsupported",
+    # The operator's prepaid hold for a provider's attempts (Gemini Flash) is used
+    # up. Nothing to do with a channel budget; an admin releases or raises it.
+    "provider_hold_cap_reached",
+    # A tenant's daily spend cap on one OpenAI model is used up; it resets at
+    # midnight UTC. `AdmissionDenied.provider` carries the model id for the copy.
+    "provider_daily_cap_reached",
+    # No tariff is current for the model, so its spend can't be counted against the
+    # daily cap: refused rather than run uncounted. `provider` carries the model id.
+    "provider_price_unavailable",
+    # A provider resource this turn needs is still being set up (the tenant's
+    # first GPT environment): nothing is wrong; the same request works shortly.
+    "provider_setup_pending",
+]
+# Why a `backend_unsupported` turn refused, for copy that names the fix: the
+# channel's own backend pin, a provider the tenant's allowlist doesn't turn on,
+# or the agent's backend that this deployment can't run.
+# Also carries the one balance cause: a server that never had credit ("no_credit_yet")
+# rather than one whose credit ran out.
+BackendRefusalCause = Literal[
+    "channel_pin",
+    "provider_not_allowed",
+    "agent_backend",
+    "provider_not_configured",
+    "no_credit_yet",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 
@@ -34,16 +63,43 @@ class AdmissionDenied(DaimonError):
     """Raised by `admit()` when the invoker policy, channel protection, balance, cap
     or channel budget gate rejects the turn.
 
-    Carries a closed reason literal — no rendered user-facing text; denial
-    copy stays adapter-side. `detail` optionally names what was refused (the
-    unattended capability gate gives the provider field's path, such as
-    `session.budget`) and is appended to the message for logs and run records.
+    Carries only closed literals — no rendered user-facing text. Denial copy
+    stays adapter-side. A `backend_unsupported` refusal may name its `cause`
+    and the `provider` involved, so the copy can name the fix.
+
+    A `backend_unsupported` refusal also records its `site`, the code location
+    that raised it ("turn.runtime_manifest.select_worker_row:812"): about 150
+    places raise it, and logs need to say which one. It is derived from our own
+    module, function and line, so it never carries request data.
     """
 
-    def __init__(self, *, reason: AdmissionDenialReason, detail: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        reason: AdmissionDenialReason,
+        detail: str | None = None,
+        cause: BackendRefusalCause | None = None,
+        provider: str | None = None,
+    ) -> None:
         super().__init__(reason if detail is None else f"{reason}: {detail}")
-        self.reason: AdmissionDenialReason = reason
         self.detail: str | None = detail
+        self.reason: AdmissionDenialReason = reason
+        self.cause: BackendRefusalCause | None = cause
+        self.provider: str | None = provider
+        self.site: str | None = raise_site() if reason == "backend_unsupported" else None
+
+
+_SITE = re.compile(r"[a-z_][a-z0-9_.]*\.[A-Za-z_][A-Za-z0-9_<>]*:\d+")
+
+
+def raise_site(depth: int = 2) -> str | None:
+    """`module.function:line` of the daimon code that constructed the refusal."""
+    frame = sys._getframe(depth)  # pyright: ignore[reportPrivateUsage]
+    module = str(frame.f_globals.get("__name__", ""))
+    if not module.startswith("daimon."):
+        return None
+    site = f"{module.removeprefix('daimon.core.')}.{frame.f_code.co_name}:{frame.f_lineno}"
+    return site if _SITE.fullmatch(site) else None
 
 
 class DmSourceSealedError(DaimonError):
@@ -151,9 +207,8 @@ class SessionAgentMismatch(DaimonError):
         destination_agent_id: str,
     ) -> None:
         super().__init__(
-            "This conversation's existing session belongs to another agent. "
-            "Continuing with a different responder currently requires a new conversation. "
-            "Your existing session and workspace have been kept."
+            "This conversation belongs to another agent. Your work is kept. "
+            "To use a different agent, start a new conversation."
         )
         self.mapping_id = mapping_id
         self.session_id = session_id

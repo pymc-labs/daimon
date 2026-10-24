@@ -187,10 +187,21 @@ def advance(
     now: datetime,
     resource: ResourceRef | None = None,
     result: Mapping[str, JsonValue] | None = None,
+    expected_status: OperationStatus | None = None,
+    expected_updated_at: datetime | None = None,
 ) -> OperationRecord:
     """Record what was observed. Repeating an observed status is a no-op, so
-    a replayed acknowledgement is harmless; `sent` is reached only by `claim`."""
+    a replayed acknowledgement is harmless; `sent` is reached only by `claim`.
+
+    `expected_status`/`expected_updated_at` make it a compare-and-set: the move
+    happens only if the operation is still exactly as the caller read it, else
+    `InvalidTransition`. A reconcile uses it so a late "absent" never resets
+    another caller's newer state."""
     current = record.operation
+    if (expected_status is not None and current.status != expected_status) or (
+        expected_updated_at is not None and current.updated_at != expected_updated_at
+    ):
+        raise InvalidTransition(current.key, current.status, status)
     if status == "sent" or (status == "pending" and current.status == "pending"):
         raise InvalidTransition(current.key, current.status, status)
     if status == current.status:
@@ -216,3 +227,20 @@ def recovery(operation: Operation) -> Recovery:
             return "observe"
         case "processed" | "failed":
             return "done"
+
+
+__all__ = [
+    "Begun",
+    "InvalidTransition",
+    "OperationRecord",
+    "Recovery",
+    "SendClaimed",
+    "TRANSITIONS",
+    "advance",
+    "begin",
+    "check_owner",
+    "claim",
+    "operation_scope",
+    "recovery",
+    "request_digest",
+]

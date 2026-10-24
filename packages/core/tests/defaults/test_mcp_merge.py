@@ -61,7 +61,7 @@ def test_get_reserved_mcp_rejection_rejects_url_equal_to_public_url_exact_match(
         server_name="my-server", url=_DEFAULT_URL, public_url=_DEFAULT_URL
     )
     assert result is not None, "own-endpoint URL must return a rejection reason"
-    assert "deployment's own MCP endpoint" in result, (
+    assert "Daimon's own connection" in result, (
         "rejection reason must contain the own-endpoint substring"
     )
 
@@ -72,7 +72,7 @@ def test_get_reserved_mcp_rejection_rejects_url_with_trailing_slash_vs_bare_publ
         server_name="my-server", url=_DEFAULT_URL + "/", public_url=_DEFAULT_URL
     )
     assert result is not None, "url with trailing slash must match bare public_url"
-    assert "deployment's own MCP endpoint" in result, (
+    assert "Daimon's own connection" in result, (
         "rejection reason must contain the own-endpoint substring"
     )
 
@@ -83,7 +83,7 @@ def test_get_reserved_mcp_rejection_rejects_bare_url_vs_public_url_with_trailing
         server_name="my-server", url=_DEFAULT_URL, public_url=_DEFAULT_URL + "/"
     )
     assert result is not None, "bare url must match public_url with trailing slash"
-    assert "deployment's own MCP endpoint" in result, (
+    assert "Daimon's own connection" in result, (
         "rejection reason must contain the own-endpoint substring"
     )
 

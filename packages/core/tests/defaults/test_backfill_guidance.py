@@ -12,9 +12,14 @@ import httpx
 import pytest
 from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK, apply_credential_guidance
 from daimon.core.defaults.backfill_guidance import backfill_credential_guidance
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
 from daimon.testing.ma_models import ma_agent
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    json_body,
+    list_response,
+)
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from structlog.testing import capture_logs
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")

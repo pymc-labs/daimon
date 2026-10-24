@@ -7,6 +7,11 @@ from typing import Any, cast
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import (
+    OPEN_READ_POLICY,
+    caller_is_foreign,
+    load_read_policy,
+)
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools.discord._client import (
@@ -26,7 +31,7 @@ from daimon.adapters.mcp.tools.teams._read import (
     _teams_list_channels_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.agent_details import GitHubDeploymentFacts
-from daimon.core.here_card import HereCard, load_here_card
+from daimon.core.here_card import HereCard, for_foreign_sender, load_here_card
 from daimon.core.teams_threads import conversation_of
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -98,33 +103,41 @@ async def _require_thread_in_channel(
 async def _where_am_i_impl(
     runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None, thread_id: str | None
 ) -> HereCard:
-    channel_id = channel_id or token_channel_id(auth)
+    channel_id = channel_id or (auth.hold.channel_id if auth.hold else token_channel_id(auth))
     if channel_id is None:
         raise ToolError("The current channel is unknown; pass its parent channel id.")
+    # A held credential describes and lists only the channel it is held to.
+    read = (
+        await load_read_policy(runtime, auth, origin_context_id=None)
+        if auth.hold is not None
+        else OPEN_READ_POLICY
+    )
+    read.require(channel_id)
     caller = await load_isolation_view(runtime, auth)
     if caller.home_place(channel_id) != caller.inside_channel_id:
         raise ToolError("That channel is outside this conversation's home.")
     category_id: str | None = None
     if auth.platform == "discord":
-        rows = await _list_channels_impl(runtime, auth)
+        rows = await _list_channels_impl(runtime, auth, read)
         visible = {row.id for row in rows}
         if channel_id not in visible:
             raise ToolError("missing channel access")
         category_id = next(row.category_id for row in rows if row.id == channel_id)
     elif auth.platform == "slack":
-        visible = {row.id for row in await _slack_list_channels_impl(runtime, auth)}
+        visible = {row.id for row in await _slack_list_channels_impl(runtime, auth, read)}
         if channel_id not in visible:
             raise ToolError("missing channel access")
     elif auth.platform == "teams":
-        visible = {row.id for row in await _teams_list_channels_impl(runtime, auth)}
+        visible = {row.id for row in await _teams_list_channels_impl(runtime, auth, read)}
         if channel_id not in visible:
             raise ToolError("missing channel access")
     else:
-        raise ToolError("/here is available for Discord, Slack and Teams channel turns")
+        raise ToolError("where_am_i works only in a channel conversation")
     if thread_id is not None:
         await _require_thread_in_channel(runtime, auth, channel_id, thread_id)
+    foreign = auth.platform == "teams" and await caller_is_foreign(runtime, auth)
     async with runtime.session_factory() as session:
-        return await load_here_card(
+        card = await load_here_card(
             session,
             runtime.client,
             tenant_id=auth.tenant_id,
@@ -152,6 +165,8 @@ async def _where_am_i_impl(
             bot_can_view=None,
             caller_can_view=True,
         )
+    # Someone from another organisation has no 1:1 chat to send `setup` in.
+    return for_foreign_sender(card) if foreign else card
 
 
 def register_here_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -159,13 +174,13 @@ def register_here_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def where_am_i(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, channel_id: str | None = None, thread_id: str | None = None
     ) -> HereCard:
-        """Return short /here text and full structured facts.
+        """Return the short who-answers-here text and the full structured facts.
         Use this when someone asks which agent you are, who answers here, whether
         you can see a channel, which channel or agent rule applies, whether
         publishing needs approval, or whose token or sign-in you hold. Never
         guess these facts from the conversation. Pass the parent channel id
         from turn controls and the current thread id when present. A bound
-        coding token can omit channel_id. Discord, Slack and Teams channel turns
-        only. Unknown visibility is reported as unknown.
+        coding token can omit channel_id. Channel turns only. Unknown visibility is
+        reported as unknown.
         """
         return await _where_am_i_impl(runtime, await _auth(ctx), channel_id, thread_id)

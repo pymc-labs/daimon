@@ -38,6 +38,7 @@ from daimon.core.credential_env import (
 )
 from daimon.core.github_app_session import effective_repo_plan
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.memory_resource import memory_scope
 from daimon.core.session_compat import valid_unavailable_repo_urls
 from daimon.core.session_fence_retry import try_fence
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
@@ -52,6 +53,7 @@ from daimon.core.session_snapshot import (
 )
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import (
+    get_channel_memory_store_id,
     get_memory_store_id,
     get_personal_memory_store_id,
 )
@@ -63,6 +65,7 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.thread_sessions import record_snapshot
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -272,6 +275,36 @@ async def recorded_snapshot(
     return snapshot
 
 
+async def _desired_memory_stores(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_uuid: uuid.UUID,
+    account_id: uuid.UUID,
+    memory_hold: TurnHold | None,
+) -> tuple[str | None, str | None]:
+    """The `(memory_store_id, personal_memory_store_id)` a session now would mount.
+
+    A held place mounts its channel's store alone. Otherwise the agent-wide
+    store, and a chat session also the caller's personal one beside it.
+    """
+    if memory_hold is not None:
+        channel_store_id = await get_channel_memory_store_id(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            platform=memory_hold.platform,
+            channel_id=memory_hold.channel_id,
+        )
+        return channel_store_id, None
+    return (
+        await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent_uuid),
+        await get_personal_memory_store_id(
+            session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=account_id
+        ),
+    )
+
+
 async def desired_snapshot_for(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -291,6 +324,9 @@ async def desired_snapshot_for(
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
     channel_skills: Sequence[MaSkill] = (),
+    system_override: str | None = None,
+    mcp_hold: str | None = None,
+    memory_hold: TurnHold | None = None,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
 
@@ -304,12 +340,22 @@ async def desired_snapshot_for(
     primary-key read. A session recorded without one is not replaced to add
     it (`session_compat`); the caller's next new session mounts it.
 
+    `memory_hold` is the held place, if the turn is held: its channel's store is
+    then the only memory (`memory_store_id`), and there is no personal store.
+    A session still mounting the agent-wide or a personal store differs and is
+    replaced with nothing carried over (`session_preparation._leaves_memory_store`),
+    and one already on the channel's store is left alone. An unheld turn never
+    reads a channel's store, so a session on one is replaced the same way.
+
     Two fields are deliberately carried over from `recorded` rather than
     re-derived:
 
     - `vault_id` — the per-(account, agent) vault is get-or-created at session
       create and stays that caller's vault; re-reading it would cost a
       `vaults.list()` on every turn to detect a change no daimon path makes.
+      The one change that does happen, a turn becoming held or ceasing to be,
+      is `mcp_hold`'s: the caller passes the hold key the turn needs, and a
+      session mounting a different one is replaced.
     - `repo_token_issued_at` — an age, not a configuration; the compatibility
       decision reads it off the recorded snapshot to time rotation.
 
@@ -324,12 +370,12 @@ async def desired_snapshot_for(
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
         rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
-        memory_store_id = await get_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_uuid
-        )
-        # Chat sessions mount the caller's personal store beside the shared one.
-        personal_memory_store_id = await get_personal_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=account_id
+        memory_store_id, personal_memory_store_id = await _desired_memory_stores(
+            session,
+            tenant_id=tenant_id,
+            agent_uuid=agent_uuid,
+            account_id=account_id,
+            memory_hold=memory_hold,
         )
 
     excluded = (
@@ -387,6 +433,9 @@ async def desired_snapshot_for(
             {} if recorded is None else recorded.token_issued_at_by_installation
         ),
         channel_skills=channel_skills,
+        system_override=system_override,
+        mcp_hold=mcp_hold,
+        memory_scope=memory_scope(memory_hold),
         tool_safety=tool_safety,
         public_url=public_url,
     )

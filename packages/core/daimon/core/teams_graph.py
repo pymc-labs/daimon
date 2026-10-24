@@ -87,6 +87,8 @@ class GraphBody(_Model):
 
 
 class GraphMention(_Model):
+    #: The `id` of the `<at>` tag in the body that this mention fills.
+    id: int | None = None
     mentioned: GraphSender | None = None
 
 
@@ -127,6 +129,14 @@ class GraphMessage(_Model):
     #: Set only by `list_channel_messages(expand_replies=True)`, in Graph's order.
     replies: list[GraphMessage] = Field(default_factory=list["GraphMessage"])
     replies_next_link: str | None = Field(default=None, alias="replies@odata.nextLink")
+
+    @property
+    def created_at(self) -> datetime | None:
+        """When it was sent; None if Graph gave no time or an unreadable one."""
+        try:
+            return datetime.fromisoformat(self.created_date_time or "")
+        except ValueError:
+            return None
 
 
 class GraphPage(_Model):

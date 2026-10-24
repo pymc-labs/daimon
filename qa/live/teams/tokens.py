@@ -13,7 +13,8 @@ from typing import Any, Protocol, cast
 
 import msal
 
-from qa.live.teams.config import TeamsQaConfig
+from qa.live.teams.config import FileTokenStore, SecretManagerTokenStore, TeamsQaConfig
+from qa.live.teams.secret_store import SecretManagerCacheBackend
 
 
 def token_claims(token: str) -> dict[str, Any]:
@@ -62,23 +63,74 @@ class AuthClient(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class CacheBackend(Protocol):
+    def read(self, persona: str) -> str | None: ...
+
+    def write(self, persona: str, serialized: str) -> None: ...
+
+    def delete(self, persona: str) -> None: ...
+
+
+class FileCacheBackend:
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def path(self, persona: str) -> Path:
+        return self.directory / f"{persona}.json"
+
+    def read(self, persona: str) -> str | None:
+        path = self.path(persona)
+        return path.read_text() if path.exists() else None
+
+    def write(self, persona: str, serialized: str) -> None:
+        path = self.path(persona)
+        fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".cache-")
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as stream:
+                stream.write(serialized)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, path)
+        finally:
+            Path(temp).unlink(missing_ok=True)
+
+    def delete(self, persona: str) -> None:
+        self.path(persona).unlink(missing_ok=True)
+
+
 class TokenStore:
-    def __init__(self, config: TeamsQaConfig) -> None:
+    def __init__(self, config: TeamsQaConfig, backend: CacheBackend | None = None) -> None:
         self.config = config
+        self.version_added = False
+        if backend is not None:
+            self.backend = backend
+        elif isinstance(config.token_store, FileTokenStore):
+            self.backend = FileCacheBackend(config.token_store.token_dir)
+        elif isinstance(config.token_store, SecretManagerTokenStore):
+            self.backend = SecretManagerCacheBackend(
+                config.token_store.project, config.token_store.secret_prefix
+            )
+        else:
+            raise ValueError("token store configuration missing")
 
     def path(self, persona: str) -> Path:
         """Return the validated persona's private cache filename."""
         if persona not in self.config.personas:
             raise ValueError("unknown persona")
-        return self.config.token_dir / f"{persona}.json"
+        if not isinstance(self.backend, FileCacheBackend):
+            raise ValueError("shared token caches have no local path")
+        return self.backend.path(persona)
 
     def _client(
         self, persona: str
     ) -> tuple[msal.PublicClientApplication, msal.SerializableTokenCache]:
         cache = msal.SerializableTokenCache()
-        path = self.path(persona)
-        if path.exists():
-            cache.deserialize(path.read_text())
+        if persona not in self.config.personas:
+            raise ValueError("unknown persona")
+        serialized = self.backend.read(persona)
+        if serialized is not None:
+            cache.deserialize(serialized)
         client = msal.PublicClientApplication(
             self.config.client_id,
             authority=f"https://login.microsoftonline.com/{self.config.tenant_id}",
@@ -92,18 +144,11 @@ class TokenStore:
         return cast(AuthClient, client), cache
 
     def save(self, persona: str, cache: msal.SerializableTokenCache) -> None:
-        """Atomically replace a mode 0600 persona cache."""
-        path = self.path(persona)
-        fd, temp = tempfile.mkstemp(dir=path.parent, prefix=".cache-")
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w") as stream:
-                stream.write(cache.serialize())
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp, path)
-        finally:
-            Path(temp).unlink(missing_ok=True)
+        """Persist one validated persona cache; shared writes are last-write-wins."""
+        if persona not in self.config.personas:
+            raise ValueError("unknown persona")
+        self.backend.write(persona, cache.serialize())
+        self.version_added = isinstance(self.backend, SecretManagerCacheBackend)
 
     def validate(self, persona: str, result: dict[str, Any]) -> Secret:
         """Check the token belongs to this persona before it is stored or used.
@@ -132,8 +177,9 @@ class TokenStore:
         if identity.expected_oid and claims.get("oid") != identity.expected_oid:
             raise ReauthRequired(persona, "object mismatch")
 
-    def acquire(self, persona: str, scopes: list[str]) -> Secret:
+    def acquire(self, persona: str, scopes: list[str], *, force_refresh: bool = False) -> Secret:
         """Acquire silently from exactly one matching persona account."""
+        self.version_added = False
         client, cache = self._client(persona)
         accounts = [
             account
@@ -145,7 +191,12 @@ class TokenStore:
         if len(accounts) != 1:
             raise ReauthRequired(persona, "account unavailable")
         try:
-            result = client.acquire_token_silent(scopes, account=accounts[0])
+            if force_refresh:
+                result = client.acquire_token_silent(
+                    scopes, account=accounts[0], force_refresh=True
+                )
+            else:
+                result = client.acquire_token_silent(scopes, account=accounts[0])
         except Exception:
             raise ReauthRequired(persona, "silent acquisition failed") from None
         if not isinstance(result, dict) or "error" in result:
@@ -173,7 +224,7 @@ class TokenStore:
             if str(a.get("username", "")).casefold() == self.config.personas[persona].upn.casefold()
         ]
         account = matching[0] if len(matching) == 1 else {}
-        entries = json.loads(cache.serialize()) if self.path(persona).exists() else {}
+        entries = json.loads(cache.serialize())
         access = list(entries.get("AccessToken", {}).values())
         refresh = list(entries.get("RefreshToken", {}).values())
         scopes = sorted(
@@ -191,4 +242,6 @@ class TokenStore:
 
     def logout(self, persona: str) -> None:
         """Remove one persona's local cache."""
-        self.path(persona).unlink(missing_ok=True)
+        if persona not in self.config.personas:
+            raise ValueError("unknown persona")
+        self.backend.delete(persona)

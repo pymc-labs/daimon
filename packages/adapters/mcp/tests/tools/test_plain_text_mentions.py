@@ -80,7 +80,7 @@ async def test_non_admin_is_refused_and_nothing_is_written(
     """A tenant-wide switch needs an admin; a refused call must not write."""
     tenant_id = await _seed(committing_sessionmaker, "teams")
 
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+    with pytest.raises(ToolError, match="requires an admin"):
         await _set_plain_text_mentions_impl(
             _runtime(committing_sessionmaker), _auth(tenant_id, admin=False), True
         )
@@ -96,7 +96,7 @@ async def test_cli_tenant_is_refused_because_it_has_no_channels(
     """The switch only means something on the chat platforms."""
     tenant_id = await _seed(committing_sessionmaker, "cli")
 
-    with pytest.raises(ToolError, match="only apply on Discord, Slack and Teams"):
+    with pytest.raises(ToolError, match="aren't available here"):
         await _set_plain_text_mentions_impl(
             _runtime(committing_sessionmaker), _auth(tenant_id, admin=True, platform="cli"), True
         )

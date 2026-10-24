@@ -126,7 +126,9 @@ def evaluate_delete_submission(
             response_payload={
                 "response_action": "errors",
                 "errors": {
-                    "confirm_name_block": ("Invalid session — please re-open the privacy panel."),
+                    "confirm_name_block": (
+                        "This form is no longer valid — please re-open the privacy panel."
+                    ),
                 },
             },
             proceed=False,

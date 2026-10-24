@@ -210,7 +210,7 @@ def register_promo_issuing_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         max_redemptions: int | None = None,
         note: str | None = None,
     ) -> CreatedPromoCode:
-        """Create a promo code any server or workspace can redeem for credit. Operator-only.
+        """Create a promo code any workspace can redeem for credit. Operator-only.
 
         ``amount_usd`` is the credit per redemption as a decimal string.
         ``credit`` codes stay until spent; ``timed`` codes need

@@ -34,6 +34,7 @@ import httpx
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import caller_is_foreign
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.tools.teams._directory import (
     TeamsChannelRef,
@@ -108,7 +109,11 @@ async def post_files(
         return await _offer(auth, client, conversation_id, content, staged)
     if CHANNEL.fullmatch(split_thread(conversation_id)[0]):
         return await _save_in_channel(runtime, auth, client, conversation_id, content, staged)
-    raise ToolError("Teams takes files in a channel or a 1:1 chat with daimon, not a group chat")
+    raise ToolError(
+        "Teams takes files in a channel, not a group chat"
+        if await caller_is_foreign(runtime, auth)
+        else "Teams takes files in a channel or a 1:1 chat with daimon, not a group chat"
+    )
 
 
 async def _save_in_channel(

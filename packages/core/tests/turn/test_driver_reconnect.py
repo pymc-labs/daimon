@@ -21,7 +21,6 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsUserMessageEvent,
 )
 from daimon.core.config import RecruitmentSettings
-from daimon.core.turn import run_turn
 from daimon.core.turn.posture import AutoApprove, BillingExempt, RequireApproval
 from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TextBlock
@@ -31,6 +30,7 @@ from daimon.testing.turn_fakes import (
     FakeAnthropic,
     RecordingLifecycle,
     YieldEvent,
+    run_turn_on_leg,
 )
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle, make_status_terminated
@@ -53,7 +53,7 @@ async def test_run_turn_passes_default_stream_read_timeout_to_events_stream() ->
         [YieldEvent(make_status_idle(event_id="sevt_1", stop_reason=make_end_turn()))]
     ]
 
-    await run_turn(
+    await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -78,7 +78,7 @@ async def test_run_turn_forwards_explicit_stream_read_timeout_verbatim() -> None
         [YieldEvent(make_status_idle(event_id="sevt_1", stop_reason=make_end_turn()))]
     ]
 
-    await run_turn(
+    await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -117,7 +117,7 @@ async def test_clean_close_while_running_reconnects_and_finalizes_on_replayed_te
     fa.beta.sessions.retrieve_statuses = ["running"]
 
     lc = RecordingLifecycle()
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -152,7 +152,7 @@ async def test_clean_close_while_idle_finalizes_without_reopening_stream() -> No
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     lc = RecordingLifecycle()
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -185,7 +185,7 @@ async def test_read_timeout_while_running_reconnects_with_read_timeout_reason() 
     fa.beta.sessions.retrieve_statuses = ["running"]
 
     lc = RecordingLifecycle()
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -213,7 +213,7 @@ async def test_read_timeout_while_terminated_finalizes_without_reopening() -> No
     fa.beta.sessions.retrieve_statuses = ["terminated"]
 
     lc = RecordingLifecycle()
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -245,7 +245,7 @@ async def test_rescheduling_status_behaves_like_running() -> None:
     fa.beta.sessions.retrieve_statuses = ["rescheduling"]
 
     lc = RecordingLifecycle()
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -285,7 +285,7 @@ async def test_three_consecutive_eventless_cycles_have_no_attempt_cap() -> None:
     fa.beta.sessions.retrieve_statuses = ["running", "running", "running"]
 
     lc = RecordingLifecycle()
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -317,7 +317,7 @@ async def test_status_check_error_finalizes_as_upstream_turn_error() -> None:
     )
 
     lc = RecordingLifecycle()
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -347,7 +347,7 @@ async def test_replay_after_eventless_cycle_does_not_duplicate_already_folded_co
     fa.beta.sessions.events.replay_events = [pre]
     fa.beta.sessions.retrieve_statuses = ["running"]
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -381,7 +381,7 @@ async def test_incomplete_replay_does_not_erase_already_folded_content() -> None
     fa.beta.sessions.retrieve_statuses = ["running"]
     lc = RecordingLifecycle()
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -432,7 +432,7 @@ async def test_terminated_replay_keeps_answer_after_current_turn_idle(
     ]
     fa.beta.sessions.retrieve_statuses = ["terminated"]
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -466,7 +466,7 @@ async def test_eventless_cycle_closes_the_abandoned_stream() -> None:
     fa.beta.sessions.events.replay_events = []
     fa.beta.sessions.retrieve_statuses = ["running"]
 
-    await run_turn(
+    await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -496,7 +496,7 @@ async def test_connection_error_regression_still_exhausts_at_two_attempts() -> N
     fa.beta.sessions.events.replay_events = []
 
     lc = RecordingLifecycle()
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",

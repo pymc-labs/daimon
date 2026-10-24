@@ -89,7 +89,11 @@ def thread_rule_key(platform: str, raw: str) -> str:
         platform == "discord" and _DISCORD_ID.fullmatch(value)
     ):
         return value
-    raise RuleRefused(f"{value} is not a Slack channel_id:thread_ts or a Discord thread id")
+    if platform == "slack":
+        raise RuleRefused(f"{value} is not a thread id of the form channel_id:thread_ts")
+    if platform == "discord":
+        raise RuleRefused(f"{value} is not a thread id")
+    raise RuleRefused(f"{value} is a thread, which keeps no rule of its own")
 
 
 def check_channel_rule(channel_id: str, rule: ChannelRule) -> None:
@@ -103,7 +107,7 @@ def check_channel_rule(channel_id: str, rule: ChannelRule) -> None:
         ChannelRule(readers="inside"),
     ):
         raise RuleRefused(
-            f"{channel_id} is a Slack thread, which only takes readers inside; "
+            f"{channel_id} is a thread, which only takes readers inside; "
             "set the rule on its channel instead"
         )
 

@@ -27,17 +27,16 @@ def test_help_keeps_registered_commands_and_spaces_the_last_block() -> None:
     data = card.model_dump(by_alias=True)
     facts = next(item["facts"] for item in data["body"] if item["type"] == "FactSet")
     assert [fact["title"] for fact in facts] == ["new", "setup", "support", "help"]
-    assert [item["text"] for item in data["body"][-2:]] == [
-        "In a channel, @mention Daimon each time.",
-        "In our 1:1 chat, just type.",
-    ]
-    assert all(item["spacing"] == "Medium" for item in data["body"][-2:])
+    assert [item["text"] for item in data["body"][-2:]] == ["💬 Or just ask", "Help me set up"]
+    assert data["body"][-1]["spacing"] == "Medium"
 
 
 def test_copy_shown_in_channels_and_group_chats_fits_both() -> None:
-    """A group chat has no thread, and `/` works there as in a channel."""
-    card = help_card(["help"], bot="Daimon").model_dump(by_alias=True)
-    assert "type / in a channel or group chat" in card["body"][1]["text"]
+    """A group chat has no thread; a command there is a mention, as in a channel."""
+    card = help_card(["help"], bot="Daimon", place="group").model_dump(by_alias=True)
+    assert card["body"][1]["text"] == (
+        "Only you can see this. @mention Daimon with one of these words."
+    )
     assert "Mention Daimon here" in NOT_YET_PRIVATE.format(bot="Daimon")
     assert "thread" not in NOT_YET_PRIVATE
 

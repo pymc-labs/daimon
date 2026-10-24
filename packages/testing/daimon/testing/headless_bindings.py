@@ -61,17 +61,14 @@ _OFFLINE_BASE_URL = "https://anthropic.invalid"
 def refuse_ambient_anthropic() -> None:
     """Refuse any ambient provider setting by name, never reading a value.
 
-    The shared check (`daimon.testing.isolated_sdk`) snapshots names by
+    The shared check (`mux.testing.isolated_sdk`) snapshots names by
     iteration and refuses every known SDK setting and any other
     ANTHROPIC_/OPENAI_/GOOGLE_/GEMINI_ name, present even empty.
     """
-    from daimon.testing.isolated_sdk import (
-        AmbientSDKConfigurationError,
-        _require_clean_environment,  # pyright: ignore[reportPrivateUsage]
-    )
+    from mux.testing.isolated_sdk import AmbientSDKConfigurationError, require_clean_environment
 
     try:
-        _require_clean_environment()
+        require_clean_environment()
     except AmbientSDKConfigurationError as err:
         raise BindingRefused(str(err)) from None
 
@@ -82,7 +79,7 @@ def isolated_anthropic(handler: Callable[[httpx.Request], httpx.Response]) -> As
     The builder refuses ambient settings before construction and before every
     copy, and passes every credential, routing and header value explicitly.
     """
-    from daimon.testing.isolated_sdk import build_async_anthropic
+    from mux.testing.isolated_sdk import build_async_anthropic
 
     refuse_ambient_anthropic()
     return build_async_anthropic(

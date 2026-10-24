@@ -4,7 +4,6 @@ import json
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.drivers.openai import OpenAIDriver
@@ -12,6 +11,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
+from mux.testing.isolated_sdk import build_async_openai
 
 from .conftest import REF, SCOPE, native_session, page, turn
 
@@ -212,3 +212,41 @@ async def test_public_submission_ports_preserve_key_in_real_http_header(mode: st
     assert len(posts) == 2 and posts[0].content == posts[1].content
     assert all(request.headers["Idempotency-Key"] == key for request in posts)
     assert all("idempotency_key" not in json.loads(request.content) for request in posts)
+
+
+async def test_native_validation_details_keep_the_cause_but_redact_wire_credentials() -> None:
+    secret = "fictional-callers-private-token"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "agents must not include MCP authorization; credential="
+                    + secret
+                    + "; key=offline-placeholder",
+                    "code": "invalid_request_error",
+                    "param": "agent.tools[0].transport.authorization",
+                }
+            },
+        )
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        with pytest.raises(ProviderError) as caught:
+            await SDKTransport(sdk).request(
+                "POST",
+                "/agents/sessions",
+                body={"agent": {"tools": [{"transport": {"authorization": secret}}]}},
+            )
+    error = caught.value
+    assert error.native_code == "400" and error.native_error_code == "invalid_request_error"
+    assert error.native_param == "agent.tools[0].transport.authorization"
+    assert (
+        error.native_message and "agents must not include MCP authorization" in error.native_message
+    )
+    assert secret not in error.native_message and "offline-placeholder" not in error.native_message
+    assert "[redacted]" in error.native_message and secret not in str(error)

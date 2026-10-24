@@ -6,19 +6,26 @@ from contextlib import AsyncExitStack
 from dataclasses import replace
 
 import httpx
+import mux.drivers.gemini as gemini_transport
+import mux.drivers.openai as openai_transport
 import pytest
-from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    FleetSettings,
+    Settings,
+    TurnSettings,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.turn import gemini_deployment, openai_deployment
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import bind_session_impl
 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
-from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
-from mux.drivers.gemini import deployment as gemini_transport
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL
 from mux.drivers.gemini.transport import SDKTransport as GeminiSDKTransport
-from mux.drivers.openai import deployment as openai_transport
 from mux.drivers.openai.transport import SDKTransport
+from mux.testing.isolated_sdk import build_async_openai, build_gemini_client
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -259,6 +266,7 @@ async def test_explicit_execution_setting_reaches_real_dependencies_without_allo
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
         turn=TurnSettings(agent_backends=enabled),
+        fleet=FleetSettings(enabled=False),
     )
     deps = build_turn_deps(
         settings,
@@ -269,7 +277,8 @@ async def test_explicit_execution_setting_reaches_real_dependencies_without_allo
         billing_config=None,
     )
     assert deps.agent_backends is enabled
-    assert deps.turn_path == "legacy" and deps.channel_backends is False
+    # The other turn flags keep their own (on) defaults: each one is a separate stop.
+    assert deps.turn_path == "mux" and deps.channel_backends is True
     assert deps.turn_runtimes == {} and deps.state_store is None
 
 
@@ -512,6 +521,12 @@ async def test_opaque_caller_resource_is_an_unproved_source_definition(native_re
     assert owned.wire.requests == [] and wire.requests == [] and posts == []
 
 
+ROOT_PROMPT_FILLER = (
+    "You are the team's assistant. Answer plainly, cite what you used, and say when "
+    "you are unsure. Keep private details private and follow the channel's rules. "
+) * 200
+
+
 @pytest.fixture
 async def explicit_worker_request(owned, monkeypatch, request):
     worker_token_caps = getattr(request, "param", False)
@@ -578,29 +593,49 @@ async def explicit_worker_request(owned, monkeypatch, request):
         base_system=owned.retained.agent.spec.system,
         limits=root.limits.model_copy(update={"deadline": request.now() + timedelta(seconds=20)}),
     )
-    worker = resolve_worker_spec(
-        root,
-        root.spec.model_copy(
-            update={
-                "declared_drops": (
-                    "memory",
-                    "sandbox",
-                    "skills",
-                    "mcp",
-                    "tools",
-                    "files",
-                    "repository",
-                )
-            }
-        ),
-        policy=POLICY,
-        now=request.now(),
-        limits=root.limits.model_copy(
-            update={"max_input_tokens": 262144, "max_output_tokens": 65536, "max_turns": 1}
-        )
-        if worker_token_caps
-        else None,
+    if worker_token_caps == "derived":
+        # A real-size inherited root prompt, as staging's daimon-fleet root has (~24k chars).
+        large = (owned.retained.agent.spec.system + "\n\n" + ROOT_PROMPT_FILLER)[:24_000]
+        root = replace(root, spec=root.spec.model_copy(update={"system": large}), base_system=large)
+    worker_spec = root.spec.model_copy(
+        update={
+            "declared_drops": (
+                "memory",
+                "sandbox",
+                "skills",
+                "mcp",
+                "tools",
+                "files",
+                "repository",
+            )
+        }
     )
+    limits = (
+        root.limits.model_copy(
+            # Explicit caps whose worst case at Flash's tariff fits the $0.05 hold.
+            update={"max_input_tokens": 16384, "max_output_tokens": 8192, "max_turns": 1}
+        )
+        if worker_token_caps is True
+        else None
+    )
+    worker = resolve_worker_spec(root, worker_spec, policy=POLICY, now=request.now(), limits=limits)
+    if worker_token_caps == "derived":
+        from daimon.core.neutral_resources import bounded_gemini_worker_tokens
+
+        # The plain-language spawn path: limits derived from the resolved prompt.
+        derived = bounded_gemini_worker_tokens(
+            worker.spec.system,
+            worker.limits.budget_usd,
+            model=worker.spec.model.id,
+            hold_usd=owned.plan.hold_usd,
+        )
+        worker = resolve_worker_spec(
+            root,
+            worker_spec,
+            policy=POLICY,
+            now=request.now(),
+            limits=worker.limits.model_copy(update={**derived, "max_turns": 1}),
+        )
     scope = worker.permissions.fleet.scope
     agent = await owned.resources.backend.agents.create(scope, worker.spec, key="restricted-worker")
     row = await owned.resources.catalog.put_agent(
@@ -687,7 +722,7 @@ async def test_complete_declared_worker_proof_consumes_actual_native_counterpart
     assert len(transport.requests) == 1
     sent = transport.requests[0]
     assert sent["agent"] == selected.counterpart.agent.ref.id
-    assert sent["tools"] == []
+    assert sent["tools"] == [NO_TOOLS_TOOL]
     assert sent["environment"] == {"type": "remote", "sources": []}
 
 
@@ -702,7 +737,6 @@ async def test_complete_declared_worker_proof_consumes_actual_native_counterpart
         "skills",
         "mcp",
         "ask_without_tools",
-        "credentials",
         "files",
         "private",
         "scope",
@@ -783,6 +817,9 @@ async def test_explicit_drops_do_not_discharge_unproved_obligations(
             ),
         )
     elif failure in ("credentials", "files"):
+        # A stored secret is left out of the worker ceiling (#1357): without "files"
+        # declared it refuses; declared, see
+        # test_a_stored_secret_never_reaches_a_worker_that_declares_files.
         if failure == "files":
             spec = worker.spec.model_copy(
                 update={"declared_drops": tuple(x for x in worker.declared_drops if x != "files")}
@@ -1346,7 +1383,10 @@ async def test_worker_expiry_attempts_cleanup_of_the_actual_prepared_session_onc
         archived[0]._scope, archived[0].session_ref
     )
     assert session.state == "idle"
-    assert "session_archive" in capsys.readouterr().out
+    # Gemini has no native archive: the cleanup is attempted once and skipped quietly.
+    output = capsys.readouterr().out
+    assert "turn.recovery_orphan_archive_skipped" in output
+    assert "turn.recovery_orphan_archive_failed" not in output
     assert not transport.requests
 
 
@@ -1432,8 +1472,10 @@ async def claimed_worker_request(explicit_worker_request, monkeypatch, clone_sou
         root,
         fleet=replace(request.worker.permissions.fleet, depth=0, scope=owned.request.scope),
         agent_id=request.worker.permissions.agent_id,
-        spec=owned.retained.agent.spec,
-        base_system=owned.retained.agent.spec.system,
+        spec=owned.retained.agent.spec.model_copy(
+            update={"system": request.worker.permissions.base_system}
+        ),
+        base_system=request.worker.permissions.base_system,
         limits=request.worker.limits,
     )
     sm = request.deps.sessionmaker
@@ -1569,7 +1611,9 @@ async def claimed_worker_request(explicit_worker_request, monkeypatch, clone_sou
     def native(call):
         if call.url.path.endswith(":countTokens"):
             native_requests.append(call)
-            return httpx.Response(200, json={"totalTokens": 262144})
+            # The real count never exceeds the cap; a derived cap is sized above it.
+            cap = resolved.limits.max_input_tokens or 262144
+            return httpx.Response(200, json={"totalTokens": min(262144, cap)})
         assert (call.method, call.url.path) in {
             ("POST", "/v1beta/interactions"),
             ("GET", "/v1beta/interactions/worker-result"),
@@ -1660,6 +1704,50 @@ async def test_claimed_worker_opaque_source_is_refused_before_funding_or_native_
     assert persisted.status == "failed" and persisted.error_code == "preparation_refused"
     assert persisted.reserved_usd == 0
     assert persisted.turns_used == 0 and persisted.binding_id is None and persisted.result is None
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+@pytest.mark.parametrize("clone_source", [False, True], indirect=True)
+async def test_a_template_representation_in_a_recapture_never_moves_the_worker_digest(
+    claimed_worker_request, monkeypatch
+):
+    """A capture taken again in run_worker must never move the worker's digest.
+
+    Staging (smoke c1c6d452): run_worker (and its pre-dispatch guard) re-capture
+    the root under the WORKER's Gemini revision, which selects the code-default
+    agent template and adds its `representations`; the spawn's capture had none.
+    That evidence is not intent, so the digest leaves it out.
+    """
+    import asyncio
+
+    from daimon.core import headless_runner
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, root, worker, prices, _, _ = claimed_worker_request
+    # As `for_worker` hands it over: the root's source, captured as the spawn was.
+    spawned = await capture_preparation_source(
+        replace(request, scope=root.fleet.scope, source=None, worker=None)
+    )
+    from daimon.core.stores.domain import SourceRepresentation
+
+    template = SourceRepresentation(source_pin="0" * 64, target=request.worker.spec)
+
+    async def moved(*_args, **_kwargs):
+        # What a capture under the worker's Gemini revision returns: the same source,
+        # plus the code-default template's representation.
+        return spawned.model_copy(update={"representations": (template,)})
+
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", moved)
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the assigned task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded", "same source, same intent: no intent_changed"
 
 
 @pytest.mark.parametrize("provider", ["gemini"], indirect=True)
@@ -2258,8 +2346,9 @@ async def test_worker_cleanup_uses_prepared_ports_and_preserves_the_original_fai
     assert len(entered) == 1
     assert len([call for call in calls if call.method == "POST"]) == 1
     output = capsys.readouterr().out
-    assert output.count("turn.recovery_orphan_archive_failed") == 1
-    assert "session_archive" in output
+    # Gemini has no native archive: the orphan cleanup is a quiet skip, not a failure.
+    assert "turn.recovery_orphan_archive_failed" not in output
+    assert output.count("turn.recovery_orphan_archive_skipped") == 1
     from daimon.core.stores import fleet
 
     async with request.deps.sessionmaker.begin() as db:
@@ -2269,3 +2358,44 @@ async def test_worker_cleanup_uses_prepared_ports_and_preserves_the_original_fai
         retained = next(row for _, rows in graph for row in rows if row.id == worker.id)
     assert retained.turns_used == 1 and retained.result is None
     assert retained.reserved_usd > 0 and retained.status == "running"
+
+
+@pytest.mark.parametrize("provider", ["gemini"], indirect=True)
+async def test_a_stored_secret_never_reaches_a_worker_that_declares_files(
+    explicit_worker_request,
+):
+    """#1357: a root's stored .env is left out of the worker ceiling, not carried."""
+    from daimon.core._models import AgentFile
+    from daimon.core.turn.runtime_manifest import worker_source_ceiling
+
+    request, _, owned, transport = explicit_worker_request
+    assert "files" in request.worker.declared_drops
+    async with request.deps.sessionmaker.begin() as db:
+        db.add(
+            AgentFile(
+                tenant_id=request.tenant_id,
+                agent_id=request.worker.permissions.agent_id,
+                key="UNREAD_PRIVATE",
+                content="invalid-ciphertext",
+                encoding="fernet_v1",
+            )
+        )
+    selected = await read_preparation_counterpart(request)
+    stored = [
+        binding
+        for binding in selected.source.resource_requirements
+        if (binding.credential_ref or "").startswith("agent-env:")
+    ]
+    assert stored, "the projector still records the root's stored secret"
+    ceiling = worker_source_ceiling(selected.source)
+    dumped = json.dumps(
+        [
+            ceiling.effective_spec.model_dump(mode="json"),
+            [binding.model_dump(mode="json") for binding in ceiling.resource_requirements],
+            selected.counterpart.agent.spec.model_dump(mode="json"),
+        ]
+    )
+    assert "agent-env:" not in dumped and "UNREAD_PRIVATE" not in dumped
+    assert "invalid-ciphertext" not in dumped
+    assert all(r.method == "GET" for r in owned.wire.requests)
+    assert transport.requests == []

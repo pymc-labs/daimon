@@ -89,7 +89,28 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
 
+      # A main CI run that main has already moved past must not deploy: an older run
+      # that reached the deploy after a newer one rolled staging back mid-smoke. The
+      # newer run deploys a superset. Checked once this job holds the environment's
+      # concurrency slot: a queued older run starts only after the newer one finishes.
+      # Skips only when the SHA is not main's head and is provably its ancestor; the
+      # head, a commit off main, or an unreadable history always deploy.
+      - name: Skip a deploy main has already superseded
+        id: fresh
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          result="$(bash scripts/ci/deploy_superseded.sh "$SHA")"
+          echo "$result" | tee -a "$GITHUB_OUTPUT"
+          if echo "$result" | grep -qx 'superseded=true'; then
+            head="$(echo "$result" | sed -n 's/^head=//p')"
+            echo "::notice::Deploy of $SHA skipped: superseded by $head (main's newer run deploys it)."
+            echo "superseded by $head"
+          fi
+
       - id: auth
+        if: steps.fresh.outputs.superseded != 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
@@ -97,13 +118,16 @@ jobs:
 
       # The runner image ships gcloud; installing another copy cost ~20s.
       - uses: google-github-actions/setup-gcloud@v2
+        if: steps.fresh.outputs.superseded != 'true'
         with:
           skip_install: true
 
       - name: Configure Docker for Artifact Registry
+        if: steps.fresh.outputs.superseded != 'true'
         run: gcloud auth configure-docker ${{ env.AR_HOST }} --quiet
 
       - name: Compute image tags
+        if: steps.fresh.outputs.superseded != 'true'
         id: tags
         run: |
           # Deterministic 7-char truncation, NOT `git rev-parse --short`:
@@ -117,6 +141,7 @@ jobs:
           echo "report=$BASE/report-host:$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Select immutable prebuilt images or canonical build tags
+        if: steps.fresh.outputs.superseded != 'true'
         id: images
         env:
           DAIMON_DIGEST: ${{ inputs.daimon_digest }}
@@ -149,7 +174,7 @@ jobs:
           done
 
       - name: Start staging IAP SSH key registration
-        if: inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true'
+        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           REPO_NAME: ${{ vars.GCP_AR_REPO }}
           IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
@@ -163,12 +188,12 @@ jobs:
       # SBOM attestations: they would turn the push into an image index, while
       # existing consumers expect a plain image manifest.
       - uses: docker/setup-buildx-action@v3
-        if: steps.images.outputs.prebuilt != 'true'
+        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - name: Build + push daimon image
-        if: steps.images.outputs.prebuilt != 'true'
+        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -180,7 +205,7 @@ jobs:
           cache-from: type=gha,scope=daimon
 
       - name: Build + push notebook-host image
-        if: steps.images.outputs.prebuilt != 'true'
+        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -192,7 +217,7 @@ jobs:
           cache-from: type=gha,scope=notebook-host
 
       - name: Build + push report-host image
-        if: steps.images.outputs.prebuilt != 'true'
+        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -204,6 +229,7 @@ jobs:
           cache-from: type=gha,scope=report-host
 
       - name: Run migrations (blocking gate)
+        if: steps.fresh.outputs.superseded != 'true'
         run: |
           gcloud run jobs update ${{ vars.GCP_AR_REPO }}-migrate --region "$REGION" \
             --image "${{ steps.images.outputs.daimon }}"
@@ -213,7 +239,10 @@ jobs:
       # Update it before any drain, using a bounded compatibility window on
       # the initial cutover. All later deployments keep strict admission.
       - name: Deploy MCP registered minters
+        if: steps.fresh.outputs.superseded != 'true'
         id: mcp_minters
+        env:
+          DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
         run: |
           SERVICE=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" --format=json) || {
             echo "MCP service must be provisioned first; see the manual cutover runbook" >&2
@@ -242,14 +271,23 @@ jobs:
           fi
           echo "window=$LEGACY" >> "$GITHUB_OUTPUT"
           echo "MCP bounded non-internal legacy window=$LEGACY cutoff=$CUTOFF"
+          # Production keeps today's behaviour until Carlos approves the new
+          # defaults: the four emergency stops, pinned on every prod deploy.
+          # To flip: delete PROD_PIN (and the matching daimon-infra pins).
+          PROD_PIN=""
+          if [ "${DEPLOY_ENVIRONMENT:-}" = production ]; then
+            PROD_PIN=",DAIMON_TURN__PATH=legacy,DAIMON_TURN__CHANNEL_BACKENDS=false"
+            PROD_PIN="$PROD_PIN,DAIMON_TURN__AGENT_BACKENDS=false,DAIMON_FLEET__ENABLED=false"
+          fi
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --image "${{ steps.images.outputs.daimon }}" \
-            --update-env-vars "DAIMON_MCP__ALLOW_LEGACY_TOKENS=$LEGACY,DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$CUTOFF"
+            --update-env-vars "DAIMON_MCP__ALLOW_LEGACY_TOKENS=$LEGACY,DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$CUTOFF$PROD_PIN"
           # Old revision requests may finish preparation and mint after traffic
           # has switched. Bound their last possible mint by the old request timeout.
           echo "$(( $(date +%s) + REQUEST_TIMEOUT ))" > "$RUNNER_TEMP/mcp-legacy-minters-until"
 
       - name: Resolve seam URL for report-host
+        if: steps.fresh.outputs.superseded != 'true'
         id: seam
         run: |
           # report-host's DAIMON_REPORT__MCP_URL points at the same mcp
@@ -262,13 +300,13 @@ jobs:
           echo "url=$URL/mcp" >> "$GITHUB_OUTPUT"
 
       - name: Wait for staging IAP SSH key registration
-        if: inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true'
+        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
         run: scripts/ci/iap-ssh-key.sh wait "$IAP_SSH_STATE" 190
 
       - name: Register the IAP SSH key
-        if: inputs.environment != 'staging' || steps.images.outputs.prebuilt != 'true'
+        if: (inputs.environment != 'staging' || steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         run: |
           # Keep this inline: rollback workflows check out the requested old
           # SHA, which may not contain the helper script used by current main.
@@ -295,6 +333,7 @@ jobs:
           fi
 
       - name: Start notebook-host VM refresh (in the background)
+        if: steps.fresh.outputs.superseded != 'true'
         id: notebook_refresh
         run: |
           # Runs alongside the worker refresh below; the two VMs share nothing.
@@ -379,6 +418,7 @@ jobs:
           ) > "$RUNNER_TEMP/notebook-refresh.log" 2>&1 < /dev/null &
 
       - name: Refresh worker VM containers (recreate in place)
+        if: steps.fresh.outputs.superseded != 'true'
         run: |
           # Skip the refresh when the workers VM is stopped (nothing to recreate).
           STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-workers \
@@ -414,6 +454,14 @@ jobs:
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
               sudo chmod 755 /usr/local/bin/daimon-refresh-env
               sudo /usr/local/bin/daimon-refresh-env
+              # Production keeps the four emergency stops until Carlos approves
+              # the new defaults; the last env_file entry wins. To flip: delete
+              # this block (and the MCP PROD_PIN and the daimon-infra pins).
+              if [ "${{ inputs.environment }}" = production ]; then
+                printf "%s\n" DAIMON_TURN__PATH=legacy DAIMON_TURN__CHANNEL_BACKENDS=false \
+                  DAIMON_TURN__AGENT_BACKENDS=false DAIMON_FLEET__ENABLED=false \
+                  | sudo tee -a /etc/daimon/daimon.env >/dev/null
+              fi
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.worker.yml /etc/daimon/compose.worker.yml
               cd /etc/daimon
               sudo -E docker compose -f compose.worker.yml pull
@@ -493,8 +541,9 @@ jobs:
               # restarts that answers on its liveness port before calling the
               # refresh done. Discord fails loudly on its own (bad token kills
               # the gateway handshake); Slack is the one that dies silently.
-              for i in $(seq 1 20); do
-                sleep 6
+              # Polled every 2s within the same 120s budget.
+              for i in $(seq 1 60); do
+                sleep 2
                 running=$(sudo docker inspect --format "{{.State.Running}}" daimon-slack-1)
                 restarts=$(sudo docker inspect --format "{{.RestartCount}}" daimon-slack-1)
                 if [ "$running" = "true" ] && [ "$restarts" = "0" ] \
@@ -502,7 +551,7 @@ jobs:
                   echo "slack worker healthy (attempt $i)"
                   break
                 fi
-                if [ "$i" = "20" ]; then
+                if [ "$i" = "60" ]; then
                   echo "slack worker not healthy after 120s (running=$running restarts=$restarts)" >&2
                   exit 1
                 fi
@@ -517,7 +566,7 @@ jobs:
       - name: Wait for notebook-host VM refresh
         # Also after a failed worker refresh, so the notebook-host outcome is
         # always on record; not after a cancel, which ends the job anyway.
-        if: ${{ !cancelled() && steps.notebook_refresh.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.notebook_refresh.outcome == 'success' && steps.fresh.outputs.superseded != 'true' }}
         run: |
           # 15 minutes; the refresh's own gates give up well before that.
           for _ in $(seq 1 450); do
@@ -532,6 +581,7 @@ jobs:
           exit "$(cat "$RUNNER_TEMP/notebook-refresh.rc")"
 
       - name: Drain legacy MCP turns before first verifier cutover
+        if: steps.fresh.outputs.superseded != 'true'
         id: mcp_cutover
         env:
           LEGACY_WINDOW: ${{ steps.mcp_minters.outputs.window }}
@@ -553,6 +603,7 @@ jobs:
           fi
 
       - name: Health gate
+        if: steps.fresh.outputs.superseded != 'true'
         run: |
           URL=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --format='value(status.url)')
@@ -566,7 +617,7 @@ jobs:
           echo "mcp did not become healthy" >&2; exit 1
 
       - name: Post-deploy smoke turn
-        if: inputs.environment == 'staging'
+        if: (inputs.environment == 'staging') && steps.fresh.outputs.superseded != 'true'
         timeout-minutes: 5
         run: |
           # Deliberately no VM-status precheck and no error-suppressing fallback
@@ -583,20 +634,104 @@ jobs:
             '
 
       - name: Let the adapters' boot reconcile settle
+        if: steps.fresh.outputs.superseded != 'true'
+        env:
+          DAIMON_IMAGE: ${{ steps.images.outputs.daimon }}
         run: |
           # After it starts, each adapter reconciles its installs against the
-          # shipped defaults in the background and signals nothing when done;
-          # the verify below would read a reconcile still in flight as drift.
-          # The notebook-host refresh used to sit between the two and give it a
-          # minute or more. It now runs alongside, so keep that margin here.
+          # shipped defaults in the background; the verify below would read a
+          # reconcile still in flight as drift, or pass on the old state before
+          # the reconcile writes. The fixed floor is 90s after the worker
+          # refresh. The step ends sooner only when every running container
+          # that reconciles at boot has logged its own completion event since
+          # it started. Anything else (a failure event, no event in this image,
+          # a service with no completion event, an unreadable log, an SSH
+          # failure) waits for the floor, so this never ends later than it.
           [ -f "$RUNNER_TEMP/workers-refreshed-at" ] || exit 0
-          wait_s=$(( $(cat "$RUNNER_TEMP/workers-refreshed-at") + 90 - $(date +%s) ))
+          deadline=$(( $(cat "$RUNNER_TEMP/workers-refreshed-at") + 90 ))
+          remaining=$(( deadline - $(date +%s) ))
+          [ "$remaining" -gt 0 ] || exit 0
+          # Leave the remote loop time to report before the deadline cuts SSH.
+          budget=$(( remaining - 10 ))
+          if [ "$budget" -gt 0 ] && [[ "$DAIMON_IMAGE" =~ ^[A-Za-z0-9./:@_-]+$ ]]; then
+            remote=$(cat <<'REMOTE'
+          set -u
+          cd /etc/daimon || exit 3
+          export DOCKER_CONFIG=/root/.docker DAIMON_IMAGE="$image"
+          end=$(( $(date +%s) + budget ))
+          fallback() { echo "boot reconcile: $*; keeping the fixed wait"; exit 3; }
+          # Events are JSON log lines: {"event": "<name>", ...}.
+          logged() { printf "%s\n" "$1" | grep -qF "\"event\": \"$2\""; }
+          while :; do
+            pending=""
+            # Every worker service that reconciles installs at boot. The
+            # scheduler reconciles only on a resolver miss at fire time.
+            for svc in discord slack teams; do
+              case $svc in
+                # One event per process once every reconcile the first
+                # on_ready started (and any seed already in flight) is done.
+                discord)
+                  done_events="discord.boot_reconcile_complete"
+                  failure_events="discord.boot_reconcile_failed" ;;
+                slack)
+                  done_events="slack.boot_sweep_complete slack.boot_sweep_skipped"
+                  failure_events="slack.boot_sweep_crashed slack.boot_sweep_tenant_failed slack.boot_sweep_reconcile_failed_ready_tenant slack.boot_sweep_status_flip_failed" ;;
+                teams)
+                  done_events="teams.tenant_ready teams.tenant_archived"
+                  failure_events="teams.tenant_reconcile_failed teams.task_failed" ;;
+              esac
+              ids=$(sudo -E docker compose -f compose.worker.yml ps -a -q "$svc" </dev/null) \
+                || fallback "cannot list $svc"
+              for id in $ids; do
+                state=$(sudo docker inspect --format "{{.State.Status}} {{.State.ExitCode}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}} {{.Config.Image}}" "$id" </dev/null) \
+                  || fallback "cannot inspect $svc"
+                set -- $state
+                [ "$5" = "$image" ] || fallback "$svc runs $5"
+                # Exited for good (teams without settings exits 0): it writes nothing.
+                if [ "$1" = exited ] && { [ "$3" = no ] || { [ "$3" = on-failure ] && [ "$2" = 0 ]; }; }; then
+                  continue
+                fi
+                [ -n "$done_events" ] || fallback "$svc logs no completion event"
+                if [ "$1" != running ]; then
+                  pending="$pending $svc"
+                  continue
+                fi
+                # Only this run of the container: a restart reconciles again.
+                logs=$(sudo docker logs --since "$4" "$id" 2>&1 </dev/null) || logs=""
+                for event in $failure_events; do
+                  if logged "$logs" "$event"; then fallback "$svc logged $event"; fi
+                done
+                complete=""
+                for event in $done_events; do
+                  if logged "$logs" "$event"; then complete=1; fi
+                done
+                [ -n "$complete" ] || pending="$pending $svc"
+              done
+            done
+            if [ -z "$pending" ]; then
+              echo "boot reconcile complete in every reconciling container"
+              exit 0
+            fi
+            [ "$(date +%s)" -lt "$end" ] || fallback "still waiting on$pending"
+            sleep 2
+          done
+          REMOTE
+          )
+            payload="budget=$budget image=$DAIMON_IMAGE
+          $remote"
+            if timeout "$remaining" gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
+              --tunnel-through-iap --command "$payload"; then
+              exit 0
+            fi
+          fi
+          wait_s=$(( deadline - $(date +%s) ))
           if [ "$wait_s" -gt 0 ]; then
             echo "waiting ${wait_s}s"
             sleep "$wait_s"
           fi
 
       - name: Verify deployed installs match shipped defaults
+        if: steps.fresh.outputs.superseded != 'true'
         # No environment gate, deliberately: this runs on every staging deploy
         # AND every production promote — unlike the smoke turn above, which is
         # scoped to staging only. A production install drifting from the
@@ -632,8 +767,9 @@ jobs:
                 sudo -E docker compose -f compose.worker.yml run --rm smoke defaults verify $verify_tenant_arg
               "
           }
-          # The settle floor above covers a typical boot reconcile; one retry a
-          # minute later covers a slow one. Real drift fails both attempts.
+          # The settle step above waits for every boot reconcile to report done,
+          # or for its floor; one retry a minute later covers a reconcile slower
+          # than the floor. Real drift fails both attempts.
           if ! verify; then
             echo "verify failed; retrying in 60s"
             sleep 60
@@ -641,7 +777,7 @@ jobs:
           fi
 
       - name: Mark tested staging images promotable
-        if: steps.images.outputs.prebuilt == 'true'
+        if: (steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
         run: |

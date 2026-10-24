@@ -6,7 +6,7 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Final
+from typing import Annotated, Final, Literal, cast, get_args
 
 import click
 import typer
@@ -60,6 +60,7 @@ from daimon.core.stores import agent_tool_rules as tool_rules_store
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
+from mux.profiles import selectable_models
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 from typer.core import TyperGroup
@@ -89,6 +90,8 @@ agents_app = typer.Typer(
 agents_app.add_typer(agent_rule_app, name="rule")
 backend_app = typer.Typer(help="Set or clear an agent's model backend.")
 agents_app.add_typer(backend_app, name="backend")
+owner_app = typer.Typer(help="Show, set or clear an agent's owner.")
+agents_app.add_typer(owner_app, name="owner")
 tool_rules_app = typer.Typer(help="List, set or clear an agent's MCP tool rules.")
 agents_app.add_typer(tool_rules_app, name="tool-rules")
 
@@ -694,6 +697,10 @@ def agents_backend_set_command(
     as_json: Annotated[bool, JSON_OPTION] = False,
     accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="One of the backend's selectable models; default if unset."),
+    ] = None,
 ) -> None:
     """Preview and set an enabled backend for new threads using this agent."""
     settings = load_settings()
@@ -711,6 +718,73 @@ def agents_backend_set_command(
                 selector=ctx.obj,
                 accept_drops=accept_drops,
                 dry_run=dry_run,
+                model=model,
+            )
+
+    run_cli(work(), console=console)
+
+
+@backend_app.command("settings")
+def agents_backend_settings_command(
+    ctx: typer.Context,
+    name: str,
+    thread_mode: Annotated[
+        str | None,
+        typer.Option(
+            "--thread-mode", help="per_caller or shared: the agent's own intent for new threads."
+        ),
+    ] = None,
+    profile: Annotated[
+        str | None, typer.Option("--profile", help="A profile of the agent's backend.")
+    ] = None,
+    require: Annotated[
+        list[str] | None,
+        typer.Option("--require", help="A capability the agent requires. Repeat for more."),
+    ] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Preview and state the agent's thread mode, profile and required capabilities.
+
+    Unset options return to the backend's default. A channel that pins a backend
+    still overrides the thread mode, and refuses a turn it can't give a
+    required capability.
+    """
+    from mux.contracts.config import CapabilityRequirement, ThreadMode
+    from mux.contracts.profile import Capability
+
+    try:
+        if thread_mode not in (None, *get_args(ThreadMode)):
+            raise ValueError(thread_mode)
+        mode = cast(ThreadMode | None, thread_mode)
+        needs = TypeAdapter(tuple[Capability, ...]).validate_python(tuple(require or ()))
+    except (ValidationError, ValueError) as exc:
+        raise typer.BadParameter(
+            "--thread-mode is per_caller or shared; --require names a known capability."
+        ) from exc
+    agent_settings = channel_backend.AgentSettings(
+        profile=profile,
+        requires={cap: CapabilityRequirement(level="required") for cap in needs} or None,
+        thread_mode=mode,
+    )
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_backend_change(
+                rt=runtime,
+                console=console,
+                name=name,
+                backend=None,
+                yes=yes,
+                as_json=as_json,
+                selector=ctx.obj,
+                accept_drops=accept_drops,
+                dry_run=dry_run,
+                settings=agent_settings,
             )
 
     run_cli(work(), console=console)
@@ -785,6 +859,8 @@ async def agents_backend_change(
     accept_drops: str | None = None,
     dry_run: bool = False,
     revert: bool = False,
+    model: str | None = None,
+    settings: channel_backend.AgentSettings | None = None,
 ) -> None:
     from mux.contracts.config import BackendConfig
 
@@ -794,6 +870,15 @@ async def agents_backend_change(
         target = BackendConfig.model_validate({"backend": backend}).backend
     except ValidationError as exc:
         raise typer.BadParameter("Choose a backend supported by this deployment.") from exc
+    if model is not None:
+        if revert or target is None:
+            raise typer.BadParameter(
+                "--model applies to set with a backend; clear and revert take none."
+            )
+        if model not in selectable_models(target):
+            raise typer.BadParameter(
+                f"--model must be one of: {', '.join(selectable_models(target)) or 'none here'}."
+            )
     if as_json and not yes and not dry_run:
         raise typer.BadParameter("Use --yes with --json after reviewing the backend preview.")
     async with rt.sessionmaker.begin() as session:
@@ -845,20 +930,40 @@ async def agents_backend_change(
     agent = await channel_backend.load_backend_agent(
         rt.anthropic, rt.sessionmaker, tenant_id=tenant_id, agent_name=name
     )
-    current_revision = await service.current(agent) if revert else None
+    current_revision = await service.current(agent) if revert or settings is not None else None
+    preview_settings: channel_backend.AgentSettings | None = None
+    if settings is not None:
+        # Settings keep the agent's provider and model.
+        target = current_revision.backend if current_revision else None
+        model = current_revision.model if current_revision else None
+        preview_settings = settings
     if revert:
         if current_revision is None:
             raise channel_backend.AgentBackendRefused("no_previous_revision")
         target = None
+        model = None
         if current_revision.previous_local is not None:
             previous = await service.revision(agent, current_revision.previous_local)
             if previous is None:
                 raise channel_backend.AgentBackendRefused("no_previous_revision")
-            target = previous.backend
-    preview = await service.preview(agent, target)
+            # Revert restores the previous model and settings too; its preview must say so.
+            target, model = previous.backend, previous.model
+            preview_settings = channel_backend.AgentSettings.of(previous)
+        else:
+            preview_settings = channel_backend.AgentSettings()
+    preview = await service.preview(agent, target, model, preview_settings)
     preview_json = TypeAdapter(type(preview)).dump_json(preview).decode()
     if not as_json:
-        console.print(f"Model backend: {preview.target_backend}", markup=False)
+        console.print(
+            f"Model backend: {preview.target_backend}"
+            + (f" ({preview.target_model})" if preview.target_model else ""),
+            markup=False,
+        )
+        if preview.target_settings:
+            console.print(
+                "Agent settings: " + json.dumps(preview.target_settings, sort_keys=True),
+                markup=False,
+            )
         for label, items in (
             ("Unsupported skills", preview.unsupported_skills),
             ("Unsupported MCPs", preview.unsupported_mcps),
@@ -881,6 +986,7 @@ async def agents_backend_change(
         return
     accepted: tuple[str, ...] | None = None
     if not revert and target is not None and preview.drop_consent is not None:
+        # A settings change on such a provider names its drops again, as a switch does.
         try:
             consent = type(preview.drop_consent).model_validate(
                 {
@@ -901,11 +1007,24 @@ async def agents_backend_change(
         accepted = consent.declared_drops
     elif accept_drops is not None:
         raise typer.BadParameter("This preview does not declare drops.")
-    confirm_or_abort(console, f"Change {name}'s model backend?", yes=yes)
+    confirm_or_abort(
+        console,
+        f"Change {name}'s {'settings' if settings is not None else 'model backend'}?",
+        yes=yes,
+    )
     current = await channel_backend.load_backend_agent(
         rt.anthropic, rt.sessionmaker, tenant_id=tenant_id, agent_name=name
     )
-    if revert:
+    if settings is not None:
+        revision = await service.set_settings(
+            current,
+            settings,
+            preview.setting_revision,
+            actor,
+            expected_preview_digest=preview.digest,
+            accepted_drops=accepted,
+        )
+    elif revert:
         assert current_revision is not None
         revision = await service.revert(
             current,
@@ -927,7 +1046,8 @@ async def agents_backend_change(
             preview.setting_revision,
             actor,
             expected_preview_digest=preview.digest,
-            **({"accepted_drops": accepted} if accepted is not None else {}),
+            model=preview.target_model,
+            accepted_drops=accepted,
         )
     if as_json:
         console.print(
@@ -935,6 +1055,7 @@ async def agents_backend_change(
                 {
                     "agent": name,
                     "backend": revision.backend,
+                    "model": revision.model,
                     "revision": revision.local,
                     "preview": json.loads(preview_json),
                 }
@@ -1400,3 +1521,149 @@ async def agents_rekey(
         columns=("agent_name", "new_name", "agent_id", "new_account"),
         as_json=False,
     )
+
+
+@owner_app.command("show")
+def agents_owner_show_command(ctx: typer.Context, name: str) -> None:
+    """Show the agent's owner account, if it has one."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_owner(rt=runtime, console=console, name=name, selector=ctx.obj)
+
+    run_cli(work(), console=console)
+
+
+@owner_app.command("set")
+def agents_owner_set_command(
+    ctx: typer.Context,
+    name: str,
+    account: Annotated[
+        str | None, typer.Option("--account", help="The owner's account id.")
+    ] = None,
+    platform: Annotated[
+        str | None, typer.Option("--platform", help="With --user: discord, slack or teams.")
+    ] = None,
+    user: Annotated[
+        str | None, typer.Option("--user", help="The owner's platform user id.")
+    ] = None,
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    """Make one person the agent's owner: they may edit it without being an admin.
+
+    The owner may change its prompt, model, provider, settings, skills, connections
+    and fleet; never the provider allowlist, budgets or GitHub access.
+    """
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_owner(
+                rt=runtime,
+                console=console,
+                name=name,
+                selector=ctx.obj,
+                change="set",
+                account=account,
+                platform=platform,
+                user=user,
+                yes=yes,
+            )
+
+    run_cli(work(), console=console)
+
+
+@owner_app.command("clear")
+def agents_owner_clear_command(
+    ctx: typer.Context, name: str, yes: Annotated[bool, YES_OPTION] = False
+) -> None:
+    """Clear the agent's owner: only admins may edit it."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def work() -> None:
+        async with build_runtime(settings) as runtime:
+            await agents_owner(
+                rt=runtime, console=console, name=name, selector=ctx.obj, change="clear", yes=yes
+            )
+
+    run_cli(work(), console=console)
+
+
+async def agents_owner(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    name: str,
+    selector: TenantSelector | None = None,
+    change: Literal["set", "clear"] | None = None,
+    account: str | None = None,
+    platform: str | None = None,
+    user: str | None = None,
+    yes: bool = False,
+) -> None:
+    """The CLI is the operator's own: assigning or clearing an owner is an admin's act."""
+    from daimon.core.agent_ownership import agent_owner, assign_agent_owner, clear_agent_owner
+    from daimon.core.stores.identity import find_platform_principal
+
+    async with rt.sessionmaker.begin() as session:
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+        owner_id: uuid.UUID | None = None
+        if change == "set":
+            if (account is None) == (user is None) or (user is not None and platform is None):
+                raise typer.BadParameter("Pass --account, or --platform with --user.")
+            if account is not None:
+                try:
+                    owner_id = uuid.UUID(account)
+                except ValueError as exc:
+                    raise typer.BadParameter("--account is an account id.") from exc
+            else:
+                found = await find_platform_principal(
+                    session, tenant_id=tenant_id, platform=platform or "", external_id=user or ""
+                )
+                if found is None:
+                    raise StoreError("No account for that platform user in this tenant.")
+                owner_id = found.account_id
+    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    if agent is None:
+        raise StoreError(f"no agent named {name!r} in your account.")
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+    if change is None:
+        current = await agent_owner(rt.sessionmaker, tenant_id=tenant_id, agent_id=agent_id)
+        console.print(
+            f"{name}: owner {current}" if current else f"{name}: no owner (admins only)",
+            markup=False,
+        )
+        return
+    if change == "clear":
+        confirm_or_abort(console, f"Clear {name}'s owner? Only admins could edit it.", yes=yes)
+        cleared = await clear_agent_owner(
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            by_account_id=principal.account_id,
+        )
+        console.print(
+            f"Cleared {name}'s owner." if cleared else f"{name} had no owner.", markup=False
+        )
+        return
+    assert owner_id is not None
+    confirm_or_abort(console, f"Make {owner_id} the owner of {name}?", yes=yes)
+    try:
+        await assign_agent_owner(
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            owner_account_id=owner_id,
+            by_account_id=principal.account_id,
+        )
+    except LookupError as exc:
+        raise StoreError("That account is not in this tenant.") from exc
+    console.print(f"{owner_id} now owns {name}.", markup=False)

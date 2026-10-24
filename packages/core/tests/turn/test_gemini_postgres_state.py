@@ -1,12 +1,14 @@
 """Real state-DB transactions behind the existing Gemini record/hold owners."""
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 from daimon.core._models import GeminiRuntimeState
+from daimon.core.stores import gemini_runtime_state
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini_state import PostgresFlashAccounting, PostgresGeminiStorage
 from daimon.testing.factories import make_account, make_tenant
@@ -19,8 +21,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 @pytest.fixture
-async def postgres_state(db_nullpool_engine, db_clean):
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+async def postgres_state(db_committing_engine, db_clean):
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
         account = await make_account(db, tenant=tenant)
@@ -116,6 +118,38 @@ async def test_postgres_serializes_first_insert_and_releases_cancelled_writer(
         assert len(records.creations) == 2
 
 
+@pytest.mark.parametrize(
+    ("outcome", "status", "released"),
+    [
+        ("refused", 400, True),  # Google rejected the request: nothing to bill
+        ("refused", 404, True),
+        ("refused", 503, True),  # a 503 refused the work: no interaction returned
+        ("refused", None, False),
+        ("unknown", None, False),  # maybe accepted: the full hold stays
+    ],
+)
+async def test_postgres_definite_refusal_releases_its_hold(
+    postgres_state, outcome, status, released
+):
+    sessions, scope, _, _ = postgres_state
+    model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
+    owner = holds(sessions, scope)
+    await owner.before_attempt(model=model, attempt=1)
+    await owner.after_attempt(receipt=FlashAttempt(model, 1, outcome, http_status=status))
+    async with sessions() as db:
+        (body,) = (await db.scalars(select(GeminiRuntimeState.body))).all()
+    (row,) = json.loads(body).values()
+    assert row["outcome"] == outcome and row["http_status"] == status
+    if released:
+        assert (row["held_usd"], row["actual_usd"], row["released_usd"]) == ("0", "0", "0.49")
+        # The budget is free again for the next attempt (cap == one hold).
+        await holds(sessions, scope).before_attempt(model=model, attempt=1)
+    else:
+        assert row["held_usd"] == "0.49" and "released_usd" not in row
+        with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
+            await holds(sessions, scope).before_attempt(model=model, attempt=1)
+
+
 @pytest.mark.parametrize("outcome", ["accepted", "refused", "unknown"])
 async def test_postgres_concurrent_holds_and_receipts_survive_restart(postgres_state, outcome):
     sessions, scope, _, _ = postgres_state
@@ -129,7 +163,7 @@ async def test_postgres_concurrent_holds_and_receipts_survive_restart(postgres_s
     result = await asyncio.gather(attempt(), attempt(), return_exceptions=True)
     assert sum(value is None for value in result) == 1
     assert sum(isinstance(value, AdmissionDenied) for value in result) == 1
-    with pytest.raises(AdmissionDenied, match="channel_budget_exceeded"):
+    with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
         await holds(sessions, scope).before_attempt(model=model, attempt=1)
     async with sessions() as db:
         bodies = (await db.scalars(select(GeminiRuntimeState.body))).all()
@@ -295,6 +329,24 @@ async def test_open_records_do_not_block_account_update_fence(postgres_state):
         ) == UUID(scope.account_id)
 
 
+# The waiter's poll cadence and the pool headroom are asserted on counted events, not on
+# elapsed time. These bounds only end a hung run, so they sit far above the unloaded cost: the
+# holds reservation is ~25 serial database round trips, and it took 0.5s on a CI runner whose
+# four vCPUs were shared with four pytest workers and their Postgres, which failed a 0.5s bound.
+HUNG_RUN_BOUND_S = 30
+# A checkout waits only for the waiter's one in-flight attempt (~10 round trips). A pool
+# timeout is retried like any busy fence, so a pool the waiter exhausts shows up as the
+# headroom assertion below within seconds, not as a hang.
+POOL_WAIT_S = 1
+
+
+async def _within_hung_run_bound(awaitable, what: str):
+    try:
+        return await asyncio.wait_for(awaitable, HUNG_RUN_BOUND_S)
+    except TimeoutError:
+        pytest.fail(f"{what} did not finish within {HUNG_RUN_BOUND_S}s (hung, not slow)")
+
+
 async def test_post_dispatch_waiter_keeps_short_polls_and_pool_headroom(
     postgres_state, db_preflight, db_schema, monkeypatch
 ):
@@ -303,7 +355,7 @@ async def test_post_dispatch_waiter_keeps_short_polls_and_pool_headroom(
 
     _, scope, _, _ = postgres_state
     engine = build_test_engine(
-        db_preflight.url, db_schema, pool_size=2, max_overflow=0, pool_timeout=0.5
+        db_preflight.url, db_schema, pool_size=2, max_overflow=0, pool_timeout=POOL_WAIT_S
     )
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     storage = PostgresGeminiStorage(sessions, scope=scope, project="polling")
@@ -323,24 +375,35 @@ async def test_post_dispatch_waiter_keeps_short_polls_and_pool_headroom(
         async with storage.transaction(after_dispatch=True) as records:
             records.creations[("t", "a", "resolved")] = ("p", "d", "agent")
 
+    async def eighth_retry_or_waiter_exit():
+        """End at the eighth retry, or at the waiter's own exit so its error is reported."""
+        eighth = asyncio.create_task(polling.wait())
+        try:
+            await asyncio.wait({eighth, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            eighth.cancel()
+        assert polling.is_set(), f"the waiter ended after {len(sleeps)} retries: {waiter!r}"
+
     monkeypatch.setattr(session_fence_retry.random, "uniform", lambda low, high: high)
     monkeypatch.setattr(session_fence_retry.asyncio, "sleep", observed_sleep)
     try:
         async with storage.transaction():
             waiter = asyncio.create_task(resolve())
-            await asyncio.wait_for(polling.wait(), 7)
+            await _within_hung_run_bound(eighth_retry_or_waiter_exit(), "the eighth retry")
             # The eighth retry must still release the second pool connection;
             # nested durable holds retain capacity while Records is locked.
-            assert engine.pool.checkedout() == 1
-            await asyncio.wait_for(
+            assert engine.pool.checkedout() == 1, (
+                "the waiter kept its pool connection while sleeping between retries"
+            )
+            await _within_hung_run_bound(
                 holds(sessions, scope, project="polling").before_attempt(
                     model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1
                 ),
-                0.5,
+                "a holds reservation while a post-dispatch waiter polls",
             )
         # An old waiter must not sleep for a second while new contenders start
         # at the short cadence. Use the longest jitter for a stable regression.
-        await asyncio.wait_for(waiter, 0.5)
+        await _within_hung_run_bound(waiter, "the waiter after Records unlocked")
         assert len(sleeps) >= 8 and max(sleeps) <= 0.075
         async with storage.transaction() as records:
             assert ("t", "a", "resolved") in records.creations
@@ -491,9 +554,8 @@ async def test_account_purge_previews_and_deletes_records_but_retains_financial_
 
 @pytest.mark.parametrize("refused", [False, True])
 async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_session(
-    postgres_state, refused
+    postgres_state, refused, monkeypatch
 ):
-    from daimon.testing.drivers.gemini.fake import FakeTransport
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
     from mux.contracts.extensions import ExtensionConfig
@@ -502,6 +564,7 @@ async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_sessi
     from mux.drivers.gemini import GeminiManagedAgents
     from mux.errors import ProviderError
     from mux.state.memory import MemoryStateStore
+    from mux.testing.drivers.gemini.fake import FakeTransport
 
     from .test_gemini_codec import interaction
 
@@ -558,10 +621,13 @@ async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_sessi
         await asyncio.wait_for(dispatched.wait(), 3)
         # The POST has completed, but another session's provider I/O holds the
         # account/project Records row while this outcome needs to be committed.
+        # Shrink the pre-dispatch busy bound and hold the row twice as long,
+        # rather than outlasting the production 5 s.
+        monkeypatch.setattr(gemini_runtime_state, "PRE_DISPATCH_BUSY_BOUND_S", 0.3)
         async with storage.transaction() as records:
             assert records.sessions[session.ref.id].unknown_delivery
             release_response.set()
-            await asyncio.sleep(5.5)
+            await asyncio.sleep(0.6)
             assert not task.done()
         if refused:
             with pytest.raises(ProviderError) as error:

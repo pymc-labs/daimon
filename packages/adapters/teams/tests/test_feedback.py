@@ -36,6 +36,7 @@ from .conftest import (
     assert_card_renders,
     build_teams_runtime,
     make_invoke,
+    notice_text,
     post_activity,
     running_service,
 )
@@ -171,7 +172,7 @@ async def test_a_thumbs_up_is_recorded_and_thanked(
     async with _running(db_session_factory, teams_api_fake) as service:
         reply = await _click(service, "like")
 
-    assert _message(reply) == feedback.THANKS_VOTE, "a light thanks, no form"
+    assert notice_text(reply) == feedback.THANKS_VOTE, "a light thanks, no form"
     [row] = await _rows(db_session_factory)
     assert (row["vote"], row["message_id"], row["channel_id"]) == ("up", ANSWER, CONVERSATION_ID)
     assert row["platform_user_id"] == AAD_OBJECT_ID, "on the voter's own row"
@@ -235,7 +236,7 @@ async def test_someone_who_could_not_ask_there_cannot_vote(
         down = await _click(service, "dislike")
         sent = await _send(service, reasons="other", note=CRITICISM)
 
-    assert {_message(up), _message(down), _message(sent)} == {NOT_ALLOWED}, "told, every time"
+    assert {notice_text(up), notice_text(down), _message(sent)} == {NOT_ALLOWED}, "told, every time"
     assert await _rows(db_session_factory) == [], "a refused vote records nothing"
 
 
@@ -246,7 +247,7 @@ async def test_teams_own_thumbs_on_an_older_answer_still_vote(
         up = await _native_click(service, "like")
         form = _form(await _native_click(service, "dislike"))
 
-    assert _message(up) == feedback.THANKS_VOTE and form["actions"], "thanks, then the form"
+    assert notice_text(up) == feedback.THANKS_VOTE and form["actions"], "thanks, then the form"
     [row] = await _rows(db_session_factory)
     assert row["vote"] == "down", "the later click wins, as on the buttons"
 

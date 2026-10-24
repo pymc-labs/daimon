@@ -26,6 +26,7 @@ from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevi
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session
 from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import (
     make_account,
@@ -34,9 +35,6 @@ from daimon.testing.factories import (
     make_tenant,
     make_tenant_config,
 )
-from daimon.testing.isolated_sdk import build_async_anthropic, build_async_openai
-from daimon.testing.ma import json_body, make_fake_memory_store_handler
-from daimon.testing.ma_models import ma_session
 from daimon.testing.turn_fakes import RecordingLifecycle
 from daimon.testing.turn_router import build_turn_router
 from mux.contracts.config import BackendConfig
@@ -46,10 +44,13 @@ from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import SDKTransport
 from mux.state.lease import Slot
+from mux.testing.drivers.anthropic.ma import json_body, make_fake_memory_store_handler
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.isolated_sdk import build_async_anthropic, build_async_openai
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_openai_host import Wire
-from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, deps_for
+from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, deps_for_pinned_mux
 
 
 async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_refuses(
@@ -170,7 +171,7 @@ async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_re
             ),
         )
         deps = replace(
-            deps_for(anthropic, db_session_factory),
+            deps_for_pinned_mux(anthropic, db_session_factory),
             channel_backends=True,
             state_store=store,
             turn_runtimes={PROFILE: runtime},
@@ -181,6 +182,7 @@ async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_re
             current = await admit(
                 deps,
                 tenant_id=TENANT,
+                requester_org=RequesterOrg.HOST,
                 platform="slack",
                 external_user_id="caller",
                 channel_id="channel",

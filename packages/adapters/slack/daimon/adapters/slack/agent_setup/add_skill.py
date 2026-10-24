@@ -115,7 +115,7 @@ async def run_add_skill_submission(
             client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text
         )
 
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
     async with runtime.sessionmaker.begin() as session:
         actor = await get_or_create_platform_principal(
             session, platform="slack", external_id=user_id, tenant_id=tenant_id
@@ -143,6 +143,7 @@ async def run_add_skill_submission(
             client,
             operation="skill_add",
             tenant_id=tenant_id,
+            team_id=team_id,
             agent_name=agent_name,
             channel_id=meta.channel_id,
             user_id=user_id,

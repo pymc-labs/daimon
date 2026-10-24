@@ -29,9 +29,10 @@ from daimon.core.stores import tenant_ledger
 from daimon.core.support_escalation import ESCALATE
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.state import TextBlock, TurnState
-from daimon.testing import ma_session, resolved_agent_env_router
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.ma import resolved_agent_env_router
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot

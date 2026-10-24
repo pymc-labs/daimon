@@ -38,6 +38,22 @@ async def actor_exists(session: AsyncSession, tenant_id: uuid.UUID, account_id: 
     )
 
 
+async def ever_had_fleet_grant(
+    session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> bool:
+    """Whether any revision of this agent stored a fleet grant (or the off marker)."""
+    query = (
+        select(AgentBackendRevisionRecord.local)
+        .where(
+            AgentBackendRevisionRecord.tenant_id == tenant_id,
+            AgentBackendRevisionRecord.agent_id == agent_id,
+            AgentBackendRevisionRecord.fleet_grant.is_not(None),
+        )
+        .limit(1)
+    )
+    return await session.scalar(query) is not None
+
+
 async def current(
     session: AsyncSession,
     tenant_id: uuid.UUID,
@@ -61,6 +77,28 @@ async def current(
     return AgentBackendRevision.model_validate(row) if row is not None else None
 
 
+async def has_backend_preference_by_name(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str, backend: Provider
+) -> bool:
+    """Conservative refusal guard; friendly names must never authorize selection."""
+    latest = (
+        select(AgentBackendRevisionRecord)
+        .where(AgentBackendRevisionRecord.tenant_id == tenant_id)
+        .distinct(AgentBackendRevisionRecord.agent_id)
+        .order_by(AgentBackendRevisionRecord.agent_id, AgentBackendRevisionRecord.local.desc())
+        .subquery()
+    )
+    return bool(
+        await session.scalar(
+            select(
+                select(latest.c.agent_id)
+                .where(latest.c.agent_name == agent_name, latest.c.backend == backend)
+                .exists()
+            )
+        )
+    )
+
+
 async def put_revision(
     session: AsyncSession,
     *,
@@ -74,12 +112,20 @@ async def put_revision(
     preview_digest: str,
     fleet_grant: JsonValue | None = None,
     drop_consent: JsonValue | None = None,
+    model: str | None = None,
+    profile: str | None = None,
+    requires: JsonValue | None = None,
+    thread_mode: str | None = None,
 ) -> AgentBackendRevision:
     row = AgentBackendRevisionRecord(
         tenant_id=tenant_id,
         agent_id=agent_id,
         local=local,
         backend=backend,
+        model=model,
+        profile=profile,
+        requires=requires,
+        thread_mode=thread_mode,
         digest=digest,
         previous_local=previous_local,
         agent_name=agent_name,

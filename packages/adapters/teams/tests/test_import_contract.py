@@ -23,11 +23,13 @@ def test_teams_is_in_adapter_independence_contract() -> None:
 
 def test_ci_runs_teams_tests() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
-    assert "pytest-teams" in workflow["jobs"], "CI must run the Teams adapter tests"
-    steps = workflow["jobs"]["pytest-teams"]["steps"]
-    assert any(
-        step.get("run") == "uv run pytest packages/adapters/teams -n auto" for step in steps
-    ), "the Teams job must execute the adapter suite"
+    legs = workflow["jobs"]["pytest-db"]["strategy"]["matrix"]["include"]
+    teams = [leg for leg in legs if leg["suite"] == "teams"]
+    assert len(teams) == 1, "CI must run the Teams adapter tests"
+    assert teams[0]["paths"] == "packages/adapters/teams", (
+        "the Teams leg must run the adapter suite"
+    )
+    assert teams[0]["shards"] == 1, "the Teams leg must not skip any of its tests"
 
 
 def _module_sources() -> dict[str, str]:

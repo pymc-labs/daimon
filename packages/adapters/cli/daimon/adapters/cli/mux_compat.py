@@ -12,10 +12,8 @@ from anthropic.types.beta import BetaEnvironment, SkillRetrieveResponse
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import environment_spec, legacy_call, sdk_environment, sdk_skill
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
-from mux.drivers.anthropic.resources.environments import (
-    create_environment_ignored as native_create_environment_ignored,
-)
+from mux.drivers.anthropic import ResourceAuthorization
+from mux.drivers.anthropic import create_environment_ignored as native_create_environment_ignored
 
 
 async def create_environment_ignored(

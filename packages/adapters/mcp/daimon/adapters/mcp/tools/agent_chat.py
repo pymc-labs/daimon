@@ -129,6 +129,7 @@ from daimon.core.stores.github_issued_tokens import touch_unmapped_app_session
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
+from daimon.core.turn.reducers import refusal_error
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.usage_sweep import settle_finished_turn
 from fastmcp import Context, FastMCP
@@ -431,7 +432,7 @@ async def _verify_agent_owns_session(
     caller's account: every member of a workspace talks to the same agent, and
     a member's session runs with that member's vault, so an agent match alone
     would let one member read, drive or stop another's conversation. Raises
-    ``ToolError("session not found")`` — same message as a genuinely missing
+    ``ToolError("conversation not found")`` — same message as a genuinely missing
     session, so existence isn't leaked across agents or accounts.
 
     A conversation that ran in a sealed channel is then refused outright: these
@@ -443,20 +444,20 @@ async def _verify_agent_owns_session(
     try:
         s = await retrieve_session(runtime.client, handle, scope=mcp_scope(auth))
     except ScopeViolation:
-        raise ToolError("session not found") from None
+        raise ToolError("conversation not found") from None
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
     if auth.agent_id is None or derived != auth.agent_id:
-        raise ToolError("session not found")
+        raise ToolError("conversation not found")
     if not _owned_by_caller(s, auth) and s.id not in await admin_readable_legacy_sessions(
         runtime, auth, [s]
     ):
-        raise ToolError("session not found")
+        raise ToolError("conversation not found")
     await require_session_outside_seals(runtime, auth, s)
     return s
 
 
 _CHAT_TURN_REFUSED = (
-    "a chat turn can't open or drive another conversation through agent chat. "
+    "a chat reply can't open or drive another conversation through agent chat. "
     "Answer in this conversation instead. Do not retry."
 )
 
@@ -620,7 +621,7 @@ async def _start_turn_impl(
         if not is_isolated:
             raise ToolError("bundle requires an isolated agent")
         if runtime.settings.mcp.jwt_secret is None:
-            raise ToolError("bundle upload is not configured on this deployment")
+            raise ToolError("bundle upload is not set up")
         claims = (
             bundle_handle.verify(
                 runtime.settings.mcp.jwt_secret.get_secret_value(),
@@ -1120,9 +1121,7 @@ async def _list_events_impl(
     )
     await _require_live_result_access(runtime, auth)
     return Page[SessionEventOut](
-        items=[
-            SessionEventOut.model_validate(event.model_dump(mode="json")) for event in cursor.data
-        ],
+        items=[SessionEventOut.from_event(event) for event in cursor.data],
         next_page=cursor.next_page,
     )
 
@@ -1164,7 +1163,7 @@ async def _deliver_turn_charts_impl(
     session = await _get_session_impl(runtime, auth, handle)
     if session.status not in {"idle", "terminated"}:
         raise ToolError(
-            f"session {handle} is {session.status!r}; deliver charts only after "
+            f"conversation {handle} is {session.status!r}; deliver charts only after "
             "get_my_session reports 'idle' or 'terminated'"
         )
 
@@ -1185,9 +1184,9 @@ async def _deliver_turn_charts_impl(
         page = events.next_page
 
     if final_text is None:
-        raise ToolError(f"no completed turn found for session {handle}")
+        raise ToolError(f"no finished reply found for conversation {handle}")
     if turn_started_at is None:
-        raise ToolError(f"no completed turn boundary found for session {handle}")
+        raise ToolError(f"no start of the finished reply found for conversation {handle}")
 
     cache_key = (handle, turn_started_at.isoformat())
     cached = _delivery_cache.get(cache_key)
@@ -1273,12 +1272,14 @@ async def _ask_impl(
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.SESSION_TERMINATED)
             raise ToolError(
-                f"Daimon turn reached terminal status {current.status!r}; "
+                f"The reply reached final status {current.status!r}; "
                 f"resume or inspect events with handle {handle}"
             )
         if current.status == "idle":
             page: str | None = None
             final_text: str | None = None
+            # The newest idle decides: a refusal ends the turn whatever text came before it.
+            refused: bool | None = None
             for _ in range(_MAX_EVENT_PAGES):
                 events = await _list_events_impl(
                     runtime,
@@ -1288,10 +1289,15 @@ async def _ask_impl(
                     100,
                     "desc",
                     created_at_gte=turn_started_at.isoformat(),
-                    types=["agent.message"],
+                    types=["agent.message", "session.status_idle"],
                 )
                 for event in events.items:
                     if event.id == turn_event_id:
+                        continue
+                    if event.type == "session.status_idle":
+                        if refused is None:
+                            details = (event.model_extra or {}).get("stop_details")
+                            refused = refusal_error(details) is not None
                         continue
                     final_text = _agent_message_text(event)
                     if final_text is not None:
@@ -1300,6 +1306,13 @@ async def _ask_impl(
                     break
                 page = events.next_page
 
+            if refused:
+                if (observation := current_outcome.get()) is not None:
+                    observation.finish(reason=TerminationReason.REFUSED)
+                raise ToolError(
+                    "Daimon's AI declined this request; rephrase it and ask again "
+                    f"with handle {handle}"
+                )
             if final_text is not None:
                 delivery = await deliver_hosted_charts(
                     runtime.client,
@@ -1326,7 +1339,7 @@ async def _ask_impl(
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.CEILING)
             raise ToolError(
-                f"Daimon turn did not become idle with a reply within "
+                f"Daimon did not finish a reply within "
                 f"{timeout_seconds:g} seconds; resume with handle {handle}"
             )
         await sleep(min(poll_interval_seconds, remaining))

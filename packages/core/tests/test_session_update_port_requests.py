@@ -9,9 +9,9 @@ from anthropic.types.beta.beta_managed_agents_session_agent_update_param import 
     BetaManagedAgentsSessionAgentUpdateParam,
 )
 from daimon.core.session_ports_compat import update_session_record
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Revision, Scope
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"

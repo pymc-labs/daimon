@@ -307,7 +307,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
 
         # Slow path (off the 3s window): tenant, role, roster, attributions.
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-        is_admin = await resolve_is_admin(client, user_id=user_id)
+        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
 
         async with runtime.sessionmaker() as session:
             roster = await load_panel_roster(
@@ -798,7 +798,7 @@ async def _dispatch_panel_action(
     view_id: str = str(view_info.get("id") or "")
     view_hash: str = str(view_info.get("hash") or "")
     trigger_id: str = str(payload.get("trigger_id") or "")
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
 
     if action_id in {
         panel_views.ACTION_BACKEND_SELECT,
@@ -823,7 +823,7 @@ async def _dispatch_panel_action(
                 client,
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
-                text="Model backend wasn't changed. Ask a workspace admin to open the panel.",
+                text="Model provider wasn't changed. Ask a workspace admin to open the panel.",
             )
             return
         if action_id == panel_views.ACTION_BACKEND_CANCEL:
@@ -849,7 +849,7 @@ async def _dispatch_panel_action(
                 client,
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
-                text="That preview is no longer available. Choose a model backend again.",
+                text="That preview is no longer available. Choose a model provider again.",
             )
             return
         if action_id == panel_views.ACTION_BACKEND_SELECT:
@@ -878,7 +878,7 @@ async def _dispatch_panel_action(
                 client,
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
-                text="Model backend preview is unavailable. Nothing was changed.",
+                text="That preview isn't available. Nothing was changed; choose again.",
             )
             return
         preview = selection.preview
@@ -909,7 +909,7 @@ async def _dispatch_panel_action(
             principal = await get_or_create_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
             )
-        is_admin = await resolve_is_admin(client, user_id=user_id)
+        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
         actor = channel_backend.BackendActor(
             tenant_id=tenant_id,
             account_id=principal.account_id,
@@ -1360,6 +1360,7 @@ async def _dispatch_panel_action(
             client,
             operation="skill_add",
             tenant_id=tenant_id,
+            team_id=team_id,
             agent_name=agent_name,
             channel_id=meta.channel_id,
             user_id=user_id,

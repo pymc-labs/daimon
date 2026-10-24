@@ -7,12 +7,12 @@ from daimon.core.turn.driver import run_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.ma import list_response, send_events_response, session_response
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
+from mux.testing.drivers.anthropic.ma import list_response, send_events_response, session_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 from .conftest import make_agent_message, make_requires_action, make_status_idle
 

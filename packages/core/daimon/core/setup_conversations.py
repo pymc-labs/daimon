@@ -22,8 +22,12 @@ from mux.errors import ScopeViolation
 # here so the Discord panel, the Slack panel and the MCP outcome cannot drift:
 # an agent named on one platform and the same agent named on the other must
 # read identically.
-SETUP_ACTION_LABEL: Final = "⚙️ Manage agents"
-EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Use Manage agents to add one."
+#
+# "Set up", not "Manage": the button opens a chat that anyone may use, and a
+# member can only add a key, make their own agent or ask an admin for the rest,
+# so "Manage" read as an admin action to the people it was never for.
+SETUP_ACTION_LABEL: Final = "⚙️ Set up agents"
+EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Use Set up agents to add one."
 
 # Discord rejects a thread name longer than 100 characters outright, so the
 # name is truncated rather than left to fail at thread creation.
@@ -35,13 +39,13 @@ def setup_thread_name(target_name: str | None) -> str:
 
     ``target_name`` is None before the person has chosen what to manage.
     """
-    name = f"Managing {target_name}" if target_name else "Managing agents"
+    name = f"Setting up {target_name}" if target_name else "Setting up agents"
     return name[:_MAX_SETUP_THREAD_NAME_CHARS]
 
 
 def setup_target_label(agent_name: str | None) -> str:
     """Name the roster action's target within both platforms' button width."""
-    label = f"⚙️ Manage {agent_name}" if agent_name else SETUP_ACTION_LABEL
+    label = f"⚙️ Set up {agent_name}" if agent_name else SETUP_ACTION_LABEL
     return label if len(label) <= 30 else f"{label[:29]}…"
 
 
@@ -74,14 +78,12 @@ async def get_setup_agent(
         raise
     except ScopeViolation:
         raise BoundAgentUnavailable(
-            "That agent is no longer available in this workspace. Choose another agent."
+            "That agent is no longer available here. Choose another agent."
         ) from None
     if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
         tenant_id
     ):
-        raise BoundAgentUnavailable(
-            "That agent is no longer available in this workspace. Choose another agent."
-        )
+        raise BoundAgentUnavailable("That agent is no longer available here. Choose another agent.")
     return agent
 
 
@@ -92,7 +94,7 @@ async def get_setup_responder(
         responder = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
     except DaimonError as error:
         raise UserFacingError(
-            "This setup conversation's Daimon responder is missing. "
+            "This setup conversation's Daimon agent is missing. "
             "Ask the operator to restore it, then open a new setup conversation."
         ) from error
     if (
@@ -100,7 +102,7 @@ async def get_setup_responder(
         or responder.metadata.get(MA_METADATA_KEY_NAME) != "daimon"
     ):
         raise UserFacingError(
-            "This conversation's responder is no longer the built-in Daimon. "
+            "This conversation's agent is no longer the built-in Daimon. "
             "Open a new setup conversation."
         )
     return responder
@@ -135,6 +137,7 @@ def build_setup_opener(
     bot_mention: str | None,
     is_admin: bool,
     admin_noun: str,
+    conversation_noun: str = "thread",
 ) -> str:
     """Open the thread by saying what it is about and what this person can do.
 
@@ -143,18 +146,22 @@ def build_setup_opener(
     since "a workspace admin" and "someone with Manage Server" are the same
     person on different platforms. ``bot_mention`` is None where every
     message reaches the bot, as in a 1:1 chat, so there is nothing to explain.
+    ``conversation_noun`` names what the setup conversation is on this platform:
+    a thread on Discord and Slack, the chat itself on Teams, which has no threads
+    in a 1:1 chat.
     """
     subject = (
-        f"This thread is about {target_display}. Tell me what to change, or name another agent."
+        f"This {conversation_noun} is about {target_display}. "
+        "Tell me what to change, or name another agent."
         if target_display is not None
         else "Which agent is this about? You can also ask me to make a new one."
     )
     role = (
         "You can change any agent and choose who answers in each channel. "
-        "Daimon itself can't be edited; ask me to fork it and change the fork."
+        "Daimon itself can't be edited; ask me to make a copy and change the copy."
         if is_admin
         else (
-            "You can make your own agents and add keys or tools to any of them. "
+            "You can make your own agents and add a key to any agent. "
             "Changes to an agent other people use, or to who answers in a channel, "
             f"need {admin_noun}. Ask anyway and I'll write the request for them."
         )

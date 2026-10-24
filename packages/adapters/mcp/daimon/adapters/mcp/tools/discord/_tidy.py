@@ -490,7 +490,7 @@ async def _archive_thread_impl(  # pyright: ignore[reportUnusedFunction]
                 now=datetime.now(UTC),
             )
         if not recorded:
-            raise ToolError("this turn has ended, so the thread was not archived. Do not retry.")
+            raise ToolError("this reply has ended, so the thread was not archived. Do not retry.")
     return result
 
 

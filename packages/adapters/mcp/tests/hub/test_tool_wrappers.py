@@ -16,10 +16,11 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.testing import AGENT_ID, build_turn_router, ma_session
+from daimon.testing import AGENT_ID, build_turn_router
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
-from daimon.testing.ma import build_fake_anthropic, list_response, session_response
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response, session_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_turn_parity import _call_tool, _runtime
@@ -323,7 +324,7 @@ async def test_handle_started_by_another_account_is_indistinguishable_from_unkno
     assert isinstance(payload, dict) and payload.get("isError"), (
         f"{tool} must reject a handle another account started, got {payload!r}"
     )
-    assert "session not found" in str(payload.get("content")), f"got {payload!r}"
+    assert "conversation not found" in str(payload.get("content")), f"got {payload!r}"
 
 
 @pytest.mark.parametrize("tool", ["ask", "start_turn", "continue_turn"])

@@ -26,7 +26,7 @@ from daimon.adapters.slack.output_delivery import (
     deliver_session_outputs,
 )
 from daimon.core.output_delivery import DeliverableFile, NoticedFiles
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from slack_sdk.web.async_client import AsyncWebClient
 from yarl import URL
 

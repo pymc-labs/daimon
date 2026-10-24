@@ -24,11 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 # Owner audit: common admission/preparation exceptions, driver finalizers and
 # run_prepared_turn's deadline boundary remain reachable. These exclusions
 # require legacy records/legacy binding/replacement branches that OpenAI cannot
-# enter, or have no production raiser. Native history replay does not replace a
-# host session and does not set RunOutcome.recovered. See the source inventory.
+# enter, an Anthropic refusal idle (`refused`), or have no production raiser.
+# Native history replay does not replace a host session and does not set
+# RunOutcome.recovered. See the source inventory.
 UNREACHABLE_REASONS = frozenset(
     {
         TerminationReason.REDUCER_BUG,
+        TerminationReason.REFUSED,
         TerminationReason.MCP_DEGRADED_EMPTY,
         TerminationReason.RETRYING_UNSETTLED,
         TerminationReason.RECOVERY_CANCELLED,

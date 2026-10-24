@@ -2,7 +2,7 @@
 permissions and channel skills of one channel the caller picks.
 
 The panel lives in the 1:1 chat, so the caller names the channel. The rights
-mirror Discord and Slack: server admins set environments, permissions, and
+mirror Discord and Slack: admins set environments, permissions, and
 channel skills. Permissions go through core `set_channel_rule`; skills use
 `add_skill_to_channel`. Every submit re-verifies the clicker, and writes are audited with
 `record_panel_write`.
@@ -24,10 +24,12 @@ from daimon.adapters.teams.card_actions import (
     card_actor,
     dialog,
     dialog_message,
+    dialog_notice,
     get_or_create_account,
     guarded,
     submitted_fields,
 )
+from daimon.adapters.teams.deployment_admins import with_admin_team
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.answering_map import load_answering_map
@@ -60,6 +62,7 @@ from daimon.core.errors import DaimonError, SkillsListTruncatedError
 from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.permissions import channel_rule, own_reader_channels
+from daimon.core.platform_words import words_for
 from daimon.core.routine_delivery import teams_channel_of
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
@@ -76,8 +79,9 @@ log = structlog.get_logger(__name__)
 ChannelNames = Callable[[str], Awaitable[Mapping[str, str | None]]]
 """One team's standard channels by id, with their names; empty when unreadable."""
 
-SERVER_ADMIN_ONLY: Final = (
-    "Only a server admin can change a channel's permissions or skills. Nothing changed."
+_ADMIN: Final = words_for("teams").admin
+ADMIN_ONLY: Final = (
+    f"Nothing changed. Only {_ADMIN} can change this channel's permissions or skills."
 )
 SKILLS_UNREADABLE: Final = "Couldn't read all the skills.\n\nNo skill was added."
 UNKNOWN_CHANNEL: Final = "That isn't a Teams channel id. Nothing changed."
@@ -91,7 +95,10 @@ _MAX_OPTION_VALUE: Final = 250
 
 
 def channels_need_admin_message() -> str:
-    return "Only a server admin can change this."
+    return f"Only {_ADMIN} can change this."
+
+
+TITLE = "Channel settings"
 
 
 async def _guarded[T](work: Awaitable[T], failed: T) -> T:
@@ -120,12 +127,16 @@ class ChannelSettingsDialog:
     async def on_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._open(ctx.activity), dialog_message(FAILED))
+        return await _guarded(self._open(ctx.activity), dialog_notice(TITLE, FAILED))
 
     async def on_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
         return await _guarded(self._submit(ctx.activity), dialog_message(FAILED))
+
+    async def _need_admin(self) -> str:
+        """The refusal for a caller who is not an admin, with who the admins are."""
+        return await with_admin_team(self._runtime, channels_need_admin_message())
 
     async def _subject(self, actor: Actor) -> Subject:
         async with self._runtime.sessionmaker() as session:
@@ -152,15 +163,15 @@ class ChannelSettingsDialog:
             policy = await load_access_policy(session, tenant_id=actor.tenant_id)
         channels = cards.visible_channels(listed, own_reader_channels(policy))
         form = cards.channel_picker_form(channels, free_entry=actor.is_admin, notice=notice)
-        return dialog("Channel settings", form)
+        return dialog(TITLE, form)
 
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None:
-            return dialog_message(DENIED)
+            return dialog_notice(TITLE, DENIED)
         subject = await self._subject(actor)
         if not actor.is_admin:
-            return dialog_message(channels_need_admin_message())
+            return dialog_notice(TITLE, await self._need_admin())
         return await self._picker(actor, subject)
 
     async def _settings(
@@ -215,7 +226,7 @@ class ChannelSettingsDialog:
             rule=channel_rule_status(policy, channel_id) if actor.is_admin else None,
             skills=tuple(skills) if actor.is_admin else None,
         )
-        return dialog("Channel settings", cards.channel_settings_form(settings, notice=notice))
+        return dialog(TITLE, cards.channel_settings_form(settings, notice=notice))
 
     async def _audit(
         self, actor: Actor, op: PanelOp, *, outcome: PanelOutcome, reason: str
@@ -248,12 +259,12 @@ class ChannelSettingsDialog:
         if not actor.is_admin:
             if audit_op is not None:
                 await self._audit(actor, audit_op, outcome="denied", reason="needs_admin")
-            return dialog_message(channels_need_admin_message())
+            return dialog_message(await self._need_admin())
         if audit_op is None:
             return await self._settings(actor, subject, channel_id)
         if audit_op != "environment" and not actor.is_admin:
             await self._audit(actor, audit_op, outcome="denied", reason="needs_admin")
-            return dialog_message(SERVER_ADMIN_ONLY)
+            return dialog_message(await with_admin_team(self._runtime, ADMIN_ONLY))
         if audit_op == "environment":
             notice = await self._save_environment(actor, subject, channel_id, data)
         elif audit_op == "channel_rule":
@@ -291,8 +302,10 @@ class ChannelSettingsDialog:
                 actor, "environment", outcome="denied", reason=f"authz:{pick.decision.reason}"
             )
             if pick.decision.reason == "not_a_reader":
-                return build_limited_network_refusal(environment_name=name)
-            return channels_need_admin_message()
+                return build_limited_network_refusal(
+                    environment_name=name, admin=words_for("teams").admin
+                )
+            return await self._need_admin()
         if name is not None and pick.missing:
             return build_missing_environment_note(name)
         if pick.needs_confirm:
@@ -327,7 +340,7 @@ class ChannelSettingsDialog:
         channel_id: str,
         data: Mapping[str, object],
     ) -> str:
-        """A server admin's permissions change, as Slack's and Discord's controls make it."""
+        """A admin's permissions change, as Slack's and Discord's controls make it."""
         readers, writers = as_readers(data.get("readers")), as_writers(data.get("writers"))
         extra = data.get("extra") or "none"
         if readers is None or writers is None or extra not in cards.RULE_EXTRAS:
@@ -350,7 +363,7 @@ class ChannelSettingsDialog:
                 channel_id=channel_id,
                 readers=None if readers == current.readers else readers,
                 writers=None if writers == current.writers else writers,
-                # Only a server admin reaches this, re-checked by the caller.
+                # Only an admin reaches this, re-checked by the caller.
                 subject=build_subject(is_admin=True, platform_user_id=actor.user_id),
                 default=self._runtime.deployment_default,
                 actor_account_id=await get_or_create_account(self._runtime, actor),
@@ -374,7 +387,7 @@ class ChannelSettingsDialog:
         channel_id: str,
         data: Mapping[str, object],
     ) -> str:
-        """A server admin's channel skills, as Slack's form saves them: removals, then an add."""
+        """A admin's channel skills, as Slack's form saves them: removals, then an add."""
         picked = str(data.get("skill_remove") or "")
         remove = [skill_id for skill_id in picked.split(",") if skill_id]
         add = str(data.get("skill_add") or "").strip()

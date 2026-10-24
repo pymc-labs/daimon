@@ -14,10 +14,10 @@ from daimon.core.output_ports_compat import (
     list_output_records,
     read_output_record,
 )
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import ResourceRef
 from mux.drivers.anthropic.outputs import Outputs
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)

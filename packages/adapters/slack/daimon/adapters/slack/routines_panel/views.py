@@ -28,6 +28,10 @@ __all__ = [
 
 _MAX_OUTPUT_CHARS = 1000
 _EMPTY_HINT = 'No routines yet.\n\nAsk your agent: "Schedule a daily summary at 9am."'
+_CREATE_HINT = (
+    'Easiest: ask me in a channel, like "every weekday at 9am, post the sales numbers".\n\n'
+    "Or fill in the form."
+)
 
 
 def build_loading_view(*, channel_id: str = "") -> dict[str, Any]:
@@ -215,6 +219,11 @@ def build_create_routine_modal(
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
             {
+                "type": "section",
+                "block_id": "routines_create__hint",
+                "text": {"type": "mrkdwn", "text": _CREATE_HINT},
+            },
+            {
                 "type": "input",
                 "block_id": "routines_create__agent",
                 "label": {"type": "plain_text", "text": "Agent"},
@@ -223,16 +232,19 @@ def build_create_routine_modal(
             {
                 "type": "input",
                 "block_id": "routines_create__cron",
-                "label": {"type": "plain_text", "text": "Schedule"},
+                "label": {
+                    "type": "plain_text",
+                    "text": "Schedule (advanced: cron, like 0 9 * * 1-5)",
+                },
                 "hint": {
                     "type": "plain_text",
-                    "text": "Five fields: minute, hour, day of month, month, day of week. "
-                    "0 9 * * * means every day at 09:00.",
+                    "text": "Minute, hour, day of month, month, day of week. "
+                    "0 9 * * 1-5 is weekdays at 09:00.",
                 },
                 "element": {
                     "type": "plain_text_input",
                     "action_id": "routines_create__cron",
-                    "placeholder": {"type": "plain_text", "text": "0 18 * * *"},
+                    "placeholder": {"type": "plain_text", "text": "0 9 * * 1-5"},
                 },
             },
             {

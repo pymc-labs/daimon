@@ -29,8 +29,9 @@ from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.core.turn.errors import SessionBusyError
-from daimon.testing import build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TARGET_AGENT_ID = "agent_continuation_target"

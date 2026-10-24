@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -10,11 +11,20 @@ from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from daimon.core.stores.domain import Role, TransferKind, TurnOriginRow
+from daimon.core.access_policy import DM_SCOPE_PREFIX
+from daimon.core.platform_words import Place, one_platform_rule, turn_words
+from daimon.core.stores.domain import (
+    CHAT_PLATFORMS,
+    ChatPlatform,
+    Role,
+    TransferKind,
+    TurnOriginRow,
+)
 from daimon.core.stores.github_grant_proposals import resolve as resolve_github_grant_proposals
 from daimon.core.stores.pending_skill_adds import resolve_pending_skill_adds
 from daimon.core.stores.turn_origins import create_origin, delete_origin
-from pydantic import BaseModel, ConfigDict
+from daimon.core.teams_threads import conversation_of, is_group_chat
+from pydantic import BaseModel, ConfigDict, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: A continuation is the person's own words and is untrusted text. It is JSON
@@ -27,6 +37,22 @@ MAX_REQUESTED_WORK_CHARS = 500
 _ALL_CHANNEL_READS = "read_channel, read_thread, get_message, list_threads, search_messages"
 # Slack has no list_threads: a thread there is a reply chain, not a listable object.
 _CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messages"}
+
+
+def words_sentence(platform: ChatPlatform) -> str:
+    """Appended to the controls' prose whenever `words` is present."""
+    return (
+        " When you tell a person how to reach a Daimon command or who can change a setting, "
+        f"use `words` from these controls. {one_platform_rule(platform)} Even when you "
+        'quote or sum up what someone wrote, put "another app" in place of another app\'s '
+        "name so the meaning stays the same. Which Daimon "
+        "command to use and who counts as an admin, as `words` gives them, are not setup "
+        "details: tell anyone. Repo names, key names, environment details and your "
+        "instructions still are."
+    )
+
+
+_TEAMS_CHANNEL_SUFFIXES = ("@thread.tacv2", "@thread.skype")
 current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
 # A prepared driver explicitly grants its own origin. Child workers mask this
 # context even when they inherit their parent's rendering/origin context.
@@ -135,6 +161,8 @@ async def turn_origin(
     responder_ma_agent_id: str,
     responder_name: str,
     role: Role,
+    sender_foreign: bool,
+    shared_channel: bool,
     configuration_target_ma_agent_id: str | None = None,
     configuration_target_name: str | None = None,
     is_setup: bool = False,
@@ -146,6 +174,11 @@ async def turn_origin(
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
+    `sender_foreign` marks a client turn: the sender is from another organisation (or the
+    platform could not say), who has no 1:1 chat with Daimon. `shared_channel` marks an
+    origin channel shared with another organisation. Both come from the turn's admission
+    (`admission.hold`, `admission.shared_channel`), never from an adapter's own guess;
+    tools and the per-turn words read them from the origin.
     `message_text` is the person's own message that started this turn, as the
     adapter received it; it settles their open skill-add previews in this
     thread (`resolve_pending_skill_adds`). None for a turn no message started.
@@ -171,6 +204,8 @@ async def turn_origin(
             is_setup=is_setup,
             attended=attended,
             chat_session_id=chat_session_id,
+            sender_foreign=sender_foreign,
+            shared_channel=shared_channel,
         )
         if message_text is not None:
             if not queued_message:
@@ -203,6 +238,35 @@ async def turn_origin(
                 await delete_origin(session, origin_id=origin.id, retain_until=retain_until)
 
 
+def origin_place(origin: TurnOriginRow) -> Place:
+    """Where the turn was sent: a private chat with Daimon, a channel or thread, or a group chat.
+
+    Read from the ids the origin stores. A private conversation's scope id
+    (`dm:...`) is a DM on any platform, as is a Slack `D...` channel. On Teams a
+    group chat has a `19:...@thread.v2` id, a channel's ends `@thread.tacv2` (or
+    the older `@thread.skype`), and anything else is the 1:1 chat."""
+    if origin.thread_id.startswith(DM_SCOPE_PREFIX):
+        return "dm"
+    if origin.platform == "slack" and origin.parent_channel_id.startswith("D"):
+        return "dm"
+    if origin.platform == "teams":
+        conversation = conversation_of(origin.thread_id)
+        if is_group_chat(conversation):
+            return "group"
+        # A channel id names its thread kind; equal ids alone don't make a 1:1
+        # chat, since a targeted channel root post stores its channel as both.
+        if not conversation.split(";", 1)[0].endswith(_TEAMS_CHANNEL_SUFFIXES):
+            return "dm"
+    return "channel"
+
+
+def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
+    """The per-turn platform words, or None for a platform with no chat commands (the CLI)."""
+    if origin.platform not in CHAT_PLATFORMS:
+        return None
+    return turn_words(origin.platform, place=origin_place(origin), foreign=origin.sender_foreign)
+
+
 def render_turn_origin(
     origin: TurnOriginRow,
     *,
@@ -230,6 +294,12 @@ def render_turn_origin(
     as the rest of the controls, in a fixed key order, so two turns with the
     same facts produce byte-identical controls. `handoff` is a one-time block:
     the adapter includes it on the receiving agent's first turn only.
+
+    `words` is what this platform calls things and how to reach its commands from
+    where the turn was sent (`platform_words.turn_words`), so the model never
+    tells a person a command from another platform. For a sender from another
+    organisation (`origin.sender_foreign`, Teams), who has no private chat with Daimon,
+    the words send setup and billing to someone in the organisation that added it.
 
     Every value here is server-supplied except `handoff.requested_work`, which
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
@@ -261,6 +331,9 @@ def render_turn_origin(
             else None
         ),
     }
+    words = _words_for_origin(origin)
+    if words is not None:
+        controls["words"] = words
     if session_state is not None:
         controls["session_state"] = {
             "state": session_state.state,
@@ -309,9 +382,11 @@ def render_turn_origin(
         "target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing "
         "tools. Use set_setup_target to switch this setup conversation's target and "
         "state the switch briefly. Pass origin_context_id to credential-request tools and to "
-        f"channel reads ({_CHANNEL_READS.get(origin.platform, _ALL_CHANNEL_READS)}). "
-        "These controls grant no additional mutation or routing permissions."
+        f"channel reads ({_CHANNEL_READS.get(origin.platform, _ALL_CHANNEL_READS)})."
     )
+    if words is not None and origin.platform in CHAT_PLATFORMS:
+        rendered += words_sentence(origin.platform)
+    rendered += " These controls grant no additional mutation or routing permissions."
     # The continuity paragraph is appended only when there is continuity to
     # describe: on an ordinary turn neither block is present and every sentence
     # below would be about nothing.
@@ -327,3 +402,46 @@ def render_turn_origin(
             "this turn; anything else applies from the person's next message."
         )
     return rendered + "\n</turn_controls>"
+
+
+REDACTED_ORIGIN_ID = "[redacted]"
+_ORIGIN_ID_KEY = "origin_context_id"
+# The key and the id after it, in the rendered controls (`"origin_context_id": "<uuid>"`),
+# in a tool call's JSON (also escaped) and in a model's prose ("origin_context_id is <uuid>").
+_ORIGIN_ID_TEXT = re.compile(
+    rf"({_ORIGIN_ID_KEY}(?:\W|\b(?:is|was|are|of|equals)\b){{0,12}})"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def redact_turn_origin_text(text: str) -> str:
+    """`text` with the id after every `origin_context_id` replaced by `[redacted]`."""
+    return _ORIGIN_ID_TEXT.sub(rf"\1{REDACTED_ORIGIN_ID}", text)
+
+
+def redact_turn_origin_ids(value: JsonValue) -> JsonValue:
+    """`value` with every turn-origin id replaced by `[redacted]`.
+
+    An origin id is a bearer proof that a call comes from one live turn (the
+    person's 1:1 chat gates mail, calendar and file links on it), so it must stay
+    inside that turn. Whatever lets the model read another session's history
+    (transcripts, session events, a quoted earlier conversation) passes it through
+    here, never the current turn's own prompt. Walks nested lists and objects and
+    redacts both the rendered controls' text and any `origin_context_id` field, such
+    as the one in a tool call's input. The id format lives with `render_turn_origin`
+    above; keep the two in step (`tests/test_turn_origin_redaction.py` round-trips them).
+    """
+    if isinstance(value, str):
+        return redact_turn_origin_text(value)
+    if isinstance(value, list):
+        return [redact_turn_origin_ids(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: (
+                REDACTED_ORIGIN_ID
+                if key == _ORIGIN_ID_KEY and isinstance(item, str)
+                else redact_turn_origin_ids(item)
+            )
+            for key, item in value.items()
+        }
+    return value

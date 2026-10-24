@@ -25,8 +25,8 @@ from daimon.core.channel_environments import (
 )
 from daimon.core.roster import paginate
 from daimon.core.scope import DeploymentDefault
-from daimon.testing import ma_environment
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TEAM = "T0ENVS"
@@ -82,7 +82,7 @@ def test_the_block_lists_channels_then_the_defaults_and_the_select_marks_the_pic
 
     assert f"<#{CHANNEL}> → *gpu*" in text, "a channel line reads channel → environment"
     assert text.index("*Workspace default:* shared") < text.index(
-        "Deployment default: *default*"
+        "Daimon-wide default: *default*"
     ), "the workspace default comes before the deployment fall-through"
     assert "_Not used while a workspace default is set._" in text, (
         "a workspace default takes the deployment default out of the cascade"
@@ -105,7 +105,7 @@ def test_with_nothing_set_the_block_names_only_the_deployment_default() -> None:
 
     assert "_no channel picks its own environment yet_" in text, "no channel rows"
     assert "*Workspace default:* Not assigned" in text, "no tenant row"
-    assert "Deployment default: *default*" in text and "not in effect" not in text, (
+    assert "Daimon-wide default: *default*" in text and "not in effect" not in text, (
         "with no rows at all, every channel runs where it did before"
     )
 
@@ -133,7 +133,7 @@ def test_the_listing_fits_one_section_with_long_names_full_of_markup() -> None:
     assert len(sections) == 1 and len(sections[0]) <= 3000, "within Slack's section cap"
     text = sections[0]
     assert "more_" in text, "the channel lines cut are counted"
-    assert "*Workspace default:* &amp;&lt;" in text and "Deployment default:" in text, (
+    assert "*Workspace default:* &amp;&lt;" in text and "Daimon-wide default:" in text, (
         "both defaults show, escaped"
     )
     assert not text.endswith("…"), "the section is budgeted, not truncated mid-entity"

@@ -110,6 +110,19 @@ def test_tool_words_stay_literal_in_title_and_details(value: str) -> None:
     assert details["items"][0]["inlines"][0]["text"] == f"File: {value}"
 
 
+def test_details_use_a_bounded_number_of_blocks_and_keep_every_line() -> None:
+    lines = tuple(f"line {n}" for n in range(500))
+    prompt = _prompt().model_copy(update={"detail_lines": lines})
+    card = confirmation_adaptive_card(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt
+    )
+    items = card.model_dump(by_alias=True, exclude_none=True)["body"][0]["items"]
+    details = next(item for item in items if item.get("id") == "approval-details")
+    texts = [block["inlines"][0]["text"] for block in details["items"]]
+    assert len(texts) <= confirmation_module.MAX_DETAIL_BLOCKS
+    assert "\n".join(texts).split("\n") == list(lines), "every line, in order"
+
+
 async def _post(
     cards: TeamsConfirmationCards, sender: FakeSender
 ) -> tuple[asyncio.Task[ConfirmationAnswer], str]:
@@ -690,7 +703,7 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
         update={
             "admin": True,
             "action": "Switch Research. " + losses,
-            "denied_action": "Model backend unchanged",
+            "denied_action": "Model provider unchanged",
             "consequence": losses,
             "detail_lines": ("Optional skill: " + "x" * 1000,),
         }
@@ -728,3 +741,64 @@ async def test_private_notice_uses_sdk_endpoint_for_conversation_type(
     request = wire.activity_requests[0]
     assert ("isTargetedActivity=true" in request.url) is (conversation_type != "personal")
     assert request.body["text"] == "private refusal"
+
+
+async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from daimon.core import confirmation
+    from mux.contracts.ids import ChannelRef
+
+    runtime = MagicMock(
+        team_owners=AsyncMock(return_value=frozenset()), group_members=GroupMembersCache()
+    )
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.teams.admin_team_id = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    tenant, account = uuid.uuid4(), uuid.uuid4()
+
+    def hook(admission):
+        TeamsConfirmationCards(FakeSender()).hook(
+            conversation_id=CONVERSATION_ID,
+            service_url=SERVICE_URL,
+            runtime=runtime,
+            admission=admission,
+            tenant_id=tenant,
+            account_id=account,
+        )
+        return factory.call_args.kwargs["pin_channel"]
+
+    assert hook(SimpleNamespace(origin_channel_id="19:origin@thread.tacv2")) == ChannelRef(
+        tenant_id=str(tenant), platform="teams", channel_id="19:origin@thread.tacv2"
+    )
+    assert hook(None) is None, "no admitted channel, no pin card"
+
+
+async def test_a_card_still_open_reminds_with_an_at_mention_of_its_requester(monkeypatch) -> None:
+    """ROOT 2: a long card pings its requester once, as an @mention Teams delivers."""
+    from daimon.core.posted_controls import lifecycle
+
+    monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.02)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    hook = cards.hook(conversation_id=CONVERSATION_ID, service_url=SERVICE_URL)
+    assert await hook(_prompt(expires_in=timedelta(seconds=0.3))) == "expired"
+    reminders = [
+        activity
+        for _conversation, activity, _url in sender.sent
+        if "still waiting" in (activity.text or "")
+    ]
+    (reminder,) = reminders
+    assert reminder.text is not None and reminder.text.endswith(
+        "This is still waiting for your click."
+    )
+    mentions = [
+        entity for entity in reminder.entities or [] if getattr(entity, "type", None) == "mention"
+    ]
+    (mention,) = mentions
+    assert mention.mentioned.id == AAD_OBJECT_ID
+    assert mention.text in reminder.text

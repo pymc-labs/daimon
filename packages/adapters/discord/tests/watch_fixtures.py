@@ -17,10 +17,11 @@ from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import tenant_ledger, watches
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import create_thread_session
-from daimon.testing import ma_environment, ma_session
+from daimon.testing import ma_environment
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
 from daimon.testing.watch_fixtures import install_poll_ports
+from mux.testing.drivers.anthropic.ma import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker
 

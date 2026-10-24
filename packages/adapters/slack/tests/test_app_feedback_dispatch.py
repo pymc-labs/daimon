@@ -275,5 +275,7 @@ async def test_external_support_submission_closes_and_spawns_nothing() -> None:
         )
         await _drain(app)
 
-    assert fake_client.sent_responses[0].payload is None
+    payload = fake_client.sent_responses[0].payload or {}
+    assert payload["response_action"] == "update", "the form is replaced by the refusal"
+    assert "only for people at" in payload["view"]["blocks"][0]["text"]["text"]
     assert ran == [], "an external Slack Connect member's note must go nowhere"

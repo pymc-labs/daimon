@@ -5,6 +5,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from daimon.adapters.teams.installations import (
+    chat_link,
+    welcome_message,
+    welcome_text,
+)
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.teams_installations import get_teams_installation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -65,10 +70,70 @@ async def test_an_install_records_the_team_and_welcomes_it_and_a_removal_forgets
         assert row is not None and row.group_id == TEAM_GROUP_ID and row.name == "Research"
         [welcome] = teams_api_fake.activity_requests
         assert f"/v3/conversations/{TEAM}/activities" in welcome.url
-        assert "@mention me" in str(welcome.body["text"])
+        [card] = [a["content"] for a in welcome.body["attachments"]]
+        assert "@mention me in a post or a reply to ask something." in str(card["body"])
+        assert card["actions"] == [
+            {
+                "type": "Action.OpenUrl",
+                "title": "Open chat",
+                "url": f"https://teams.microsoft.com/l/chat/0/0?users={BOT_ACCOUNT_ID}",
+            }
+        ], "one click opens the 1:1 chat the welcome names"
 
         await post_activity(service, _installation("remove"))
         assert await _row(db_session_factory) is None
+
+
+async def test_a_personal_install_welcomes_the_chat_in_plain_text(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    chat = "a:1personal-chat"
+    install = _installation("add")
+    install["conversation"] = {
+        "id": chat,
+        "conversationType": "personal",
+        "tenantId": ENTRA_TENANT_ID,
+    }
+    install["channelData"] = {"tenant": {"id": ENTRA_TENANT_ID}}
+    async with running_service(build_teams_runtime(db_session_factory), teams_api_fake) as service:
+        await post_activity(service, install)
+    [welcome] = teams_api_fake.activity_requests
+    assert welcome.body["text"] == welcome_text("daimon", team=False)
+    assert "attachments" not in welcome.body, "a 1:1 chat is already open; no Open chat button"
+
+
+def test_the_welcomes_say_what_to_do_in_the_place_they_are_sent() -> None:
+    assert welcome_text("Daimon", team=False) == (
+        "👋 I'm Daimon. I help with questions and data.\n\n"
+        "Ask a question or send me a data file.\n\n"
+        'To set things up, say "help me set up". '
+        "Send `help` for the rest."
+    )
+    assert welcome_text("Daimon", team=True) == (
+        "👋 I'm Daimon. I answer in the thread where you mention me.\n\n"
+        "@mention me in a post or a reply to ask something.\n\n"
+        'For setup, open a chat with me and say "help me set up".'
+    )
+
+
+@pytest.mark.parametrize(
+    ("bot_id", "link"),
+    [
+        ("28:abc-123", "https://teams.microsoft.com/l/chat/0/0?users=28:abc-123"),
+        ("29:a-person", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_the_chat_link_is_built_only_from_a_bot_account_id(
+    bot_id: str | None, link: str | None
+) -> None:
+    assert chat_link(bot_id) == link
+
+
+def test_a_team_welcome_without_a_bot_id_is_plain_text() -> None:
+    message = welcome_message("Daimon", team=True, bot_id=None)
+    assert message.text == welcome_text("Daimon", team=True) and not message.attachments
 
 
 async def test_a_group_chat_install_posts_no_welcome(

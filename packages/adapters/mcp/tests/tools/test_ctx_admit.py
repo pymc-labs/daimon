@@ -128,7 +128,7 @@ async def test_admit_refuses_when_the_policy_is_unreadable(
         {"t": auth.tenant_id},
     )
     await db_session.commit()
-    with _BALANCE_OK, pytest.raises(ToolError, match="TERMINAL ERROR: this workspace's access"):
+    with _BALANCE_OK, pytest.raises(ToolError, match="TERMINAL ERROR: the access settings here"):
         await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
 
 

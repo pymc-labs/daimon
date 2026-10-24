@@ -14,7 +14,9 @@ Deliberately NOT tagged ``admin``: thread scope is a member action, and the
 tool would be invisible to the very callers who ask for it. Channel and
 workspace scope are admin-only, enforced inside the impl instead.
 
-Discord and Teams follow threads; Slack callers are refused before any read.
+Discord and Teams follow threads, so the tools are tagged for those two and Slack
+callers never see them; a call that still arrives from another platform is refused
+before any read.
 """
 
 from __future__ import annotations
@@ -32,8 +34,8 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools.discord import verify_participation_scope
 from daimon.adapters.mcp.tools.teams._participation import verify_teams_participation_scope
+from daimon.core.scope_cascade import resolve_above
 from daimon.core.stores.thread_participation import (
-    ParticipationModes,
     clear_participation_mode,
     get_participation_modes,
     set_participation_mode,
@@ -41,29 +43,26 @@ from daimon.core.stores.thread_participation import (
 from daimon.core.thread_participation import (
     ParticipationMode,
     ParticipationScope,
-    ResolvedParticipation,
     build_participation_explanation,
     build_participation_note,
     resolve_participation,
     scope_label,
+    tier_word,
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 _PLATFORMS: Final = frozenset({"discord", "teams"})
 
-_WRONG_PLATFORM = (
-    "Following threads is only available on Discord and Teams right now, so there is "
-    "nothing to turn on here."
-)
+_WRONG_PLATFORM = "Following threads isn't available here yet, so there is nothing to turn on."
 _DEPLOYMENT_DISABLED = (
-    "Participation is disabled for this deployment and cannot be turned on. "
+    "Following is turned off for all of Daimon and cannot be turned on. "
     "I only reply when @mentioned; the operator would have to change that."
 )
 _DISABLED_NEEDS_A_WIDER_SCOPE = (
     "'disabled' is not a thread-level setting — use mode='off' to stop "
-    "following this thread. 'disabled' locks a whole channel or workspace and "
-    "is an admin action at those scopes."
+    "following this thread. 'disabled' locks a whole channel or everything here and "
+    "is an admin action there."
 )
 
 
@@ -142,18 +141,6 @@ def _target_scope(
     return ParticipationScope.WORKSPACE, None
 
 
-def _resolve_above(
-    scope: ParticipationScope, deployment: ParticipationMode, modes: ParticipationModes
-) -> ResolvedParticipation:
-    """Resolve only the tiers wider than `scope` — what a write here has to live under."""
-    return resolve_participation(
-        deployment=deployment,
-        workspace=modes.workspace if scope is not ParticipationScope.WORKSPACE else None,
-        channel=modes.channel if scope is ParticipationScope.THREAD else None,
-        thread=None,
-    )
-
-
 def _scope_result_label(scope: ParticipationScope, scope_id: str | None) -> str:
     return "workspace" if scope is ParticipationScope.WORKSPACE else f"{scope.value}:{scope_id}"
 
@@ -193,12 +180,13 @@ async def _set_thread_participation_impl(
             channel_id=channel_id,
             thread_id=thread_id,
         )
-        above = _resolve_above(scope, deployment, before)
+        above = resolve_above(scope, deployment, before)
         if requested is ParticipationMode.ON and above.mode is ParticipationMode.DISABLED:
+            tier = tier_word(above.tier, auth.platform)
             raise ToolError(
-                f"Participation is disabled at the {above.tier} level, so "
-                f"{scope_label(scope, scope_id)} cannot be turned on. An admin would "
-                f"have to change the {above.tier} setting first."
+                f"Participation is disabled at the {tier} level, so "
+                f"{scope_label(scope, scope_id, auth.platform)} cannot be turned on. "
+                f"An admin would have to change the {tier} setting first."
             )
 
         if requested is None:
@@ -239,7 +227,11 @@ async def _set_thread_participation_impl(
         effective_mode=effective.mode.value,
         effective_tier=effective.tier,
         note=build_participation_note(
-            scope=scope, scope_id=scope_id, requested=requested, effective=effective
+            scope=scope,
+            scope_id=scope_id,
+            requested=requested,
+            effective=effective,
+            platform=auth.platform,
         ),
     )
 
@@ -282,12 +274,14 @@ async def _get_thread_participation_impl(
         thread_mode=modes.thread.value if modes.thread is not None else None,
         effective_mode=effective.mode.value,
         effective_tier=effective.tier,
-        explanation=build_participation_explanation(effective, thread_id=thread_id),
+        explanation=build_participation_explanation(
+            effective, thread_id=thread_id, platform=auth.platform
+        ),
     )
 
 
 def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool
+    @mcp.tool(tags={"discord", "teams"})  # pyright: ignore[reportArgumentType]
     async def set_thread_participation(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         mode: Literal["on", "off", "disabled", "inherit"],
@@ -300,7 +294,7 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
         channel; neither for the workspace. Channel and workspace scope need an
-        admin (Manage Server on Discord, an admin team owner on Teams).
+        admin.
 
         Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
         workspace so nothing below can turn it on (not valid for a thread),
@@ -311,7 +305,7 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
             runtime, await _auth(ctx), mode, thread_id, channel_id
         )
 
-    @mcp.tool
+    @mcp.tool(tags={"discord", "teams"})  # pyright: ignore[reportArgumentType]
     async def get_thread_participation(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         thread_id: str | None = None,

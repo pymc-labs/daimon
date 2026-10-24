@@ -7,10 +7,19 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
+from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
+from daimon.adapters.discord.commands.billing import BillingCog
+from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+from daimon.adapters.discord.commands.github import GitHubCog
 from daimon.adapters.discord.commands.help import (
     HelpCog,
     build_help_view,
 )
+from daimon.adapters.discord.commands.here import HereCog
+from daimon.adapters.discord.commands.memory import MemoryCog
+from daimon.adapters.discord.commands.privacy import PrivacyCog
+from daimon.adapters.discord.commands.routines import RoutinesCog
+from daimon.core.platform_words import DESCRIPTIONS, WORDS
 
 
 def _collect_text_display_content(view: discord.ui.LayoutView) -> list[str]:
@@ -137,6 +146,41 @@ class TestBuildHelpView:
         assert length <= 4000, (
             f"aggregate TextDisplay content must stay within 4000-char budget, got {length}"
         )
+
+
+class TestSharedDescriptions:
+    """Registration and /help say what the shared table says."""
+
+    def test_every_command_description_equals_the_table(self) -> None:
+        cogs = [
+            AgentSetupCog,
+            BillingCog,
+            DirectMessageCog,
+            GitHubCog,
+            HelpCog,
+            HereCog,
+            MemoryCog,
+            PrivacyCog,
+            RoutinesCog,
+        ]
+        registered = {
+            f"/{command.qualified_name}": command.description
+            for cog in cogs
+            for command in cog(MagicMock()).walk_app_commands()
+        }
+        for action, command in WORDS["discord"].commands.items():
+            assert registered[command.word] == DESCRIPTIONS[action], command.word
+            assert len(DESCRIPTIONS[action]) <= 100, "Discord caps a description at 100"
+
+    def test_help_lines_carry_the_table_descriptions(self) -> None:
+        body = next(
+            text
+            for text in _collect_text_display_content(build_help_view())
+            if text.startswith("/here")
+        )
+        for action, command in WORDS["discord"].commands.items():
+            line = next(line for line in body.splitlines() if line.startswith(command.word + " "))
+            assert line.removeprefix(command.word).strip() == DESCRIPTIONS[action]
 
 
 class TestHelpCog:

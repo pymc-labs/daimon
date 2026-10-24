@@ -23,11 +23,20 @@ from daimon.adapters.mcp.tools._untrusted import UntrustedResult
 from daimon.adapters.mcp.tools.microsoft._access import GRAPH_ROOT
 from daimon.adapters.mcp.tools.microsoft._paths import check_write, parse_path
 from daimon.adapters.mcp.tools.microsoft._person import (
-    is_one_to_one,
+    NEEDS_ORIGIN,
+    origin_facts,
     require_one_to_one,
     require_person,
 )
-from daimon.core.confirmation import SEND_BODY_LIMIT
+from daimon.core.confirmation import (
+    SEND_BODY_LIMIT,
+    SEND_HEADER_BYTES,
+    WRITE_BODY_BYTES,
+    WRITE_BODY_LIMIT,
+    WRITE_PATH_LIMIT,
+    is_plain,
+    write_body_size,
+)
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -52,12 +61,22 @@ _HIT_KEYS = (
 _ERROR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,63}")
 _ADDRESS = re.compile(r"[^@\s,;<>]+@[^@\s,;<>]+")
 _MAX_RECIPIENTS = 50
+#: Longest email address (RFC 5321).
+_MAX_ADDRESS = 254
 _DOWNLOAD_KEYS = frozenset({"@microsoft.graph.downloadurl", "@content.downloadurl"})
 
 
 _NO_LINK = (
     "This file's download link is given only in the person's 1:1 chat with Daimon, since "
     "anyone holding it could open the file. Ask them there."
+)
+_NO_LINK_UNVERIFIED = (
+    "This file's download link is given only in the person's own chat, since anyone holding it "
+    "could open the file. " + NEEDS_ORIGIN
+)
+_NO_LINK_FOREIGN = (
+    "This file's download link works only for people in the organisation that added "
+    "Daimon, since anyone holding it could open the file."
 )
 
 
@@ -121,6 +140,11 @@ def _refusal_hint(response: httpx.Response) -> str:
             "The person's account, or what their organisation allowed this app, does not "
             "permit this. Do not retry."
         )
+    if status == 423:
+        return (
+            "The file is locked, most likely open in a desktop Office app, so nothing was "
+            "changed. Ask whoever has it open to close it, then try again."
+        )
     return ""
 
 
@@ -144,16 +168,24 @@ def _next_path(data: dict[str, JsonValue]) -> str | None:
     return None
 
 
-def _result(response: httpx.Response, *, links: bool) -> GraphResult:
+def _no_link(foreign: bool | None) -> str:
+    if foreign is None:
+        return _NO_LINK_UNVERIFIED
+    return _NO_LINK_FOREIGN if foreign else _NO_LINK
+
+
+def _result(response: httpx.Response, *, links: bool, foreign: bool | None = False) -> GraphResult:
     """A bounded result: JSON trimmed by dropping list items, text cut, never bytes.
 
-    `links` (the person's 1:1 chat only) returns a /content redirect's link.
+    `links` (the person's 1:1 chat only) returns a /content redirect's link. `foreign` is
+    whether the sender is from another organisation, None when no turn origin verified and
+    the sender is not known to be a guest.
     """
     status = response.status_code
     if response.is_redirect:
         if links:
             return GraphResult(status=status, download_url=response.headers.get("location"))
-        return GraphResult(status=status, text=_NO_LINK)
+        return GraphResult(status=status, text=_no_link(foreign))
     if not response.content:
         return GraphResult(status=status)
     kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
@@ -179,11 +211,17 @@ def _result(response: httpx.Response, *, links: bool) -> GraphResult:
     if kind.startswith("text/") or kind in ("application/xhtml+xml", "application/xml"):
         text = response.text
         return GraphResult(status=status, text=text[:_MAX_CHARS], truncated=len(text) > _MAX_CHARS)
-    return GraphResult(
-        status=status,
-        text="Binary content is not returned. GET .../content for a download link"
-        + ("." if links else " in the person's 1:1 chat with Daimon."),
+    where = (
+        "."
+        if links
+        else " in the person's 1:1 chat with Daimon."
+        if foreign is False
+        else " for people in the organisation that added Daimon."
+        if foreign
+        else " once the origin_context_id from the current chat is passed."
     )
+    text = "Binary content is not returned. GET .../content for a download link"
+    return GraphResult(status=status, text=text + where)
 
 
 def _hit_path(kind: SearchKind, resource: dict[str, JsonValue]) -> str | None:
@@ -267,7 +305,8 @@ async def microsoft_get_impl(
     )
     if response.is_error:
         raise _refused(response)
-    return _result(response, links=await is_one_to_one(runtime, auth, origin_context_id))
+    one_to_one, foreign = await origin_facts(runtime, auth, origin_context_id)
+    return _result(response, links=one_to_one, foreign=foreign)
 
 
 async def microsoft_write_impl(
@@ -286,11 +325,24 @@ async def microsoft_write_impl(
         await require_one_to_one(runtime, auth, origin_context_id, what="OneNote")
     if (kind == "upload") != (file_handle is not None):
         raise ToolError("A file upload (PUT .../content) takes file_handle; nothing else does.")
+    # The approval card shows the whole path and body, so nothing longer is written.
+    if len(target.decoded) > WRITE_PATH_LIMIT:
+        raise ToolError(
+            f"Nothing was written: the path is {len(target.decoded):,} characters and the "
+            f"limit is {WRITE_PATH_LIMIT:,}."
+        )
+    size, size_bytes = write_body_size(body)
+    if size > WRITE_BODY_LIMIT or size_bytes > WRITE_BODY_BYTES:
+        raise ToolError(
+            f"Nothing was written: the body is {size:,} characters ({size_bytes:,} bytes) and the "
+            f"limit is {WRITE_BODY_LIMIT:,} characters and {WRITE_BODY_BYTES:,} bytes (emoji and "
+            "most non-Latin text take 3 to 4 bytes each). Make the change in smaller calls."
+        )
     content: bytes | None = None
     headers: dict[str, str] = {}
     payload: JsonValue = None
     if kind == "upload":
-        assert file_handle is not None
+        assert file_handle is not None  # checked above
         if body is not None:
             raise ToolError("A file upload takes file_handle and no body.")
         ((upload, data),) = await staged_uploads(
@@ -323,22 +375,36 @@ async def microsoft_write_impl(
     return _result(response, links=False)
 
 
+def _check_send_header(fields: list[str]) -> None:
+    """Refuse a send whose approval card could not show every address and field whole."""
+    size = sum(len(field.strip().encode()) for field in fields)
+    if size > SEND_HEADER_BYTES:
+        raise ToolError(
+            f"Nothing was sent: the addresses, subject, location, start, end and time zone "
+            f"total {size:,} bytes and the limit is {SEND_HEADER_BYTES:,} (emoji and most "
+            "non-Latin text take 3 to 4 bytes a character). Shorten them or send to fewer people."
+        )
+
+
 def _recipients(addresses: list[str], field: str) -> list[dict[str, object]]:
     for address in addresses:
-        if not _ADDRESS.fullmatch(address.strip()):
+        # The approval card shows an address without invisible characters, so one
+        # that holds any is refused rather than sent as something else.
+        clean = address.strip()
+        if not _ADDRESS.fullmatch(clean) or not is_plain(clean) or len(clean) > _MAX_ADDRESS:
             raise ToolError(f"{field} has {address!r}, which is not one email address.")
     return [{"emailAddress": {"address": a.strip()}} for a in addresses]
 
 
 _GAP_TEXT = {
-    "no_origin": "this call is not from the person's own chat turn",
-    "no_live_session": "this chat has no live session for the person",
-    "other_agents_session": "this chat's session runs another agent",
+    "no_origin": "this call is not from the person's own chat",
+    "no_live_session": "this chat has no live conversation for the person",
+    "other_agents_session": "this chat's conversation runs another agent",
     "session_not_gated": (
-        "this chat's session started before sending was set up; their next message updates it"
+        "this chat's conversation started before sending was set up; their next message updates it"
     ),
-    "session_unreadable": "Daimon could not read this chat's session; try again in a moment",
-    "source_context_unavailable": "this chat's session could not be checked",
+    "session_unreadable": "Daimon could not read this chat's conversation; try again in a moment",
+    "source_context_unavailable": "this chat's conversation could not be checked",
 }
 
 
@@ -370,10 +436,11 @@ async def microsoft_send_impl(
     if gap is not None:
         raise ToolError(
             "Nothing was sent: sending needs the person's Approve on a card, and "
-            f"{_GAP_TEXT[gap]}. Do not retry this turn."
+            f"{_GAP_TEXT[gap]}. Do not retry in this reply."
         )
     if not to or len(to) + len(cc) > _MAX_RECIPIENTS:
         raise ToolError(f"Pass between 1 and {_MAX_RECIPIENTS} recipients.")
+    _check_send_header([*to, *cc, subject, location or "", start or "", end or "", time_zone])
     text = {"contentType": "Text", "content": body}
     if action == "send_mail":
         message: dict[str, object] = {

@@ -27,8 +27,8 @@ from daimon.core.stores.thread_sessions import mark_turn_active
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn_origin import build_handoff_notice
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
-from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

@@ -97,23 +97,45 @@ def test_reap_orphans_skips_dead_pids(tmp_path: Path) -> None:
     assert load_pids(path) == {}, "pids file must be cleared after sweep"
 
 
+def _process_state(child: subprocess.Popen[bytes]) -> str:
+    """What the reaper saw of ``child``, for a failure message: exit status and /proc argv."""
+    try:
+        cmdline = Path(f"/proc/{child.pid}/cmdline").read_bytes().split(b"\x00")
+    except OSError as err:
+        cmdline = [repr(err).encode()]
+    return f"returncode={child.poll()!r}, /proc cmdline={cmdline!r}"
+
+
+def _wait_for_argv(
+    child: subprocess.Popen[bytes], argv: list[str], *, within: float = 10.0
+) -> None:
+    """Wait until ``/proc/<pid>/cmdline`` shows ``argv``, which ``child`` was started with.
+
+    ``Popen`` returns once ``execve`` has closed its close-on-exec pipe, which the
+    kernel does before it lays out the new program's arguments; for that moment the
+    cmdline reads empty, so the identity check rightly refuses the pid (about 1 run in
+    1,000 when the reap followed straight after).
+    """
+    expected = [os.fsencode(arg) for arg in argv]
+    deadline = time.monotonic() + within
+    cmdline = Path(f"/proc/{child.pid}/cmdline")
+    while cmdline.read_bytes().split(b"\x00")[:-1] != expected:
+        assert time.monotonic() < deadline, (
+            f"the child never showed its argv: {_process_state(child)}"
+        )
+        time.sleep(0.001)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="identity check reads /proc, Linux only")
 def test_reap_orphans_kills_live_process_whose_cmdline_matches_slug(tmp_path: Path) -> None:
     """A live PID whose cmdline still identifies it as that slug's marimo is SIGTERM'd."""
     # Spawn a real child we can prove was killed. Its argv carries the same
     # markers spawn_marimo's cmd does (`marimo` + `--base-url /n/<slug>`), so
     # the identity check recognizes it without needing marimo installed.
-    child = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import time; time.sleep(30)",
-            "--base-url",
-            "/n/live",
-            "marimo",
-        ],
-    )
+    argv = [sys.executable, "-c", "import time; time.sleep(30)", "--base-url", "/n/live", "marimo"]
+    child = subprocess.Popen(argv)
     try:
+        _wait_for_argv(child, argv)
         path = tmp_path / "pids.json"
         save_pids(
             path,
@@ -123,7 +145,8 @@ def test_reap_orphans_kills_live_process_whose_cmdline_matches_slug(tmp_path: Pa
         reaped = reap_orphans(path, term_wait_seconds=3.0)
 
         assert [r.slug for r in reaped] == ["live"], (
-            "a live PID whose cmdline still names this slug's marimo must be reaped"
+            "a live PID whose cmdline still names this slug's marimo must be reaped; "
+            f"the child's {_process_state(child)}"
         )
         # The child should now be dead — give it a moment to exit cleanly
         # under SIGTERM and confirm via wait().

@@ -28,6 +28,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.agents import (
     AgentInfo,
     _build_agent_info,  # pyright: ignore[reportPrivateUsage]
@@ -120,8 +121,8 @@ async def _detach_mcp_server_impl(
     outcome = decide_operation("mcp_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
         raise ToolError(
-            f"Disconnecting '{server_name}' from '{agent_name}' needs a workspace or server "
-            "admin, and the caller is not one. Tell them an admin can ask Daimon: disconnect "
+            f"Disconnecting '{server_name}' from '{agent_name}' needs {admin_noun(auth.platform)}, "
+            "and the caller is not one. Tell them an admin can ask Daimon: disconnect "
             f"{server_name} from {agent_name}. Nothing was changed. Do not retry."
         )
 
@@ -330,7 +331,7 @@ async def _remove_agent_key_impl(
     outcome = decide_operation("key_remove", is_admin=auth.is_admin, target=facts)
     if outcome != "allow":
         raise ToolError(
-            f"Removing {key} from '{agent_name}' needs a workspace or server admin, and the "
+            f"Removing {key} from '{agent_name}' needs {admin_noun(auth.platform)}, and the "
             f"caller is not one. Tell them an admin can ask Daimon: remove {key} from "
             f"{agent_name}. The key is unchanged. Do not retry."
         )
@@ -364,7 +365,7 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``attach_mcp_server`` adds public endpoints; ``request_mcp_token`` and
         ``request_mcp_oauth`` enroll authenticated connections. The built-in
         daimon server cannot be removed. Use this when a connection keeps
-        failing: a server admin can disconnect from any agent, built-in Daimon
+        failing: an admin can disconnect from any agent, built-in Daimon
         included; a member can disconnect from an agent that is not a channel or
         workspace default.
         Pass this turn's ``origin_context_id`` so its channel counts."""

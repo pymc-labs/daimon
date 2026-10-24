@@ -1,6 +1,7 @@
 """Slack /memory handler — the channel agent's shared memory, and your own.
 
-`/memory` and `/memory <path>` show the shared memory read-only.
+`/memory` and `/memory <path>` show the shared memory read-only; in a channel shared
+with another organisation, that channel's own memory instead.
 `/memory mine`, `/memory mine <path>` and `/memory forget-mine [code]` act on
 the invoking person's own personal memory only (`daimon.core.memory_view`).
 
@@ -15,8 +16,9 @@ boundary (S3).
 from __future__ import annotations
 
 import contextlib
-from typing import Any
+from typing import Any, cast
 
+import aiohttp
 import anthropic
 import structlog
 from daimon.adapters.slack.interactions import resolve_web_client
@@ -34,12 +36,43 @@ from daimon.core.memory_view import (
     resolve_channel_agent,
 )
 from daimon.core.mux_backend import resource_scope
+from daimon.core.turn_hold import RequesterOrg
 from slack_sdk.errors import SlackApiError
+from slack_sdk.web.async_client import AsyncWebClient
 
 log = structlog.get_logger()
 
 _SLACK_LIMIT = 3800  # headroom under Slack's ~4000-char text limit
 _EMPTY = "No memory to show here."
+
+
+async def _requester_org(client: AsyncWebClient, *, team_id: str, user_id: str) -> RequesterOrg:
+    """HOST when `users.info` says the person belongs to this workspace, OTHER when to another.
+
+    A failed or unreadable lookup is UNKNOWN, which reads as held: nothing is
+    recorded about the person from here.
+    """
+    try:
+        info = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+        user_team: object = cast("dict[str, Any]", info.get("user") or {}).get("team_id")
+    except (SlackApiError, aiohttp.ClientError, TimeoutError, AttributeError):
+        return RequesterOrg.UNKNOWN
+    if not isinstance(user_team, str) or not user_team:
+        return RequesterOrg.UNKNOWN
+    return RequesterOrg.HOST if user_team == team_id else RequesterOrg.OTHER
+
+
+async def _channel_shared(client: AsyncWebClient, *, channel_id: str) -> bool | None:
+    """Slack's own word on whether the channel is shared with another organisation.
+
+    None when the lookup fails; the recorded registry still applies then.
+    """
+    try:
+        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+        shared: object = cast("dict[str, Any]", info.get("channel") or {}).get("is_ext_shared")
+    except (SlackApiError, aiohttp.ClientError, TimeoutError, AttributeError):
+        return None
+    return shared if isinstance(shared, bool) else None
 
 
 def _truncate(text: str) -> str:
@@ -78,7 +111,13 @@ def _personal_text(reply: PersonalMemoryReply) -> str:
 
 
 async def _personal_memory_text(
-    runtime: SlackRuntime, *, team_id: str, user_id: str, channel_id: str, args: str
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    team_id: str,
+    user_id: str,
+    channel_id: str,
+    args: str,
 ) -> str:
     """The invoker's own personal memory: never anyone else's, whatever the args."""
     request = parse_memory_args(args)
@@ -90,6 +129,8 @@ async def _personal_memory_text(
         user_id=user_id,
         channel_id=channel_id,
         default=runtime.deployment_default,
+        requester_org=await _requester_org(client, team_id=team_id, user_id=user_id),
+        channel_shared=await _channel_shared(client, channel_id=channel_id),
     )
     if agent is None:
         return _EMPTY
@@ -101,6 +142,7 @@ async def _personal_memory_text(
         request=request,
         command="/memory",
         scope=resource_scope(tenant_id=str(agent.tenant_id)),
+        held=agent.hold is not None,
     )
     return _personal_text(reply)
 
@@ -131,7 +173,12 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                 channel=channel_id,
                 user=user_id,
                 text=await _personal_memory_text(
-                    runtime, team_id=team_id, user_id=user_id, channel_id=channel_id, args=path_arg
+                    runtime,
+                    client,
+                    team_id=team_id,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    args=path_arg,
                 ),
             )
             return
@@ -143,6 +190,8 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             user_id=user_id,
             channel_id=channel_id,
             default=runtime.deployment_default,
+            requester_org=await _requester_org(client, team_id=team_id, user_id=user_id),
+            channel_shared=await _channel_shared(client, channel_id=channel_id),
         )
         if resolved is None:
             text = _EMPTY

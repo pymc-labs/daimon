@@ -269,7 +269,9 @@ async def test_opt_in_actual_native_sdk_host_d11_matches_posted_cost(
         else observation_from_interaction(
             dict(native_turn.snapshot),
             native,
-            revision=1,
+            # The tape's accepted reply is a running snapshot already carrying the
+            # meter (revision 1); the terminal walk's final reading is revision 2.
+            revision=2,
             observed_at=controls.NOW,
             root_turn=native_turn.root_id,
             model=model,

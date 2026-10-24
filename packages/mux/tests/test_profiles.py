@@ -32,6 +32,7 @@ def test_declared_profiles_and_their_core_status() -> None:
         "openai.persistent_workspace": True,
         "openai.conversation_only": False,
         "gemini.inline_reuse": False,
+        "selfhosted.loop": False,
     }
 
 
@@ -355,3 +356,24 @@ def test_enabled_native_web_authority_is_preserved_by_execution_mapping(web):
         | ({"google_search"} if "web_search" in web else set())
     )
     assert {tool.name for tool in mapped} == expected
+
+
+@pytest.mark.parametrize("name", ["pdf", "docx", "pptx", "xlsx"])
+@pytest.mark.parametrize(
+    "source,expected", [(None, True), ("anthropic", True), ("custom", False), ("other", False)]
+)
+def test_builtin_bare_id_fallback_only_without_source(
+    name: str, source: str | None, expected: bool
+) -> None:
+    from mux.contracts.ids import SkillRef
+    from mux.profiles.anthropic import is_builtin_skill
+
+    assert is_builtin_skill(SkillRef(id=name, source=source)) is expected
+
+
+def test_selectable_models_list_the_default_first_and_never_pro() -> None:
+    from mux.profiles import selectable_models
+
+    assert selectable_models("gemini") == ("gemini-3.8-flash", "gemini-4-argon")
+    assert selectable_models("openai") == ("gpt-6-luna", "gpt-6-astra")
+    assert not any("pro" in model for model in selectable_models("gemini"))

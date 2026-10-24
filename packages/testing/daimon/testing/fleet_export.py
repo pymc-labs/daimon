@@ -24,12 +24,6 @@ from uuid import UUID
 
 from daimon.core.fleet import FleetConflict, FleetRun, FleetWorker, check_result, worker_slot
 from daimon.core.stores import fleet, mux_state
-from daimon.testing.conformance.recording import (
-    Audit,
-    RecordingError,
-    normalized_event,
-    string_fields,
-)
 from daimon.testing.outcome_oracle import (
     EvidenceModel,
     FleetEvidence,
@@ -47,6 +41,7 @@ from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.contracts.resources import ProjectionSnapshot, ProviderBinding
 from mux.state.lease import Slot
 from mux.state.store import binding_slot
+from mux.testing.conformance.recording import Audit, RecordingError, normalized_event, string_fields
 from pydantic import Field, JsonValue, ValidationError, model_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession

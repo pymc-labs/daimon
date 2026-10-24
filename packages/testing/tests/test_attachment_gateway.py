@@ -13,11 +13,11 @@ from pathlib import Path
 
 import pytest
 import sentry_sdk
-from daimon.testing import ma_agent
 from daimon.testing.attachment_ingestion import attachment_cells, read_attachment
-from daimon.testing.ma import FakeMAState, make_fake_memory_store_handler
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from daimon.testing.output_ownership import FilePin
+from mux.testing.drivers.anthropic.ma import FakeMAState, make_fake_memory_store_handler
 
 from packages.adapters.discord.tests.owned_db_preflight import (
     offline_db_preflight as offline_db_preflight,

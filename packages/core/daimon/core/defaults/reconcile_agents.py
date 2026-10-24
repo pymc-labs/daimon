@@ -32,12 +32,17 @@ from daimon.core.defaults.spec_merge import (
     merge_skills_with_ma,
     merge_tools_with_ma,
 )
+from daimon.core.errors import DaimonError
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, create_agent, update_agent
 from daimon.core.specs import AgentSpec, dump_agent_spec
 
 _log = structlog.get_logger(__name__)
+
+
+class AgentNameTaken(DaimonError):
+    """A create-only reconcile found an agent of that name already in the tenant."""
 
 
 async def reconcile_agent(
@@ -51,8 +56,13 @@ async def reconcile_agent(
     managed: bool = True,
     skills_view: list[SkillListResponse] | None = None,
     references: object = None,
+    create_only: bool = False,
 ) -> ResourceOutcome:
     """Reconcile a single agent against MA.
+
+    `create_only` refuses with `AgentNameTaken` instead of updating an agent
+    that already has the name, so creating an agent can never rewrite someone
+    else's (a concurrent create of the same name).
 
     `references` is ignored; it is still accepted because some callers pass it.
 
@@ -111,6 +121,8 @@ async def reconcile_agent(
     )
     matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)
     ma_match = matches[0] if matches else None
+    if create_only and ma_match is not None:
+        raise AgentNameTaken(spec.name)
     # Dedup: when MA holds multiple agents with the same daimon_name (the
     # multi_match condition), keep the canonical one (max
     # created_at, returned first by find_agents_by_daimon_tag) and archive

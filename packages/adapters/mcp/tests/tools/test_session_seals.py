@@ -43,11 +43,12 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin
-from daimon.testing import ma_agent, ma_session
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -95,6 +96,8 @@ class _World:
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
             chat_session_id="test-session",
@@ -534,11 +537,11 @@ async def test_a_chat_turn_cannot_start_ask_or_continue_through_agent_chat(
     runtime = world.runtime()
     chat_turn = world.auth(agent_id=world.agent_key_auth().agent_id)
 
-    with pytest.raises(ToolError, match="chat turn"):
+    with pytest.raises(ToolError, match="chat reply"):
         await _start_turn_impl(runtime, chat_turn, _SEALED_TOPIC)
-    with pytest.raises(ToolError, match="chat turn"):
+    with pytest.raises(ToolError, match="chat reply"):
         await _continue_turn_impl(runtime, chat_turn, "ses_open", _SEALED_TOPIC)
-    with pytest.raises(ToolError, match="chat turn"):
+    with pytest.raises(ToolError, match="chat reply"):
         await _ask_impl(runtime, chat_turn, _SEALED_TOPIC, handle="ses_open")
     assert world.sent == []
 
@@ -891,6 +894,6 @@ async def test_a_signed_bearer_is_refused_when_the_policy_cannot_be_read(world: 
         )
 
     assert result["result"].get("isError"), result
-    assert "access settings can't be read" in str(result), result
+    assert "access settings here can't be read" in str(result), result
     create.assert_not_awaited()
     assert world.sent == []

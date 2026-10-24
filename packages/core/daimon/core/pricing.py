@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import Protocol
@@ -273,7 +273,8 @@ class ProviderPrice:
     A None cache-write rate declares that billing stage inapplicable, rather
     than asserting that the provider reported a zero count. Reasoning is
     already included in output. Actual infrastructure cost is supplied
-    separately for the observation's grain and revision.
+    separately for the observation's grain and revision. A host-admitted tariff
+    pins its validity check to admitted_on; ordinary prices use the receipt date.
     """
 
     provider: str
@@ -285,10 +286,15 @@ class ProviderPrice:
     cache_write: Decimal | None = None
     verified: bool = True
     max_priced_input_tokens: int | None = None
+    # (input and cache, output) multipliers above max_priced_input_tokens. Applied
+    # to a whole aggregate, which may mix tiers, so the cost is an upper bound.
+    long_context_multipliers: tuple[Decimal, Decimal] | None = None
     valid_before: date | None = None
+    admitted_on: date | None = None
 
     def current_on(self, on: date) -> bool:
-        """A verified source row applies only within its known date window."""
+        """Check the frozen admission date when the host admitted this tariff."""
+        on = self.admitted_on or on
         return (
             self.verified
             and self.checked_on <= on
@@ -300,6 +306,11 @@ class ProviderPrice:
             type(self.max_priced_input_tokens) is not int or self.max_priced_input_tokens < 0
         ):
             raise ValueError("pricing input threshold requires a nonnegative integer")
+        if self.long_context_multipliers is not None and (
+            self.max_priced_input_tokens is None
+            or any(not factor.is_finite() or factor < 1 for factor in self.long_context_multipliers)
+        ):
+            raise ValueError("long-context multipliers need a threshold and are at least 1")
         if self.valid_before is not None and self.valid_before <= self.checked_on:
             raise ValueError("pricing validity must extend beyond its checked date")
         if not self.provider or not self.model:
@@ -351,19 +362,37 @@ def provider_cost_of(
 ) -> Decimal | None:
     """Verified total cost, including actual session/container charges.
 
-    Missing counts or infrastructure remain unverified, never a free turn.
+    Non-measured completeness, missing counts or infrastructure remain
+    unverified, never a free turn.
     A caller may explicitly supply zero for inapplicable infrastructure.
     Equal cached/uncached rates permit exact inclusive-input pricing even
     when the split is unreported. No missing native count is filled in.
     """
     tokens = provider_usage_tokens(usage, price)
-    if not price.current_on(usage.observed_at.date()) or infrastructure_usd is None:
-        return None
-    if price.max_priced_input_tokens is not None and (
-        usage.input_tokens is None or usage.input_tokens > price.max_priced_input_tokens
+    if (
+        usage.completeness != "measured"
+        or not price.current_on(usage.observed_at.date())
+        or infrastructure_usd is None
     ):
+        return None
+    above = price.max_priced_input_tokens is not None and (
+        usage.input_tokens is None or usage.input_tokens > price.max_priced_input_tokens
+    )
+    if above and (usage.input_tokens is None or price.long_context_multipliers is None):
         # An aggregate cannot establish the pricing tier of its requests.
         return None
+    if above and price.long_context_multipliers is not None:
+        # Conservative: the whole aggregate at the long-context rates.
+        incoming_factor, output_factor = price.long_context_multipliers
+        price = replace(
+            price,
+            input=price.input * incoming_factor,
+            cache_read=price.cache_read * incoming_factor,
+            cache_write=(
+                None if price.cache_write is None else price.cache_write * incoming_factor
+            ),
+            output=price.output * output_factor,
+        )
     if not infrastructure_usd.is_finite() or infrastructure_usd < 0:
         raise ValueError("actual infrastructure cost must be finite and nonnegative")
     with localcontext() as context:
@@ -472,7 +501,7 @@ def list_price_preview(model: str, rates: ModelRates | ProviderPrice | None) -> 
     rates describe the supplied request tier only; no prices are discovered or
     synthesized here. A context/output limit alone cannot bound a whole turn.
     """
-    bound = "Worst-case per turn: unknown; request count, tools and hosted runtime are not bounded."
+    bound = "Worst case per reply: unknown; requests, tools and hosted time have no cap."
     exclusions = "Excludes billing markup, hosted runtime, external tools and cache storage."
     if rates is None:
         return f"{model}: list price unknown. {bound} {exclusions}"
@@ -549,6 +578,7 @@ def resolved_worker_prices(
 PROVIDER_PRICING_CHECKED_ON = date(2026, 10, 14)
 PROVIDER_PRICING_SOURCES = (
     "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    "https://developers.openai.com/api/docs/models/gpt-6-astra",
     "https://developers.openai.com/api/docs/guides/agents-api/observability",
     "https://ai.google.dev/gemini-api/docs/pricing",
     "https://ai.google.dev/gemini-api/docs/antigravity-agent",
@@ -565,6 +595,20 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.01"),
                 Decimal("0.125"),
                 max_priced_input_tokens=272_000,
+            ),
+            # Checked 2026-10-22 (official model page). Above 272k input tokens
+            # input/cache double and output is 1.5x; an aggregate above it is
+            # priced wholly at those rates, an upper bound.
+            ProviderPrice(
+                PERSISTENT_WORKSPACE.provider,
+                "gpt-6-astra",
+                date(2026, 10, 22),
+                Decimal("10.00"),
+                Decimal("50.00"),
+                Decimal("1.00"),
+                Decimal("12.50"),
+                max_priced_input_tokens=272_000,
+                long_context_multipliers=(Decimal(2), Decimal("1.5")),
             ),
         ),
         INLINE_REUSE.profile_id: (
@@ -585,9 +629,41 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.075"),
                 valid_before=date(2027, 1, 1),
             ),
+            # Intro tariff only (GA 2026-10-13, through 2026-11-30). The post-intro
+            # price is unpublished here, so from 2026-12-01 Argon is unpriced and
+            # refused at admission until a dated row is added. Cached input: 95% off.
+            # FOLLOW-UP before 2026-12-01: add the post-intro row, or the daily model
+            # cap also refuses every Argon turn and worker (provider_price_unavailable).
+            ProviderPrice(
+                INLINE_REUSE.provider,
+                "gemini-4-argon",
+                date(2026, 10, 22),
+                Decimal("2.00"),
+                Decimal("10.00"),
+                Decimal("0.10"),
+                valid_before=date(2026, 12, 1),
+            ),
         ),
     }
 )
+
+
+def provider_price_expired_on(profile: str, provider: str, model: str) -> date | None:
+    """The last day of the model's newest tariff once every dated row has expired.
+
+    None while a row is current or not yet checked, or when the model has no row.
+    """
+    on = datetime.now(UTC).date()
+    if profile == CONVERSATION_ONLY.profile_id:
+        profile = PERSISTENT_WORKSPACE.profile_id
+    rows = [
+        price
+        for price in _PROVIDER_PRICING.get(profile, ())
+        if (price.provider, price.model) == (provider, model)
+    ]
+    if not rows or any(price.valid_before is None or on < price.valid_before for price in rows):
+        return None
+    return max(price.valid_before for price in rows if price.valid_before) - timedelta(days=1)
 
 
 def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:

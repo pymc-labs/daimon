@@ -5,13 +5,13 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.events import Event, RequiresActionPayload
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.turn import EventHistoryWalk
 from mux.errors import ProviderError, ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 
 SCOPE = Scope(

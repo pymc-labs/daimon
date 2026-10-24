@@ -31,7 +31,7 @@ from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.setup_conversations import get_setup_responder
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.direct_messages import DirectMessageBusy
-from daimon.testing.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.exc import DBAPIError
 from structlog.testing import capture_logs
 
@@ -78,7 +78,7 @@ def test_known_local_errors_never_publish_exception_bodies() -> None:
         (NotebookRateLimitError(body), "The notebook publishing limit has been reached."),
         (DirectMessageBusy(body), "A reply is still running."),
         (HandoffRefusedInSetupThread(body), "This setup conversation can't change agents."),
-        (AgentNameCollision(body), "This workspace already has an agent with that name."),
+        (AgentNameCollision(body), "This server already has an agent with that name."),
     ]:
         result = render_error(error, request_id=TEST_RID)
         assert result.startswith(expected)
@@ -239,7 +239,7 @@ async def test_missing_setup_responder_keeps_shared_helper_guidance(status: int)
     with pytest.raises(UserFacingError) as caught:
         await get_setup_responder(client, tenant_id=uuid.uuid4(), ma_agent_id="ag_private")
     assert render_error(caught.value, request_id=TEST_RID) == (
-        "This setup conversation's Daimon responder is missing. "
+        "This setup conversation's Daimon agent is missing. "
         "Ask the operator to restore it, then open a new setup conversation."
         f"\n\n{REF}"
     )
@@ -249,7 +249,7 @@ def test_an_unreadable_access_policy_keeps_its_words_and_the_ref() -> None:
     """A class whose every message is written for people subclasses UserFacingError."""
     error = AccessPolicyUnreadable(tenant_id=uuid.uuid4())
     assert render_error(TurnError(kind="upstream", cause=error), request_id=TEST_RID) == (
-        "this workspace's access settings can't be read, so no turn was started; "
+        "the access settings here can't be read, so Daimon can't reply; "
         f"ask an admin to fix them\n\n{REF}"
     )
 
@@ -273,3 +273,53 @@ def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
 
     assert '"skill_01PBRj"' in text and "remove_skill" in text
     assert "couldn't accept the request" not in text
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            ("rate_limited", True, None),
+            "Daimon's AI service is busy.\n\nTry again in a minute.",
+        ),
+        (("overloaded", True, "503"), "Daimon's AI service is busy.\n\nTry again in a minute."),
+        (
+            ("rate_limited", False, "quota_zero"),
+            "This model isn't available on this server's Google plan.\n\n"
+            "Pick another model or ask an admin to upgrade it.",
+        ),
+        (
+            ("rate_limited", True, "quota_exhausted"),
+            "Google is rate-limiting this model right now.\n\nTry again in a minute.",
+        ),
+        (
+            ("transient_network", True, None),
+            "Daimon couldn't reach its AI service.\n\nTry again in a minute.",
+        ),
+        (
+            ("upstream", True, None),
+            "Daimon couldn't reach its AI service.\n\nTry again in a minute.",
+        ),
+        (
+            ("permission", False, "gcs_token_echo"),
+            "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it.",
+        ),
+        (
+            ("upstream", False, "malformed_interaction"),
+            "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it.",
+        ),
+    ],
+)
+def test_neutral_provider_failures_map_to_their_cause(
+    error: tuple[str, bool, str | None], expected: str
+) -> None:
+    from mux.errors import ProviderError
+
+    category, retryable, code = error
+    failure = ProviderError(category, retryable=retryable, native_code=code)  # type: ignore[arg-type]
+    result = render_error(failure, request_id=TEST_RID)
+    assert result == f"{expected}\n\n{REF}"
+    # Never the internal code (e.g. the r12 gcs_token_echo) on the card.
+    assert code is None or code not in result
+    wrapped = TurnError(kind="upstream", cause=failure)
+    assert render_error(wrapped, request_id=TEST_RID) == f"{expected}\n\n{REF}"

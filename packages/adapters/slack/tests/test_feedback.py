@@ -642,3 +642,144 @@ async def test_open_modal_returns_none_when_slack_refuses() -> None:
         )
         client = AsyncWebClient(token="xoxb-test")
         assert await open_modal(client, trigger_id="T", view=_modal()) is None
+
+
+# ---------------------------------------------------------------------------
+# Members of another workspace (Slack Connect): only an answer to their own request
+# ---------------------------------------------------------------------------
+
+_EXTERNAL_USER = "U_EXTERNAL"
+
+
+def _external_vote_payload(action_id: str, *, requested_by: str | None) -> dict[str, Any]:
+    payload = _vote_payload(action_id, user_id=_EXTERNAL_USER)
+    payload["user"]["team_id"] = "T_OTHER"
+    if requested_by is not None:
+        payload["actions"][0]["value"] = requested_by
+    return payload
+
+
+def test_the_vote_buttons_carry_who_asked_when_the_answer_says() -> None:
+    plain = build_feedback_actions_block()
+    assert all("value" not in e for e in plain["elements"])
+    asked = build_feedback_actions_block(requested_by=_EXTERNAL_USER)
+    assert [e["value"] for e in asked["elements"]] == [_EXTERNAL_USER, _EXTERNAL_USER]
+
+
+async def test_an_external_member_votes_on_an_answer_to_their_own_request(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    runtime = await _runtime(db_session, db_session_factory)
+
+    await handle_feedback_vote(
+        runtime, _external_vote_payload(FEEDBACK_VOTE_DOWN, requested_by=_EXTERNAL_USER)
+    )
+
+    (row,) = await _rows(db_session_factory)
+    assert row["platform_user_id"] == _EXTERNAL_USER and row["vote"] == "down"
+    (opened,) = _calls(fake_slack_web_client, _VIEWS_OPEN_URL)
+    meta = json.loads(opened["view"]["private_metadata"])
+    assert meta["requested_by"] == _EXTERNAL_USER, "the form stays tied to their own answer"
+
+
+@pytest.mark.parametrize("requested_by", ["U_SOMEONE_ELSE", None], ids=["others-answer", "unknown"])
+async def test_an_external_member_cannot_vote_on_another_answer_or_one_that_does_not_say(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    requested_by: str | None,
+) -> None:
+    runtime = await _runtime(db_session, db_session_factory)
+
+    await handle_feedback_vote(
+        runtime, _external_vote_payload(FEEDBACK_VOTE_DOWN, requested_by=requested_by)
+    )
+
+    assert await _rows(db_session_factory) == [], "nothing is recorded"
+    assert _calls(fake_slack_web_client, _VIEWS_OPEN_URL) == [], "no form opens"
+    (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
+    assert ephemeral["user"] == _EXTERNAL_USER
+    assert "can't leave feedback" in ephemeral["text"]
+
+
+async def test_an_internal_member_still_votes_on_any_answer(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    runtime = await _runtime(db_session, db_session_factory)
+    payload = _vote_payload(FEEDBACK_VOTE_UP)
+    payload["actions"][0]["value"] = "U_SOMEONE_ELSE"
+
+    await handle_feedback_vote(runtime, payload)
+
+    assert len(await _rows(db_session_factory)) == 1
+
+
+def _external_submission(
+    requested_by: str | None, *, user_id: str = _EXTERNAL_USER
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "channel_id": _CHANNEL_ID,
+        "message_ts": _MESSAGE_TS,
+        "thread_ts": _THREAD_TS,
+    }
+    if requested_by is not None:
+        meta["requested_by"] = requested_by
+    payload = _submission_payload("it was wrong", user_team="T_OTHER", meta=meta)
+    payload["user"]["id"] = user_id
+    return payload
+
+
+def test_an_external_form_proceeds_only_from_their_own_answer() -> None:
+    own = evaluate_feedback_text_submission(_external_submission(_EXTERNAL_USER))
+    assert own.proceed is True and own.external is True
+    for requested_by in ("U_SOMEONE_ELSE", None):
+        refused = evaluate_feedback_text_submission(_external_submission(requested_by))
+        assert refused.proceed is False and refused.response_payload is None
+
+
+async def test_an_external_forms_row_is_recorded_for_the_submitter(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    runtime = await _runtime(db_session, db_session_factory)
+    decision = evaluate_feedback_text_submission(_external_submission(_EXTERNAL_USER))
+
+    await run_feedback_text_submission(
+        runtime, team_id=_TEAM_ID, user_id=_EXTERNAL_USER, decision=decision
+    )
+
+    (row,) = await _rows(db_session_factory)
+    assert row["platform_user_id"] == _EXTERNAL_USER
+    assert row["feedback_text"] == "it was wrong"
+
+
+async def test_the_details_button_opens_the_form_for_an_external_only_on_their_own_answer(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    runtime = await _runtime(db_session, db_session_factory)
+
+    def click(requested_by: str | None) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "channel_id": _CHANNEL_ID,
+            "message_ts": _MESSAGE_TS,
+            "thread_ts": _THREAD_TS,
+        }
+        if requested_by is not None:
+            value["requested_by"] = requested_by
+        payload = _external_vote_payload(FEEDBACK_DETAILS_ACTION_ID, requested_by=None)
+        payload["actions"][0]["value"] = json.dumps(value)
+        return payload
+
+    await handle_feedback_details_click(runtime, click("U_SOMEONE_ELSE"))
+    await handle_feedback_details_click(runtime, click(None))
+    assert _calls(fake_slack_web_client, _VIEWS_OPEN_URL) == []
+
+    await handle_feedback_details_click(runtime, click(_EXTERNAL_USER))
+    assert len(_calls(fake_slack_web_client, _VIEWS_OPEN_URL)) == 1

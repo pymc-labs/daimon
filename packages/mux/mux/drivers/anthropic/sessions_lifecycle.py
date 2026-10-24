@@ -83,6 +83,7 @@ class AgentOverrides(NativeConfig):
     type: Literal["agent_with_overrides"]
     id: str
     model: str | None = None
+    system: str | None = None
     mcp_servers: list[MCPServer] | None = None
     tools: list[AgentTool] | None = None
     skills: list[Annotated[CustomSkill | CatalogSkill, Field(discriminator="type")]] | None = None

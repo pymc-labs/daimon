@@ -19,10 +19,8 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaCloudConfig, BetaEnvironment
 from anthropic.types.beta.beta_managed_agents_session_stats import BetaManagedAgentsSessionStats
 from anthropic.types.beta.beta_managed_agents_session_usage import BetaManagedAgentsSessionUsage
-from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
-    EMPTY_SESSION_STATS,
-    EMPTY_SESSION_USAGE,
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     NotHandled,
     _environment_response,
@@ -32,7 +30,12 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from mux.testing.drivers.anthropic.ma_models import (
+    EMPTY_CLOUD_CONFIG,
+    EMPTY_SESSION_STATS,
+    EMPTY_SESSION_USAGE,
+    ma_session,
+)
 
 
 @contextlib.contextmanager
@@ -326,7 +329,7 @@ async def test_make_agent_env_echo_handler_without_session_rejects_session_reads
 
 
 async def test_make_archive_agent_handler_archives_the_requested_agent_and_composes() -> None:
-    from daimon.testing.ma import make_archive_agent_handler
+    from mux.testing.drivers.anthropic.ma import make_archive_agent_handler
 
     client = build_fake_anthropic(
         combine_handlers(make_archive_agent_handler(name="gone"), make_fake_ma_handler())
@@ -343,7 +346,7 @@ async def test_make_archive_agent_handler_archives_the_requested_agent_and_compo
 
 
 async def test_build_no_retry_anthropic_does_not_retry_a_conflict() -> None:
-    from daimon.testing.ma import build_no_retry_anthropic
+    from mux.testing.drivers.anthropic.ma import build_no_retry_anthropic
 
     hits: list[str] = []
 

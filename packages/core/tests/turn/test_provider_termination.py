@@ -20,10 +20,10 @@ from daimon.core.turn.termination import (
     termination_reason,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef, Scope
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from . import test_gemini_codec as gemini_native

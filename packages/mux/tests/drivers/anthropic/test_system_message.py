@@ -5,13 +5,13 @@ from __future__ import annotations
 import pickle
 
 import pytest
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.actions import NativeInput, UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.actions import SystemMessageConfig, translate_inputs
 from mux.errors import ExtensionVersionError, UnsupportedCapability
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import JsonValue, ValidationError
 
 

@@ -211,7 +211,7 @@ def option_a_plan(go):
     """The signed three-request envelope replaces C03's old container/cutoff plan."""
     from decimal import Decimal
 
-    from daimon.testing.conformance.budget import ProbePlan, TokenLimits
+    from mux.testing.conformance.budget import ProbePlan, TokenLimits
 
     _, envelope = envelope_from_go(go)
     require_envelope_unexpired(envelope)
@@ -260,7 +260,7 @@ def require_option_a_config(config_path: Path, go):
     """No credential/ledger access: bind config bytes and exact N=3 reservation."""
     from decimal import Decimal
 
-    from daimon.testing.conformance.budget import BudgetConfig
+    from mux.testing.conformance.budget import BudgetConfig
 
     if digest(config_path) != CONFIG_SHA256:
         raise ValueError("C03 OptionA config differs from lead signature")

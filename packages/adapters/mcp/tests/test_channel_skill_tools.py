@@ -24,9 +24,9 @@ from daimon.core.stores import channel_skills
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

@@ -23,15 +23,17 @@ from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.privacy import TurnPrivacy
-from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
 from daimon.testing.ma_models import (
     ma_agent,
     ma_environment,
-    ma_session,
     with_coordinator,
     with_hidden_capability,
 )
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import HttpUrl
+
+from .turn_path_support import HeadlessIdentity, TurnIOSpy, TurnPath
 
 _NOW = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC)
 
@@ -151,7 +153,9 @@ def _confirmations(sends: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [e for body in sends for e in body["events"] if e["type"] == "user.tool_confirmation"]
 
 
-async def test_routine_write_is_denied_when_the_policy_is_on() -> None:
+async def test_routine_write_is_denied_when_the_policy_is_on(
+    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
+) -> None:
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
     client = build_fake_anthropic(_router(creates=creates, sends=sends).dispatch)
@@ -163,8 +167,12 @@ async def test_routine_write_is_denied_when_the_policy_is_on() -> None:
         environment_id="env_x",
         trigger_message="file tonight's bugs",
         tool_safety=ToolSafetyPolicy(enabled=True),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
+        turn_path=turn_path,
     )
 
+    turn_io_used.assert_ran(turn_path)
     assert tail == "I could not file it."
     (created,) = creates
     agent = created["agent"]
@@ -180,8 +188,9 @@ async def test_routine_write_is_denied_when_the_policy_is_on() -> None:
     assert "linear/create_issue" in sent["deny_message"]
 
 
-async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
-    """Created as the agent is; the unattended gate still makes every call pause."""
+async def test_routine_session_is_unchanged_when_the_policy_is_off(
+    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
+) -> None:
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
@@ -194,8 +203,12 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
         environment_id="env_x",
         trigger_message="file tonight's bugs",
         tool_safety=OPEN_TOOL_SAFETY,
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
+        turn_path=turn_path,
     )
 
+    turn_io_used.assert_ran(turn_path)
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
     # The fake keeps serving the frozen snapshot, so every gate rewrites it.
     assert updates
@@ -449,7 +462,8 @@ def test_no_production_signature_defaults_the_policy() -> None:
 
 async def test_run_turn_without_a_policy_is_a_type_error() -> None:
     with pytest.raises(TypeError, match="tool_safety"):
-        await run_turn(  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+        await run_turn(
+            tool_safety=OPEN_TOOL_SAFETY,  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
             privacy=TurnPrivacy("test"),
             anthropic=build_fake_anthropic(MARouter().dispatch),
             agent_id="ag",

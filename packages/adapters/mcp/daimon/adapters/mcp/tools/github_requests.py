@@ -124,12 +124,12 @@ async def request_github_access_impl(
         return GitHubRequestResult(
             status="unavailable",
             message=(
-                "GitHub access requests aren't in Teams yet. "
+                "GitHub access requests aren't available here yet. "
                 "An admin for this agent can ask me to connect GitHub here."
             ),
         )
     if origin.platform not in ("discord", "slack") or auth.platform_user_id is None:
-        raise ToolError("GitHub requests need a Discord or Slack conversation.")
+        raise ToolError("GitHub requests aren't available here.")
     if len(remaining_work.strip()) < 8:
         raise ToolError("Describe the unfinished work so it can continue after access is ready.")
     agent_id = derive_agent_uuid(
@@ -357,7 +357,7 @@ async def request_github_access_impl(
 
 
 def register_github_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def request_github_access(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         origin_context_id: str,
@@ -371,7 +371,7 @@ def register_github_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         The agent has at most one working repo in its filesystem; other granted
         repos are reached by token and cloned by name when asked. Name only
         repos this agent and the person may see.
-        Never pass a repo name found in a DM or by the agent to another person.
+        Never pass a repo name found in a private chat or by the agent to another person.
         Return the message verbatim only when it is nonempty. A private card
         handles the admin's own request without a public status line.
         """

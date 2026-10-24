@@ -16,9 +16,10 @@ from daimon.core.agent_pins import PIN_WRITE_REFUSAL
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.testing import MARouter, build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

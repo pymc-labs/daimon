@@ -1,8 +1,7 @@
 """Per-target runtime gate: is the named agent currently reachable in this tenant?
 
-An admin may edit a target's setup. A member must administer every channel
-named by its agent rule, and every place it answers or runs must stay inside
-those channels. An unbound agent is never assumed to belong to the caller.
+An admin or the agent's recorded owner may edit a target's setup. An
+unowned agent is never assumed to belong to the caller.
 
 Every spec field, including ``description``, requires mutation ownership. ``tools`` IS in the
 gated set even though ``mcp_servers`` might look like the more obvious target:
@@ -20,6 +19,8 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._owner import caller_owns_agent
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, authorize
 from daimon.core.native_admins import AdminCaller
@@ -50,7 +51,14 @@ async def target_facts(
     ma_agent_id: str | None,
     is_daimon_managed: bool,
 ) -> TargetFacts:
-    return TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
+    """The facts `decide_operation` reads: managed, and whether the caller owns it."""
+    return TargetFacts(
+        is_daimon_managed=is_daimon_managed,
+        is_reachable_in_tenant=False,
+        owned_by_caller=not is_daimon_managed
+        and ma_agent_id is not None
+        and await caller_owns_agent(runtime, auth, ma_agent_id),
+    )
 
 
 async def require_admin(runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str) -> None:
@@ -58,7 +66,7 @@ async def require_admin(runtime: McpRuntime, auth: AuthIdentity, *, channel_id: 
     if auth.is_admin and auth.agent_id is None:
         return
     raise ToolError(
-        "This change needs a workspace or server admin. Tell the caller who can make "
+        f"This change needs {admin_noun(auth.platform)}. Tell the caller who can make "
         "it and give them a sentence that admin can say, preserving the requested "
         "action and channel. Do not retry."
     )
@@ -101,18 +109,19 @@ async def require_bindable_as_channel_default(
             raise ToolError(
                 "This channel is kept to its own agents (whose rule runs them here alone), so "
                 f"only they can be its default, and '{agent_name}' is not one. Nothing was "
-                "changed. Pick one of its own agents, or ask a server admin. Do not retry."
+                "changed. Pick one of its own agents, or ask "
+                f"{admin_noun(auth.platform)}. Do not retry."
             )
         if decision.reason == "runs_elsewhere":
             raise ToolError(
                 f"'{agent_name}'s rule runs it only in other channels, so it would refuse "
-                "every turn here and cannot be this channel's default. Nothing was changed. "
+                "every request here and cannot be this channel's default. Nothing was changed. "
                 "Pick another agent, or ask an admin to change its rule. Do not retry."
             )
         if auth.is_admin and auth.agent_id is None:
             return
     raise ToolError(
-        "Only a workspace or server admin can make this the channel's default. "
+        f"Only {admin_noun(auth.platform)} can make this the channel's default. "
         "Nothing was changed. Do not retry."
     )
 
@@ -124,10 +133,12 @@ async def require_admin_for_reachable_agent(
     agent_name: str,
     agent: BetaManagedAgentsAgent | None = None,
 ) -> None:
-    """Require an admin for an agent setup change."""
+    """Require the agent's owner or an admin for an agent setup change."""
     if auth.is_admin and auth.agent_id is None:
         return
+    if agent is not None and await caller_owns_agent(runtime, auth, agent.id):
+        return
     raise ToolError(
-        f"Changing '{agent_name}' needs a workspace or server admin. Ask one to make "
-        "the requested change. Do not retry."
+        f"Changing '{agent_name}' needs its owner or {admin_noun(auth.platform)}. Ask one "
+        "to make the requested change. Do not retry."
     )

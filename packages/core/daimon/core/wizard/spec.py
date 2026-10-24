@@ -272,13 +272,13 @@ class WizardSpec(BaseModel):
                 if len(option.label) > MAX_LABEL_CHARS:
                     raise ValueError(
                         f"step {index} ({step.key!r}) has an option label "
-                        f"{len(option.label)} characters long, exceeding Discord's "
+                        f"{len(option.label)} characters long, exceeding the "
                         f"{MAX_LABEL_CHARS}-character button label limit; shorten it"
                     )
                 if len(option.value) > MAX_SELECT_OPTION_VALUE_CHARS:
                     raise ValueError(
                         f"step {index} ({step.key!r}) has an option value "
-                        f"{len(option.value)} characters long, exceeding Discord's "
+                        f"{len(option.value)} characters long, exceeding the "
                         f"{MAX_SELECT_OPTION_VALUE_CHARS}-character option value "
                         f"limit; shorten it"
                     )
@@ -289,7 +289,7 @@ class WizardSpec(BaseModel):
                     raise ValueError(
                         f"step {index} ({step.key!r}) has an option description "
                         f"{len(option.description)} characters long, exceeding "
-                        f"Discord's {MAX_SELECT_OPTION_DESCRIPTION_CHARS}-character "
+                        f"the {MAX_SELECT_OPTION_DESCRIPTION_CHARS}-character "
                         f"option description limit; shorten it"
                     )
 
@@ -300,14 +300,14 @@ class WizardSpec(BaseModel):
                 raise ValueError(
                     f"step {index} ({step.key!r}) renders a head text of {head_chars} "
                     f"characters (prompt plus question), exceeding the {head_budget}-"
-                    f"character budget within Discord's {MAX_TEXT_DISPLAY_CHARS}-"
+                    f"character budget within the {MAX_TEXT_DISPLAY_CHARS}-"
                     f"character text limit; shorten the prompt or the question"
                 )
             if step.kind is StepKind.MULTI and len(step.question) > MAX_SELECT_PLACEHOLDER_CHARS:
                 raise ValueError(
                     f"step {index} ({step.key!r}) is a multi step whose question is "
                     f"{len(step.question)} characters long; a multi step's question "
-                    f"is rendered as the select placeholder, which Discord caps at "
+                    f"is rendered as the select placeholder, which is capped at "
                     f"{MAX_SELECT_PLACEHOLDER_CHARS} characters; shorten it"
                 )
 
@@ -368,7 +368,7 @@ class WizardSpec(BaseModel):
             if estimate > MAX_TOTAL_COMPONENTS:
                 raise ValueError(
                     f"step {index} ({step.key!r}) is estimated to render {estimate} "
-                    f"components, exceeding Discord's {MAX_TOTAL_COMPONENTS}-component "
+                    f"components, exceeding the {MAX_TOTAL_COMPONENTS}-component "
                     f"ceiling; split the form into a shorter follow-up wizard"
                 )
 

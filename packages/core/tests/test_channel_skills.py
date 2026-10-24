@@ -42,8 +42,8 @@ from daimon.core.stores.channel_skills import (
 )
 from daimon.core.stores.domain import ChannelSkillRow
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 

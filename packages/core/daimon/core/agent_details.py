@@ -260,9 +260,7 @@ async def load_agent_details(
         default=deployment_default,
     )
     if viewer is not None and not viewer.sees_agent(agent):
-        raise UserFacingError(
-            "That agent is no longer available in this workspace. Choose another agent."
-        )
+        raise UserFacingError("That agent is no longer available here. Choose another agent.")
     tenant_row, channel_rows = await scoped_config_read.list_propagations_for_tenant(
         session, tenant_id=tenant_id
     )

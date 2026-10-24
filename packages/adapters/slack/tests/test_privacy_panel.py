@@ -352,8 +352,8 @@ def test_summary_line_includes_mcp_tokens_and_slack_categories() -> None:
     )
     text = summary_line(preview)
     assert "Daimon access token" in text, "summary must mention mcp_tokens"
-    assert "saved Slack access token" in text, "summary must mention slack_user_tokens"
-    assert "temporary Slack request record" in text, "summary must mention slack_turn_contexts"
+    assert "saved access token" in text, "summary must mention slack_user_tokens"
+    assert "temporary request record" in text, "summary must mention slack_turn_contexts"
 
 
 def test_cascade_plain_rows_are_a_spaced_list_without_routine_id() -> None:

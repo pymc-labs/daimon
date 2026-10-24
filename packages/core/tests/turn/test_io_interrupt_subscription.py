@@ -7,8 +7,8 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 from daimon.core.turn.io import turn_io
-from daimon.testing import build_fake_anthropic
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import JsonValue
 
 
@@ -106,7 +106,11 @@ async def test_interrupt_closes_subscribed_stream_on_every_failed_exit(path, exi
     async with build_fake_anthropic(handle) as client:
         client.max_retries = 0
         io = turn_io(client, "sesn_test", path=path, scope=scope)
-        task = asyncio.create_task(io.interrupt(timeout_s=0.5 if exit_kind == "timeout" else 10))
+        # A lost POST acknowledgement leaves the stream silent, so the mux path
+        # waits out the whole deadline: keep it short. The cancelled exit never
+        # reaches its deadline.
+        deadline_s = {"timeout": 0.5, "post_failure": 1.0}.get(exit_kind, 10)
+        task = asyncio.create_task(io.interrupt(timeout_s=deadline_s))
         if exit_kind == "cancelled":
             await asyncio.wait_for(opened.wait(), timeout=5)
             # Wait for the POST before cancellation, so this probes closing an

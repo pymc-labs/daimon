@@ -1824,7 +1824,7 @@ async def test_read_thread_reply_alias_respects_the_resolved_parent_seal(
             )
             assert result.thread_ts == "1.0" and result.messages[0].files[0].url is not None
         else:
-            with pytest.raises(ToolError, match="limited to turns inside"):
+            with pytest.raises(ToolError, match="limited to conversations inside"):
                 await _slack_read_thread_impl(
                     runtime, auth, thread_id="C1:2.0", limit=50, read_policy=policy
                 )

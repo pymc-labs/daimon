@@ -7,8 +7,8 @@ from anthropic.types.beta import BetaManagedAgentsSkillParams, SkillListResponse
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.skills import resolve_skill_names
 from daimon.core.errors import DefaultsError
-from daimon.testing.ma import MARouter, list_response
-from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 
 _CREATED_AT = "2026-04-21T00:00:00Z"
 _TENANT_A = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")

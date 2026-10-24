@@ -44,6 +44,7 @@ async def get_account_with_tenant(
             Tenant.external_id,
             PlatformPrincipal.external_id,  # platform_user_id — null when no matching principal
             Account.platform_role_ids,
+            PlatformPrincipal.foreign_home_id,
         )
         .select_from(Account)
         .join(Tenant, Tenant.id == Account.tenant_id)
@@ -57,7 +58,7 @@ async def get_account_with_tenant(
     row = (await session.execute(stmt)).one_or_none()
     if row is None:
         return None
-    acct_id, role_str, tenant_id, platform, ext_id, platform_user_id, role_ids = row
+    acct_id, role_str, tenant_id, platform, ext_id, platform_user_id, role_ids, foreign_home = row
     return AccountIdentityRow(
         account_id=acct_id,
         tenant_id=tenant_id,
@@ -66,6 +67,7 @@ async def get_account_with_tenant(
         external_id=ext_id,
         platform_user_id=platform_user_id,
         platform_role_ids=tuple(role_ids),
+        foreign_home_id=foreign_home,
     )
 
 

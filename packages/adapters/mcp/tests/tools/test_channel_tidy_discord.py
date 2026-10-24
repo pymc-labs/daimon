@@ -56,10 +56,10 @@ from daimon.core.stores.agent_posts import get_post, record_post
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.core.stores.turn_origins import create_origin
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -335,6 +335,8 @@ class _World:
                 configuration_target_ma_agent_id=None,
                 configuration_target_name=None,
                 role=Role.USER,
+                sender_foreign=False,
+                shared_channel=False,
                 expires_at=now + timedelta(hours=1),
                 now=now,
                 is_setup=is_setup,
@@ -875,7 +877,7 @@ async def test_the_per_turn_limit_stops_the_eleventh_action(
             origin_context_id=origin,
         )
 
-    with pytest.raises(ToolError, match="this turn's tidy limit"):
+    with pytest.raises(ToolError, match="this reply's tidy limit"):
         await _edit_message_impl(
             world.runtime,
             auth,
@@ -1199,7 +1201,7 @@ async def test_an_agent_key_has_one_turn_bucket_whatever_origins_it_names(
             origin_context_id=first,
         )
 
-    with pytest.raises(ToolError, match="this turn's tidy limit"):
+    with pytest.raises(ToolError, match="this reply's tidy limit"):
         await _edit_message_impl(
             world.runtime,
             key,

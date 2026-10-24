@@ -42,7 +42,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-_ADMIN_REQUIRED = "requires a workspace or server admin"
+_ADMIN_REQUIRED = "requires a server admin"
 _CHANNEL = "chan-1"
 _THREAD = "thread-1"
 _ENTRA = "99999999-8888-7777-6666-555555555555"
@@ -320,8 +320,8 @@ async def test_deployment_disabled_refuses_every_scope(
             _CHANNEL,
         )
 
-    assert "disabled for this deployment" in str(exc_info.value), (
-        "the refusal must say the deployment, not the workspace, said no"
+    assert "turned off for all of Daimon" in str(exc_info.value), (
+        "the refusal must say Daimon, not the workspace, said no"
     )
     assert (await _modes(db_session, tenant_id)).thread is None, "no row may be written"
 
@@ -377,7 +377,7 @@ async def test_a_slack_caller_is_refused(
             _CHANNEL,
         )
 
-    assert "Discord" in str(exc_info.value), "the refusal must name where it works"
+    assert "isn't available here" in str(exc_info.value), "the refusal must say so, naming no app"
     assert (await _modes(db_session, tenant_id)).thread is None, "no row may be written"
 
 
@@ -507,7 +507,7 @@ async def test_get_refuses_a_slack_caller_too(
 ) -> None:
     tenant_id = await _seed(committing_sessionmaker)
 
-    with pytest.raises(ToolError, match="Discord"):
+    with pytest.raises(ToolError, match="isn't available here"):
         await _get_thread_participation_impl(
             _runtime(committing_sessionmaker, ParticipationMode.ON),
             _auth(tenant_id=tenant_id, admin=False, platform="slack"),

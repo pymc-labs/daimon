@@ -8,7 +8,7 @@
   "channel_display_name": "Example QA Channel",
   "bot_app_id": "00000000-0000-0000-0000-000000000004",
   "bot_display_name": "Example Bot",
-  "token_dir": "/tmp/example-teams-qa-private-tokens",
+  "token_store": {"kind": "file", "token_dir": "/tmp/example-teams-qa-private-tokens"},
   "company": "teams-qa",
   "personas": {
     "admin": {"upn": "admin@example.onmicrosoft.com", "role": "admin", "vault_item": "synthetic-admin"},

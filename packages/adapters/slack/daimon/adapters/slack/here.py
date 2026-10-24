@@ -9,6 +9,7 @@ from daimon.adapters.slack.errors import generate_request_id, surface_command_er
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.errors import DaimonError
 from daimon.core.here_card import HereCard, load_here_card, render_here_card
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -120,7 +121,17 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
         visible_ids = await _visible_channel_ids(client, user_id)
         visible_ids.add(channel_id)
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-        async with runtime.sessionmaker() as session:
+        async with (
+            guard_selfhosted_channel(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                platform="slack",
+                channel_id=channel_id,
+                thread_id=None,
+                caller_id=user_id,
+            ),
+            runtime.sessionmaker() as session,
+        ):
             principal = await find_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
             )
@@ -140,7 +151,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 public_mcp_url=str(runtime.settings.mcp.public_url)
                 if runtime.settings.mcp.public_url is not None
                 else None,
-                is_admin=await resolve_is_admin(client, user_id=user_id),
+                is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
                 caller_account_id=principal.account_id if principal else None,
                 resolve_setter_display=lambda external_id: _setter_display_name(
                     client, external_id

@@ -9,7 +9,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     combine_handlers,
@@ -254,3 +254,63 @@ async def test_forget_mine_needs_confirmation_and_never_clears_another_members(
     assert await _paths(runtime, bob_store) == ["/tone.md"], "only the invoker's store"
     shared = await _say(runtime, user_id=777, path=None)
     assert "/notes/team.md" in shared, "the shared memory is untouched"
+
+
+async def _hold_channel(db_session, runtime, *, shared_files: dict[str, str]) -> None:
+    """Mark the invoking channel shared and bind a channel store holding `shared_files`."""
+    from daimon.core.stores.agent_memory_stores import insert_channel_memory_store
+    from daimon.core.stores.shared_channels import mark_channel_shared
+
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
+    (agent,) = [a async for a in runtime.anthropic.beta.agents.list() if a.name == "daimon"]
+    store = await runtime.anthropic.beta.memory_stores.create(name="channel", description="d")
+    for path, content in shared_files.items():
+        await runtime.anthropic.beta.memory_stores.memories.create(
+            store.id, path=path, content=content
+        )
+    await insert_channel_memory_store(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
+        platform="discord",
+        channel_id="42",
+        memory_store_id=store.id,
+    )
+    await mark_channel_shared(
+        db_session, tenant_id=tenant_id, platform="discord", channel_id="42", source="platform"
+    )
+    await db_session.commit()
+
+
+def _sent_text(interaction: MagicMock) -> str:
+    sent = interaction.followup.send.call_args
+    return sent.args[0] if sent.args else sent.kwargs.get("content", "")
+
+
+async def test_memory_in_a_shared_channel_shows_the_channel_store_not_the_agent_wide_one(
+    db_session, db_session_factory
+) -> None:
+    runtime = await _setup(db_session, db_session_factory, seed={"/wide.md": "internal"})
+    await _hold_channel(db_session, runtime, shared_files={"/channel.md": "agreed here"})
+    cog = MemoryCog(MagicMock())
+
+    listing, shown, wide = (_interaction(runtime) for _ in range(3))
+    for interaction, path in ((listing, None), (shown, "/channel.md"), (wide, "/wide.md")):
+        await cog.memory.callback(cog, interaction, path=path)
+
+    assert "/channel.md" in _sent_text(listing) and "/wide.md" not in _sent_text(listing)
+    assert "agreed here" in _sent_text(shown)
+    assert "No memory file called" in _sent_text(wide)
+
+
+async def test_personal_memory_commands_say_it_is_not_used_in_a_shared_channel(
+    db_session, db_session_factory
+) -> None:
+    runtime = await _setup(db_session, db_session_factory, seed={})
+    await _hold_channel(db_session, runtime, shared_files={"/channel.md": "agreed here"})
+    cog = MemoryCog(MagicMock())
+
+    for path in ("mine", "mine /a.md", "forget-mine", "forget-mine abc123"):
+        interaction = _interaction(runtime)
+        await cog.memory.callback(cog, interaction, path=path)
+        assert "Personal memory isn't used in this channel." in _sent_text(interaction)

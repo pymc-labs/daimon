@@ -70,10 +70,19 @@ when it supports all nine.
 
 | Profile | Core | Notes |
 | --- | --- | --- |
-| `anthropic.managed_agents` | yes | Every capability native. |
+| `anthropic.managed_agents` | yes | Every core capability is native. `reconcile` reads the session status and the newest 5,000 events; older history is reported as a `history_truncated` gap. Steering, stream-cursor replay, environment fork and native schedules are not offered. |
 | `openai.persistent_workspace` | yes | `reconcile` is emulated from saved items; missed events cannot be replayed. |
 | `openai.conversation_only` | no | No workspace. Runnable for explicitly granted conversation-only fleet workers. |
 | `gemini.inline_reuse` | no | The inline environment expires after inactivity, so workspace persistence is not guaranteed. Its usage reporting is undeclared, so admission refuses it until a driver shows usage observations. |
+
+A profile only declares what its driver does. The profile honesty test
+(`packages/mux/tests/test_profile_honesty.py`) calls each driver for every
+capability its profile declares `native` or `emulated`, with no network, and
+fails when the driver refuses it. It also checks that the profile's
+`accounting_mode` names the usage grain its driver emits: `usage_grain` is
+`model_request` for `request_spans` and `native_requests` (self-hosted) and
+`turn` for `native_totals` and `native_root_totals`. A capability added to a
+profile without a probe fails the test.
 
 `admit(config, profile)` is pure and runs before any provider call:
 
@@ -101,16 +110,46 @@ channel to the default. Both refuse a selection that does not hold
 together (`InvalidConfig`).
 
 Admission reads it only when `DAIMON_TURN__CHANNEL_BACKENDS` is on; it is
-off by default, and then nothing is read. With it on, a channel nobody
+on by default. Setting it false is an emergency stop, and then nothing is read. With it on, a channel nobody
 configured has no revision and admits exactly as before. A configured
 channel is checked after the config cascade and before any provider call:
 its profile must meet the configuration (`admit` above), and this release
 must be able to run it, which today means `anthropic.managed_agents` with
 the agent's own model, per caller or shared (below), or, per caller only,
-`openai.persistent_workspace` with `gpt-6-luna` or `gemini.inline_reuse`
+`openai.persistent_workspace` with `gpt-6-luna` or `gpt-6-astra`, or `gemini.inline_reuse`
 with `gemini-3.8-flash`. Anything else is refused as
 `backend_unsupported`, recorded as `admission_denied` in the turn outcome,
-never run on Anthropic in its place.
+never run on Anthropic in its place. The refusal carries a `cause` for its
+copy: `channel_pin` (the channel's own provider pin), `provider_not_allowed`
+(the tenant's allowlist doesn't turn the provider on) or `agent_backend` (the
+agent's provider can't serve it here yet), and the provider involved. Each
+names the chat words that fix it; a refusal with no cause never blames the
+channel.
+
+A channel pin outranks every agent's own provider there, so an admin can clear
+it from chat: "clear this channel's pin" calls `request_channel_pin_clear`,
+which previews what this channel pins and, once the admin confirms the card,
+writes a `channel_clear` revision (`clear_channel_backend`). Only the chat's own
+channel can be cleared: the card binds the channel it is posted in (the
+admitted turn's origin channel), never a channel named in the tool call, and it
+re-checks the pin's revision and digest and that the clicker is a current
+admin. Existing threads keep their model.
+
+A channel may also name `gemini-4-argon` (Gemini 4 Argon, 1M-token context)
+on `gemini.inline_reuse`, and an agent's config may pick it (below); the
+default stays `gemini-3.8-flash`. An Argon turn makes one attempt: a 503 is the
+turn's answer, never a fallback to the Flash chain. A fleet worker runs Argon
+only on the bounded token envelope (as Flash does, at Argon's tariff, within its
+budget and the per-turn hold); an Argon worker that cannot get one is refused at
+spawn, never run on the 4096-token cap. Token limits a caller sets explicitly
+get the same bound: a Gemini worker whose worst case (max input at the model's
+input rate plus max output at its output rate) exceeds min(budget / markup,
+hold) is refused at spawn, and again at plan admission against the row's hold.
+Configuring a channel to Argon, and admitting its turns, both refuse whenever
+`provider_prices` has no current Argon row (today: from 2026-12-01; see
+[billing](billing.md)); the message names the date the price window ended.
+Argon's rates are about 2.7x Flash's, so raise the runtime row's `hold_usd`
+(and `cap_usd`) for an Argon channel rather than reusing a Flash row's values.
 
 A channel whose configuration says `thread_mode="shared"` shares one session
 per new thread between everyone who writes in it
@@ -321,6 +360,32 @@ not zero. `input_tokens` includes the cached and cache-write counts, and
 provider's own usage record unchanged. A later revision of the same
 observation corrects it, and the corrections are applied as a delta.
 
+## Public import paths
+
+Every public module declares `__all__`, and each public name is reachable
+from one module. `packages/mux/tests/test_public_exports.py` checks that every
+listed name exists and has no second path.
+
+| Import from | For |
+| --- | --- |
+| `mux.contracts` | `Contract` and `FrozenMap`, the base types defined in the private `_base` module |
+| `mux.contracts.<module>` | the contract types in the Layout table above, each from the module that defines it |
+| `mux.errors` | the error taxonomy (the stable path for `mux.contracts.errors`) |
+| `mux.state.<module>` | the state protocol and rules |
+| `mux.profiles` | the declared profiles and their lookups |
+| `mux.drivers` | `isolated_ssl_context` |
+| `mux.drivers.anthropic`, `mux.drivers.openai`, `mux.drivers.gemini`, `mux.drivers.selfhosted` | the driver factory and the host-injection API: transports, credential and secret schemas, resource ports, payload and record helpers |
+
+Import a driver's names from its package, not from a submodule such as
+`mux.drivers.anthropic.transport`. The one public driver submodule is
+`mux.drivers.selfhosted.wire`, the `daimon-harness/0` wire format shared by the
+host, the harness and the conformance kit; it declares its own `__all__`. Submodules and `_`-prefixed modules are
+implementation files and may move. One import-linter contract keeps Daimon's
+own code to this rule. Five generic names stay on their submodules: openai
+`KEY` and `reserved`, gemini `credential`, and selfhosted `segment` and `usage`. Two intentional second paths exist: `mux.errors` and
+`mux.contracts.errors`, and `RequiredAction` in `mux.contracts.events` and
+`mux.contracts.actions`.
+
 ## Dependencies and import rules
 
 `daimon-mux` depends on `pydantic` and `httpx`. Each driver's SDK is an
@@ -333,21 +398,27 @@ Import-linter contracts in the root `pyproject.toml` hold the boundaries:
 | --- | --- |
 | Mux must not import daimon | `mux` → `daimon` |
 | Mux contracts and profiles import no provider SDK or driver | `mux.contracts`, `mux.profiles`, `mux.errors`, `mux.state` → `anthropic`, `openai`, `google`, `mux.drivers` |
-| Only mux.drivers.anthropic imports the anthropic SDK | `mux` → `anthropic`, except from `mux.drivers.anthropic` |
-| Only mux.drivers.openai imports the openai SDK | `mux` → `openai`, except from `mux.drivers.openai` |
-| Only mux.drivers.gemini imports the google.genai SDK | `mux` → `google`, except from `mux.drivers.gemini` |
+| Only mux.drivers.anthropic imports the anthropic SDK | `mux` → `anthropic`, except from `mux.drivers.anthropic` and `mux.testing.drivers.anthropic` (plus `mux.testing.isolated_sdk`) |
+| Only mux.drivers.openai imports the openai SDK | `mux` → `openai`, except from `mux.drivers.openai` and `mux.testing.drivers.openai` (plus `mux.testing.isolated_sdk`) |
+| Only mux.drivers.gemini imports the google.genai SDK | `mux` → `google`, except from `mux.drivers.gemini` and `mux.testing.drivers.gemini` (plus `mux.testing.isolated_sdk`) |
+| Product code must not import test harnesses | `daimon.core`, `daimon.adapters` and every mux module except `mux.testing` → `mux.testing`, `daimon.testing` |
+| Daimon product code imports provider drivers through their packages | `daimon.core`, `daimon.adapters` → submodules of `mux.drivers.anthropic`, `.openai`, `.gemini` and `mux.contracts._base`, with three named exceptions |
 
-The tests run in CI as the `pytest-mux` job (`uv run pytest packages/mux`).
+The tests run in CI as the `pytest-mux` job (`uv run pytest packages/mux`). The
+`mux-standalone` job builds an environment with only `daimon-mux`, its provider
+extras and the test dependencies, checks that `daimon` cannot be imported, and
+runs the same tests there: `mux.testing` carries the test doubles, so the mux
+tests need nothing from the Daimon host.
 
 ## Conformance
 
-`daimon.testing.conformance` provides an offline C01–C18 runner. Drivers explicitly
+`mux.testing.conformance` provides an offline C01–C18 runner. Drivers explicitly
 register a fresh fake-transport adapter per fixture; the existing pytest-mux
 job collects the runner's regression tests. Results distinguish pass, fail
 and pending with evidence. State-store and host seams that have not landed
 remain pending and prevent certification. The in-memory reference driver is
 a test oracle, not a backend. See
-`packages/testing/docs/conformance/README.md` for adapter
+`packages/mux/docs/conformance/README.md` for adapter
 requirements and the dependency matrix. No default runtime behavior changes.
 
 The conformance runner uses `mux.state.store.StateStore`. The memory oracle
@@ -762,7 +833,7 @@ certification; undeclared capability errors still fail their probes.
 
 ### Manual probe budgets
 
-`daimon.testing.conformance.budget` reserves worst-case spend before provider work and
+`mux.testing.conformance.budget` reserves worst-case spend before provider work and
 persists admission and settlement receipts. Runs exceeding 80% of a configured
 provider line or total cap are refused. Missing, altered or rolled-back ledger
 state also refuses admission. An authorized caller supplies reviewed pricing
@@ -802,7 +873,7 @@ the first `.env` mount without fetching later pages and records the one add
 response identity without a retrieve. Session and file grants are checked before I/O.
 ### OpenAI offline conformance
 
-Explicit registration through `daimon.testing.drivers.openai.conformance.register` runs the
+Explicit registration through `mux.testing.drivers.openai.conformance.register` runs the
 actual OpenAI driver and pinned SDK against synthetic HTTP/SSE records. Each
 shared fixture gets a fresh driver and independent request log. C05, C06, C09, C10,
 C15 and C16 pass; the other twelve entries declare typed pending reasons for
@@ -812,10 +883,11 @@ successful unsupported migration, public handles and undeclared extensions.
 The registration context closes streams and SDK clients. This adds no provider
 discovery or host activation and makes no live calls.
 
-### Experimental turn bridge
+### Turn bridge
 
-`DAIMON_TURN__PATH=legacy` remains the default, including an empty value.
-Setting `mux` opts into Events/Sessions ports for turn input, confirmed stream
+`DAIMON_TURN__PATH=mux` is the default, including an empty value. Setting
+`legacy` is an emergency stop that returns every turn to the Managed Agents-only
+path. `mux` uses Events/Sessions ports for turn input, confirmed stream
 opening and status checks. The host keeps its existing authorization, billing,
 rendering and lifecycle policies. Prepared turns derive the scope from the
 admitted tenant and account; direct callers must supply their authorized scope.
@@ -850,7 +922,7 @@ records, without adding a neutral outcome or a replay request.
 
 ## Manual conformance probes
 
-The standalone `daimon.testing.conformance.budget` guard reserves conservative spend before
+The standalone `mux.testing.conformance.budget` guard reserves conservative spend before
 provider work and appends receipts. All callers share a pinned ledger, checkpoint
 and stable sequence lock; resets and paired snapshot rollbacks refuse admission.
 Runs exceeding 80% of provider or total caps are refused. Failed, cancelled and
@@ -866,7 +938,7 @@ A defense-in-depth credential audit covers
 written evidence and reconstructed normalized text before export and replay.
 Replay feeds a caller-supplied offline event fake and recomputes fixture checks;
 PENDING never certifies. Native HTTP/SSE codec certification is separate work.
-See `packages/testing/docs/conformance/README.md` for the APIs and limitations.
+See `packages/mux/docs/conformance/README.md` for the APIs and limitations.
 
 ## Persistent memory and resource identity reads
 
@@ -961,6 +1033,11 @@ a legacy-host authorization escape. The default legacy caller stays unchanged.
 Headless routine turns on the mux path pass the caller's authorized tenant and
 account to the shared turn driver. A missing identity is rejected before session
 assembly or provider I/O. The default legacy path retains its existing requests.
+After session assembly, each headless turn owns in-memory mutation claims and
+bounded retries. A definitely refused write can retry within the caller's SDK
+attempt allowance and the turn deadline; a write with an unknown outcome is
+never resent. The SDK cannot add hidden retries to a claimed write. This adds
+no durable transcript copy and does not resume a routine after a process restart.
 
 Prepared turns also carry their admitted tenant/account scope through legacy
 replay, interruption and confirmation recovery. Seal publication commits before
@@ -988,7 +1065,7 @@ keys pass through in M0, without a second replay cache. Bundle existence probes
 use the Artifacts native metadata projection so unused reply fields remain
 optional. Offline ScriptedTransport proofs compare raw request body bytes and
 protocol headers, as well as SDK projections and call order.
-Gemini probe preparation uses `python -m daimon.testing.drivers.gemini.live_cert`, with an
+Gemini probe preparation uses `python -m mux.testing.drivers.gemini.live_cert`, with an
 explicit model and empty output directory. Its default MockTransport command
 uses a private ledger and no real key. An authorized `--live` command additionally
 requires the pinned mode-0600 key file and reviewed model prices in the shared
@@ -1035,13 +1112,13 @@ Incomplete tool mappings are typed PENDING. Missing atomic session revision
 pinning is an explicit capability gap, while skill pins remain required.
 Replay retains omitted tool arguments and does not certify their contents.
 The standard eighteen-case matrix stays unchanged. See the package-local
-`packages/testing/docs/conformance/README.md` for the adapter contract.
+`packages/mux/docs/conformance/README.md` for the adapter contract.
 Responder identity uses the authorized row's tenant/account scope and the native
 `anthropic.session_reads@1` extension. It retains the SDK response for configuration
 snapshot backfill, including null channel and thread metadata, without an additional
 read or a generic provider-binding projection.
 The supplementary Gemini F1 adapter is explicitly selected from
-`daimon.testing.drivers.gemini.default_capability`. It returns typed ADAPTER_DEPENDENCY
+`mux.testing.drivers.gemini.default_capability`. It returns typed ADAPTER_DEPENDENCY
 before I/O for the complete default's binary skill bundle and authenticated
 MCP/session seams. Tests load the actual default YAML and complete skill trees;
 supported text-only subsets cannot pass the full-default scenario. This offline
@@ -1077,6 +1154,16 @@ with their native IDs through binding CAS on the Anthropic path; shared sessions
 already published by shared-thread preparation, with an accountless slot.
 The writer's admitted tenant/account remains the operation owner. Legacy turns
 perform none of these StateStore reads or writes.
+
+A prepared turn that finds the lease held by another running turn on the same
+thread waits for it, polling the store with a short backoff, rather than raising
+`LeaseBusy`. The wait is bounded by what is left of the turn's ceiling, and a
+turn that exhausts it ends through the ordinary ceiling outcome without retiring
+the thread's session mapping. Stop ends the wait as an interrupt. The store
+decides whether the lease is free, so a holder that dies frees the slot when its
+TTL lapses. If the holder replaced the session while the turn waited, the turn
+adopts that replacement through the same recovery that heals a dead session.
+Callers that use `TurnPersistence` directly keep the immediate `LeaseBusy`.
 
 An input, action decision, cancel or archive persists its intent and wins
 `claim_send` before provider mutation. Claimed Anthropic mutations use a
@@ -1126,7 +1213,7 @@ late record leaves the entire batch unchanged.
 
 ### OpenAI host turns
 
-Explicit caller-private `openai.persistent_workspace` channels run `gpt-6-luna`
+Explicit caller-private `openai.persistent_workspace` channels run `gpt-6-luna` or `gpt-6-astra`
 through the mux turn path when channel backends are enabled and the host supplies
 `OpenAIHostRuntime`. That injection contains scoped provisioned native resource
 references, a private transport factory, explicit small hosted-container controls,
@@ -1192,7 +1279,7 @@ Missing runtime dependencies or unsupported deployment policies return the visib
 `backend_unsupported` refusal before transport construction. Journal source
 identities include the interaction identity, preserving later turns and function
 continuations in a reused session.
-Gemini always sends an explicit `tools` list compiled from the agent configuration; an omitted neutral tool list becomes `[]`. The SDK boundary also makes older stored requests explicit. This prevents Gemini from silently enabling its default search and URL tools. Continuations and selected 503 fallback sends retain the same reviewed tools. See [Gemini supported tools](https://ai.google.dev/gemini-api/docs/antigravity-agent#supported-tools).
+Gemini always sends an explicit `tools` list compiled from the agent configuration. For an agent request the list is an allowlist, but an empty (or omitted) list means Gemini's defaults: `code_execution`, `google_search` and `url_context` (measured 2026-10-23). So when an agent request has no tool of its own, `compile_agent` allows a single inert function, `daimon_no_tools`, instead of `[]`, which keeps the built-ins (billable search among them) off. A session stored with `[]` before this is upgraded in place: `validate_intent` accepts exactly that difference and its next send uses the fresh compilation. (The SDK boundary only makes an omitted list explicit; it changes nothing else.) Named-agent definitions stay tool-free, because the Agents API allows no function tool there; each interaction carries the sentinel, and the interaction's list is what governs. If the model ever calls it, the host answers once ("no tools are available here; answer directly") and the turn continues; a second call is answered too (so the interaction is never left waiting on an action) and ends the turn in plain words: "Daimon couldn't answer that without tools. Ask again, a little more directly." The sentinel never appears in a transcript, live or replayed. A pause that mixes it with a real function call stays an ordinary `requires_action`. Continuations and selected 503 fallback sends retain the same reviewed tools. See [Gemini supported tools](https://ai.google.dev/gemini-api/docs/antigravity-agent#supported-tools).
 
 ### Provider action callback
 
@@ -1371,7 +1458,7 @@ An explicitly imported Gemini SDK conformance component checks cancellation/EOF
 occupancy and usage revision replay on MockTransport. Tool/mount updates, native
 vaults and deletion keep their typed limits; live certificates and exact-spend
 settlement are separate. See
-`packages/testing/docs/drivers/gemini/CONFORMANCE-SDK.md`.
+`packages/mux/docs/drivers/gemini/CONFORMANCE-SDK.md`.
 Explicit channel backend configuration resolves runtime dependencies separately
 for each admitted turn. Native preparation and execution use the same resolved
 runtime and authorized scope; runtime lookup does not cache one channel's native
@@ -1395,8 +1482,8 @@ Install the `daimon-mux[openai]` extra in deployments that explicitly enable
 OpenAI channels. The default application dependency remains unchanged.
 
 The application resolves `openai.persistent_workspace` per admitted turn when
-`DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true` are explicitly
-enabled. Injected runtimes remain supported. Without an injection, export
+`DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true` (both defaults)
+are in effect. Injected runtimes remain supported. Without an injection, export
 `DAIMON_TURN__PROVIDER_RUNTIME_FILE` in the application's process environment
 pointing to an operator-owned JSON file. Its entries authorize provisioned native
 resources for one exact tenant, account, channel and backend configuration digest:
@@ -1429,11 +1516,16 @@ read. This is the one hard scope boundary the matcher preserves exactly: a
 row's resources can never serve a tenant other than the one it names, no
 matter how many other fields are wildcarded. Selection tries an exact match
 on every field first (unchanged from the schema above); only when no row
-matches exactly does it retry allowing `"*"` rows on those three fields, and
-the existing "exactly one candidate or refuse" rule still applies to each
-pass — an operator mixing one wildcard default with one or more narrower,
-exact rows gets the narrower row for the channels it names and the default
-for everything else, never an ambiguous refusal between them. `daimon openai
+matches exactly does it retry allowing `"*"` rows on those three fields.
+In that retry a row wins when the fields it names exactly strictly include
+every other matching row's, so a channel's own row with `"*"` accounts beats
+a deployment-wide default. Rows naming different fields (one channel's row
+and one account's row) refuse as ambiguous, as do equally specific rows.
+An operator mixing one wildcard default with narrower rows gets the narrower
+row for the channels it names and the default for everything else. A
+narrower row whose `config_digest` or `configuration_grant` doesn't match the
+channel's configuration doesn't match at all, so that channel falls back to
+the default. `daimon openai
 init` (see `docs/self-hosting.md`'s "Self-host on OpenAI") provisions the
 agent and environment and writes this row; it defaults to the wildcard form.
 
@@ -1446,8 +1538,9 @@ project; admission's Anthropic agent/environment IDs are never reused for OpenAI
 An optional positive integer `spend_limit_usd_cents` is passed through the
 provider's public session controls only when an operator supplies it for a
 verified project. Omission uses the provider fix's unset control; its native
-representation belongs to the OpenAI driver. The host fixes `gpt-6-luna`,
-small containers and disabled delegation.
+representation belongs to the OpenAI driver. The host runs the admitted model
+(`gpt-6-luna` or `gpt-6-astra`) and prices it at that model's row, with small
+containers and disabled delegation.
 
 Unconfigured channels and the default Anthropic path read neither the manifest
 nor any provider key and construct no foreign client. G1 rechecks policy before
@@ -1468,7 +1561,7 @@ directories at `.agents/skills/<skill-id>`. Existing text-only inline mounts
 remain the default. Missing authorized publication is a typed deployment
 dependency; offline compiler proofs do not promote live F1/QA parity. The host
 supplies GCS access/retention and authenticated MCP separately. See the Gemini
-`packages/testing/docs/drivers/gemini/DEFAULT-CAPABILITY.md`.
+`packages/mux/docs/drivers/gemini/DEFAULT-CAPABILITY.md`.
 
 Gemini accepts a neutral MCP toolset selector only when it names a declared
 server; the server’s auth and policy checks remain mandatory. The F2 offline
@@ -1530,14 +1623,14 @@ transports. Each adapter's `BACKEND-CONFORMANCE.md` describes its input boundary
 and the independent database and SDK mutation controls.
 
 Offline catalog sentinel clients and native OpenAI/Gemini replay clients use the
-shared `daimon.testing.isolated_sdk` factories. Ambient provider options,
+shared `mux.testing.isolated_sdk` factories. Ambient provider options,
 including empty settings and options added before SDK copies, refuse before
 HTTP client allocation without fetching their values. Auth, headers, routes,
 TLS and retry budgets stay explicit; both Gemini HTTP clients close with their
 replay. Recipes and native request/result matching are unchanged.
 
 Offline platform-surface host tests construct their Anthropic SDK client through
-`daimon.testing.isolated_sdk.build_async_anthropic`, with explicit routing,
+`mux.testing.isolated_sdk.build_async_anthropic`, with explicit routing,
 headers and retry settings. Ambient provider configuration is refused before
 HTTP allocation, including empty environment values.
 
@@ -1714,25 +1807,44 @@ during provider I/O; its account lineage locks are released beforehand. Records 
 independently, and commits finish before cancellation propagates. Unchanged record
 payloads are not rewritten. Account privacy purge previews and removes conversation
 records; conservative financial holds are deliberately retained as financial
-evidence, contain no conversation/artifact payload, and never replenish a cap.
+evidence and contain no conversation/artifact payload. A purge never releases a
+hold: only settlement, a definite 4xx refusal or expiry do (below).
 
 Known storage limitation: each namespace still stores one complete Records blob,
 including artifact bytes, and the conservative hold map grows with attempts. There
-is currently no payload-size bound or automatic hold compaction/reconciliation.
+is currently no payload-size bound or automatic hold compaction (holds settle or
+expire, below, but released rows stay).
 Operators must monitor payload bytes and database storage before increasing
 workload or admitting large artifacts; this change does not authorize unlimited
 storage, deleting unknown holds, or truncating records. Reconciliation and any
 historical SQLite transfer remain explicit existing-owner operations. Do not switch
 an active namespace to an empty PostgreSQL row and call it a migration.
 
-Each Flash attempt first persists an explicit operator hold, then retains its
-accepted/refused/unknown receipt. Holds are estimates, not actual spend. They
-remain reserved until an accounting reconciler supplies verified provider and
-infrastructure actuals; this slice never treats a refusal as a free call or
-releases an unknown outcome. Exhausting the configured hold cap refuses further
-attempts. The provider usage outbox preserves native usage with unknown prices
-and infrastructure costs pending. Automatic actual settlement/hold release is a
-follow-up; this runtime is not a live certificate or QA parity claim.
+Each Flash or Argon attempt first persists an explicit operator hold (stamped
+`held_at`), then records its accepted/refused/unknown receipt. Holds are
+estimates against the row's `cap_usd`, not actual spend, and leave the cap three
+ways. A definite 4xx refusal releases at once (nothing to bill). An accepted
+attempt settles when its interaction's terminal usage is recorded: only a
+`final` observation (status completed, failed, cancelled, incomplete or
+budget_exceeded, or requires_action, since a tool-result round continues as a new
+interaction with its own hold) settles, never a running snapshot. Then `held_usd` becomes 0,
+`settled_usd` keeps the hold and `actual_usd` the token cost at the model's
+tariff (a later cumulative revision replaces `actual_usd` only, so nothing counts
+twice). Anything else (a lost response, a 503 fallback, a crash before usage, an
+unpriced alias) expires after `HOLD_TTL` (24 hours), logged as
+`provider_hold_expired`. Expiry and stamps commit even when the attempt that
+finds them is refused, so a full ledger ages out; a hold from before stamping
+starts its clock when first seen. Released rows stay as evidence.
+
+`cap_usd` therefore bounds the unsettled exposure in flight per (tenant, account,
+project) ledger, not total spend: a settled or expired attempt no longer counts.
+Total Gemini spend is bounded by the turn gates every backend passes (the
+prepaid balance gate, the per-person monthly cap and channel budgets, plus a
+fleet worker's run budget; see
+[billing](billing.md#the-gates-in-order)) and, outside Daimon, by the Google Cloud project's own
+billing budget or quota. Billing follows the usage outbox, never holds.
+`scripts/gemini_hold_report.py` reports each ledger's outstanding holds from one
+READ ONLY transaction; this runtime is not a live certificate or QA parity claim.
 
 Credential discovery happens only in the selected authorized transport factory.
 Private request-owned SDK clients use the explicit key, pinned Google origin,
@@ -1912,7 +2024,7 @@ binds a local immutable bundle and host-supplied session before interaction-time
 deployment. Actual-SDK MockTransport tests retain exact request bytes and prove
 required-action occupancy. C04/C11 remain shared-fixture PENDING until complete
 host/provider envelopes are composed. See
-`packages/testing/docs/drivers/gemini/CONFORMANCE-HOOKS.md`
+`packages/mux/docs/drivers/gemini/CONFORMANCE-HOOKS.md`
 for the evidence boundary; no live calls or default selection changes.
 
 ### D11 native footer binding (offline QA)
@@ -2054,7 +2166,7 @@ empty tools, one/three native interactions and separately pinned financial and
 GO documents. Native terminal usage is fetched once before owned cleanup;
 missing or decreasing evidence preserves held spend and the original workflow
 verdict. The standard conformance registry and historical live certificates
-remain unchanged. See `packages/testing/docs/drivers/gemini/LIVE-ROUND.md` for the
+remain unchanged. See `packages/mux/docs/drivers/gemini/LIVE-ROUND.md` for the
 reviewed recipe, exact model-limit arithmetic and pending boundaries.
 
 
@@ -2165,8 +2277,8 @@ resources refuse. A final catalog read detects
 changes during native readback; it does not claim an atomic provider revision
 pin. This component returns the existing retained catalog revision.
 
-Agent-origin native execution remains refused, including when
-`DAIMON_TURN__AGENT_BACKENDS=true`. The flag is default off and retains the
+`DAIMON_TURN__AGENT_BACKENDS` is on by default; setting it false is an
+emergency stop that refuses agent-origin native execution. The flag retains the
 readback groundwork; it does not turn a catalog component into complete source
 preservation authority. The existing admission and preparation origin guards
 refuse before publishing an agent-origin effective revision, constructing a
@@ -2188,7 +2300,7 @@ their existing behavior.
 ### Agent backend selection surfaces
 
 With `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
-workspace admins can select **Model backend** in an agent's setup Details on
+admins can select **Model provider** in an agent's setup Details on
 Discord, Slack or Teams. Only the tenant's enabled backends are offered. Preview
 shows unsupported attachments and capabilities, shared-thread restrictions,
 and the shared service's list-price estimate or explicit unknown values. Confirm
@@ -2197,7 +2309,37 @@ preview requires a fresh preview. **Use default** clears the agent preference.
 Existing threads retain their backend, and explicit channel overrides still
 have precedence.
 
-The CLI exposes `daimon agents backend set NAME BACKEND` and
+An admin may also pick a model with the provider: `model` on
+`request_agent_backend_switch` and `set_agent_backend`, and `--model` on the
+CLI ("switch agent to gemini-4-argon"). Only the provider's selectable models
+are accepted: Gemini's gemini-3.8-flash (the default) and gemini-4-argon;
+OpenAI's gpt-6-luna (the default) and gpt-6-astra. Gemini's gemini-3.5-flash-lite stays a fleet-worker model:
+the host runs it only token-capped. Naming the default stores no model,
+as before. The model is part of the preview digest and the stored revision;
+revert restores the previous model; the card names it. Switching the
+deployment's default agent says it affects new conversations in every channel
+on the server (workspace on Slack, team on Teams); a lost capability (memory
+on Gemini and OpenAI) is listed before Confirm.
+
+An agent also states its own **settings** on the same revision: its thread
+mode (`shared` is the agent's intent to share threads), its required
+capabilities and, rarely, a profile of its backend. Unset is the backend's
+default. Turns that follow the agent's setting use them. A channel that pins a
+backend stays an override and keeps its own thread mode, but it is
+tighten-only for the agent: when the pinned profile lacks a capability the
+agent requires, the turn is refused (`channel_pin_lacks_capability`) rather
+than run without it. A provider switch keeps the settings that still apply
+(a profile belongs to one backend); a provider that can't share threads
+refuses a switch of an agent that shares them. In chat,
+`request_agent_backend_switch` takes `thread_mode` and
+`required_capabilities` (stated together; an omitted one returns to the
+default) and the card shows them. Only an admin may turn sharing on; on the CLI, `daimon agents backend settings
+NAME [--thread-mode MODE] [--profile PROFILE] [--require CAPABILITY ...]`.
+
+The agent's owner may make every change in this section that an admin may,
+except the tenant allowlist (see [Permissions](permissions.md#changing-agent-setup)).
+
+The CLI exposes `daimon agents backend set NAME BACKEND [--model MODEL]` and
 `daimon agents backend clear NAME`, using the existing tenant selector and
 confirmation prompt. `--yes` skips that prompt; machine-readable `--json`
 requires `--yes`. These commands use the same shared preview and transactional
@@ -2220,6 +2362,79 @@ with `applied=false`, without changing a setting. Chat credentials use the
 existing confirmation flow. Admin Details omit unavailable backend controls,
 and stale selections refuse without applying a change. Clear previews and their
 labels derive from the shared default backend.
+
+### Agent template rows
+
+An OpenAI or Gemini agent-origin turn normally needs a manifest row pinned to the exact
+source agent, its MA version and a pre-installed native counterpart. A
+**template row** serves every agent of one tenant instead: `"root_materialization":
+true`, with no `source_agent_id`, `source_agent_version`, `counterpart_catalog_id`,
+`counterpart_catalog_revision` or `agent_id`, and usually `"*"` on platform,
+channel and account. `tenant_id` and `profile` stay exact, and a
+`configuration_grant` lists the models it serves (Flash and Argon for Gemini,
+`gpt-6-luna` for OpenAI). An OpenAI persistent-workspace template still pins
+its `environment_id`, which must be an active hosted environment.
+
+On an agent's first turn after the switch is confirmed, source preparation
+proves the drop consent, then the host publishes the confirmed target spec
+into the tenant's catalog once per user (catalog entries are scoped to the
+caller's account), at
+`root:<agent>:<MA version>:<profile>:<model>:<target digest>`. Every later
+turn for that agent version reuses it; editing the agent, changing the model
+or a different derived target publishes a new entry. A concurrent first turn
+loses the catalog compare-and-set and reads the winner's entry, and native
+creation uses the catalog id as its key. Readback then verifies the entry like
+an operator-installed counterpart. A template row carries no operator
+capability inputs, so its turns run the agent's own instructions with the
+confirmed drops (tools, skills and connections are declared drops for now).
+An OpenAI template refuses a target with custom tools or MCP connections
+before any native write: nothing would run them.
+
+A template row may add `"template_capabilities": "mcp"` to keep the agent's
+Daimon tools. Capture then represents the source's daimon-mcp toolset from
+its live catalogue (tools that need a confirmation stay listed as
+unavailable, as for any Gemini representation), and the agent's own tools and
+custom skills become declared drops the switch card names. Each turn mints one
+registered caller credential in memory when the request is first sent: it acts
+as the requesting person's account with the agent's chat-execution grant
+(never an admin or the bot; the server re-reads roles), lives at most
+min(turn deadline + 60 s, 900 s), is checked against the consented catalogue,
+and is revoked and read back when the turn ends, whether it answered, failed,
+was cancelled or hit its deadline. A turn that outlives the credential gets
+tool errors rather than a refreshed token; a credential left by a crashed host
+expires on its own. If Gemini echoes the request's MCP header in an
+interaction, the transport removes only that exact header and refuses any
+other trace of the token (`mcp_header_echo`, `mcp_token_echo`). The MCP
+service's runtime manifest needs the same row, since the switch preview there
+captures the representation the consent pins.
+
+Selection only offers a row to the turn origin it serves: an agent's turn
+considers template and source-pinned rows; a channel's turn considers fixed
+plans with neither. A tenant-wide channel row and a template row therefore
+coexist without ambiguity.
+
+### Worker template rows
+
+A fleet worker row normally pins the source agent and its version
+(`source_agent_id`, `source_agent_version`) and usually the root's channel, so
+editing the agent or running it elsewhere refuses its workers. A **worker
+template row** sets `"worker_materialization": true` with `"*"` (or no value)
+for both source fields, and usually `"*"` on platform, channel and account. It
+serves every granted agent of its one tenant, at the agent's live version, in
+any channel: identity comes from the worker request's own admitted source
+agent (the agent the worker runs as), never from the row. `tenant_id` and
+`profile` stay exact, the configuration grant bounds the models, and the
+per-request checks are unchanged (tenant, caller and session account, the
+root's thread and run). A row pins both source fields or neither, and `"*"`
+source pins are refused on any row that is not a worker row. A row pinned to a
+source agent serves only that agent at that version: another agent's worker,
+or the same agent after an edit, falls through to the template. A pinned row
+still wins over the template in its channel. Selection partitions rows by turn
+kind: a root turn considers root templates and pinned rows, a worker considers
+worker rows and pinned rows, and a channel's turn considers only fixed plans.
+So a root template and a worker template coexist in one tenant, and the
+manifest hold a fleet worker is sized for follows the same rule. Workers still publish their per-run counterpart from the resolved
+worker spec, as before.
 
 ### Output delivery pagination
 
@@ -2318,12 +2533,12 @@ replacements for the dependency under test.
 
 ### Confirm an agent backend change from chat
 
-With the neutral turn path and backend selection enabled, a workspace admin can
-ask `@Daimon switch Researcher to openai`. The chat tool first returns the current
+With the neutral turn path and backend selection enabled, a workspace admin or
+the agent's owner can ask `@Daimon switch Researcher to openai`. The chat tool first returns the current
 compatibility preview, including unsupported skills, MCPs and capabilities,
 shared-thread limits and the cost line. The confirmation card shows those same
-server-side facts. Only the requesting admin may Confirm; permission is checked
-again on the click.
+server-side facts. Only the requester may Confirm, and only while they are
+still the agent's owner or an admin; permission is checked again on the click.
 
 The card binds the current setting revision and complete preview digest. An
 expired card, a changed agent or policy, or a newer setting requires a fresh
@@ -2712,7 +2927,7 @@ primary model.
 
 The Gemini managed-agent token budget is best-effort and excludes cached tokens.
 It is not a hard spending ceiling. Worker runtime admission refuses a deadline
-more than 120 seconds away. Worker execution retains its admitted deadline,
+more than 600 seconds away. Worker execution retains its admitted deadline,
 cancellation and financial guard; complete measured usage is required for exact
 settlement.
 The session creator accepts complete scoped worker preparation through its existing
@@ -2984,7 +3199,7 @@ root-and-workers run.
 
 ### Fleet runtime composition and draining
 
-With `DAIMON_FLEET__ENABLED=true`, the ordinary Discord `build_runtime(settings)`
+With `DAIMON_FLEET__ENABLED=true` (the default), the ordinary Discord `build_runtime(settings)`
 and MCP `create_mcp_app` factories construct the existing fleet orchestrator,
 worker pool and scoped host ports. They use the process's real sessions, client,
 markup and turn dependencies. No permission loader needs to be injected: root
@@ -3354,10 +3569,27 @@ file, owned by the runtime user, mode 0600. Provisioners use the existing
 provider-neutral after-ACK credential binding with `chat_execution=True` against
 the retained canonical source; they must not mint a token before the native agent has been acknowledged
 and read back. The real host factory passes the scoped resolver into the OpenAI
-driver. Only session creation receives the bearer: its registered identity,
-account/tenant, expiry, revocation and exact authenticated catalogue are checked
-before exposure to the captured destination. Agent metadata and runtime
-manifests contain the credential reference, never the bearer itself.
+driver. Before session creation, the resolver checks the bearer's registered
+identity, account/tenant, expiry, revocation and exact authenticated catalogue.
+The driver writes it through the native vault port into a new caller-scoped
+session vault, bound to the captured MCP URL, and attaches only `vault_ids` and
+the credential ID to the session request. Inline MCP authorization is not sent.
+Agent metadata, session bindings and runtime manifests contain references,
+never bearer values. The binding retains the owned vault identity so deleting
+the session also deletes its vault and credentials after a process restart;
+independently supplied vaults remain retained. A definite session-create
+rejection cleans the new vault. An uncertain native creation or malformed create
+ACK keeps the vault because accepted work may still need it. The raised error
+notes its owned vault ID and requires manual provider cleanup after resolving
+the session outcome; there is no automatic reconciler. A process crash between
+vault creation and persisting the session binding can also leave an untracked
+vault that requires operator recovery from native inventory/creation receipts.
+Cleanup failures preserve the original error and add a safe failure-type/owned-ID
+note. Provider message, code and parameter diagnostics are suppressed throughout
+the MCP authentication flow because they may echo credentials from earlier
+requests; normalized categories and HTTP status remain available.
+A newly authorized credential remains required after caller-token expiry; this
+adds no automatic refresh or broader MCP permissions.
 
 Memory has no native preservation mapping in this profile and remains an
 explicit preview/consent loss. Model controls, repositories and any other source

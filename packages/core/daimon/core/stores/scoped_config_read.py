@@ -67,7 +67,7 @@ async def resolve(
                 raise UserFacingError(
                     "This setup conversation was deleted. Open a new setup conversation."
                     if binding.kind == "setup"
-                    else "This conversation was deleted. Start the task again in a new thread."
+                    else "This conversation was deleted. Start again in a new conversation."
                 )
             return config.model_copy(
                 update={

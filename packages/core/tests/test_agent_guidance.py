@@ -24,8 +24,10 @@ def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
         "GitHub organizations. For a repo outside the working repo's organization,\n"
         "run `sh /mnt/session/uploads/github-repo.sh owner/repo <gh args...>`; to clone,\n"
         "run `sh /mnt/session/uploads/github-repo.sh owner/repo clone [dir]` and use\n"
-        "that clone for later Git commands. Plain `gh` and `GH_TOKEN` cover the working\n"
-        "repo's organization.\n"
+        "that clone for later Git commands. To push from that clone, run\n"
+        "`sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>` inside it, and\n"
+        "never push a repo outside the working repo's organization with `GH_TOKEN`. Plain\n"
+        "`gh` and `GH_TOKEN` cover the working repo's organization.\n"
     )
     assert CREDENTIAL_GUIDANCE_BLOCK.count(paragraph) == 1
     before = CREDENTIAL_GUIDANCE_BLOCK.replace(paragraph, "")
@@ -33,6 +35,19 @@ def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
         "f0cbfd773f6fd765d6812797f9f90ccfc4d35dcf1e626eecc486712cbf42ec2b"
     )
     assert apply_credential_guidance("base prompt").count(paragraph) == 1
+
+
+def test_github_helper_push_sentence_only_inside_helper_paragraph() -> None:
+    sentence = "github-repo.sh owner/repo push <branch>"
+    assert CREDENTIAL_GUIDANCE_BLOCK.count(sentence) == 1
+    helper_start = CREDENTIAL_GUIDANCE_BLOCK.index("If /mnt/session/uploads/github-repo.sh exists")
+    helper_end = CREDENTIAL_GUIDANCE_BLOCK.index("Do not describe every repo")
+    assert helper_start < CREDENTIAL_GUIDANCE_BLOCK.index(sentence) < helper_end
+    # The general paragraph keeps pushing the working repo with GH_TOKEN.
+    assert (
+        "git push https://x-access-token:${GH_TOKEN}@github.com/owner/repo.git <branch>"
+        in CREDENTIAL_GUIDANCE_BLOCK[:helper_start]
+    )
 
 
 def test_prepends_block_when_absent() -> None:

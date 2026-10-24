@@ -33,7 +33,7 @@ from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import Settings
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 

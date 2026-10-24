@@ -27,7 +27,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.state import TextBlock, TurnState
-from daimon.testing import ma_session, ma_session_agent
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

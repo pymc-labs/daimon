@@ -14,8 +14,6 @@ from typing import Literal
 import httpx
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions import BetaManagedAgentsStreamSessionEvents
-from daimon.testing.isolated_sdk import build_async_anthropic
-from daimon.testing.ma_models import ma_session
 from daimon.testing.provider_fixtures import (
     TARGET_SHA256,
     FixtureGap,
@@ -31,6 +29,8 @@ from daimon.testing.provider_replay import (
     WireReplay,
     WireReply,
 )
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.isolated_sdk import build_async_anthropic
 from pydantic import Field, TypeAdapter, model_validator
 
 _EVENT = TypeAdapter[BetaManagedAgentsStreamSessionEvents](BetaManagedAgentsStreamSessionEvents)

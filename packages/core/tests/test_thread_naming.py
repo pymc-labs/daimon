@@ -26,7 +26,7 @@ from daimon.core.thread_naming import (
     strip_mentions,
     suggest_thread_name,
 )
-from daimon.testing.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
 # ---------------------------------------------------------------------------
 # strip_mentions (pure)

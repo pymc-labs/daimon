@@ -38,10 +38,11 @@ from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn_origin import turn_origin
-from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -150,6 +151,8 @@ async def test_handoff_binds_the_thread_and_writes_no_channel_or_workspace_routi
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -215,6 +218,8 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
         role=Role.USER,
         attended=attended,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -285,6 +290,8 @@ async def test_handoff_nulls_a_fabricated_or_switch_only_continuation(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -347,6 +354,8 @@ async def test_handoff_confirmation_omits_the_raw_channel_id(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -386,6 +395,8 @@ async def test_handoff_unreachable_refusal_renders_the_channel_as_a_mention(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match=r"<#C_PARENT>") as excinfo:
             await _hand_off_task_impl(
@@ -424,8 +435,10 @@ async def test_handoff_refuses_an_agent_nobody_can_reach_and_writes_nothing(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
-        with pytest.raises(ToolError, match="does not answer anywhere in this workspace"):
+        with pytest.raises(ToolError, match="does not answer anywhere here"):
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
             )
@@ -478,6 +491,8 @@ async def test_handoff_refuses_inside_a_setup_conversation(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         is_setup=True,
         chat_session_id="test-session",
     ) as origin:
@@ -531,6 +546,8 @@ async def test_handoff_refuses_a_recreated_namesakes_old_id(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="recreated and has a new id"):
             await _hand_off_task_impl(
@@ -576,6 +593,8 @@ async def test_handoff_refuses_the_agent_that_already_answers_here(
         responder_name=_DESTINATION_NAME,
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="already answers in this conversation"):
             await _hand_off_task_impl(
@@ -622,6 +641,8 @@ async def test_handoff_asks_once_about_uncommitted_work_then_proceeds_with_the_a
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="uncommitted changes in https://github.com/acme/data"):
             await _hand_off_task_impl(
@@ -698,6 +719,8 @@ async def test_handoff_never_asks_about_uncommitted_work_when_no_repo_is_bound(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -729,6 +752,8 @@ async def test_handoff_rejects_a_wrong_or_expired_origin_before_touching_ma(
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         now=now,
         expires_at=now + timedelta(minutes=-1 if mismatch == "expired" else 10),
         chat_session_id="test-session",
@@ -805,6 +830,8 @@ async def test_fresh_start_marks_the_callers_live_session_without_tearing_it_dow
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _start_fresh_task_impl(runtime, auth, origin_context_id=str(origin.id))
 
@@ -827,7 +854,7 @@ async def test_fresh_start_marks_the_callers_live_session_without_tearing_it_dow
             account_id=other.id,
         )
     assert still_live is not None and still_live.id == mine.id, (
-        "nothing is removed until the new workspace is ready"
+        "nothing is removed until the new working files are ready"
     )
     assert still_live.fresh_start_requested_at is not None, "the request is recorded for next bind"
     assert neighbour is not None and neighbour.id == theirs.id, (
@@ -865,6 +892,8 @@ async def test_fresh_start_confirms_even_when_the_caller_has_no_live_session(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _start_fresh_task_impl(runtime, auth, origin_context_id=str(origin.id))
 
@@ -911,6 +940,8 @@ async def test_fresh_start_does_not_change_who_answers_in_the_thread(
         responder_name=_DESTINATION_NAME,
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         await _start_fresh_task_impl(runtime, auth, origin_context_id=str(origin.id))
 
@@ -960,6 +991,8 @@ async def test_handoff_with_an_answer_and_no_live_session_still_switches_the_res
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -1036,6 +1069,8 @@ async def test_handoff_stays_on_its_side_of_an_isolated_channel(
         responder_name="room-bot",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         if reachable:
             result = await _hand_off_task_impl(
@@ -1043,7 +1078,7 @@ async def test_handoff_stays_on_its_side_of_an_isolated_channel(
             )
             assert result.destination_name == _DESTINATION_NAME, "outside, shared agents stay"
         else:
-            with pytest.raises(ToolError, match="not in this workspace"):
+            with pytest.raises(ToolError, match="not here"):
                 await _hand_off_task_impl(
                     runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
                 )
@@ -1084,6 +1119,8 @@ async def test_handoff_refuses_an_agent_pinned_to_other_channels_and_writes_noth
         responder_name="daimon",
         role=Role.ADMIN,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="only runs in other channels"):
             await _hand_off_task_impl(
@@ -1134,6 +1171,8 @@ async def test_handoff_admits_a_pinned_agent_inside_its_own_channel(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -1184,6 +1223,8 @@ async def test_handoff_to_another_channels_agent_is_admin_only(
         responder_name="daimon",
         role=role,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         if role is Role.USER:
             with pytest.raises(ToolError, match="only a server admin can do it"):
@@ -1245,6 +1286,8 @@ async def test_handoff_from_a_dm_is_outside_every_pin(
         responder_name="daimon",
         role=Role.ADMIN,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="only runs in other channels"):
             await _hand_off_task_impl(
@@ -1293,6 +1336,8 @@ async def test_handoff_refuses_an_agent_pinned_by_its_display_name(
         responder_name="daimon",
         role=Role.ADMIN,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="only runs in other channels"):
             await _hand_off_task_impl(
@@ -1349,6 +1394,8 @@ async def test_a_member_hands_the_thread_to_an_agent_pinned_to_this_channel(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -1375,7 +1422,7 @@ async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
         MA_METADATA_KEY_SEALED,
         MA_METADATA_KEY_THREAD,
     )
-    from daimon.testing.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
@@ -1422,6 +1469,8 @@ async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -1475,6 +1524,8 @@ async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with capture_decision() as decision, pytest.raises(ToolError):
             await _hand_off_task_impl(
@@ -1485,3 +1536,114 @@ async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
         True,
         "authz:runs_elsewhere",
     ), "the refusal is audited as the policy's denial, not a tool error"
+
+
+@pytest.mark.parametrize("pinned", ["unpinned", "older_session", "shared_binding"])
+async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    pinned: str,
+) -> None:
+    """A copy on Gemini, routed nowhere: an admin may hand an unpinned thread to it
+    (its own provider applies). A thread pinned to Claude (by an older session, or
+    a shared binding) is refused: moving it drops history, and only a confirmed
+    switch may do that. Nothing is released either way."""
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends, mux_state
+    from daimon.core.thread_release import caller_slot, pending_releases
+    from daimon.testing.factories import make_thread_session
+    from mux.contracts.config import DEFAULT_BACKEND
+    from mux.contracts.resources import ProviderBinding
+    from mux.profiles import MANAGED_AGENTS
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    if pinned == "older_session":
+        await make_thread_session(
+            db_session,
+            tenant=tenant,
+            account=caller,
+            thread_id="T_THREAD",
+            channel_id="C_PARENT",
+            ma_session_id="sess_old",
+            ma_agent_id=_RESPONDER_ID,
+        )
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        await agent_backends.put_revision(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_DESTINATION_ID),
+            local=1,
+            backend="gemini",
+            digest="d" * 64,
+            previous_local=None,
+            agent_name="research-bot",
+            preview_digest="p" * 64,
+        )
+        if pinned == "shared_binding":
+            slot = caller_slot(
+                tenant_id=tenant.id,
+                platform="discord",
+                channel_id="C_PARENT",
+                thread_id="T_THREAD",
+                account_id=caller.id,
+            )
+            await mux_state.put_binding(
+                session,
+                ProviderBinding(
+                    id="shared-binding",
+                    thread=slot.thread,
+                    provider=DEFAULT_BACKEND,
+                    profile=MANAGED_AGENTS.profile_id,
+                    native_refs={"session": "sess_shared"},
+                    generation=1,
+                    config_revision=0,
+                    legacy_account_id=None,
+                ),
+                expected_generation=0,
+            )
+    runtime = _runtime(
+        committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
+    )
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        platform="discord",
+        platform_user_id="42",
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.ADMIN,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        if pinned == "unpinned":
+            result = await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )
+            assert "research-bot will handle your next message." in result.confirmation
+        else:
+            with pytest.raises(ToolError, match="runs on Gemini.*can't take over here"):
+                await _hand_off_task_impl(
+                    runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+                )
+    async with committing_sessionmaker() as session:
+        assert await pending_releases(session, tenant_id=tenant.id) == []
+        handed = await get_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="C_PARENT",
+            thread_id="T_THREAD",
+        )
+    assert (handed is not None) == (pinned == "unpinned"), "a refusal rolls the hand-off back"

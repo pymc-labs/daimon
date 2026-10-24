@@ -7,8 +7,6 @@ from copy import deepcopy
 
 import httpx
 import pytest
-from daimon.testing.drivers.openai.conformance_c03 import C03Policy
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.ids import ModelRef, Revision
@@ -19,6 +17,8 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
+from mux.testing.drivers.openai.conformance_c03 import C03Policy
+from mux.testing.isolated_sdk import build_async_openai
 
 from .conftest import REF, SCOPE
 

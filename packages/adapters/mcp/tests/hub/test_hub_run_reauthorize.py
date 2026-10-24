@@ -24,11 +24,11 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
-from daimon.testing import AGENT_ID, build_turn_router, ma_session
+from daimon.testing import AGENT_ID, build_turn_router
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
-from daimon.testing.ma import session_response
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import session_response
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, ma_session
 
 from .test_turn_parity import _TOKEN, _call_tool, _runtime
 

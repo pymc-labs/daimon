@@ -32,8 +32,17 @@ def _unique_declared_drops(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
+# `credentials`: saved keys the target can't receive; it runs without them.
 CapabilityDrop = Literal[
-    "memory", "sandbox", "skills", "mcp", "tools", "files", "repository", "model_controls"
+    "memory",
+    "sandbox",
+    "skills",
+    "mcp",
+    "tools",
+    "files",
+    "repository",
+    "model_controls",
+    "credentials",
 ]
 # A concrete MCP tool can be unavailable while the rest of its server survives.
 MCPToolDrop = Annotated[
@@ -231,8 +240,11 @@ class ProviderBinding(Contract):
     """Which provider session backs a thread, at which generation.
 
     Stored apart from the channel's desired config: changing the config
-    affects new threads only, so an existing binding is never rewritten by
-    it. `id` is the binding's identity, the one `ContinuityLost.binding_id`
+    affects new threads only, so an existing binding is not rewritten by it,
+    except where a driver can apply an edit in place. The self-hosted driver
+    does for an edited agent: its `apply_update` yields the next generation
+    with the new pins, which the host writes through `put_binding`'s
+    generation compare-and-swap. `id` is the binding's identity, the one `ContinuityLost.binding_id`
     and the usage adjustment keys name; it is stable across generations.
     `legacy_account_id` is set for a caller-private binding that predates
     shared threads.
@@ -441,3 +453,49 @@ class AgentThread(Contract):
     agent: ResourceRef | None = None
     parent_thread_id: str | None = None
     status: Literal["running", "idle", "terminated"]
+
+
+__all__ = [
+    "Agent",
+    "AgentFilter",
+    "AgentPatch",
+    "AgentSpec",
+    "AgentThread",
+    "Artifact",
+    "BuiltinToolDrop",
+    "CapabilityDrop",
+    "Continuity",
+    "CredentialBinding",
+    "CredentialInfo",
+    "DeclaredDrop",
+    "Environment",
+    "EnvironmentFilter",
+    "EnvironmentPatch",
+    "EnvironmentSpec",
+    "ExportRequirements",
+    "ExtensionsByNamespace",
+    "Lifecycle",
+    "MCPConnection",
+    "MCPToolDrop",
+    "Memory",
+    "MemoryStore",
+    "ModelAdmission",
+    "ModelInfo",
+    "NetworkPolicy",
+    "ProjectionSnapshot",
+    "ProviderBinding",
+    "ResourceBinding",
+    "Session",
+    "SessionExport",
+    "SessionFilter",
+    "SessionSpec",
+    "Skill",
+    "SkillUpload",
+    "SkillUploadFile",
+    "SkillVersion",
+    "ToolSpec",
+    "UpdateOperation",
+    "UpdatePlan",
+    "Vault",
+    "WorkspaceSource",
+]

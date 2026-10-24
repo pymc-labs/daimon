@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import random
 import re
 import subprocess
@@ -746,3 +747,16 @@ def test_checkpoint_left_out_ignores_an_echo_of_the_command() -> None:
     assert checkpoint_left_out(prompt) == ((), 0), (
         "quoting back the commands is not evidence that anything was left out"
     )
+
+
+def test_handoff_limit_admits_a_compressed_40_mib_binary_member() -> None:
+    """The Gemini snapshot tests feed the driver a 40 MiB member that gzips under this
+    host limit (`test_snapshot_accepts_a_real_40_mib_binary_member` in the mux suite)."""
+    mib = 1024 * 1024
+    body = bytes(range(256)) * (40 * mib // 256)
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as tar:
+        info = tarfile.TarInfo("work/large.bin")
+        info.size = len(body)
+        tar.addfile(info, io.BytesIO(body))
+    assert len(output.getvalue()) < HANDOFF_MAX_BYTES

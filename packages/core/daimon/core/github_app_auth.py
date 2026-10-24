@@ -367,6 +367,9 @@ async def mint_installation_listing_token(
 class InstallationAccountState:
     account_login: str
     suspended_at: datetime | None
+    # GitHub always sends account.id; None only when a response omits it, so
+    # owner correction is skipped rather than failing the reconciliation.
+    account_id: int | None = None
 
 
 async def get_app_installation_account(
@@ -412,7 +415,17 @@ async def get_app_installation_account(
             raise ValueError("GitHub installation suspended_at must include a timezone")
     else:
         raise ValueError("GitHub installation suspended_at must be a timestamp or null")
-    return InstallationAccountState(account_login=login, suspended_at=suspended_at)
+    account_id_raw = account_object.get("id")
+    account_id = (
+        account_id_raw
+        if isinstance(account_id_raw, int)
+        and not isinstance(account_id_raw, bool)
+        and account_id_raw > 0
+        else None
+    )
+    return InstallationAccountState(
+        account_login=login, suspended_at=suspended_at, account_id=account_id
+    )
 
 
 async def list_installation_repositories(

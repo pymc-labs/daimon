@@ -31,7 +31,7 @@ from daimon.core.thread_participation import (
     ParticipationScope,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import CHANNEL_ID, OTHER_AAD_OBJECT_ID, THREAD_ID, make_inbound

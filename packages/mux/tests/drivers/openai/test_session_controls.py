@@ -6,7 +6,6 @@ import json
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.ids import Revision
@@ -17,6 +16,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import UnsupportedCapability
+from mux.testing.isolated_sdk import build_async_openai
 from pydantic import ValidationError
 
 from .conftest import REF, SCOPE, native_session
@@ -184,8 +184,10 @@ async def test_explicit_session_model_override_is_verified(actual_model: str | N
     assert json.loads(seen[-1].content)["agent"] == {"model": "gpt-6-luna"}
 
 
-def test_only_luna_is_an_allowed_session_model_control():
-    for model in ("gpt-6-astra", "gpt-5-nano", "gpt-6-sol", ""):
+def test_only_native_host_models_are_allowed_session_model_controls():
+    for model in ("gpt-6-luna", "gpt-6-astra"):
+        assert SessionControls.model_validate({"model": model}).model == model
+    for model in ("gpt-5-nano", "gpt-6-sol", ""):
         with pytest.raises(ValidationError):
             SessionControls.model_validate({"model": model})
 

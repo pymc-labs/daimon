@@ -28,7 +28,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 _CHAT_PLATFORMS: Final = frozenset({"discord", "slack", "teams"})
-_WRONG_PLATFORM = "Plain-text mentions only apply on Discord, Slack and Teams; nothing was changed."
+_WRONG_PLATFORM = "Plain-text mentions aren't available here; nothing was changed."
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ async def _set_plain_text_mentions_impl(
         try:
             await set_plain_text_mentions(session, tenant_id=auth.tenant_id, enabled=enabled)
         except StoreError as exc:
-            raise ToolError("internal: the caller's tenant no longer exists") from exc
+            raise ToolError("internal: this chat space no longer exists") from exc
     return PlainTextMentionsStatus(enabled=enabled, note=_note(enabled))
 
 
@@ -81,7 +81,7 @@ def register_plain_text_mentions_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
     ) -> PlainTextMentionsStatus:
         """Let a typed "@<your name>" in a channel or thread start a reply. Admin-only.
 
-        For the whole server or workspace, on Discord, Slack and Teams. When
+        For the whole workspace. When
         ``enabled`` is true, a person's message in a channel or thread that
         contains your name after "@" as plain text (any case, for example a
         pasted prompt or a mention typed on a phone without picking you from
@@ -100,7 +100,7 @@ def register_plain_text_mentions_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         """Report whether a typed "@<your name>" in a channel or thread starts a reply here.
 
         Reading needs no admin; changing it does (``set_plain_text_mentions``,
-        a server or workspace admin). Read the returned ``note`` back to the
+        an admin). Read the returned ``note`` back to the
         user.
         """
         return await _get_plain_text_mentions_impl(runtime, await _auth(ctx))

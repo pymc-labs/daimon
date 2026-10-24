@@ -12,18 +12,18 @@ from typing import cast
 
 import httpx
 import pytest
-from daimon.testing.conformance.budget import BudgetConfig, BudgetGuard, BudgetRefused
-from daimon.testing.conformance.runner import ConformanceFailure
-from daimon.testing.drivers.gemini.round_cases import INTERACTION_CEILING_USD, run_c04, run_c06
-from daimon.testing.drivers.gemini.round_runner import Admission, Case, Envelope, execute
-from daimon.testing.isolated_sdk import build_gemini_client
 from mux.contracts.actions import InputEvent, UserMessage
 from mux.contracts.events import Event, TextPart
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import SendReceipt
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import GeminiEvents
-from mux.drivers.gemini.transport import Object, SDKTransport
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, SDKTransport
+from mux.testing.conformance.budget import BudgetConfig, BudgetGuard, BudgetRefused
+from mux.testing.conformance.runner import ConformanceFailure
+from mux.testing.drivers.gemini.round_cases import INTERACTION_CEILING_USD, run_c04, run_c06
+from mux.testing.drivers.gemini.round_runner import Admission, Case, Envelope, execute
+from mux.testing.isolated_sdk import build_gemini_client
 from pydantic import JsonValue
 
 SCOPE = Scope(tenant_id="n12-round", account_id="qa", principal_id="human", authorization_id="go")
@@ -57,7 +57,7 @@ class NativeWire:
             if self.sdk is not None:
                 assert self.session is not None
             body = json.loads(request.content)
-            assert body["tools"] == []
+            assert body["tools"] == [NO_TOOLS_TOOL]
             assert body["agent_config"]["model"] == "gemini-3.8-flash"
             self.identities.append(
                 "native-owned" if len(self.posts) == 1 else f"native-owned-{len(self.posts)}"
@@ -294,7 +294,10 @@ async def test_complete_round_sdk_single_case_hold_get_before_delete_and_exact_s
     for request in native.requests:
         if request.method == "POST" and request.url.path.endswith("/interactions"):
             body = json.loads(request.content)
-            assert body["tools"] == [] and body["agent_config"]["max_total_tokens"] == 4096
+            assert (
+                body["tools"] == [NO_TOOLS_TOOL]
+                and body["agent_config"]["max_total_tokens"] == 4096
+            )
     with pytest.raises(FileExistsError):
         await execute(selected, mock=httpx.MockTransport(native.handle))
     assert len(native.posts) == selected.envelope.interactions
@@ -309,7 +312,7 @@ async def test_unsealed_live_admission_refuses_before_key_or_transport(
     def forbidden() -> str:
         raise AssertionError("key must not be touched")
 
-    monkeypatch.setattr("daimon.testing.drivers.gemini.round_runner.read_key", forbidden)
+    monkeypatch.setattr("mux.testing.drivers.gemini.round_runner.read_key", forbidden)
     with pytest.raises(BudgetRefused, match="separately pinned"):
         await execute(selected, live=True)
     assert not selected.output.exists()

@@ -37,11 +37,11 @@ from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.effect_recorder import FakeClock
 from daimon.testing.factories import make_ledger_entry, make_tenant
-from daimon.testing.ma import combine_handlers, make_fake_memory_store_handler
-from daimon.testing.ma_models import ma_session
 from daimon.testing.turn_fakes import BlockForever, FakeAnthropic, RecordingLifecycle
 from daimon.testing.turn_router import build_turn_router
 from http_turn import EventBytes, HttpTurnFixtures
+from mux.testing.drivers.anthropic.ma import combine_handlers, make_fake_memory_store_handler
+from mux.testing.drivers.anthropic.ma_models import ma_session
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 
@@ -213,7 +213,7 @@ async def test_cold_thread_feedback_before_session_create(
     else:
         app: Any = SlackApp(runtime=runtime)
         with AioResponsesMock() as mock:
-            module._register_slack_defaults(mock)
+            module._register_slack_defaults(mock, team_id=workspace)
             await app._handle_app_mention(
                 {
                     "type": "app_mention",

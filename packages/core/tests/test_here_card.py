@@ -97,9 +97,12 @@ def test_mcp_plain_text_states(state: str, expected_lines: list[str]) -> None:
 @pytest.mark.parametrize(
     ("state", "subline"),
     [
-        ("no_replies", "An admin can turn them on in setup."),
-        ("no_agent", "An admin can pick one in setup."),
-        ("blocked", "An admin can change where it answers in setup."),
+        ("no_replies", "An admin can turn them on in setup, in a 1:1 chat with Daimon."),
+        ("no_agent", "An admin can pick one in setup, in a 1:1 chat with Daimon."),
+        (
+            "blocked",
+            "An admin can change where it answers in setup, in a 1:1 chat with Daimon.",
+        ),
     ],
 )
 def test_teams_sublines_name_its_setup_command(state: str, subline: str) -> None:

@@ -39,13 +39,13 @@ from daimon.core.stores import tenants, usage_events
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import KnownName, upsert_user_names
-from daimon.testing import ma_model_usage
 from daimon.testing.factories import (
     make_account,
     make_channel_budget,
     make_ledger_entry,
     make_tenant,
 )
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -132,7 +132,7 @@ def test_the_month_summary_and_own_use_lines() -> None:
     ), "the month and the spend are two lines, no separator"
     assert admin_summary(since, spend=1.0, people=1) == ("October 2026", "$1.00 spent by 1 person")
     assert admin_summary(since, spend=0.0, people=0) == ("October 2026", "Nothing used yet")
-    assert turns_phrase(1250) == "about 1,250 turns"
+    assert turns_phrase(1250) == "about 1,250 answers"
     assert caller_line(11.5, Decimal("25"), 71) == "$11.50 of your $25.00 this month"
     assert caller_line(11.5, None, 71) == "$11.50 used this month"
     assert caller_line(0.0, Decimal("25"), 0) == "Nothing used this month"

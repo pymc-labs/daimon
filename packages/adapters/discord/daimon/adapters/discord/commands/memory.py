@@ -24,17 +24,20 @@ from daimon.core.memory_view import (
     ChannelAgent,
     PersonalMemoryReply,
     get_own_personal_memory_store,
+    get_shared_memory_store_id,
+    held_place,
     parse_memory_args,
     personal_memory_reply,
 )
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import list_memory_entries, read_memory
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.rule_views import is_memory_hidden
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.agent_memory_stores import get_memory_store_id
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
+from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -76,6 +79,20 @@ async def _resolve_agent(
         )
         config = await resolve_config(session, context=scope, default=runtime.deployment_default)
         policy = await load_access_policy(session, tenant_id=tenant_id)
+        channel = interaction.channel
+        parent = channel.parent_id if isinstance(channel, discord.Thread) else None
+        hold = await held_place(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            # A thread is held with its parent channel.
+            channel_id=str(parent if parent is not None else interaction.channel_id),
+            foreign_home_id=principal.foreign_home_id,
+            # Discord has no other-organisation members and no live shared-channel
+            # signal: a member of the guild, and the recorded registry decides.
+            requester_org=RequesterOrg.HOST,
+            channel_shared=None,
+        )
     if config.agent_name is None:
         return None
     agent = await find_agent_by_daimon_tag(
@@ -86,8 +103,6 @@ async def _resolve_agent(
         raise UserFacingError(
             "The configured agent could not be found. Ask an admin to check the agent setup."
         )
-    channel = interaction.channel
-    parent = channel.parent_id if isinstance(channel, discord.Thread) else None
     if is_memory_hidden(
         policy,
         agent_names=(config.agent_name, *agent_pin_names(agent.name, agent.metadata)),
@@ -100,20 +115,21 @@ async def _resolve_agent(
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
         account_id=principal.account_id,
+        hold=hold,
     )
 
 
 async def _resolve_store(
     runtime: DiscordRuntime, interaction: BotInteraction
 ) -> tuple[str, str] | None:
-    """Resolve (agent_name, shared memory_store_id) for the invoking channel, or None."""
+    """Resolve (agent_name, shown memory_store_id) for the invoking channel, or None.
+
+    The agent-wide store, or in a held place the channel's own.
+    """
     agent = await _resolve_agent(runtime, interaction)
     if agent is None:
         return None
-    async with runtime.sessionmaker() as session:
-        store_id = await get_memory_store_id(
-            session, tenant_id=agent.tenant_id, agent_id=agent.agent_id
-        )
+    store_id = await get_shared_memory_store_id(runtime.sessionmaker, agent)
     if store_id is None:
         return None
     return agent.agent_name, store_id
@@ -164,7 +180,7 @@ class MemoryCog(commands.Cog):
 
     @app_commands.command(
         name="memory",
-        description="What the agent remembers",
+        description=DESCRIPTIONS["memory"],
     )
     @app_commands.describe(
         path=(
@@ -193,6 +209,7 @@ class MemoryCog(commands.Cog):
                     request=request,
                     command="/memory path:",
                     scope=resource_scope(tenant_id=str(agent.tenant_id)),
+                    held=agent.hold is not None,
                 )
                 await interaction.followup.send(
                     _personal_text(reply),

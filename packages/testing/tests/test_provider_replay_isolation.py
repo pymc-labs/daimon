@@ -8,9 +8,9 @@ from pathlib import Path
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import SDK_ENV_VARS, AmbientSDKConfigurationError
 from daimon.testing.provider_fixtures import load_provider_fixtures, turn_tape
 from daimon.testing.provider_replay import Backend, ProviderTape, WireReplay, provider_replay
+from mux.testing.isolated_sdk import SDK_ENV_VARS, AmbientSDKConfigurationError
 
 DATA = Path(__file__).resolve().parents[3] / "packages/testing/fixtures/target53"
 PACK = load_provider_fixtures(DATA / "index.json", catalog_root=DATA / "catalog")

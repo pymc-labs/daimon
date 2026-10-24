@@ -17,9 +17,9 @@ from daimon.core.mux_compat import (
     update_agent,
     update_environment,
 )
-from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedTransport
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 
 class ResourceTransport:
@@ -514,7 +514,7 @@ async def test_skills_listing_keeps_pagination_and_truncation_signal(terminal_fu
 async def test_missing_page_data_keeps_sdks_empty_iterator_behavior(resource, payload):
     from collections import deque
 
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     path = "/v1/agents" if resource == "agent" else "/v1/environments"
     old = ScriptedTransport(deque([ScriptedReply("GET", path, httpx.Response(200, json=payload))]))
@@ -676,7 +676,7 @@ async def test_canonical_worker_agent_create_preserves_actual_sdk_bytes(clone):
         skills=payload["skills"],
         metadata=payload["metadata"],
     ).model_dump(mode="json")
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     before.queue(ScriptedReply("POST", "/v1/agents", httpx.Response(200, json=native)))
     after.queue(ScriptedReply("POST", "/v1/agents", httpx.Response(200, json=native)))
@@ -695,8 +695,8 @@ async def test_canonical_worker_agent_create_preserves_actual_sdk_bytes(clone):
 
 async def test_claimed_agent_create_disables_sdk_retry_without_changing_shared_client():
     from anthropic import InternalServerError
-    from daimon.testing.ma_transport import ScriptedReply
     from mux.drivers.anthropic.transport import single_attempt_mutation
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     trace = ScriptedTransport()
     trace.queue(
@@ -730,10 +730,10 @@ async def test_claimed_agent_create_disables_sdk_retry_without_changing_shared_c
 )
 async def test_claimed_worker_resource_creates_make_one_native_attempt(kind, path):
     from daimon.core.mux_backend import managed_agents
-    from daimon.testing.ma_transport import ScriptedReply
     from mux.contracts.ports import MemoryStores, Vaults
     from mux.drivers.anthropic.transport import single_attempt_mutation
     from mux.errors import ProviderError
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     trace = ScriptedTransport()
     trace.queue(

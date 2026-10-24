@@ -76,10 +76,13 @@ class AccountingMode(StrEnum):
 
     Native root totals describe already decoded disjoint child usage, not
     permission to provision delegation or a claim that a roster port exists.
+    Native requests settle incremental model-request observations through the
+    same native protocol; `usage_grain` is the grain a driver must emit.
     """
 
     REQUEST_SPANS = "request_spans"
     NATIVE_TOTALS = "native_totals"
+    NATIVE_REQUESTS = "native_requests"
     NATIVE_ROOT_TOTALS = "native_root_totals"
 
     @property
@@ -89,6 +92,13 @@ class AccountingMode(StrEnum):
     @property
     def supports_root_usage(self) -> bool:
         return self is AccountingMode.NATIVE_ROOT_TOTALS
+
+    @property
+    def usage_grain(self) -> Literal["model_request", "turn"]:
+        """The grain of the observations this mode settles."""
+        if self in (AccountingMode.REQUEST_SPANS, AccountingMode.NATIVE_REQUESTS):
+            return "model_request"
+        return "turn"
 
 
 class Profile(Contract):
@@ -169,3 +179,13 @@ class Profile(Contract):
         if version not in versions:
             raise ExtensionVersionError(namespace, version, versions)
         return ExtensionRef(namespace=namespace, version=version)
+
+
+__all__ = [
+    "AccountingMode",
+    "CORE_CAPABILITIES",
+    "Capability",
+    "Profile",
+    "SUPPORTED",
+    "Support",
+]

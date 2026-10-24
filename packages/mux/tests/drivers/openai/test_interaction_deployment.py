@@ -10,9 +10,6 @@ from typing import cast
 
 import httpx
 import pytest
-from daimon.testing.drivers.openai.default_capability import decode_upload
-from daimon.testing.drivers.openai.offline_sdk import refuse_inherited_settings
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import RequiresActionPayload, TextPart
 from mux.contracts.ids import ModelRef, Revision, Scope
@@ -33,6 +30,9 @@ from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ContinuityLost, UnsupportedCapability
+from mux.testing.drivers.openai.default_capability import decode_upload
+from mux.testing.drivers.openai.offline_sdk import refuse_inherited_settings
+from mux.testing.isolated_sdk import build_async_openai
 
 SCOPE = Scope(tenant_id="tenant", account_id="account", principal_id="human", authorization_id="go")
 BUNDLE = SkillUpload(

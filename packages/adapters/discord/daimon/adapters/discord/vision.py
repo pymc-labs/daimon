@@ -185,7 +185,7 @@ async def download_as_image_blocks(
             inlined += not isinstance(outcome, str)
     for i in waiting:
         log.warning("image_attachment.skipped.count_cap", name=attachments[i].filename)
-        outcomes[i] = f"more than {MAX_VISION_IMAGES} images in one turn"
+        outcomes[i] = f"more than {MAX_VISION_IMAGES} images in one message"
 
     blocks = [outcome for outcome in outcomes if isinstance(outcome, dict)]
     skipped = [

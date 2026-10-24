@@ -37,9 +37,6 @@ from daimon.testing.http_observation import (
     http_outcome,
     offline_http_apps,
 )
-from daimon.testing.ma import send_events_response
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.outcome_oracle import (
     CheckResult,
     OutcomeReport,
@@ -76,6 +73,9 @@ from mux.contracts.resources import ProviderBinding
 from mux.drivers.anthropic.resources.session_tools import SessionTools
 from mux.state.memory import MemoryStateStore
 from mux.state.store import binding_slot
+from mux.testing.drivers.anthropic.ma import send_events_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import Field, JsonValue, computed_field, model_validator
 
 if __package__:

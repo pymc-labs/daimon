@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.metadata
+import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -141,6 +143,8 @@ def test_database_free_tests_load_plugin_without_reading_dsn_or_models(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("DAIMON_DATABASE__TEST_URL", raising=False)
+    # Needs a fresh interpreter: it asserts which modules the plugin leaves
+    # unimported, and an in-process run shares this process's sys.modules.
     pytester.makepyfile(
         """
 import sys
@@ -251,7 +255,7 @@ async def test_next_module(db_engine, db_schema):
 """
     )
     root = Path(__file__).resolve().parents[3]
-    result = pytester.runpytest_subprocess(
+    result = pytester.runpytest_inprocess(
         "-q",
         "-n",
         "0",
@@ -261,7 +265,6 @@ async def test_next_module(db_engine, db_schema):
         str(root / "pyproject.toml"),
         str(first),
         str(second),
-        timeout=120,
     )
     result.assert_outcomes(passed=2)
 
@@ -327,7 +330,17 @@ class TestClassOverride:
             raise RuntimeError("class admission changed")
 """
     )
-    pytester.runpytest_subprocess("-q", timeout=120).assert_outcomes(passed=3)
+    pytester.runpytest_inprocess("-q").assert_outcomes(passed=3)
+
+
+def _import_probe_module(path: Path) -> None:
+    # pydantic imports this lazily, and a sys.modules restore would unload it.
+    importlib.import_module("pydantic.root_model")
+    spec = importlib.util.spec_from_file_location("new15_owned_preload", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
 
 
 @pytest.mark.parametrize(
@@ -352,9 +365,13 @@ def test_real_fixture_graph_stops_before_connection_or_ddl(
     expected_skips: int,
 ) -> None:
     monkeypatch.setenv("PREFLIGHT_PROBE_CASE", case)
-    monkeypatch.setenv(
-        "PREFLIGHT_NEW15_TEST_FILE", str(Path(__file__).with_name("test_channel_accounting.py"))
-    )
+    probe_file = Path(__file__).with_name("test_channel_accounting.py")
+    monkeypatch.setenv("PREFLIGHT_NEW15_TEST_FILE", str(probe_file))
+    # The inner session runs in this process and pytester restores sys.modules
+    # after each run. Import the probe's heavy provider stack first, so it is
+    # part of the snapshot and survives instead of being half-unloaded (which
+    # breaks pydantic generics on the next case).
+    _import_probe_module(probe_file)
     # No db_preflight import: existing consumers discover it automatically.
     pytester.makeconftest(
         r"""
@@ -442,8 +459,9 @@ async def test_original_new15_consumer(context, connection_and_factory_trap):
     raise RuntimeError("NEW15 context must never run past trap")
 """
     )
-    # pytester executes in a child: no real shared DB connection can escape trap.
-    result = pytester.runpytest_subprocess("-q", "--tb=short", timeout=120)
+    # The inner session runs in this process, but its conftest traps every
+    # engine connection and all schema DDL, so no real DB access can escape.
+    result = pytester.runpytest_inprocess("-q", "--tb=short")
     if expected_skips:
         result.assert_outcomes(skipped=expected_skips)
     else:

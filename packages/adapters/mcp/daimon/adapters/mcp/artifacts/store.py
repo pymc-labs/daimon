@@ -84,7 +84,11 @@ class S3ArtifactStore:
 
 
 def build_artifact_store(settings: ArtifactsSettings) -> ArtifactStore:
-    """Construct the production S3-compatible store from validated settings."""
+    """Construct the configured private store from validated settings."""
+    if settings.backend == "azure_blob":
+        from daimon.adapters.mcp.artifacts.azure_blob import build_azure_blob_store
+
+        return build_azure_blob_store(settings)
     client = Session().create_client(  # pyright: ignore[reportUnknownMemberType]  # botocore has no inline types
         "s3",
         endpoint_url=str(settings.endpoint_url).rstrip("/"),

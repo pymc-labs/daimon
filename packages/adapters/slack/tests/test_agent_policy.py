@@ -37,9 +37,9 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.testing.factories import make_tenant, make_tenant_config
-from daimon.testing.ma import MARouter, build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, make_fake_ma_handler
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -60,6 +60,7 @@ def _users_info_payload(*, is_admin: bool) -> dict[str, Any]:
         "user": {
             "id": _USER_ID,
             "name": "admin" if is_admin else "member",
+            "team_id": _TEAM_ID,
             "is_admin": is_admin,
             "is_owner": False,
             "is_primary_owner": False,
@@ -149,6 +150,7 @@ async def test_attachment_write_allows_an_admin_without_reading_the_target(
             AsyncWebClient(token="xoxb-test"),
             operation="repo_bind",
             tenant_id=tenant.id,
+            team_id=_TEAM_ID,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
             channel_id=_CHANNEL_ID,
             user_id=_USER_ID,
@@ -183,6 +185,7 @@ async def test_spec_edit_refuses_a_managed_agent_even_for_an_admin(
             AsyncWebClient(token="xoxb-test"),
             operation="agent_spec_edit",
             tenant_id=tenant.id,
+            team_id=_TEAM_ID,
             agent_name=_AGENT_NAME,
             channel_id=_CHANNEL_ID,
             user_id=_USER_ID,
@@ -215,6 +218,7 @@ async def test_spec_edit_refuses_a_member_when_the_target_answers_somewhere(
             AsyncWebClient(token="xoxb-test"),
             operation="agent_spec_edit",
             tenant_id=tenant.id,
+            team_id=_TEAM_ID,
             agent_name=_AGENT_NAME,
             channel_id=_CHANNEL_ID,
             user_id=_USER_ID,
@@ -246,6 +250,7 @@ async def test_spec_edit_refuses_a_member_when_the_target_answers_nowhere(
             AsyncWebClient(token="xoxb-test"),
             operation="agent_spec_edit",
             tenant_id=tenant.id,
+            team_id=_TEAM_ID,
             agent_name=_AGENT_NAME,
             channel_id=_CHANNEL_ID,
             user_id=_USER_ID,
@@ -279,6 +284,7 @@ async def test_refuse_unless_allowed_refuses_when_the_agent_id_is_gone(
             AsyncWebClient(token="xoxb-test"),
             operation="repo_bind",
             tenant_id=tenant.id,
+            team_id=_TEAM_ID,
             agent_id=uuid.uuid4(),
             channel_id=_CHANNEL_ID,
             user_id=_USER_ID,
@@ -317,6 +323,7 @@ async def test_posted_token_write_allows_a_member_without_fetching_the_target(
             AsyncWebClient(token="xoxb-test"),
             operation="key_add",
             tenant_id=tenant.id,
+            team_id=_TEAM_ID,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
             channel_id=_CHANNEL_ID,
             user_id=_USER_ID,
@@ -359,6 +366,7 @@ async def test_credential_gate_reachable_limb_uses_decide_operation(
             runtime,
             AsyncWebClient(token="xoxb-test"),
             tenant_id=tenant.id,
+            team_id=_TEAM_ID,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
             channel_id=_CHANNEL_ID,
             user_id=_USER_ID,
@@ -391,3 +399,63 @@ def test_refusal_copy_differs_by_operation_family() -> None:
     assert refusal_message("skill_repo_connect", "needs_admin") == SHARED_AGENT_SKILLS_MESSAGE, (
         "a skill import names what the member was trying to add"
     )
+
+
+async def test_the_agents_owner_passes_the_panel_gate_and_others_do_not(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The panel allows the owner exactly what chat allows; a member is still refused."""
+    from daimon.core.stores import agent_owners
+    from daimon.testing.factories import make_account, make_platform_principal
+
+    async with db_session_factory() as session:
+        tenant = await make_tenant(session, platform="slack", workspace_id=_TEAM_ID)
+        owner = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, tenant=tenant, account=owner, platform="slack", external_id=_USER_ID
+        )
+        await agent_owners.set_owner(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_AGENT_ID),
+            owner_account_id=owner.id,
+            source="admin_assigned",
+        )
+        await session.commit()
+
+    for operation, refused_for_owner in (
+        ("agent_spec_edit", False),
+        ("skill_add", False),
+        ("key_replace", False),
+        ("mcp_connect", False),
+        # Spends the workspace's GitHub installation: an admin's call.
+        ("repo_bind", True),
+    ):
+        with AioResponsesMock() as mock:
+            mock.get(_USERS_INFO_PATTERN, payload=_users_info_payload(is_admin=False), repeat=True)  # pyright: ignore[reportUnknownMemberType]
+            mock.post(f"{_SLACK_API_BASE}/chat.postEphemeral", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
+            runtime = _build_runtime(
+                db_session_factory, handler=_agent_list_handler(tenant_id=tenant.id)
+            )
+            refused = await refuse_unless_allowed_for_agent_name(
+                runtime,
+                AsyncWebClient(token="xoxb-test"),
+                operation=operation,
+                tenant_id=tenant.id,
+                team_id=_TEAM_ID,
+                agent_name=_AGENT_NAME,
+                channel_id=_CHANNEL_ID,
+                user_id=_USER_ID,
+            )
+            assert refused is refused_for_owner, operation
+            refused_other = await refuse_unless_allowed_for_agent_name(
+                runtime,
+                AsyncWebClient(token="xoxb-test"),
+                operation=operation,
+                tenant_id=tenant.id,
+                team_id=_TEAM_ID,
+                agent_name=_AGENT_NAME,
+                channel_id=_CHANNEL_ID,
+                user_id="U_SOMEONE_ELSE",
+            )
+            assert refused_other is True, operation

@@ -64,8 +64,10 @@ If /mnt/session/uploads/github-repo.sh exists, your repos span multiple
 GitHub organizations. For a repo outside the working repo's organization,
 run `sh /mnt/session/uploads/github-repo.sh owner/repo <gh args...>`; to clone,
 run `sh /mnt/session/uploads/github-repo.sh owner/repo clone [dir]` and use
-that clone for later Git commands. Plain `gh` and `GH_TOKEN` cover the working
-repo's organization.
+that clone for later Git commands. To push from that clone, run
+`sh /mnt/session/uploads/github-repo.sh owner/repo push <branch>` inside it, and
+never push a repo outside the working repo's organization with `GH_TOKEN`. Plain
+`gh` and `GH_TOKEN` cover the working repo's organization.
 Do not describe every repo with token access as mounted
 or name repos from a server-wide list as this agent's own.
 If a private repo can't be read, say so in one line and, in the same reply,

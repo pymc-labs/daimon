@@ -89,7 +89,7 @@ async def handle_routines_command(runtime: SlackRuntime, payload: dict[str, Any]
                 session,
                 runtime.anthropic,
                 tenant_id=tenant_id,
-                viewer_user_id=await routines_viewer(client, user_id=user_id),
+                viewer_user_id=await routines_viewer(client, user_id=user_id, team_id=team_id),
             )
         state = RoutinesPanelState(
             rows=entries,
@@ -184,7 +184,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             async with runtime.sessionmaker() as session, session.begin():
 
                 async def allowed(row: RoutineRow) -> bool:
-                    is_admin = await resolve_is_admin(client, user_id=user_id)
+                    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
                     return can_manage_routine(row, user_id=user_id, is_admin=is_admin)
 
                 result = await apply_routine_action(
@@ -218,7 +218,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     session,
                     runtime.anthropic,
                     tenant_id=tenant_id,
-                    viewer_user_id=await routines_viewer(client, user_id=user_id),
+                    viewer_user_id=await routines_viewer(client, user_id=user_id, team_id=team_id),
                 )
             state = RoutinesPanelState(
                 rows=entries,
@@ -249,7 +249,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 return
             # Authority gate before showing the confirm modal (re-checked at
             # submit for TOCTOU safety). Admin OR creator.
-            is_admin = await resolve_is_admin(client, user_id=user_id)
+            is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
             if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -287,7 +287,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             # Same authority as pause/resume/delete. last_result_tail is the
             # agent's own output from a scheduled run and routinely carries
             # business data, so reading it is not a lesser act than pausing.
-            is_admin = await resolve_is_admin(client, user_id=user_id)
+            is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
             if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -324,7 +324,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     session,
                     runtime.anthropic,
                     tenant_id=tenant_id,
-                    viewer_user_id=await routines_viewer(client, user_id=user_id),
+                    viewer_user_id=await routines_viewer(client, user_id=user_id, team_id=team_id),
                 )
             state = RoutinesPanelState(
                 rows=entries,
@@ -338,7 +338,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
 
         elif action_value == "create":
             # Admin gate at click time. Refused → ephemeral.
-            is_admin = await resolve_is_admin(client, user_id=user_id)
+            is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
             if not is_admin:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,

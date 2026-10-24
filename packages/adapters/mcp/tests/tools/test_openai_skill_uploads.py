@@ -52,11 +52,11 @@ class _OpenAIHost(NeutralResourceHost):
     """A real, scoped host whose catalog agent and Add edge are recorded stand-ins."""
 
     def __init__(self, sessions: async_sessionmaker[AsyncSession], scope: Scope) -> None:
-        from daimon.testing.isolated_sdk import build_async_openai
         from mux.drivers.openai import OpenAIDriver
         from mux.drivers.openai.transport import SDKTransport
         from mux.drivers.openai.turn import MemoryRecoveryJournal
         from mux.drivers.openai.usage import MemoryUsageRevisions
+        from mux.testing.isolated_sdk import build_async_openai
 
         super().__init__(
             OpenAIDriver(
@@ -253,7 +253,7 @@ async def test_openai_reads_a_polite_reply_like_every_backend(
             added = await confirm(reply)
             assert added.status == "added"
         else:
-            with pytest.raises(ToolError, match="did not start with the person replying"):
+            with pytest.raises(ToolError, match="is not the person replying"):
                 await confirm(reply)
     assert [host.added for host in hosts.hosts] == (
         [[], [("helper", "notes")]] if adds else [[], []]
@@ -305,7 +305,7 @@ async def test_a_host_for_another_account_is_refused_before_any_change(
     auth, origin = await _cards_off_turn(world)
     hosts = _Hosts(world.runtime.session_factory, foreign_account=True)
     await _openai_room(world, monkeypatch, tmp_path, hosts=hosts)
-    with pytest.raises(ToolError, match="different tenant, account or workspace"):
+    with pytest.raises(ToolError, match="belong to someone else"):
         await _add_skill_impl(
             world.runtime,
             auth,

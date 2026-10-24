@@ -42,7 +42,7 @@ async def test_mint_stores_the_admin_role_and_refuses_promo_create(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
-    with pytest.raises(OperatorTokenError, match="mint-operator-token"):
+    with pytest.raises(OperatorTokenError, match="can't be granted from here"):
         await _mint(db_session, tenant.id, ["tenant:read", "promo:create"])
     minted = await _mint(db_session, tenant.id, ["tenant:read"])
     (row,) = await list_panel_operator_tokens(db_session, tenant_id=tenant.id, now=NOW)

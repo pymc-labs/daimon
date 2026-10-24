@@ -30,8 +30,8 @@ from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.testing.archives import make_tarball
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TS = "2026-04-21T00:00:00Z"

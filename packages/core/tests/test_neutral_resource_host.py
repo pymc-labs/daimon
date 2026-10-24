@@ -34,8 +34,6 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.neutral_catalog import CatalogConflict, PostgresNeutralCatalog
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux import profiles
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import Agent, AgentSpec, MCPConnection, ToolSpec
@@ -47,6 +45,8 @@ from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles import PERSISTENT_WORKSPACE
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 

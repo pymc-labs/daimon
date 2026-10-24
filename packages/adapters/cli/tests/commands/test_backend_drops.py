@@ -16,12 +16,13 @@ from daimon.core.config import Settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import security_audit
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.pytest_plugin import db_preflight as db_preflight
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -643,18 +644,19 @@ async def test_flag_off_refuses_before_source_or_dependency_construction(operato
     from daimon.core.errors import StoreError
 
     rt, *rest = operator
-    rt = replace(rt, settings=rt.settings.model_copy(update={"turn": TurnSettings()}))
+    stopped = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
+    rt = replace(rt, settings=rt.settings.model_copy(update={"turn": stopped}))
     operator[-1].clear()
     with pytest.raises(StoreError, match="disabled"):
         await run((rt, *rest), accept_drops="memory,sandbox")
     assert not operator[-1]
 
 
-async def test_real_encrypted_key_remains_nondroppable_without_any_secret_read(
+async def test_real_encrypted_key_is_lost_only_when_declared_without_any_secret_read(
     operator, monkeypatch
 ):
+    import click
     from cryptography.fernet import Fernet
-    from daimon.core.channel_backend import AgentBackendRefused
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.stores import agent_files
 
@@ -674,7 +676,8 @@ async def test_real_encrypted_key_remains_nondroppable_without_any_secret_read(
         pytest.fail("A switch preview must not resolve a secret")
 
     monkeypatch.setattr(agent_files, "get_agent_file", forbidden_read)
-    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+    # The saved key is a declared `credentials` loss: accepting less changes nothing.
+    with pytest.raises(click.BadParameter, match="credentials"):
         await run(operator, accept_drops="memory,sandbox")
     assert await revisions(operator) is None
 
@@ -800,6 +803,7 @@ async def test_default_denial_observation_keeps_the_real_external_user_id(operat
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="denied-human",
             channel_id="900",
@@ -829,7 +833,8 @@ def test_disabled_revert_command_refuses_before_runtime_construction(monkeypatch
     from daimon.core.config import TurnSettings
     from daimon.core.errors import StoreError
 
-    monkeypatch.setattr(agents, "load_settings", lambda: SimpleNamespace(turn=TurnSettings()))
+    stopped = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
+    monkeypatch.setattr(agents, "load_settings", lambda: SimpleNamespace(turn=stopped))
 
     def forbidden_runtime(*args, **kwargs):
         pytest.fail("A disabled new command must not construct a runtime")
@@ -896,3 +901,153 @@ async def test_native_no_drop_switch_binds_empty_consent_without_loss_flags(oper
     assert revision.backend == "anthropic" and revision.drop_consent is not None
     assert revision.declared_drops == ()
     assert all(request.method == "GET" for request in requests)
+
+
+async def test_revert_restores_the_previous_model_through_its_own_preview_digest(operator):
+    rt, *_ = operator
+
+    async def change(**options):
+        output = StringIO()
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=output, width=240),
+            name="Research",
+            yes=True,
+            as_json=True,
+            **options,
+        )
+        return json.loads(output.getvalue())
+
+    argon = await change(backend="gemini", model="gemini-4-argon", accept_drops="memory,sandbox")
+    assert argon["model"] == "gemini-4-argon"
+    assert argon["preview"]["target_model"] == "gemini-4-argon"
+    await change(backend="openai", accept_drops="memory,sandbox")
+    reverted = await change(backend=None, revert=True)
+    # The revert's preview is the previous model's, so its digest matches the write.
+    assert reverted["preview"]["target_model"] == "gemini-4-argon"
+    restored = await revisions(operator)
+    assert (restored.backend, restored.model) == ("gemini", "gemini-4-argon")
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"backend": None, "model": "gemini-4-argon"},
+        {"backend": None, "model": "gemini-4-argon", "revert": True},
+        {"backend": "gemini", "model": "gemini-3.5-flash-lite"},
+        {"backend": "openai", "model": "gemini-4-argon"},
+    ],
+)
+async def test_model_is_refused_where_it_does_not_apply(operator, options):
+    rt, *_ = operator
+    with pytest.raises(typer.BadParameter, match="--model"):
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=StringIO()),
+            name="Research",
+            yes=True,
+            as_json=False,
+            **options,
+        )
+    assert await revisions(operator) is None
+
+
+async def test_agent_settings_are_previewed_written_and_reverted(operator):
+    from daimon.core.channel_backend import AgentSettings
+    from mux.contracts.config import CapabilityRequirement
+
+    rt, *_ = operator
+    output = StringIO()
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=output, width=240),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        settings=AgentSettings(thread_mode="shared"),
+    )
+    assert 'Agent settings: {"thread_mode": "shared"}' in output.getvalue()
+    shared = await revisions(operator)
+    assert shared.backend is None and shared.thread_mode == "shared"
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        settings=AgentSettings(),
+    )
+    await run(operator, accept_drops="memory,sandbox")
+    # On OpenAI a settings change names the provider's drops again.
+    needs = AgentSettings(requires={"tool_loop": CapabilityRequirement(level="required")})
+    with pytest.raises(typer.BadParameter, match="memory,sandbox"):
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=StringIO()),
+            name="Research",
+            backend=None,
+            yes=True,
+            as_json=False,
+            settings=needs,
+        )
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        settings=needs,
+        accept_drops="memory,sandbox",
+    )
+    required = await revisions(operator)
+    assert required.backend == "openai" and required.requires == needs.requires
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        revert=True,
+    )
+    reverted = await revisions(operator)
+    assert reverted.backend == "openai" and reverted.requires is None
+
+
+async def test_the_operator_assigns_shows_and_clears_an_owner(operator):
+    from daimon.adapters.cli.commands.agents import agents_owner
+    from daimon.core.agent_ownership import agent_owner
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.testing.factories import make_account, make_platform_principal
+
+    rt, tenant, agent, *_ = operator
+    async with rt.sessionmaker.begin() as db:
+        person = await make_account(db, tenant=tenant)
+        await make_platform_principal(
+            db, tenant=tenant, account=person, platform="discord", external_id="42"
+        )
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    output = StringIO()
+    console = Console(file=output, width=240)
+    await agents_owner(rt=rt, console=console, name="Research")
+    assert "no owner (admins only)" in output.getvalue()
+    with pytest.raises(typer.BadParameter):
+        await agents_owner(rt=rt, console=console, name="Research", change="set", user="42")
+    await agents_owner(
+        rt=rt,
+        console=console,
+        name="Research",
+        change="set",
+        platform="discord",
+        user="42",
+        yes=True,
+    )
+    assert await agent_owner(rt.sessionmaker, tenant_id=tenant.id, agent_id=agent_id) == person.id
+    await agents_owner(rt=rt, console=console, name="Research", change="clear", yes=True)
+    assert await agent_owner(rt.sessionmaker, tenant_id=tenant.id, agent_id=agent_id) is None
+    async with rt.sessionmaker() as db:
+        rows = await security_audit.list_events(db, tenant_id=tenant.id, tool_name="agent_owner")
+    assert sorted(row.operation for row in rows) == ["assign", "clear"]

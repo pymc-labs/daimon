@@ -466,8 +466,10 @@ def render_handoff_acknowledged(
     lines = [
         f"{target_name} will handle your next message.",
         "Send a message to continue.",
-        f"Your conversation and files carry over. {target_name} uses its own "
-        "connections and memory.",
+        f"Your conversation and files carry over while {target_name} stays on this "
+        f"model provider. {target_name} uses its own connections and memory.",
+        f"Switching {target_name} to another provider starts it fresh here: earlier "
+        "messages and files don't carry over.",
     ]
     if requested_work is not None:
         # The person's own words may already end a sentence; never double the stop.
@@ -483,7 +485,7 @@ def render_fresh_start(target_name: str) -> str:
             "Leaves behind: this task's working files and unfinished work.",
             f"Keeps: everything already posted here, and {target_name}'s saved memory, "
             "keys and connections.",
-            "Nothing is removed until the new workspace is ready.",
+            "Nothing is removed until the new working files are ready.",
         ]
     )
 
@@ -509,10 +511,9 @@ def render_unexpected_loss(transfer_kind: Literal["transcript", "history"]) -> s
         recovered_line = "I have what was posted here, but not the earlier conversation."
     return "\n".join(
         [
-            "I lost the workspace this task was running in and started a new one.",
+            "I lost this task's working files and started with new ones.",
             recovered_line,
-            "Anything unsaved in the old workspace is gone, and nothing that was running "
-            "came across.",
+            "Anything unsaved there is gone, and nothing that was running came across.",
             "Tell me what to re-check and I'll go from there.",
         ]
     )
@@ -586,7 +587,7 @@ def render_timer_seed(note: str, *, set_at: datetime) -> str:
     """The user message a fired timer's turn runs with. Model-facing, not person-facing."""
     return (
         f"[timer] You set this timer in this conversation at "
-        f"{set_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC and it has fired. This turn was "
+        f"{set_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC and it has fired. This was "
         f"started by the timer, not by a new message; act on your note and reply "
         f"here.\n\n{note}"
     )

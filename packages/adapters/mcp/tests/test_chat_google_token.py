@@ -21,8 +21,9 @@ from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

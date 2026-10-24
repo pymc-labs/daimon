@@ -164,6 +164,7 @@ def evaluate_routines_create_submission(payload: dict[str, Any]) -> RoutinesCrea
 async def _refuse_non_admin(
     web_client: AsyncWebClient,
     *,
+    team_id: str,
     channel_id: str,
     user_id: str,
 ) -> bool:
@@ -172,7 +173,7 @@ async def _refuse_non_admin(
     Every mutating run_* calls this first. Returns True = caller should return
     early (refused). Returns False = admin confirmed, proceed.
     """
-    is_admin = await resolve_is_admin(web_client, user_id=user_id)
+    is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
     if not is_admin:
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
@@ -206,6 +207,7 @@ async def run_routines_create_submission(
     try:
         refused = await _refuse_non_admin(
             web_client,
+            team_id=team_id,
             channel_id=channel_id,
             user_id=user_id,
         )
@@ -312,7 +314,7 @@ async def run_routines_delete_submission(
                     text="This routine no longer exists.",
                 )
                 return
-            is_admin = await resolve_is_admin(web_client, user_id=user_id)
+            is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
             if not can_manage_routine(row, user_id=user_id, is_admin=is_admin):
                 await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
@@ -330,7 +332,7 @@ async def run_routines_delete_submission(
                 session,
                 runtime.anthropic,
                 tenant_id=tenant_id,
-                viewer_user_id=await routines_viewer(web_client, user_id=user_id),
+                viewer_user_id=await routines_viewer(web_client, user_id=user_id, team_id=team_id),
             )
         state = RoutinesPanelState(
             rows=entries, over_cap_count=over_cap_count, agent_name_map=agent_name_map

@@ -56,6 +56,8 @@ class TerminationReason(StrEnum):
     """The event stream dropped and the reconnect budget ran out."""
     UPSTREAM = "upstream"
     """MA or the API returned an error the turn could not continue past."""
+    REFUSED = "refused"
+    """The model declined the request: an idle carrying refusal `stop_details`."""
     RATE_LIMITED = "rate_limited"
     """The API refused the turn with a 429."""
     SESSION_TERMINATED = "session_terminated"
@@ -210,6 +212,8 @@ def normalized_termination_reason(event: Event) -> TerminationReason | None:
     if event.type != "session.turn_ended":
         return None
     payload = TurnEndedPayload.model_validate(event.payload)
+    if payload.outcome == "errored" and payload.native_reason == "refusal":
+        return TerminationReason.REFUSED
     return {
         "completed": TerminationReason.COMPLETED,
         "interrupted": TerminationReason.INTERRUPTED,

@@ -158,16 +158,16 @@ def test_participation_note_reports_the_effective_tier() -> None:
 
 def test_participation_explanation_names_the_winning_tier() -> None:
     on = build_participation_explanation(ResolvedParticipation(ON, "thread"), thread_id="t1")
-    assert "I follow thread t1" in on and "thread tier is set to on" in on, (
+    assert "I follow thread t1" in on and "thread setting is on" in on, (
         "an on cascade explains which tier turned it on"
     )
     disabled = build_participation_explanation(
         ResolvedParticipation(DISABLED, "workspace"), thread_id=None
     )
-    assert "only reply in here when @mentioned" in disabled and "workspace tier" in disabled, (
+    assert "only reply in here when @mentioned" in disabled and "workspace setting" in disabled, (
         "a disabled cascade says so and names the tier that cannot be overridden"
     )
     off = build_participation_explanation(ResolvedParticipation(OFF, "deployment"), thread_id="t1")
-    assert "deployment tier is the" in off and "it is off" in off, (
+    assert "Daimon-wide setting is the" in off and "it is off" in off, (
         "an off cascade names the narrowest tier with a setting"
     )

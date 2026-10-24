@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import uuid
 
+from daimon.core.errors import SessionRetired
 from daimon.core.stores import mux_state
 from daimon.core.stores.thread_sessions import get_live_thread_session, get_thread_session_by_id
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.outcomes import current_outcome
-from daimon.core.turn.persistence import TurnPersistence
+from daimon.core.turn.persistence import LeaseWait, TurnPersistence
 from daimon.core.turn.prepare import admitted_session_scope
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import BindingConflict, ScopeViolation
 from mux.profiles import get_profile
 from mux.state.lease import Slot
+from mux.state.store import ERA_REF, adopted_identity
 
 
 async def prepared_persistence(
@@ -31,6 +33,7 @@ async def prepared_persistence(
     session_ref: ResourceRef | None = None,
     scope: Scope | None = None,
     fleet_capture: bool = False,
+    lease_wait: LeaseWait | None = None,
 ) -> TurnPersistence:
     """Adopt existing native ids; publish ownership through put_binding only.
 
@@ -86,6 +89,7 @@ async def prepared_persistence(
             source_agent_id=admission.agent.id,
             session_ref=session_ref,
             fleet_capture=fleet_capture,
+            lease_wait=lease_wait,
         )
     channel_id = admission.origin_channel_id or ""
     if mapping_id is not None:
@@ -104,11 +108,13 @@ async def prepared_persistence(
             or mapped.thread_id != thread_id
             or mapped.account_id != (admission.shared_owner or admission.account_id)
             or mapped.ma_session_id != session_id
-            or mapped.status != "live"
-            or live is None
-            or live.id != mapped.id
         ):
             raise ScopeViolation(session_id, "prepared session mapping differs from this turn")
+        # Only a mapping inside the caller's own scope may say it is retired:
+        # the legacy fence answers the same way (`require_writable_session`),
+        # and an out-of-scope caller learns nothing about another tenant's rows.
+        if mapped.status != "live" or live is None or live.id != mapped.id:
+            raise SessionRetired("This conversation moved. Continue in the new one.")
         # Match the migration's slot key, including its channel-less rows.
         channel_id = mapped.channel_id or ""
     if admission.shared_owner is not None:
@@ -139,18 +145,25 @@ async def prepared_persistence(
     ):
         raise ScopeViolation(session_id, "shared binding belongs to another owner")
     if current is None:
-        binding = ProviderBinding(
-            id=(
-                str(mapping_id)
-                if mapping_id is not None
-                else str(
-                    uuid.uuid5(uuid.NAMESPACE_URL, f"daimon.turn.binding:{slot.model_dump_json()}")
-                )
+        # A released slot (a confirmed provider switch) keeps its id at the next generation.
+        binding_id, era = adopted_identity(
+            await store.get_binding(slot, include_released=True),
+            str(mapping_id)
+            if mapping_id is not None
+            else str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"daimon.turn.binding:{slot.model_dump_json()}")
             ),
+        )
+        binding = ProviderBinding(
+            id=binding_id,
             thread=slot.thread,
             provider="anthropic",
             profile="anthropic.managed_agents",
-            native_refs={"session": session_id, "agent": admission.agent.id},
+            native_refs={
+                "session": session_id,
+                "agent": admission.agent.id,
+                **({ERA_REF: era} if era else {}),
+            },
             generation=1,
             config_revision=(admission.backend_revision.local if admission.backend_revision else 0),
             legacy_account_id=scope.account_id,
@@ -184,4 +197,5 @@ async def prepared_persistence(
         source_agent_id=admission.agent.id,
         session_ref=session_ref,
         fleet_capture=fleet_capture,
+        lease_wait=lease_wait,
     )

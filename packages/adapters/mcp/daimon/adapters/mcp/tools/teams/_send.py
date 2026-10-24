@@ -25,6 +25,7 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import (
+    caller_is_foreign,
     get_verified_origin,
     require_channel_writable,
     turn_origin_place,
@@ -135,7 +136,7 @@ async def _teams_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     file_handles: list[str] | None = None,
 ) -> TeamsMessageRow:
     if attachments:
-        raise ToolError("attachments takes Discord CDN URLs; on Teams post files with file_handles")
+        raise ToolError("attachments aren't accepted here; post files with file_handles")
     if file_handles and len(file_handles) > MAX_FILES:
         raise ToolError(f"max {MAX_FILES} files per message")
     if content.strip() or not file_handles:
@@ -191,7 +192,7 @@ async def _teams_replace_file_impl(  # pyright: ignore[reportUnusedFunction]  # 
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     if origin is None:
         raise ToolError(
-            "replace_channel_file needs this turn's origin_context_id from turn_controls, so "
+            "replace_channel_file needs your origin_context_id from turn_controls, so "
             "nothing was changed"
         )
     if origin.parent_channel_id != channel:
@@ -269,12 +270,17 @@ async def _post_teams_wizard_impl(  # pyright: ignore[reportUnusedFunction]  # u
     A bare channel gets a new post, whose thread the form and its turn then live in.
     """
     if any(step.image_handle is not None for step in spec.steps):
-        raise ToolError("step images are Discord-only; describe the picture in the question")
+        raise ToolError("step images aren't available here; describe the picture in the question")
     conversation_id = _conversation_id(channel_id)
     channel, root = split_thread(conversation_id)
     is_channel = _CHANNEL.fullmatch(channel) is not None
     if not (is_channel or conversation_id.startswith("a:")):
-        raise ToolError("a form goes in a channel, a thread or a 1:1 chat, not a group chat")
+        guest = await caller_is_foreign(runtime, auth)
+        raise ToolError(
+            "a form goes in a channel or a thread, not a group chat"
+            if guest
+            else "a form goes in a channel, a thread or a 1:1 chat, not a group chat"
+        )
     client = await _authorize(runtime, auth, conversation_id)
     card = wizard_card(to_screen(spec, WizardState(short_id=short_id)))
     try:

@@ -42,9 +42,9 @@ from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
-from daimon.testing.ma import build_stub_anthropic
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
@@ -411,7 +411,7 @@ async def test_post_app_install_link_rejects_unset_slug(
     auth = _auth_identity(platform=platform)
     captured = _outbound_request_count(monkeypatch)
 
-    with pytest.raises(ToolError, match="no GitHub App install link configured") as refused:
+    with pytest.raises(ToolError, match="no GitHub App install link set up") as refused:
         await _post_app_install_link_impl(
             runtime, auth, channel_id="222", purpose="reading a private repo"
         )

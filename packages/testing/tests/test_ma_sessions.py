@@ -21,7 +21,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_end_turn import (
 from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import (
     BetaManagedAgentsSessionStatusIdleEvent,
 )
-from daimon.testing.ma import (
+from daimon.testing.ma_sessions import (
+    FakeSessionsState,
+    make_fake_sessions_handler,
+    session_turn_sse,
+)
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     FakeMemoryStoreState,
     NotHandled,
@@ -29,11 +34,6 @@ from daimon.testing.ma import (
     combine_handlers,
     make_fake_ma_handler,
     make_fake_memory_store_handler,
-)
-from daimon.testing.ma_sessions import (
-    FakeSessionsState,
-    make_fake_sessions_handler,
-    session_turn_sse,
 )
 
 

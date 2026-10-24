@@ -11,8 +11,8 @@ from typing import Protocol, cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import FakeEventsResource
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 
 class Capture(Protocol):

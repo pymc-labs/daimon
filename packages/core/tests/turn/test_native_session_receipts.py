@@ -21,11 +21,17 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.testing.ma import MARouter, list_response, send_events_response, sse_response
-from daimon.testing.ma_models import ma_agent, ma_session
-from daimon.testing.ma_transport import ScriptedTransport
+from daimon.testing.ma_models import ma_agent
 from mux.contracts.config import ConfigRevision
 from mux.contracts.resources import ProviderBinding
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    list_response,
+    send_events_response,
+    sse_response,
+)
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 from ..test_fleet_budget import tariffs
 from ..test_fleet_permissions import POLICY
@@ -41,15 +47,17 @@ def source_read_only(request):
 
 
 @pytest.fixture
-async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_only, request):
+async def native_worker(db_preflight, db_committing_engine, db_clean, source_read_only, request):
+    from daimon.core.turn.prepare import clone_overrides
     from mux.contracts.ids import SkillRef
-    from mux.contracts.resources import AgentPatch, ToolSpec
+    from mux.contracts.resources import ToolSpec
 
     resolved_tools = None
     kwargs = {}
     variant = getattr(request, "param", "")
     paid_w1 = variant.startswith("paid_w1")
-    effort = paid_w1 or getattr(request, "param", None) == "live_root_effort"
+    # clone_source_effort: a clone worker whose source carries native model controls.
+    effort = paid_w1 or variant in ("live_root_effort", "clone_source_effort")
     live = effort or getattr(request, "param", None) == "live_root_readback"
     if live or getattr(request, "param", None) == "resolved_readback":
         # Recorded response-only builtin types, reordered configs and resolved defaults.
@@ -96,12 +104,12 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             original_tools=capture["tools"], environment_config=capture["environment"]["config"]
         )
     sm, tenant, account, source, env, old, captured = await worker_source_context(
-        db_nullpool_engine, warm=True, **kwargs
+        db_committing_engine, warm=True, **kwargs
     )
     if live:
         from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsModelConfig
         from daimon.core.channel_backend import load_backend_agent
-        from daimon.testing.ma_models import ma_model_config
+        from mux.testing.drivers.anthropic.ma_models import ma_model_config
 
         source = source.model_copy(
             update={
@@ -121,7 +129,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             captured = await load_backend_agent(
                 client, sm, tenant_id=tenant, agent_name="source", actual_agent=source
             )
-    if variant in {"resolver_fresh", "clone_source"}:
+    if variant in {"resolver_fresh", "clone_source", "clone_source_effort"}:
         from daimon.core.channel_backend import load_backend_agent
 
         retained_environment = captured.environment
@@ -142,7 +150,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             update={"deadline": datetime.now(UTC) + timedelta(minutes=10)}
         ),
     )
-    if variant in {"resolver_fresh", "clone_source"}:
+    if variant in {"resolver_fresh", "clone_source", "clone_source_effort"}:
         # Production worker intent inherits the complete root stamps.
         root = replace(root, spec=root.spec.model_copy(update={"metadata": source.metadata}))
     async with sm.begin() as db:
@@ -262,7 +270,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                 update={"declared_drops": ("memory", "sandbox", "skills", "tools")}
             )
         resolved_tools = None  # The scripted ACK must echo this worker's compiled grant.
-    if variant == "clone_source":
+    if variant in ("clone_source", "clone_source_effort"):
         assert captured.source is not None
         root = replace(
             root,
@@ -273,8 +281,8 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
     resolved = resolve_worker_spec(
         root,
         requested,
-        overrides=AgentPatch.model_validate(root.spec.model_dump(mode="json"))
-        if variant == "clone_source"
+        overrides=clone_overrides(root.spec)
+        if variant in ("clone_source", "clone_source_effort")
         else None,
         policy=POLICY,
         now=datetime.now(UTC),
@@ -376,7 +384,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                     update={
                         key: value
                         for key, value in payload["agent"].items()
-                        if key in ("skills", "tools", "mcp_servers")
+                        if key in ("skills", "tools", "mcp_servers", "system")
                     }
                 )
             native["session"] = ma_session(
@@ -384,7 +392,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                 agent=session_agent,
                 environment_id=payload["environment_id"],
                 metadata=payload["metadata"],
-                resources=payload["resources"],
+                resources=payload.get("resources", []),
             )
             if controls["fault"] == "lost_session_ack" and native["session_posts"] == 1:
                 raise httpx.ReadError("lost session ACK", request=call)
@@ -402,6 +410,31 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                 raw["archived_at"] = NOW.isoformat()
             if controls["fault"] == "agent_drift" and agent.id == "new-worker":
                 raw["system"] = "changed instructions"
+            if controls["fault"] == "echo_default_controls" and agent.id == "new-worker":
+                # SMOKE-1 J3: MA fills its default controls on a bare-id model.
+                model = raw["model"]["id"] if isinstance(raw["model"], dict) else raw["model"]
+                raw["model"] = {"id": model, "speed": "standard", "effort": {"type": "medium"}}
+            if controls["fault"] == "echo_other_model" and agent.id == "new-worker":
+                # Default-looking controls, but on a model the worker never asked for.
+                raw["model"] = {
+                    "id": "claude-sonnet-4-6",
+                    "speed": "standard",
+                    "effort": {"type": "medium"},
+                }
+            if controls["fault"] == "echo_other_effort" and agent.id == "new-worker":
+                model = raw["model"]["id"] if isinstance(raw["model"], dict) else raw["model"]
+                raw["model"] = {"id": model, "speed": "standard", "effort": {"type": "high"}}
+            if controls["fault"] == "echo_url_sources" and agent.id == "new-worker":
+                # SMOKE d75 J4 (probe2): MA echoes url_sources on the web_fetch config.
+                for config in raw["tools"][0]["configs"]:
+                    if config["name"] == "web_fetch":
+                        config["url_sources"] = {"type": "any"}
+            if controls["fault"] == "echo_unknown_tool_field" and agent.id == "new-worker":
+                # SMOKE d75 J4: MA echoes a tool field our strict native schema lacks.
+                raw["tools"][0]["configs"][0]["permission_policy"] = {
+                    "type": "always_allow",
+                    "unknown_field": True,
+                }
             if controls["fault"] == "builtin_widening" and agent.id == "new-worker":
                 for config in raw["tools"][0]["configs"]:
                     if config["name"] == "bash":
@@ -417,9 +450,20 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             raw["agent"]["system"] = "unapproved readback instructions"
         if controls["fault"] == "resource_drift":
             raw["resources"][0]["memory_store_id"] = "foreign-memory"
+        readback = controls.get("readback")
+        if readback == "resource_appears":
+            # The provider attached a store the memoryless worker never asked for.
+            raw["resources"] = [
+                {"type": "memory_store", "memory_store_id": "memstore-x", "access": "read_only"}
+            ]
+        elif readback == "resources_missing":
+            raw.pop("resources", None)
         return httpx.Response(200, json=raw)
 
-    from daimon.testing.ma import FakeMemoryStoreState, make_fake_memory_store_handler
+    from mux.testing.drivers.anthropic.ma import (
+        FakeMemoryStoreState,
+        make_fake_memory_store_handler,
+    )
 
     memory = make_fake_memory_store_handler(FakeMemoryStoreState())
     router.add("POST", r"/v1/memory_stores", lambda call, match: memory(call))
@@ -442,6 +486,12 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
         return httpx.Response(200, json=native["session"].model_dump(mode="json"))
 
     router.add("POST", r"/v1/sessions/worker-session/archive", archive)
+
+    def archive_agent(call, match):
+        native["agent"] = native["agent"].model_copy(update={"archived_at": NOW})
+        return httpx.Response(200, json=native["agent"].model_dump(mode="json"))
+
+    router.add("POST", r"/v1/agents/new-worker/archive", archive_agent)
     router.add(
         "POST", r"/v1/sessions/worker-session/events", lambda call, match: send_events_response()
     )
@@ -613,7 +663,11 @@ async def _exercise_session_receipt(native_worker, fault, *, native_path=False):
                 before_native=fresh_guard,
             )
         return await create_ma_session(
-            request.deps, executing, tenant_id=request.tenant_id, preparation=selected
+            request.deps,
+            executing,
+            tenant_id=request.tenant_id,
+            preparation=selected,
+            platform="discord",
         )
 
     controls["fault"] = fault
@@ -697,13 +751,43 @@ async def test_paid_w1_declared_tool_and_skill_losses_keep_native_memory_binding
         assert payload["agent"] == "new-worker"
 
 
-@pytest.mark.parametrize("native_worker", ["paid_w1_memory", "paid_w1_sandbox"], indirect=True)
-async def test_native_worker_resource_losses_refuse_before_session_allocation(native_worker):
+@pytest.mark.parametrize("native_worker", ["paid_w1_memory"], indirect=True)
+async def test_a_native_worker_that_dropped_memory_mounts_no_store(native_worker):
+    """Spawn admits a declared memory loss; dispatch honours it (r13b) instead of refusing.
+
+    The session mounts nothing and no store is created for it.
+    """
+    request, _, _, trace, _ = native_worker
+    assert not request.worker.resources and "memory" in request.worker.spec.declared_drops
+    await _exercise_session_receipt(native_worker, None, native_path=True)
+    payload = next(
+        json.loads(call.body)
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/sessions"
+    )
+    assert not payload.get("resources")
+    assert not any(call.path.startswith("/v1/memory_stores") for call in trace.requests)
+
+
+@pytest.mark.parametrize("readback", ["resource_appears", "resources_missing"])
+@pytest.mark.parametrize("native_worker", ["paid_w1_memory"], indirect=True)
+async def test_a_memoryless_worker_session_must_read_back_with_no_resources(
+    native_worker, readback
+):
     from mux.errors import ScopeViolation
+
+    *_, controls = native_worker
+    controls["readback"] = readback
+    with pytest.raises(ScopeViolation, match="native source resource readback differs"):
+        await _exercise_session_receipt(native_worker, None, native_path=True)
+
+
+@pytest.mark.parametrize("native_worker", ["paid_w1_sandbox"], indirect=True)
+async def test_native_worker_sandbox_loss_refuses_before_session_allocation(native_worker):
+    from mux.errors import ScopeViolation, UnsupportedCapability
 
     request, _, _, trace, _ = native_worker
     assert not request.worker.resources
-    with pytest.raises(ScopeViolation, match="one granted warm memory mount required"):
+    with pytest.raises((ScopeViolation, UnsupportedCapability)):
         await _exercise_session_receipt(native_worker, None, native_path=True)
-    assert any(call.path == "/v1/agents" and call.method == "POST" for call in trace.requests)
     assert not any(call.path == "/v1/sessions" and call.method == "POST" for call in trace.requests)

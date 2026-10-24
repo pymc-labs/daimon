@@ -51,6 +51,11 @@ def _tool(name: str, status: str) -> ToolUseBlock:
             "Daimon's AI service failed on this reply.",
             "@mention Daimon to try again.",
         ),
+        (
+            TerminationReason.REFUSED,
+            "Daimon's AI declined this request.",
+            "Rephrase it and @mention Daimon again.",
+        ),
         (TerminationReason.RATE_LIMITED, "Daimon's AI service is busy.", "Try again in a minute."),
         (
             TerminationReason.SESSION_TERMINATED,
@@ -175,6 +180,7 @@ def test_completed_has_no_notice() -> None:
     [
         (TerminationReason.INTERRUPTED, "Send a message to carry on."),
         (TerminationReason.UPSTREAM, "Send your message again."),
+        (TerminationReason.REFUSED, "Rephrase it and send it again."),
         (TerminationReason.CONNECTION_LOST, "Send a message to ask what it finished."),
         (TerminationReason.SESSION_BUSY, "Wait for it to finish, then send a message."),
     ],
@@ -267,11 +273,27 @@ def test_depleted_refusal_names_the_billing_command() -> None:
     assert notice.next_step == "An admin can top up with `billing` in a 1:1 chat with me."
 
 
-def test_teams_setup_noun() -> None:
-    nouns = RefusalNouns(
-        scope="organisation", admin="an admin", billing="`billing`", setup="`setup`"
+def test_a_server_that_never_had_credit_is_not_told_it_ran_out() -> None:
+    assert admission_refusal_text("balance_depleted", _NOUNS, cause="no_credit_yet") == (
+        "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
     )
-    assert nouns.setup == "`setup`"
+
+
+def test_nouns_for_a_platform_come_from_the_words_table() -> None:
+    teams = RefusalNouns.for_platform("teams")
+    assert (teams.scope, teams.admin) == ("organisation", "an admin")
+    assert teams.billing == "`billing` in a 1:1 chat with me"
+    assert teams.setup == "`setup` in a 1:1 chat with me"
+    assert RefusalNouns.for_platform("teams", place="dm").setup == "`setup`"
+    assert admission_refusal_text("balance_depleted", RefusalNouns.for_platform("discord")) == (
+        "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
+    )
+
+
+def test_nouns_for_a_caller_without_a_chat_platform_name_no_command() -> None:
+    nouns = RefusalNouns.for_caller(None)
+    assert nouns.admin == "an admin"
+    assert "/" not in nouns.billing + nouns.setup
 
 
 def test_dm_refusal_keeps_the_pinned_agent_separate_from_the_bot_name() -> None:
@@ -290,3 +312,109 @@ def test_dm_refusal_keeps_the_pinned_agent_separate_from_the_bot_name() -> None:
     )
     assert channel == "team-020-analyst only works in other channels.\n\nAsk it there."
     assert dm == "team-020-analyst only works in other channels.\n\nAsk it there."
+
+
+@pytest.mark.parametrize(
+    ("cause", "provider", "title", "fix"),
+    [
+        (
+            "channel_pin",
+            "openai",
+            "This channel is pinned to OpenAI, which can't run here.",
+            'Ask an admin to say "clear this channel\'s pin", so churn-explorer answers on its own'
+            " provider.",
+        ),
+        (
+            "provider_not_allowed",
+            "gemini",
+            "Gemini isn't turned on for this server.",
+            'Ask an admin to turn it on, or to say "switch churn-explorer to Anthropic".',
+        ),
+        (
+            "agent_backend",
+            "gemini",
+            "churn-explorer runs on Gemini, which isn't set up here yet.",
+            'Ask an admin to say "switch churn-explorer to Anthropic", or to finish setting up'
+            " Gemini.",
+        ),
+    ],
+)
+def test_a_provider_refusal_names_its_real_cause_and_the_chat_fix(cause, provider, title, fix):
+    rendered = admission_refusal_text(
+        "backend_unsupported", _NOUNS, agent_name="churn-explorer", cause=cause, provider=provider
+    )
+    assert rendered == f"{title}\n\n{fix}"
+
+
+def test_an_unattributed_provider_refusal_never_blames_the_channel():
+    rendered = admission_refusal_text("backend_unsupported", _NOUNS)
+    assert "channel" not in rendered
+    assert rendered == (
+        "This agent's model provider isn't available here right now.\n\n"
+        "Ask an admin to check which provider this agent uses."
+    )
+
+
+def test_an_unknown_provider_is_named_generically():
+    rendered = admission_refusal_text(
+        "backend_unsupported", _NOUNS, cause="agent_backend", provider=None
+    )
+    assert rendered.startswith("This agent runs on a model provider,")
+
+
+def test_a_full_gemini_hold_ledger_reads_as_busy_in_plain_words() -> None:
+    rendered = admission_refusal_text("provider_hold_cap_reached", _NOUNS)
+    assert "Too many replies are running or still being settled" in rendered
+    assert "Try again in a few minutes." in rendered
+    assert "hold" not in rendered.lower(), "no ledger jargon"
+
+
+@pytest.mark.parametrize(
+    ("code", "title", "action"),
+    [
+        (
+            "quota_zero",
+            "Gemini 4 Argon isn't available on this server's Google plan.",
+            "Pick another model or ask an admin to upgrade it.",
+        ),
+        (
+            "quota_exhausted",
+            "Google is rate-limiting Gemini 4 Argon right now.",
+            "Try again in a minute.",
+        ),
+    ],
+)
+def test_a_provider_quota_refusal_names_the_model_and_the_fix(
+    code: str, title: str, action: str
+) -> None:
+    """J2 smoke: Argon on a free-tier key is a quota of 0, never a stall or a
+    generic failure; even Google's "retry in 17h" doesn't replace the words."""
+    from daimon.core.errors import TurnError
+    from mux.errors import ProviderError
+
+    cause = ProviderError(
+        "rate_limited",
+        retryable=code != "quota_zero",
+        native_code=code,
+        native_param="gemini-4-argon",
+    )
+    error = TurnError(kind="upstream", message=str(cause), cause=cause)
+    until = datetime(2026, 10, 24, 7, 0, tzinfo=UTC)
+    notice = render_termination_notice(
+        TerminationReason.RATE_LIMITED,
+        state=TurnState(rate_limit_until=until, error=error),
+    )
+    assert notice is not None
+    assert (notice.title, notice.next_step) == (title, action)
+
+
+def test_an_unnamed_quota_model_and_a_plain_rate_limit_keep_their_words() -> None:
+    from daimon.core.turn.notices import provider_quota_copy
+    from mux.errors import ProviderError
+
+    unnamed = ProviderError("rate_limited", retryable=False, native_code="quota_zero")
+    assert provider_quota_copy(unnamed) == (
+        "This model isn't available on this server's Google plan.",
+        "Pick another model or ask an admin to upgrade it.",
+    )
+    assert provider_quota_copy(ProviderError("rate_limited", retryable=True)) is None

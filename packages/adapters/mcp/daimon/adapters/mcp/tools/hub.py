@@ -88,7 +88,7 @@ from pydantic import BaseModel
 log = structlog.get_logger(__name__)
 
 _NOT_FOUND = "daimon not found"
-_SESSION_NOT_FOUND = "session not found"
+_SESSION_NOT_FOUND = "conversation not found"
 
 
 class DaimonSummary(BaseModel):
@@ -318,8 +318,8 @@ def register_hub_tools(
         """List every Daimon you can reach on this platform, across all your workspaces.
 
         Call this first. ``id`` is what every other tool takes as ``daimon_id``;
-        ``workspace`` tells you which Slack workspace or Discord server the Daimon
-        lives in. Two Daimons may share a ``name`` in different workspaces.
+        ``workspace`` tells you which workspace the Daimon lives in. Two Daimons may
+        share a ``name`` in different workspaces.
         """
         return await _list_daimons_impl(runtime, await _hub_auth(ctx))
 
@@ -436,7 +436,7 @@ def register_hub_tools(
 
         Other people's conversations with the same Daimon are not listed and
         their handles are not accepted; nor are conversations from a sealed
-        channel, which can only be read from inside it. A workspace admin also
+        channel, which can only be read from inside it. An admin also
         sees everyone's channel conversations with this Daimon, sealed ones
         included, and can read them with ``get_session``/``list_events``, but
         for the channels they administer.

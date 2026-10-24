@@ -44,7 +44,7 @@ async def _list_credentials_impl(
     auth: AuthIdentity,
 ) -> list[VaultCredentialSummary]:
     if auth.agent_id is None:
-        raise ToolError("agent_id missing — token was not minted for an agent session")
+        raise ToolError("agent_id missing — this token is not an agent's")
     display_name = f"daimon-mcp:{auth.account_id}:{auth.agent_id}"
     matching = [
         v
@@ -53,7 +53,8 @@ async def _list_credentials_impl(
     ]
     if not matching:
         raise ToolError(
-            "no MCP vault found for this agent — run a session first to bootstrap the vault"
+            "no connection vault found for this agent — start a conversation with it first "
+            "to create the vault"
         )
     vault_id = min(matching, key=lambda v: v.created_at).id
     creds = [c async for c in walk_vault_credentials(client, vault_id, scope=mcp_scope(auth))]

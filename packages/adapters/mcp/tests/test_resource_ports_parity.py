@@ -42,11 +42,12 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.stores.domain import Role, ThreadSessionRow, TurnOriginRow
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage, ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic.resources.session_tools import EventQuery, SessionSend, SessionTools
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import BaseModel, PostgresDsn, SecretStr
 
 TENANT = uuid.UUID(int=1)

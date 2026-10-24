@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_document_block import (
     BetaManagedAgentsDocumentBlock,
 )
@@ -40,8 +41,16 @@ from anthropic.types.beta.sessions.beta_managed_agents_url_image_source import (
 )
 from daimon.core.errors import TurnError
 from daimon.core.turn.reducers import apply
-from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
-from daimon.testing.ma_models import ma_model_usage
+from daimon.core.turn.state import (
+    TextBlock,
+    ToolUseBlock,
+    TurnState,
+    UsageTotals,
+    extract_final_response,
+    extract_sealed_responses,
+)
+from daimon.core.turn.termination import TerminationReason
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
 from .conftest import (
     make_agent_message,
@@ -82,11 +91,77 @@ def test_apply_records_event_id_in_seen_event_ids() -> None:
 # --- agent.message ---
 
 
-def test_apply_concatenates_consecutive_agent_messages_into_one_text_block() -> None:
+def test_apply_concatenates_consecutive_agent_messages_into_one_text_block_by_default() -> None:
     state = TurnState()
     state = apply(state, make_agent_message(event_id="sevt_1", text="hello "))
     state = apply(state, make_agent_message(event_id="sevt_2", text="world"))
     assert state.content == [TextBlock(kind="text", text="hello world")]
+
+
+def test_with_the_switch_off_a_status_line_is_glued_onto_the_answer_as_before() -> None:
+    state = TurnState()
+    for event in [
+        make_agent_message(event_id="m1", text="🔍 **Looking up:** priors"),
+        make_tool_use(event_id="t1", name="search"),
+        make_agent_message(event_id="m2", text="📚 **Found:** 14 patterns"),
+        make_agent_message(event_id="m3", text="Priors are usually Beta."),
+    ]:
+        state = apply(state, event)
+    assert extract_final_response(state.content) == (
+        "📚 **Found:** 14 patternsPriors are usually Beta."
+    )
+    assert extract_sealed_responses(state.content, min_chars=10) == [
+        (0, "🔍 **Looking up:** priors")
+    ]
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_apply_keeps_consecutive_agent_messages_as_separate_text_blocks() -> None:
+    state = TurnState()
+    state = apply(state, make_agent_message(event_id="sevt_1", text="📚 Found: 14 patterns"))
+    state = apply(state, make_agent_message(event_id="sevt_2", text="Here is the answer."))
+    assert state.content == [
+        TextBlock(kind="text", text="📚 Found: 14 patterns"),
+        TextBlock(kind="text", text="Here is the answer."),
+    ]
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_messages_after_the_last_tool_are_kept_apart_not_glued() -> None:
+    state = TurnState()
+    events = [
+        make_agent_message(event_id="m1", text="🔍 **Looking up:** saturation priors"),
+        make_tool_use(event_id="t1", name="search"),
+        make_agent_message(event_id="m2", text="🔍 **Looking up:** adstock"),
+        make_tool_use(event_id="t2", name="search"),
+        make_agent_message(event_id="m3", text="📚 **Found:** 14 patterns"),
+        make_agent_message(event_id="m4", text="Priors on saturation are usually Beta."),
+    ]
+    for event in events:
+        state = apply(state, event)
+    assert extract_final_response(state.content) == (
+        "📚 **Found:** 14 patterns\n\nPriors on saturation are usually Beta."
+    )
+    assert extract_sealed_responses(state.content, min_chars=500) == []
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_an_ordinary_turn_posts_the_same_answer() -> None:
+    state = TurnState()
+    for event in [
+        make_agent_message(event_id="m1", text="Let me check."),
+        make_tool_use(event_id="t1", name="bash"),
+        make_agent_message(event_id="m2", text="It is 42.\n\nSecond paragraph."),
+    ]:
+        state = apply(state, event)
+    assert extract_final_response(state.content) == "It is 42.\n\nSecond paragraph."
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_apply_ignores_an_agent_message_with_no_text() -> None:
+    state = apply(TurnState(), make_agent_message(event_id="sevt_1", text=""))
+    assert state.content == []
+    assert "sevt_1" in state.seen_event_ids
 
 
 def test_apply_opens_new_text_block_when_tool_use_interleaves() -> None:
@@ -131,6 +206,36 @@ def test_apply_propagates_evaluated_permission_onto_tool_use_block() -> None:
     block = state.content[0]
     assert isinstance(block, ToolUseBlock)
     assert block.evaluated_permission == "ask"
+
+
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        ("allow", "ask", "ask"),
+        ("ask", "allow", "ask"),
+        ("deny", "ask", "deny"),
+        ("ask", "deny", "deny"),
+    ],
+)
+def test_repeated_tool_identity_only_tightens_permission_and_retains_result(
+    first, second, expected
+) -> None:
+    state = apply(
+        TurnState(),
+        make_tool_use(event_id="tool", name="write", evaluated_permission=first),
+    )
+    state = apply(state, make_tool_result(event_id="result", tool_use_id="tool", text="written"))
+    updated = apply(
+        state, make_tool_use(event_id="tool", name="write", evaluated_permission=second)
+    )
+    block = updated.content[0]
+    assert isinstance(block, ToolUseBlock)
+    assert len(updated.content) == 1
+    assert block.evaluated_permission == expected
+    assert block.status == "complete"
+    assert block.result_content == state.content[0].result_content
+    assert updated.seen_event_ids == state.seen_event_ids
+    assert apply(updated, make_tool_use(event_id="tool", name="write")) == updated
 
 
 def test_apply_propagates_mcp_server_name_only_on_mcp_variant() -> None:
@@ -356,6 +461,37 @@ def test_apply_sets_stop_reason_to_retries_exhausted_variant() -> None:
     )
     assert state.stop_reason is not None
     assert state.stop_reason.type == "retries_exhausted"
+
+
+def test_apply_finalizes_refusal_idle_as_refused_error() -> None:
+    """A refusal idles as `end_turn` with no text; without `stop_details` it
+    would finalize as an empty success that the chat card shows as stopped."""
+    state = apply(
+        TurnState(),
+        make_status_idle(
+            event_id="s_1",
+            stop_details={"type": "refusal", "category": "cyber", "explanation": "x"},
+        ),
+    )
+    assert state.error is not None, "a refusal must set a TurnError"
+    assert state.error.kind == "refused", f"unexpected kind {state.error.kind}"
+    assert "cyber" in state.error.message, "the category should reach the log line"
+    assert state.termination is TerminationReason.REFUSED, "refusal has its own reason"
+
+
+@pytest.mark.parametrize("details", [{"type": "other"}, {}, "refusal", ["refusal"]], ids=str)
+def test_apply_leaves_end_turn_idle_without_refusal_details_unfinalized(details: object) -> None:
+    """An unexpected `stop_details` shape must not crash the turn."""
+    state = apply(TurnState(), make_status_idle(event_id="s_1", stop_details=details))
+    assert state.error is None, "only a refusal in stop_details is a failure"
+    assert state.termination is None, "the driver decides an ordinary end"
+
+
+def test_apply_reads_a_refusal_with_an_odd_category() -> None:
+    details = {"type": "refusal", "category": 5}
+    state = apply(TurnState(), make_status_idle(event_id="s_1", stop_details=details))
+    assert state.error is not None, "a refusal must not depend on the category's shape"
+    assert "no category" in state.error.message, state.error.message
 
 
 # --- session.status_terminated: finalizes as an upstream error ---

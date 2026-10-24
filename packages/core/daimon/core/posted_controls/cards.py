@@ -116,9 +116,7 @@ _REPLACED_FACT: Final[str] = "Use the newer form below."
 # copies cannot drift. `expired_message` replaces the fourth one, which was a
 # bare "this expired" with no way back.
 NO_LONGER_VALID_MESSAGE: Final[str] = "This request is no longer valid — ask again."
-WRONG_REQUESTER_MESSAGE: Final[str] = (
-    "This request was for someone else — ask again in your own thread."
-)
+WRONG_REQUESTER_MESSAGE: Final[str] = "This request was for someone else — ask again yourself."
 ALREADY_USED_MESSAGE: Final[str] = "This request was already used — ask again."
 
 _BUTTON_LABEL: Final[dict[CardKind, str]] = {

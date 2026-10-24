@@ -71,6 +71,7 @@ def wheel(root: Path, entries: dict[str, str], *, name: str = "daimon-mux") -> P
     "member",
     [
         "mux/conformance/budget.py",
+        "mux/testing_extras/fake.py",
         "mux/drivers/gemini/fake.py",
         "mux/drivers/gemini/round_runner.py",
         "mux/drivers/gemini/live-budget.example.json",
@@ -88,6 +89,20 @@ def test_built_product_wheel_is_checked_independently_of_source(
     tmp_path: Path, member: str
 ) -> None:
     assert boundary.wheel_violations(wheel(tmp_path, {member: ""}))
+
+
+def test_mux_testing_package_ships_in_the_mux_wheel_but_not_its_tests(tmp_path: Path) -> None:
+    allowed = wheel(
+        tmp_path,
+        {
+            "mux/testing/conformance/budget.py": "pass",
+            "mux/testing/drivers/gemini/fake.py": "pass",
+            "mux/testing/drivers/gemini/live_cert.py": "pass",
+        },
+    )
+    assert boundary.wheel_violations(allowed) == []
+    leaked = wheel(tmp_path, {"mux/testing/test_budget.py": "pass"})
+    assert boundary.wheel_violations(leaked)
 
 
 def test_testing_wheel_contains_helpers_but_not_tests(tmp_path: Path) -> None:

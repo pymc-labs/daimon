@@ -13,8 +13,10 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.recruitment_guard import protected
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.here_card import HereCard, load_here_card, render_here_card
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.identity import find_platform_principal
 
 import discord
@@ -49,7 +51,7 @@ class HereCog(commands.Cog):
         super().__init__()
         self.bot = bot
 
-    @app_commands.command(name="here", description="Who answers here and what it can use")
+    @app_commands.command(name="here", description=DESCRIPTIONS["here"])
     @require_registered_guild
     async def here(self, interaction: BotInteraction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -106,7 +108,17 @@ class HereCog(commands.Cog):
                         (str(sibling.id), f"#{sibling.name}: {'yes' if bot_can_view else 'no'}")
                     )
             caller_perms = channel.permissions_for(member) if member is not None else None
-            async with runtime.sessionmaker() as session:
+            async with (
+                guard_selfhosted_channel(
+                    runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    channel_id=str(channel.id),
+                    thread_id=thread_id,
+                    caller_id=str(interaction.user.id),
+                ),
+                runtime.sessionmaker() as session,
+            ):
                 principal = await find_platform_principal(
                     session,
                     tenant_id=tenant_id,

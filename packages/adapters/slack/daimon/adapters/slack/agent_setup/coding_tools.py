@@ -64,7 +64,7 @@ __all__ = [
 log = structlog.get_logger()
 
 NOT_CONFIGURED_MESSAGE: Final[str] = (
-    "This deployment is not set up for coding-tool access yet. Ask the operator to finish "
+    "Coding-tool access isn't set up yet. Ask the operator to finish "
     "setup, then try again. Nothing was saved."
 )
 
@@ -172,7 +172,7 @@ async def handle_coding_tools_click(
         )
         return
 
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,

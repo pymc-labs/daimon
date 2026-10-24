@@ -133,6 +133,19 @@ class TenantAccessPolicy(BaseModel):
     # Agent name -> its rule. An agent not named here runs wherever the cascade sends it.
     agent_rules: dict[str, AgentRule] = Field(default_factory=dict)
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
+    # Whether an admin chose `enabled_backends`. False: the tenant follows the
+    # deployment default (`daimon.core.provider_keys`), resolved when it is loaded.
+    backends_explicit: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _given_backends_are_explicit(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        fields = cast("dict[str, Any]", data)
+        if "enabled_backends" in fields and "backends_explicit" not in fields:
+            return {**fields, "backends_explicit": True}
+        return fields
 
     @field_validator("invoker_role_ids")
     @classmethod

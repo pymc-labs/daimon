@@ -54,6 +54,9 @@ NOT_YET_PRIVATE = (
     "Private questions aren't supported yet. Mention {bot} here to ask openly, "
     "or ask me in our 1:1 chat."
 )
+NOT_YET_PRIVATE_FOREIGN = (
+    "Private questions aren't supported yet. Mention {bot} here to ask openly."
+)
 UNSHOWN = "I ran `{name}`, but couldn't show you its result privately here."
 # Admission refusals about the sender, not the thread: only they see them.
 SENDER_ONLY: frozenset[AdmissionDenialReason] = frozenset({"invoker_not_allowed", "cap_exceeded"})
@@ -190,7 +193,8 @@ class PrivateReplies:
         """
         if command is None:
             bot = inbound.bot_name or "daimon"
-            await self.tell_sender(inbound, NOT_YET_PRIVATE.format(bot=bot))
+            notice = NOT_YET_PRIVATE_FOREIGN if inbound.is_foreign else NOT_YET_PRIVATE
+            await self.tell_sender(inbound, notice.format(bot=bot))
             return
         name, args = command
         if inbound.kind == "dm":

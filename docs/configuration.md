@@ -30,6 +30,7 @@ typo is silent — check the spelling here.
 - [Environment](#environment)
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
+- [Progress Plans](#progress-plans)
 - [Slack](#slack)
 - [Teams](#teams)
 - [GitHub](#github)
@@ -37,6 +38,7 @@ typo is silent — check the spelling here.
 - [Microsoft Accounts](#microsoft-accounts)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
+- [Selfhosted](#selfhosted)
 - [Gemini](#gemini)
 - [Notebook Host](#notebook-host)
 - [Report Host](#report-host)
@@ -661,7 +663,7 @@ Replying in threads unprompted. See ThreadParticipationSettings.
 
 ### `DAIMON_THREAD_PARTICIPATION__MODE`
 
-`ParticipationMode` · optional · default `off`
+`CascadeMode` · optional · default `off`
 
 Deployment default for replying in threads unprompted. off: mention-only until a thread,
 channel or workspace is turned on. disabled: mention-only and cannot be turned on. on:
@@ -693,6 +695,28 @@ How many earlier thread messages the classifier sees before deciding.
 Model that decides whether a burst of unprompted messages deserves a reply. One short
 call per quiet burst; a small, fast model is the point. The call sets effort low, so
 pick a model that supports the effort parameter.
+
+## Progress Plans
+
+Read from `daimon.core.config.ProgressPlansSettings`. Prefix `DAIMON_PROGRESS_PLANS__`.
+
+Progress plans: the agent keeps a short plan the working card draws.
+
+`mode` is the deployment tier of the same cascade thread participation uses (deployment,
+workspace, channel, thread); the agent's `set_progress_plans` tool writes the other
+tiers when a person asks.
+
+The agent's plan on the working card. See ProgressPlansSettings.
+
+### `DAIMON_PROGRESS_PLANS__MODE`
+
+`CascadeMode` · optional · default `off`
+
+Deployment default for progress plans on the "Working on it…" card (Discord, Slack and
+Teams). On, the agent keeps a short checklist of a longer task's steps on the card and
+may add one-line updates on what it found and does next. off: shown only where a
+workspace, channel or thread is turned on. disabled: never shown, and cannot be turned
+on. on: shown everywhere unless turned off below.
 
 ## Slack
 
@@ -988,6 +1012,53 @@ unset.
 Full JSON contents of a Google service-account key, used by the token broker to mint
 delegated Google Workspace credentials.
 
+## Selfhosted
+
+Read from `daimon.core.config.SelfHostedSettings`. Prefix `DAIMON_SELFHOSTED__`.
+
+Operator opt-in for the self-hosted turn runtime.
+
+### `DAIMON_SELFHOSTED__ADMISSION_ENABLED`
+
+`bool` · optional · default `False`
+
+Allow explicitly configured selfhosted channels to pass backend admission. Default
+false. Enabling this still requires the profile's usage observations capability and a
+configured self-hosted core runtime.
+
+### `DAIMON_SELFHOSTED__SINGLE_TENANT`
+
+`bool` · optional · default `False`
+
+Declare this self-hosted installation single-tenant. Required for wildcard MCP
+credential bindings; leave false for shared installations.
+
+### `DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`
+
+`tuple[str, ...]` · optional · default unset
+
+Operator-authorized exact hostnames or IP literals for credential-free HTTP MCP
+connections to private, link-local or metadata destinations. Empty by default. Loopback
+remains allowed; credential-bearing connections still require HTTPS.
+
+### `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`
+
+`tuple[HarnessAuthBinding, ...]` · optional · default unset
+
+JSON list of harness auth bindings: auth_mode (bearer_env or entra), name
+(DAIMON_SELFHOSTED__HARNESS_TOKEN_* variable or exact Entra audience), origin (exact
+HTTPS origin), tenants (UUID list). Unbound names and destinations are refused before
+credential resolution. Wildcards require single_tenant.
+
+### `DAIMON_SELFHOSTED__MCP_CREDENTIAL_BINDINGS`
+
+`tuple[McpCredentialBinding, ...]` · optional · default unset
+
+JSON list of operator MCP credential bindings: each has name (HARNESS_MCP_CRED_*),
+origin (exact HTTPS origin), and tenants (UUID list). Unbound references, other origins
+and other tenants are refused. Use tenants=["*"] only for a single-tenant installation.
+Configure the harness HARNESS_MCP_CRED_BINDINGS from the same operator source.
+
 ## Gemini
 
 Read from `daimon.core.config.GeminiSettings`. Prefix `DAIMON_GEMINI__`.
@@ -1122,6 +1193,34 @@ secrets. Keep both separate.
 Multiplier applied to raw Anthropic usage cost before billing the tenant. 1.0 = pass-
 through.
 
+### `DAIMON_BILLING__SELFHOSTED__ADMISSION_CLOCK_SKEW_S`
+
+`float` · optional · default `5`
+
+Maximum harness clock lag in seconds when associating usage with an existing tariff
+admission. Frozen at admission; default 5, maximum 60. This tolerance never creates an
+admission or selects current prices.
+
+### `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS`
+
+`dict[str, str]` · optional · default `{}`
+
+JSON object mapping selfhosted Azure deployment names to underlying model ids. Targets
+must have configured tariffs and aliases cannot shadow another model. The runtime must
+call the tariff admission gate before paid model work; these settings alone do not
+enable refusal or execution.
+
+### `DAIMON_BILLING__SELFHOSTED__MODELS`
+
+`dict[str, list[SelfhostedModelPrice]]` · optional · default `{}`
+
+JSON object keyed by underlying Azure OpenAI model id, each containing a list of
+historical tariffs. Each requires effective_from (ISO date), input, output and
+cache_read (USD per million tokens); optional valid_before expires a row. A newer
+effective_from ends the previous open window. Retain historical rows. Supply verified
+regional/contract rates; input/output must be positive. Runtime admission must persist
+the selected tariff before paid work.
+
 ### `DAIMON_BILLING__SIGNUP_CREDIT`
 
 `Decimal` · optional · default `10.00`
@@ -1129,6 +1228,27 @@ through.
 USD credit automatically seeded when a guild/workspace is provisioned, so a freshly-
 installed tenant can chat immediately on trial credit before paying. Set to 0 to require
 payment before use.
+
+### `DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`
+
+`Decimal` · optional · default `20`
+
+Most a tenant may spend each UTC day on any one Gemini model, in provider USD at list
+price, counted across every agent turn and fleet worker. A Gemini agent turn has no
+token envelope and its usage reaches no ledger debit, so this is the guard. Checked as
+each turn or worker starts, for its first request's model and any Flash fallback of it,
+never mid-turn; a model with no current tariff is refused, and an unpriced fallback
+never runs. It resets at midnight UTC. 0 allows no Gemini turns.
+
+### `DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD`
+
+`Decimal` · optional · default `20`
+
+Most a tenant may spend each UTC day on any one OpenAI model, in provider USD at list
+price, counted across every agent turn and fleet worker. OpenAI sessions carry no native
+spend limit on this project, so this is the guard. Checked as each turn or worker
+starts, never mid-turn; a model with no current tariff is refused. It resets at midnight
+UTC. 0 allows no OpenAI turns.
 
 ## Support
 
@@ -1211,14 +1331,18 @@ JSON object.
 
 Read from `daimon.core.config.TurnSettings`. Prefix `DAIMON_TURN__`.
 
-Experimental neutral turn ports; legacy remains the default.
+Neutral turn ports. mux and backend selection are on by default.
+
+`path`, `channel_backends` and `agent_backends` are emergency stops, not setup: a fresh
+install needs none of them. Setting one off stops new turns at admission and queued or
+retried work before it is sent again.
 
 ### `DAIMON_TURN__PATH`
 
-`'legacy' | 'mux'` · optional · default `legacy`
+`'legacy' | 'mux'` · optional · default `mux`
 
-Experimental turn I/O path. legacy (the default) preserves the current behavior; mux
-opts into neutral Events/Sessions ports. Off by default.
+Turn I/O path. mux (the default) runs turns through the neutral Events/Sessions ports.
+Emergency stop only: legacy returns every turn to the Managed Agents-only path.
 
 ### `DAIMON_TURN__NATIVE_FOOTER_COST`
 
@@ -1231,20 +1355,32 @@ unchanged with either value.
 
 ### `DAIMON_TURN__CHANNEL_BACKENDS`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
-Read each channel's backend configuration at admission. Off by default: no channel's
-configuration is read and every turn runs as before. On: a channel with no backend
-configuration is unchanged; a configured one is checked against its profile and refused
-(backend_unsupported) if the profile cannot meet it or this release cannot run it yet.
+Read each agent's and channel's backend configuration at admission. On by default: a
+channel with no backend configuration is unchanged; a configured one is checked against
+its profile and refused (backend_unsupported) if the profile cannot meet it or this
+release cannot run it yet. Emergency stop only: false reads no backend configuration and
+every turn runs on Anthropic as before.
 
 ### `DAIMON_TURN__AGENT_BACKENDS`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
 Capture complete scoped source and resource intent for an agent-selected native backend.
 Unproved obligations are refused; counterpart identity readback alone never authorizes
-execution. Requires mux and channel_backends; off by default.
+execution. Requires mux and channel_backends; on by default. Emergency stop only: false
+refuses agent-selected native backends.
+
+### `DAIMON_TURN__STATUS_LOG`
+
+`bool` · optional · default `False`
+
+Keep each message the agent writes apart in its answer. Off by default: consecutive
+messages from the agent are joined into one block of text. On: an answer made of several
+messages keeps every one, set apart by a blank line instead of being run together.
+Either way the "Working on it…" card shows the last three messages the agent wrote,
+oldest first, one line each (cut at 120 characters).
 
 ## Thread Naming
 
@@ -1323,17 +1459,21 @@ queue and its card ends with the ordinary error.
 
 Read from `daimon.core.config.FleetSettings`. Prefix `DAIMON_FLEET__`.
 
-Orchestrated worker fleets (``DAIMON_FLEET__*``). Off by default.
+Orchestrated worker fleets (``DAIMON_FLEET__*``). On by default.
 
 An orchestrator turn fans out to worker turns on any enabled backend. Their concurrency
 is a pool of its own, counted from the durable worker rows, so a fan-out never takes the
-chat turns' slots.
+chat turns' slots. Each agent still needs its own fleet grant and stays inside the
+tenant's budgets.
 
 ### `DAIMON_FLEET__ENABLED`
 
-`bool` · optional · default `False`
+`bool` · optional · default `True`
 
-Allow orchestrator turns to start worker fleets. Off by default.
+Allow orchestrator turns to start worker fleets. On by default. Emergency stop only:
+false refuses new fleets and new workers before they are funded, and holds finished-
+worker wakes until it is on again; the run's deadline sweep ends what is left. Fleets
+also stop when the turn path or either backend flag is off.
 
 ### `DAIMON_FLEET__MAX_WORKERS_PER_RUN`
 
@@ -1528,9 +1668,11 @@ confirms unattended.
 
 `int` · optional · default `600`
 
-How long an approval card waits for the requester's Approve or Deny, in seconds, before
-it expires and the call is refused. Production keeps the 10-minute default; staging can
-set it short (60-90) so a precheck or load test does not hold a turn for ten minutes.
+How long an approval card waits for the requester's Approve or Deny, in seconds (up to
+24 hours), before it expires and the call is refused. A card never outlives its turn: it
+shows and keeps the earlier of this and the turn's own deadline. Production keeps the
+10-minute default; staging can set it short (60-90) so a precheck or load test does not
+hold a turn for ten minutes.
 
 ## Artifacts
 
@@ -1541,32 +1683,54 @@ Optional private object storage for hosted-client artifacts.
 This whole block is optional: it stays unset until at least one of its variables is set,
 and the features that read it are inactive while it is.
 
-Optional private S3-compatible store for presigned chart links. Bounded image embeds
-still run when this is unset.
+Optional private S3-compatible or Azure Blob store for signed chart links. Bounded image
+embeds still run when this is unset.
+
+### `DAIMON_ARTIFACTS__BACKEND`
+
+`'s3' | 'azure_blob'` · optional · default `s3`
+
+Artifact storage backend: s3 (default) or azure_blob.
 
 ### `DAIMON_ARTIFACTS__ENDPOINT_URL`
 
 `HttpUrl` · **required**
 
-S3-compatible bucket endpoint; used for uploads and presigned GET URLs.
+S3-compatible endpoint or Azure Blob account URL
+(https://&lt;account&gt;.blob.core.windows.net); used for uploads and signed GET URLs.
 
 ### `DAIMON_ARTIFACTS__BUCKET`
 
 `str` · **required**
 
-Private bucket name. Daimon never applies a public-read ACL.
+Private S3 bucket or Azure Blob container name; provision it before startup.
 
 ### `DAIMON_ARTIFACTS__ACCESS_KEY_ID`
 
-`SecretStr` · **required** · secret
+`SecretStr` · optional · default unset · secret
 
-S3-compatible access key id.
+S3 access key id; required only for the s3 backend.
 
 ### `DAIMON_ARTIFACTS__SECRET_ACCESS_KEY`
 
-`SecretStr` · **required** · secret
+`SecretStr` · optional · default unset · secret
 
-S3-compatible secret access key.
+S3 secret access key; required only for the s3 backend.
+
+### `DAIMON_ARTIFACTS__AZURE_CONNECTION_STRING`
+
+`SecretStr | None` · optional · default unset · secret
+
+Local Azurite connection string only; BlobEndpoint must match the loopback endpoint_url.
+Leave unset on Azure; managed identity signs user-delegation SAS without account keys.
+
+### `DAIMON_ARTIFACTS__AZURE_CLIENT_ID`
+
+`str | None` · optional · default unset
+
+User-assigned managed identity client id; required for azure_blob except local Azurite.
+ManagedIdentityCredential uses only this identity, with no environment service-principal
+or developer-login fallback.
 
 ### `DAIMON_ARTIFACTS__REGION`
 

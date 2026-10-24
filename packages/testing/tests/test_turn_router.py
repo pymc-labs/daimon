@@ -19,7 +19,6 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
     BetaManagedAgentsUserMessageEvent,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, session_response
 from daimon.testing.turn_router import (
     AGENT_ID,
     AGENT_TEXT,
@@ -27,6 +26,12 @@ from daimon.testing.turn_router import (
     MODEL_ID,
     build_turn_router,
     turn_events,
+)
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    list_response,
+    session_response,
 )
 
 

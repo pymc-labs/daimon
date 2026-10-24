@@ -126,8 +126,8 @@ _NOTE_INPUT_ID: Final = "support_note_input"
 
 NOT_ALLOWED: Final = "Asking the team isn't available to you here."
 POLICY_UNREADABLE: Final = (
-    "This workspace's access policy could not be read, so nothing was sent. "
-    "Ask an admin to check it."
+    "This workspace's access settings could not be read, so nothing was sent. "
+    "Ask an admin to check them."
 )
 CHECK_FAILED: Final = "That didn't work. Try again."
 FORM_DID_NOT_OPEN: Final = "That didn't work. Try again."

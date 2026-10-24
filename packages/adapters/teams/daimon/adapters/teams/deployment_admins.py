@@ -12,6 +12,7 @@ no role, so stored admin roles stand until then.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -24,6 +25,8 @@ from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import GroupLookupFailed, GroupMembers, ServerAdminIds
 from daimon.core.stores.domain import Role
+from daimon.core.stores.teams_installations import list_teams_installations
+from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
 
@@ -194,3 +197,41 @@ async def boot_owner_ids(runtime: TeamsRuntime, settings: TeamsSettings) -> froz
         return await _owner_ids(settings, admin_team_owners(runtime))
     except GroupLookupFailed:
         return None  # demoting on a failed read would take every owner's role
+
+
+_ASKS_AN_ADMIN = re.compile(r"\badmins?\b", re.IGNORECASE)
+
+
+async def admin_team_name(runtime: TeamsRuntime) -> str | None:
+    """The admin team's name as last recorded from its activities; None when unknown.
+
+    Read from `teams_installations` (the app must be installed in the admin
+    team, so it has a row), never from Graph, so a refusal costs one small query.
+    """
+    settings = runtime.settings.teams
+    if settings is None or settings.admin_team_id is None:
+        return None
+    tenant_id = derive_tenant_uuid(platform="teams", workspace_id=settings.tenant_id)
+    try:
+        async with runtime.sessionmaker() as session:
+            installs = await list_teams_installations(session, tenant_id=tenant_id)
+    except SQLAlchemyError as err:
+        log.warning("teams.admin_team.name_unread", error=type(err).__name__)
+        return None
+    for install in installs:
+        if install.group_id.lower() == settings.admin_team_id and install.name:
+            return " ".join(install.name.split())
+    return None
+
+
+async def with_admin_team(runtime: TeamsRuntime, refusal: str) -> str:
+    """`refusal` plus "Admins are the owners of the {name} team." when the name is known."""
+    name = await admin_team_name(runtime)
+    if name is None:
+        return refusal
+    return f"{refusal}\n\nAdmins are the owners of the {name} team."
+
+
+async def with_admin_team_if_asked(runtime: TeamsRuntime, text: str) -> str:
+    """`with_admin_team` for a refusal that tells the person to ask an admin; else `text`."""
+    return await with_admin_team(runtime, text) if _ASKS_AN_ADMIN.search(text) else text

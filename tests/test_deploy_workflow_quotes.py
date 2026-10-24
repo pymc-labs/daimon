@@ -23,6 +23,8 @@ from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 _WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 _SSH = re.compile(r"\bgcloud[ \t]+compute[ \t]+ssh\b")
 _EXPRESSION = re.compile(r"\$\{\{.*?\}\}")
+# `timeout <duration> gcloud compute ssh ...` bounds an SSH by a deadline.
+_TIMEOUT_PREFIX = re.compile(r"(?:^|\s)timeout[ \t]+\S+$")
 
 
 def _run_blocks(node: Node) -> list[ScalarNode]:
@@ -86,7 +88,7 @@ def _unquoted_ssh_matches(text: str) -> list[re.Match[str]]:
                 command_start = index + 1
             else:
                 match = _SSH.match(text, index)
-                prefix = text[command_start:index].strip()
+                prefix = _TIMEOUT_PREFIX.sub("", text[command_start:index].strip()).strip()
                 if match and prefix in {"", "if", "then", "do", "else", "elif", "!"}:
                     matches.append(match)
                     index = match.end()
@@ -164,9 +166,10 @@ def test_deploy_workflow_remote_scripts() -> None:
     scripts = 0
     for workflow in sorted((*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml"))):
         scripts += _check_workflow(workflow.name, workflow.read_text())
-    # deploy.yml has 4 inline payloads; lane.yml has 2 `lane_ssh` wrappers that each
-    # forward one shell variable as the single --command argument.
-    assert scripts == 6, f"expected exactly 6 remote scripts, found {scripts}"
+    # deploy.yml has 4 inline payloads and 1 forwarded shell variable (the boot
+    # reconcile wait); lane.yml has 2 `lane_ssh` wrappers that each forward one
+    # shell variable as the single --command argument.
+    assert scripts == 7, f"expected exactly 7 remote scripts, found {scripts}"
 
 
 @pytest.mark.parametrize(
@@ -195,3 +198,15 @@ def test_ssh_quote_fixtures(filename: str, command: str, error: str | None) -> N
             _check_workflow(filename, source)
     else:
         assert _check_workflow(filename, source) == 1
+
+
+def test_ssh_behind_timeout_is_still_checked() -> None:
+    run = (
+        'if timeout "$remaining" gcloud compute ssh ${{ vars.VM }} --zone "$ZONE" \\\n'
+        "  --tunnel-through-iap --command 'echo ok' 'split'; then :; fi"
+    )
+    source = "jobs:\n  test:\n    steps:\n      - run: |\n" + "".join(
+        f"          {line}\n" for line in run.splitlines()
+    )
+    with pytest.raises(AssertionError, match="one argument"):
+        _check_workflow("fixture.yml", source)

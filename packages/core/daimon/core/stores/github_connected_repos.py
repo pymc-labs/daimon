@@ -13,6 +13,7 @@ from daimon.core._models import (
     GitHubAccessRequest,
     TenantGitHubRepo,
 )
+from daimon.core.stores.github_access import lock_tenant_grants
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy import Exists, delete, distinct, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +32,7 @@ async def _require_admin(
 ) -> None:
     account = await session.get(Account, account_id)
     if account is None or account.tenant_id != tenant_id or account.role != "admin":
-        raise ValueError("Only a server or workspace admin can manage connected repos.")
+        raise ValueError("Only an admin can manage connected repos.")
 
 
 def _has_own_row(model: type[AgentGitHubGrant] | type[AgentGitHubGrantDraft]) -> Exists:
@@ -143,6 +144,7 @@ async def set_repo_ability(
     ability: Literal["read", "write"],
     account_id: uuid.UUID,
 ) -> None:
+    await lock_tenant_grants(session, tenant_id=tenant_id)
     await _require_admin(session, tenant_id=tenant_id, account_id=account_id)
     repo = await _server_wide_row(session, tenant_id=tenant_id, repo_id=repo_id)
     if repo is None or repo.status != "active":
@@ -173,6 +175,7 @@ async def disconnect_repo(
     repo_id: int,
     account_id: uuid.UUID,
 ) -> None:
+    await lock_tenant_grants(session, tenant_id=tenant_id)
     await _require_admin(session, tenant_id=tenant_id, account_id=account_id)
     repo = await _server_wide_row(session, tenant_id=tenant_id, repo_id=repo_id)
     if repo is None or repo.status != "active":
@@ -214,6 +217,7 @@ async def disconnect_github(
     session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> int:
     """Disconnect this server's repos and cancel unfinished access requests."""
+    await lock_tenant_grants(session, tenant_id=tenant_id)
     await _require_admin(session, tenant_id=tenant_id, account_id=account_id)
     repos = list(
         await session.scalars(

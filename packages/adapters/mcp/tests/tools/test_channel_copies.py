@@ -27,10 +27,10 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -121,7 +121,7 @@ async def test_a_closing_channels_copy_is_archived_with_its_rule_and_default(
         await _archive_channel_copy_impl(runtime, world.auth(), name=COPY)
     with pytest.raises(ToolError, match="made for another channel"):
         await _archive_channel_copy_impl(runtime, world.auth(), name=COPY, channel_id=OTHER)
-    with pytest.raises(ToolError, match="Only a workspace or server admin"):
+    with pytest.raises(ToolError, match="Only an admin"):
         await _archive_channel_copy_impl(
             runtime, world.auth(admin=False), name=COPY, channel_id=ROOM
         )
@@ -186,7 +186,7 @@ async def test_a_copy_made_the_workspace_default_is_refused(
             agent_name=COPY,
             mode="agent",
         )
-    with pytest.raises(ToolError, match="workspace or deployment default"):
+    with pytest.raises(ToolError, match="default for everyone here"):
         await _archive_channel_copy_impl(runtime, world.auth(), name=COPY, channel_id=ROOM)
     assert not world.archived(COPY)
 

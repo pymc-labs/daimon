@@ -7,40 +7,86 @@ authority, and an operation acknowledgement never certifies native completion.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import replace
+from collections.abc import Awaitable, Callable, Iterator, MutableMapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Self, cast
+from typing import TYPE_CHECKING, Any, Protocol, Self, cast
 
+import structlog
+from daimon.adapters.discord.checks import ADMIN_NOUN
 from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.adapters.discord.views import finish_control
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.fleet import TERMINAL, FleetRun, FleetWorker
-from daimon.core.fleet_orchestration import Control, FleetOrchestrator, FleetRefused
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.fleet import RUN_TRANSITIONS, TERMINAL, FleetRun, FleetWorker, holds_slot
+from daimon.core.fleet_orchestration import (
+    Control,
+    FleetOrchestrator,
+    FleetRefused,
+    fleet_cost_words,
+)
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerPermissions, WorkerSpecRefused
 from daimon.core.posted_controls import CardButton, CardState, PostedCard
 from daimon.core.stores.agent_posts import AgentPostRow
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
+from daimon.core.turn.state import ToolUseBlock, TurnState
 
 import discord
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.bot import DaimonBot
+    from daimon.core.stores.fleet import EndNotice
     from daimon.core.turn.deps import TurnDeps
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+class Presser(Protocol):
+    """Who acts on a fleet card: a button press, or the author of a typed stop."""
+
+    @property
+    def user(self) -> discord.User | discord.Member: ...
+
+    @property
+    def guild_id(self) -> int | None: ...
+
+    @property
+    def channel_id(self) -> int | None: ...
+
+
+@dataclass(frozen=True)
+class TypedPresser:
+    """A typed "stop" in the run's thread, acting as its author would by pressing Stop."""
+
+    user: discord.User | discord.Member
+    guild_id: int | None
+    channel_id: int | None
+
 
 type ParentLoader = Callable[
-    [discord.Interaction | None], Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None]
+    [Presser | None], Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None]
 ]
 type ParentResolver = Callable[
-    [discord.Thread, int, uuid.UUID | None, uuid.UUID | None, discord.Interaction | None],
+    [discord.Thread, int, uuid.UUID | None, uuid.UUID | None, Presser | None],
     Awaitable[tuple[WorkerPermissions, TenantAccessPolicy] | None],
 ]
 type Send = Callable[..., Awaitable[discord.Message]]
 type Edit = Callable[..., Awaitable[discord.Message | None]]
+type FindPosted = Callable[[uuid.UUID], Awaitable[discord.Message | None]]
 
 _MESSAGE_TEXT_LIMIT = 4000
+# Cards remembered per run so a wake turn edits the card its root turn posted.
+_POSTED_CARDS_LIMIT = 512
+# Recent thread messages searched for a run's card the process no longer remembers.
+_CARD_HISTORY_LIMIT = 50
+_UNAVAILABLE = "Fleet status is unavailable, so there's no fleet result to share."
+_FINISHED = "The fleet workers have finished. I'll post the result here next."
+_ERROR_CODE = re.compile(r"[a-z0-9_]{1,40}")
+
+log = structlog.get_logger(__name__)
 
 
 def _literal(value: str, limit: int) -> str:
@@ -57,12 +103,18 @@ def build_fleet_view(
     *,
     collected: bool = False,
     blocked: bool = False,
+    partial: bool = False,
+    cost: str | None = None,
 ) -> discord.ui.LayoutView:
-    """Render only canonical scoped rows; no specs, excerpts or native handles."""
+    """Render only canonical scoped rows; no specs, excerpts or native handles.
+
+    `cost` is an ended run's cost in words (`fleet_cost_words`); it leads the footer.
+    """
     if (
         run.platform != "discord"
         or len({worker.id for worker in workers}) != len(workers)
-        or len(workers) > run.max_workers
+        or len(workers) > 2 * run.max_workers
+        or sum(1 for worker in workers if holds_slot(worker)) > run.max_workers
         or any(worker.run_id != run.id or worker.tenant_id != run.tenant_id for worker in workers)
     ):
         raise FleetRefused("foreign_worker")
@@ -70,13 +122,13 @@ def build_fleet_view(
         "applied"
         if collected
         else "refused"
-        if blocked or run.status in ("cancelled", "failed")
+        if partial or blocked or run.status in ("cancelled", "failed")
         else "received"
     )
     facts = tuple(
-        f"{worker.ordinal}. **{_literal(worker.role, 60)}** · "
+        f"{worker.ordinal}. **{_literal(worker.role, 60)}**{_worker_agent(worker)} · "
         f"{_literal(worker.backend, 20)} / {_literal(worker.model, 40)} — "
-        f"{worker.status.replace('_', ' ')}"
+        f"{_worker_status(worker)}"
         for worker in sorted(workers, key=lambda row: row.ordinal)
     )
     actions: tuple[tuple[Control, str], ...] = (("kill", "Stop"), ("resume", "Resume"))
@@ -103,14 +155,21 @@ def build_fleet_view(
         headline=(
             "Fleet — collected"
             if collected
+            else "Fleet — partial result"
+            if partial
             else "Fleet — blocked"
             if blocked
+            else "Fleet — no workers started"
+            if not workers and run.status in ("completed", "cancelled", "failed")
             else f"Fleet — {run.status}"
         ),
         facts=facts,
         buttons=buttons,
         footer=(
-            f"Budget cap ${run.total_budget_usd} · "
+            # Once the run is over, what it cost leads (J3: "the cost is shown").
+            f"Cost {cost} · Budget cap ${run.total_budget_usd}"
+            if cost is not None
+            else f"Budget cap ${run.total_budget_usd} · "
             f"Deadline <t:{int(run.deadline_at.timestamp())}:f>"
         ),
     )
@@ -176,6 +235,234 @@ def build_fleet_view(
         view.stop()
         raise FleetRefused("invalid_card")
     return view
+
+
+def _worker_agent(worker: FleetWorker) -> str:
+    """The agent a worker ran as, when it ran as one and that isn't its role's name.
+
+    A worker that runs as an agent carries that agent's own metadata name. An inline
+    spec inherits the root's metadata, so a name it gives itself is not shown as an
+    agent.
+    """
+    name, metadata = worker.spec.get("name"), worker.spec.get("metadata")
+    agent = metadata.get(MA_METADATA_KEY_NAME) if isinstance(metadata, dict) else None
+    drops = worker.spec.get("declared_drops")
+    declared = [
+        item for item in (drops if isinstance(drops, list) else []) if isinstance(item, str)
+    ]
+    if not isinstance(name, str) or not name.strip() or name != agent:
+        # A task copy of the root: every one runs without tools and skills, so say only
+        # what the root's own setup lost (its connectors, stored files, repositories,
+        # memory).
+        lost = [_DROP_WORDS[item] for item in declared if item in _COPY_LOSSES]
+        return f" (without {', '.join(dict.fromkeys(lost))})" if lost else ""
+    # What it runs without, so the person who asked sees it, not only the root.
+    lost = [_DROP_WORDS.get(item, "some of its setup") for item in declared]
+    without = f", without {', '.join(dict.fromkeys(lost))}" if lost else ""
+    label = "" if name == worker.role else _literal(name, 40)
+    if not label and not without:
+        return ""
+    return f" ({label}{without})" if label else f" ({without.removeprefix(', ')})"
+
+
+#: Losses a task copy of the root shows; the rest every task worker has.
+_COPY_LOSSES = frozenset({"mcp", "files", "repository", "memory"})
+
+#: Plain words for what an agent worker runs without (its declared losses).
+_DROP_WORDS = {
+    "tools": "its tools",
+    "skills": "its skills",
+    "mcp": "its connected tools",
+    "memory": "its memory",
+    "sandbox": "its sandbox",
+    "model_controls": "its model settings",
+    "files": "its files",
+    "repository": "its repository",
+    "credentials": "its saved keys",
+}
+
+
+def _worker_status(worker: FleetWorker) -> str:
+    """Status words, with the closed error code of a worker that did not succeed."""
+    status = worker.status.replace("_", " ")
+    if worker.status in TERMINAL and worker.status != "succeeded" and worker.error_code:
+        from daimon.core.fleet import worker_error_text
+
+        # Known codes in plain words; others stay closed host codes in code spans.
+        # A setup error names the worker id prefix the host logs (fleet.worker_task_failed).
+        if (text := worker_error_text(worker.error_code, ref=str(worker.id)[:8])) is not None:
+            return f"{status}: {text}"
+        code = worker.error_code if _ERROR_CODE.fullmatch(worker.error_code) else "error"
+        status += f" (`{code}`)"
+    return status
+
+
+def _worker_list(workers: Sequence[FleetWorker], *, limit: int = 1400) -> str:
+    """Complete role/status pairs within one Discord message, in canonical order."""
+    facts = [
+        f"{_literal(row.role, 60)}: {_worker_status(row)}"
+        for row in sorted(workers, key=lambda row: row.ordinal)
+    ]
+    retained: list[str] = []
+    for fact in facts:
+        if len("; ".join(retained + [fact])) > limit:
+            break
+        retained.append(fact)
+    if len(retained) < len(facts):
+        retained.append(f"+{len(facts) - len(retained)} more")
+    return "; ".join(retained)
+
+
+def _collect_status(block: ToolUseBlock) -> str | None:
+    """The status a completed daimon fleet_collect call returned, or None."""
+    for item in block.result_content or ():
+        text: object = (
+            cast("dict[str, object]", item).get("text")
+            if isinstance(item, dict)
+            else getattr(item, "text", None)
+        )
+        if not isinstance(text, str):
+            continue
+        try:
+            value: object = json.loads(text)
+        except ValueError:
+            continue
+        for _ in range(3):
+            if not isinstance(value, dict):
+                break
+            reply = cast("dict[str, object]", value)
+            if isinstance(reply.get("status"), str) and "run_id" in reply:
+                return cast(str, reply["status"])
+            value = reply.get("result", reply.get("structuredContent"))
+    return None
+
+
+def fleet_result_seen(state: TurnState) -> bool:
+    """Whether the root's final answer follows a collect that returned the run's end.
+
+    Only the turn's last fleet_collect counts: a waiting, failed or absent one
+    means the answer predates any finished result, so a wake must deliver it.
+    """
+    for block in reversed(state.content):
+        if not isinstance(block, ToolUseBlock) or block.mcp_server_name != DAIMON_SERVER_NAME:
+            continue
+        if block.name != "fleet_collect" and not (
+            block.name == "call_tool" and block.input.get("name") == "fleet_collect"
+        ):
+            continue
+        if block.status != "complete" or block.is_error:
+            return False
+        return _collect_status(block) in ("ready", "blocked")
+    return False
+
+
+def _custom_ids(components: Sequence[object]) -> Iterator[str]:
+    for component in components:
+        custom_id = getattr(component, "custom_id", None)
+        if isinstance(custom_id, str):
+            yield custom_id
+        for name in ("children", "components"):
+            nested = getattr(component, name, None)
+            if isinstance(nested, (list, tuple)):
+                yield from _custom_ids(cast("Sequence[object]", nested))
+        accessory = getattr(component, "accessory", None)
+        if accessory is not None:
+            yield from _custom_ids((accessory,))
+
+
+def history_finder(thread: discord.Thread) -> FindPosted:
+    """Find a run's live card in recent thread history (its controls name the run)."""
+
+    async def find(run_id: uuid.UUID) -> discord.Message | None:
+        prefix = f"fleet:{run_id.hex}:"
+        try:
+            async for message in thread.history(limit=_CARD_HISTORY_LIMIT):
+                if (message.webhook_id is not None or message.author.bot) and any(
+                    custom_id.startswith(prefix) for custom_id in _custom_ids(message.components)
+                ):
+                    return message
+        except Exception:
+            # A lookup is best effort: failing it posts a fresh card instead.
+            log.info("fleet.card_history_unavailable", run_id=str(run_id), exc_info=True)
+        return None
+
+    return find
+
+
+#: Worker codes that mean the run's deadline cut it off.
+_DEADLINE_CODES = frozenset({"deadline_expired", "run_deadline", "timed_out"})
+
+
+def fleet_ended_text(workers: Sequence[FleetWorker]) -> str:
+    """The plain line for a run that ended with no result delivered in its thread."""
+    why = (
+        "it ran out of time before its result was delivered here"
+        if any(row.error_code in _DEADLINE_CODES for row in workers)
+        else "its result wasn't delivered here"
+    )
+    details = _worker_list(workers)
+    return f"The fleet ended: {why}." + (f" Workers: {details}." if details else "")
+
+
+#: Remember a run's card message; the flag says a terminal card is now showing,
+#: which settles the run's owed end notice.
+type RecordCard = Callable[[FleetRun, discord.Message, bool], Awaitable[None]]
+
+
+async def show_fleet_ended(
+    thread: discord.Thread, notice: EndNotice, record: RecordCard | None = None
+) -> None:
+    """Settle the run's card to its final state, then post the run-end line.
+
+    The card is the stored message, else the one whose controls name the run;
+    one that is gone or can't be edited is posted again (and remembered, so a
+    retry edits it). A run a wake already answered gets only the card.
+    """
+    run = notice.run
+    view = build_fleet_view(run, notice.workers)
+    card: discord.Message | None = None
+    if notice.card_message_id is not None and notice.card_message_id.isdigit():
+        try:
+            card = await thread.fetch_message(int(notice.card_message_id))
+        except discord.NotFound:
+            card = None
+    if card is None:
+        card = await history_finder(thread)(run.id)
+    shown: discord.Message | None = None
+    if card is not None:
+        try:
+            shown = await card.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.NotFound, discord.Forbidden):
+            # Gone, or no longer ours to edit: post the final card afresh below.
+            log.info("fleet.card_end_edit_failed", run_id=str(run.id))
+        else:
+            shown = shown or card
+    if shown is None:
+        shown = await thread.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+    view.stop()
+    if record is not None:
+        # The line below is still owed: the notice settles when this returns.
+        await record(run, shown, False)
+    if not notice.delivered:
+        await thread.send(
+            fleet_ended_text(notice.workers), allowed_mentions=discord.AllowedMentions.none()
+        )
+
+
+def record_card(sessionmaker: async_sessionmaker[AsyncSession]) -> RecordCard:
+    """Store a run's card message id; a terminal card settles the owed notice."""
+    from daimon.core.stores import fleet
+
+    async def record(run: FleetRun, message: discord.Message, terminal: bool) -> None:
+        await fleet.record_card(
+            sessionmaker,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            message_id=str(message.id),
+            terminal=terminal,
+        )
+
+    return record
 
 
 class FleetControl(
@@ -249,9 +536,18 @@ class DiscordFleetCardFactory:
     No database, provider or permission projection is invented by this factory.
     """
 
-    def __init__(self, service: FleetOrchestrator, load_parent: ParentResolver) -> None:
+    def __init__(
+        self,
+        service: FleetOrchestrator,
+        load_parent: ParentResolver,
+        record: RecordCard | None = None,
+    ) -> None:
         self._service = service
         self._resolve = load_parent
+        self._record = record
+        # One live card per run in this process: a wake turn edits the card its
+        # root turn posted instead of leaving that one at "running".
+        self._posted: dict[uuid.UUID, discord.Message] = {}
 
     @classmethod
     def from_runtime(cls, service: FleetOrchestrator, deps: TurnDeps) -> Self:
@@ -270,10 +566,13 @@ class DiscordFleetCardFactory:
             requester_id: int,
             intent_id: uuid.UUID | None,
             run_id: uuid.UUID | None,
-            interaction: discord.Interaction | None,
+            interaction: Presser | None,
         ) -> tuple[WorkerPermissions, TenantAccessPolicy] | None:
             from daimon.adapters.discord.checks import admin_caller
+            from daimon.adapters.discord.recruitment_guard import protected
 
+            if protected(deps.recruitment, thread, str(thread.guild.id)):
+                raise FleetRefused("prerequisites_unavailable")
             if intent_id is None or (interaction is not None and run_id is None):
                 raise FleetRefused("prerequisites_unavailable")
             tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
@@ -341,7 +640,7 @@ class DiscordFleetCardFactory:
             except (WorkerSpecRefused, ScopeViolation, SQLAlchemyError):
                 raise FleetRefused("prerequisites_unavailable") from None
 
-        return cls(service, resolve)
+        return cls(service, resolve, record_card(deps.sessionmaker))
 
     def __call__(
         self,
@@ -354,12 +653,13 @@ class DiscordFleetCardFactory:
         turn_card_intent_id: uuid.UUID | None = None,
         recorded_post: AgentPostRow | None = None,
         on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
+        wake_id: uuid.UUID | None = None,
     ) -> DiscordFleetCard | None:
         if not isinstance(thread, discord.Thread):
             return None
         card: DiscordFleetCard
 
-        async def current(interaction: discord.Interaction | None):
+        async def current(interaction: Presser | None):
             actor_id = interaction.user.id if interaction is not None else requester_id
             result = await self._resolve(
                 thread, requester_id, turn_card_intent_id, card.run_id, interaction
@@ -394,8 +694,61 @@ class DiscordFleetCardFactory:
             send=send,
             edit=edit,
             on_replacement=on_replacement,
+            posted=self._posted,
+            find_posted=history_finder(thread),
+            wake_id=wake_id,
+            record=self._record,
         )
         return card
+
+
+_NOT_CONTROLLER = f"Only the person who started this fleet, or {ADMIN_NOUN}, can {{verb}} it."
+FLEET_STOPPING = "Stopping this fleet and its workers."
+FLEET_STOP_NOT_ALLOWED = _NOT_CONTROLLER.format(verb="stop")
+_WAITING = "This action is waiting for its dependencies."
+_ALREADY_ENDED = "This fleet has already stopped."
+_WORKER_ENDED = "This worker has already finished."
+_UNREACHABLE = "Couldn't reach the fleet just now. Try again in a moment."
+_NOT_HERE = "You can't control this fleet from here."
+_LIMIT_USED = "This fleet has run out of the time or steps it was given, so it can't be resumed."
+_IN_FLIGHT = "Someone's press on this fleet is still going through. Try again in a moment."
+# Refusals a newer card would not offer: the card is behind the run.
+_CARD_BEHIND = frozenset(
+    {
+        "stale_version",
+        "foreign_worker",
+        "foreign_run",
+        "ambiguous_workers",
+        # The run moved under the press (a concurrent control or wake).
+        "control_evidence_invalid",
+    }
+)
+# The same press, from this or another clicker, is still being written.
+_PRESS_IN_FLIGHT = frozenset({"operation_conflict", "control_evidence_unavailable"})
+_CHANGED = (
+    "This fleet changed since the card was drawn. Wait for the card to update, then try again."
+)
+
+
+def _refusal_text(refused: FleetRefused | WorkerSpecRefused, action: Control) -> str:
+    """Why a fleet card click did nothing, in terms of what the clicker can do."""
+    reason: str = refused.reason
+    if reason == "controller_required":
+        # The shared owner's live rule: the fleet's starter or a current server admin.
+        return _NOT_CONTROLLER.format(verb="stop" if action == "kill" else "resume")
+    if reason == "terminal_run":
+        return _ALREADY_ENDED
+    if reason == "terminal_worker":
+        return _WORKER_ENDED
+    if reason in _CARD_BEHIND:
+        return _CHANGED
+    if reason == "original_limit_exhausted":
+        return _LIMIT_USED
+    if reason in _PRESS_IN_FLIGHT:
+        return _IN_FLIGHT
+    if reason == "prerequisites_unavailable":
+        return _UNREACHABLE
+    return _NOT_HERE
 
 
 class DiscordFleetCard:
@@ -411,9 +764,15 @@ class DiscordFleetCard:
         edit: Edit,
         on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        posted: MutableMapping[uuid.UUID, discord.Message] | None = None,
+        find_posted: FindPosted | None = None,
+        wake_id: uuid.UUID | None = None,
+        record: RecordCard | None = None,
     ) -> None:
         self._run_id = run_id
         self._service = service
+        # An ended run's cost in words, read once (`_read`).
+        self._costs: dict[uuid.UUID, str] = {}
         self._load_parent = load_parent
         self._send = send
         self._edit = edit
@@ -422,6 +781,14 @@ class DiscordFleetCard:
         self._message: discord.Message | None = None
         self._view: discord.ui.LayoutView | None = None
         self._lock = asyncio.Lock()
+        self._posted = posted
+        self._find_posted = find_posted
+        # The worker_finished wake this turn runs for: its own claim is not a
+        # wake still owed to the root, and it settles through the wake owner.
+        self._wake_id = wake_id
+        self._record = record
+        # The run the last rendered view showed, for `record`.
+        self._rendered: FleetRun | None = None
 
     @property
     def run_id(self) -> uuid.UUID | None:
@@ -429,7 +796,7 @@ class DiscordFleetCard:
         return self._run_id
 
     async def _snapshot(
-        self, interaction: discord.Interaction | None
+        self, interaction: Presser | None
     ) -> tuple[WorkerPermissions, TenantAccessPolicy, FleetRun, tuple[FleetWorker, ...]] | None:
         result = await self._load_parent(interaction)
         if result is None:
@@ -447,9 +814,23 @@ class DiscordFleetCard:
         ):
             raise FleetRefused("foreign_run")
         run_id = self._run_id or parent.fleet.run_id
-        run, workers = await self._service.read_snapshot(parent, policy, run_id)
+        run, workers = await self._read(parent, policy, run_id)
         self._run_id = run.id
         return parent, policy, run, workers
+
+    async def _read(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy, run_id: uuid.UUID
+    ) -> tuple[FleetRun, tuple[FleetWorker, ...]]:
+        """The run as the card shows it: once it has ended, with what it actually cost.
+
+        The stored figure trails the budget watch, so a running run shows no cost;
+        an ended one says the same cost the result reply does
+        (`FleetOrchestrator.run_cost`), read once.
+        """
+        run, workers = await self._service.read_snapshot(parent, policy, run_id)
+        if run.status not in RUN_TRANSITIONS and run.id not in self._costs:
+            self._costs[run.id] = fleet_cost_words(await self._service.run_cost(parent, run))
+        return run, workers
 
     def _render(
         self,
@@ -458,12 +839,16 @@ class DiscordFleetCard:
         *,
         collected: bool = False,
         blocked: bool = False,
+        partial: bool = False,
     ) -> discord.ui.LayoutView:
+        self._rendered = run
         return build_fleet_view(
             run,
             workers,
             collected=collected,
             blocked=blocked,
+            partial=partial,
+            cost=self._costs.get(run.id) if run.status not in RUN_TRANSITIONS else None,
         )
 
     async def refresh(self) -> bool:
@@ -473,15 +858,20 @@ class DiscordFleetCard:
             if snapshot is None:
                 return False
             _, _, run, workers = snapshot
+            if not workers and self._message is None:
+                # Every turn holds a fleet run; one nothing was spawned into is
+                # not a fleet, so the turn renders as a plain turn.
+                return False
             view = self._render(run, workers)
             await self._display(view)
             return True
 
     async def _display(self, view: discord.ui.LayoutView) -> None:
         if self._message is None:
-            self._message = await self._send(
-                view=view, allowed_mentions=discord.AllowedMentions.none()
-            )
+            if not await self._adopt(view):
+                self._message = await self._send(
+                    view=view, allowed_mentions=discord.AllowedMentions.none()
+                )
         else:
             previous = self._message
             updated = await self._edit(
@@ -494,6 +884,41 @@ class DiscordFleetCard:
         if self._view is not None:
             self._view.stop()
         self._view = view
+        if self._posted is not None and self._run_id is not None and self._message is not None:
+            self._posted.pop(self._run_id, None)
+            self._posted[self._run_id] = self._message
+            while len(self._posted) > _POSTED_CARDS_LIMIT:
+                self._posted.pop(next(iter(self._posted)))
+        run = self._rendered
+        if self._record is not None and run is not None and self._message is not None:
+            try:
+                # A terminal card on show settles the run's owed end notice.
+                await self._record(run, self._message, run.status not in RUN_TRANSITIONS)
+            except Exception:
+                log.warning("fleet.card_record_failed", run_id=str(run.id), exc_info=True)
+
+    async def _adopt(self, view: discord.ui.LayoutView) -> bool:
+        """Edit the card an earlier turn of this run posted in this thread, if any."""
+        if self._run_id is None:
+            return False
+        previous = self._posted.get(self._run_id) if self._posted is not None else None
+        if previous is None and self._find_posted is not None:
+            # A restart forgot the card; its run-scoped controls still find it.
+            previous = await self._find_posted(self._run_id)
+        if previous is None:
+            return False
+        try:
+            updated = await self._edit(
+                previous, view=view, allowed_mentions=discord.AllowedMentions.none()
+            )
+        except discord.HTTPException:
+            # The earlier card is gone or no longer ours: post this turn's own.
+            log.info("fleet.card_adopt_failed", run_id=str(self._run_id))
+            return False
+        self._message = updated if updated is not None else previous
+        if updated is not None and updated.id != previous.id and self._on_replacement is not None:
+            await self._on_replacement(updated)
+        return True
 
     async def control(
         self,
@@ -523,11 +948,17 @@ class DiscordFleetCard:
                     now=self._clock(),
                 )
                 if reply.get("accepted") is not True:
-                    await interaction.response.send_message(
-                        "This action is waiting for its dependencies.", ephemeral=True
-                    )
+                    await interaction.response.send_message(_WAITING, ephemeral=True)
                     return False
-                run, workers = await self._service.read_snapshot(parent, policy, run.id)
+                log.info(
+                    "fleet.control_pressed",
+                    run_id=str(run.id),
+                    worker_id=str(worker_id) if worker_id is not None else None,
+                    action=action,
+                    pressed_by=str(interaction.user.id),
+                    presser_is_admin=parent.subject.is_admin,
+                )
+                run, workers = await self._read(parent, policy, run.id)
                 view = self._render(run, workers)
 
                 async def edit_current(
@@ -547,68 +978,200 @@ class DiscordFleetCard:
                     edit=edit_current,
                 )
                 return True
-            except (FleetRefused, WorkerSpecRefused):
+            except (FleetRefused, WorkerSpecRefused) as refused:
                 await interaction.response.send_message(
-                    "This control is no longer available. Refresh the fleet card.",
-                    ephemeral=True,
+                    _refusal_text(refused, action), ephemeral=True
                 )
                 return False
 
-    async def allow_sealed_responses(self) -> bool:
-        """Only the trusted snapshot's proven absence restores ordinary delivery.
+    async def stop_typed(self, presser: Presser, *, message: discord.Message | None) -> str:
+        """A typed stop in the run's thread: the card's Stop-all, by its author; the reply text.
 
-        An unresolved or foreign root never permits disclosure. Active fleet
-        text is governed by collect/review, including on terminal failure.
+        The same authority as the button (the fleet's starter or a current server
+        admin, checked by the shared owner), at the run's current version.
         """
         async with self._lock:
             try:
-                return await self._snapshot(None) is None
+                snapshot = await self._snapshot(presser)
+                if snapshot is None:
+                    raise FleetRefused("foreign_run")
+                parent, policy, run, _ = snapshot
+                reply = await self._service.control(
+                    parent,
+                    policy,
+                    run_id=run.id,
+                    worker_id=None,
+                    action="kill",
+                    expected_version=run.version,
+                    operation_key=f"discord:fleet:{run.id}:all:{run.version}:kill",
+                    now=self._clock(),
+                )
+                if reply.get("accepted") is not True:
+                    return _WAITING
+                log.info(
+                    "fleet.control_typed",
+                    run_id=str(run.id),
+                    action="kill",
+                    pressed_by=str(presser.user.id),
+                    presser_is_admin=parent.subject.is_admin,
+                )
+            except (FleetRefused, WorkerSpecRefused) as refused:
+                return _refusal_text(refused, "kill")
+            # The kill stands whether or not the card can be redrawn now.
+            try:
+                run, workers = await self._read(parent, policy, run.id)
+                if message is not None:
+                    self._message = message
+                await self._display(self._render(run, workers))
+            except Exception:
+                log.warning("fleet.control_typed_redraw_failed", run_id=str(run.id), exc_info=True)
+            return FLEET_STOPPING
+
+    async def allow_sealed_responses(self) -> bool:
+        """Ordinary delivery only for no run, or a run nothing was spawned into yet.
+
+        Every turn holds a fleet run, so a run alone can't withhold a plain
+        turn's answer. Text sealed before any worker exists can't carry worker
+        output; once one exists, fleet text is governed by collect/review,
+        including on terminal failure. An unresolved or foreign root never
+        permits disclosure.
+        """
+        async with self._lock:
+            try:
+                snapshot = await self._snapshot(None)
             except (FleetRefused, WorkerSpecRefused):
                 return False
+            return snapshot is None or not snapshot[3]
 
     async def allow_summary(self) -> bool:
         """Compatibility gate for callers that only need disclosure authority."""
         allowed, _ = await self.summary_gate(render=self._message is not None)
         return allowed
 
-    async def summary_gate(self, *, render: bool = True) -> tuple[bool, str | None]:
-        """Allow reviewed text, or supply a status-only explanation of a blocked run."""
+    async def summary_gate(
+        self, *, render: bool = True, seen: bool = True
+    ) -> tuple[bool, str | None]:
+        """Decide what the turn's final answer may show, and end the card with it.
+
+        `seen` says the root's answer follows a collect that returned the run's
+        end (see `fleet_result_seen`). (True, None): deliver the root's answer (no
+        fleet, a seen result, or a run that never started a worker). (True,
+        notice): a partial result; the notice heads the root's answer. (False,
+        notice): the notice replaces it. A result the root has not seen is owed
+        to a wake turn, which delivers it; the run ends only after that.
+        """
         async with self._lock:
             try:
                 snapshot = await self._snapshot(None)
                 if snapshot is None:
                     return True, None
                 parent, policy, run, workers = snapshot
+                if not workers:
+                    # The root started nothing, so its answer carries no worker output.
+                    run = await self._settle(parent, policy, run)
+                    if render and self._message is not None:
+                        await self._display(self._render(run, workers))
+                    return True, None
                 reply = await self._service.collect(parent, policy, run_id=run.id)
+                run_id = run.id
+                ready = reply.get("status") == "ready"
+                blocked = reply.get("status") == "blocked"
+                partial = blocked and reply.get("partial") is True
+                # An answer that predates the result leaves it to a wake turn.
+                deferred = (
+                    (ready or blocked)
+                    and not seen
+                    and self._wake_id is None
+                    and await self._service.defer(parent, policy, run_id=run_id)
+                )
+                if deferred:
+                    ready = blocked = partial = False
+                elif ready or blocked:
+                    run = await self._settle(parent, policy, run, unless_waking=not seen)
             except (FleetRefused, WorkerSpecRefused):
-                return False, None
-            ready = reply.get("status") == "ready"
-            blocked = reply.get("status") == "blocked"
-            if render and (blocked or (ready and self._message is not None)):
+                return False, _UNAVAILABLE
+            if render:
                 # Collect can observe rows newer than the initial snapshot.
                 try:
-                    run, workers = await self._service.read_snapshot(parent, policy, run.id)
-                    view = self._render(run, workers, collected=ready, blocked=blocked)
+                    run, workers = await self._read(parent, policy, run_id)
+                    view = self._render(
+                        run,
+                        workers,
+                        collected=ready,
+                        blocked=blocked and not partial,
+                        partial=partial,
+                    )
                 except (FleetRefused, WorkerSpecRefused):
-                    return False, None
-                await self._display(view)
-            notice = None
+                    view = None
+                if view is not None and (ready or blocked or workers or self._message is not None):
+                    await self._display(view)
+            details = _worker_list(workers)
+            if deferred:
+                return False, _FINISHED
+            if partial:
+                done = sum(1 for row in workers if row.status == "succeeded")
+                return True, (
+                    f"Partial result: {done} of {len(workers)} workers succeeded. "
+                    f"Fleet workers: {details}."
+                )
             if blocked:
-                facts = [
-                    f"{_literal(row.role, 60)}: {row.status.replace('_', ' ')}"
-                    for row in sorted(workers, key=lambda row: row.ordinal)
-                ]
-                # Keep complete role/status pairs within one Discord message.
-                retained: list[str] = []
-                for fact in facts:
-                    if len("; ".join(retained + [fact])) > 1400:
-                        break
-                    retained.append(fact)
-                if len(retained) < len(facts):
-                    retained.append(f"+{len(facts) - len(retained)} more")
-                details = "; ".join(retained)
                 notice = "Fleet run didn't finish. "
                 if details:
                     notice += details + ". "
-                notice += "No reviewed result to share."
-            return ready, notice
+                return False, notice + "No reviewed result to share."
+            if ready:
+                return True, None
+            # No per-worker states here: this message is never edited again, so
+            # they would read as stuck after the run ends (r14). The card above is
+            # the live progress, and it ends in the run's final state.
+            return False, (
+                "Fleet is still working. The fleet card shows each worker as it "
+                "finishes, and I'll post the result here when they're done."
+            )
+
+    async def end_after_error(self) -> None:
+        """Leave a failed root turn's card current, and still owe the root its result.
+
+        A run with no worker ends. Running workers are armed by collect; finished
+        ones are owed a wake unless this is that wake. Nothing is disclosed here.
+        """
+        async with self._lock:
+            try:
+                snapshot = await self._snapshot(None)
+                if snapshot is None:
+                    return
+                parent, policy, run, workers = snapshot
+                if not workers:
+                    run = await self._settle(parent, policy, run)
+                    if self._message is not None:
+                        await self._display(self._render(run, workers))
+                    return
+                reply = await self._service.collect(parent, policy, run_id=run.id)
+                if reply.get("status") in ("ready", "blocked") and self._wake_id is None:
+                    await self._service.defer(parent, policy, run_id=run.id)
+                run, workers = await self._read(parent, policy, run.id)
+                await self._display(self._render(run, workers))
+            except (FleetRefused, WorkerSpecRefused) as error:
+                log.info("fleet.card_error_end_skipped", reason=str(error))
+
+    async def _settle(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        run: FleetRun,
+        *,
+        unless_waking: bool = True,
+    ) -> FleetRun:
+        """End a run left with no active worker; a lost race keeps the read row."""
+        try:
+            settled = await self._service.settle(
+                parent,
+                policy,
+                run_id=run.id,
+                wake_id=self._wake_id,
+                unless_waking=unless_waking,
+            )
+        except (FleetRefused, WorkerSpecRefused) as error:
+            log.info("fleet.run_settle_skipped", run_id=str(run.id), reason=str(error))
+            return run
+        return settled or run

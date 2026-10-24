@@ -23,14 +23,10 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_vault import chat_mcp_credential
 from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.testing import (
-    build_fake_anthropic,
-    ma_agent,
-    ma_environment,
-    ma_session,
-    ma_session_agent,
-)
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

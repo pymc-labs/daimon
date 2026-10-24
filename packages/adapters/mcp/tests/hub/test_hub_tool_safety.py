@@ -32,11 +32,17 @@ from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import session_settle_state
 from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.testing import AGENT_ID, build_turn_router, ma_agent, ma_session
+from daimon.testing import AGENT_ID, build_turn_router, ma_agent
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, send_events_response
+from daimon.testing.ma import MARouter
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import (
+    build_fake_anthropic,
+    json_body,
+    ma_session,
+    send_events_response,
+)
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 

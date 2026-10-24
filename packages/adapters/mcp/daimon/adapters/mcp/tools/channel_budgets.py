@@ -26,6 +26,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import Action
 from daimon.core.channel_budget import (
@@ -48,7 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PLATFORMS = ("discord", "slack", "teams")
 _NEEDS_CHANNEL = (
-    "channel_id is required: pass this turn's origin_context_id, the id from "
+    "channel_id is required: pass your origin_context_id, the id from "
     '<channel role="parent_channel">, or the channel the user named.'
 )
 
@@ -89,12 +90,13 @@ class ClearChannelBudgetResult:
     """False when the channel had no budget to clear."""
 
 
-_NEEDS_BUDGET_ADMIN = (
-    "Changing a channel's budget needs a workspace or server admin, and the caller is not "
-    "one; a channel's own admins can't change it either. Tell them who can make it and give "
-    "them a sentence that admin can say, preserving the requested action and channel. "
-    "Do not retry."
-)
+def _needs_budget_admin(auth: AuthIdentity) -> str:
+    return (
+        f"Changing a channel's budget needs {admin_noun(auth.platform)}, and the caller is not "
+        "one; a channel's own admins can't change it either. Tell them who can make it and give "
+        "them a sentence that admin can say, preserving the requested action and channel. "
+        "Do not retry."
+    )
 
 
 def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
@@ -102,7 +104,7 @@ def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
     decision = may_set_channel_budget(mcp_subject(auth, is_admin=auth.is_admin), channel_id)
     if not decision:
         record_authz_denial(Action.SET_CHANNEL_BUDGET, decision.reason)
-        raise ToolError(_NEEDS_BUDGET_ADMIN)
+        raise ToolError(_needs_budget_admin(auth))
     record_policy_decision(Action.SET_CHANNEL_BUDGET, "allow")
 
 
@@ -123,7 +125,7 @@ def _result(status: ChannelBudgetStatus) -> ChannelBudgetResult:
 
 def _require_platform(auth: AuthIdentity) -> str:
     if auth.platform not in _PLATFORMS:
-        raise ToolError("channel budgets exist only for Discord, Slack and Teams channels")
+        raise ToolError("channel budgets aren't available here")
     return cast(str, auth.platform)
 
 
@@ -322,7 +324,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ChannelBudgetLookup:
         """Show a channel's spending budget: its limit, window and what it has spent.
 
-        For the channel this turn is in (in a DM, the channel it was moved
+        For the channel this turn is in (in a private chat, the channel it was moved
         from), omit ``channel_id`` and pass this turn's
         ``origin_context_id``. For another channel, pass its id; a
         thread id resolves to its parent channel. Any member may read the
@@ -335,7 +337,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def list_channel_budgets(ctx: Context) -> list[ChannelBudgetResult]:  # pyright: ignore[reportUnusedFunction]
-        """List every channel budget in this server or workspace with its spend. Admin-only."""
+        """List every channel budget in this workspace with its spend. Admin-only."""
         return await _list_channel_budgets_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})

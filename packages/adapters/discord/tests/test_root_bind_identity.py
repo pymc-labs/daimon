@@ -18,10 +18,11 @@ from daimon.core.turn import admission as admission_module
 from daimon.core.turn import prepare as prepare_module
 from daimon.core.turn import runtime_manifest
 from daimon.core.turn_origin import current_origin_id
-from daimon.testing import ma_agent, ma_session
 from daimon.testing.factories import make_account
+from daimon.testing.ma_models import ma_agent
 from mux.contracts.ids import ModelRef
 from mux.profiles import backend_selection
+from mux.testing.drivers.anthropic.ma_models import ma_session
 
 from .conftest import make_tenant
 from .harness import make_bot
@@ -113,7 +114,8 @@ async def test_real_caller_binds_acknowledged_identity_and_unwinds_once(
 
     async def bind(deps, admission, **kwargs):
         origin_id = current_origin_id.get()
-        early = enabled and granted
+        # Without a grant the agent still has the default fleet (J10), so fleet on = early.
+        early = enabled
         assert (origin_id is not None) is early
         assert ("turn_card_intent_id" in kwargs) is early
         async with db_session_factory() as db:

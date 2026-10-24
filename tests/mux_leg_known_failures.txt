@@ -1,0 +1,5 @@
+# Known failures of the mux CI leg (DAIMON_TURN__PATH=mux, DAIMON_TURN__CHANNEL_BACKENDS=true).
+# daimon.testing.mux_leg_known marks each id below xfail(strict): remove a line when its
+# test starts passing; never add a line for a new failure, fix the failure instead.
+# Regenerate: run the four suites on the mux leg and list the failed ids.
+# The list is empty: every suite passes on the mux leg.

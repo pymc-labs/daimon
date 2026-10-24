@@ -27,9 +27,9 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
-from daimon.testing import ma_agent
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -94,10 +94,16 @@ def _agent_matching_tenant(tenant_id: uuid.UUID, *, name: str) -> dict[str, obje
 
 
 async def _provision(
-    db_session_factory: async_sessionmaker[AsyncSession], *, workspace_id: str
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: str,
+    signup_credit: Decimal = Decimal("0"),
 ) -> uuid.UUID:
     result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=workspace_id
+        db_session_factory,
+        platform="discord",
+        workspace_id=workspace_id,
+        signup_credit=signup_credit,
     )
     await set_provision_status(db_session_factory, tenant_id=result.tenant_id, status="pending")
     return result.tenant_id
@@ -132,7 +138,8 @@ async def test_seed_flips_ready_when_report_succeeds_and_default_agent_resolves(
         "a non-failing report with the default agent present on MA must flip to ready"
     )
     posted_embed = guild.system_channel.send.await_args.kwargs["embed"]
-    assert posted_embed.title == "✅ Ready", "the ready embed must be posted when status is ready"
+    assert posted_embed.title == "👋 Daimon is ready", "the ready embed is posted when ready"
+    assert "credit" not in (posted_embed.description or ""), "no credit, no credit line"
 
 
 async def test_seed_flips_failed_when_default_agent_missing_from_ma(
@@ -291,7 +298,7 @@ async def test_seed_stays_ready_without_promo_line_when_promo_lookup_fails(
         "a failed promo lookup must not flip a ready guild to failed"
     )
     posted_embed = guild.system_channel.send.await_args.kwargs["embed"]
-    assert posted_embed.title == "✅ Ready", "the ready embed must still be posted"
+    assert posted_embed.title == "👋 Daimon is ready", "the ready embed must still be posted"
     assert "promo" not in (posted_embed.description or ""), "the promo line should be left out"
 
 
@@ -406,3 +413,109 @@ async def test_seed_ma_error_during_roster_check_flips_failed_via_existing_bound
     )
     posted_embed = guild.system_channel.send.await_args.kwargs["embed"]
     assert posted_embed.title == "⚠️ Setup hit a snag"
+
+
+def _guild_with_welcome_message(guild_id: int) -> tuple[MagicMock, MagicMock]:
+    """A guild whose channel returns a message that can be edited."""
+    guild = _make_guild(guild_id=guild_id)
+    message = MagicMock(spec=discord.Message)
+    message.edit = AsyncMock()
+    guild.system_channel.send.return_value = message
+    return guild, message
+
+
+async def _seed_after_welcome(
+    bot: DaimonBot, tenant_id: uuid.UUID, guild: MagicMock, *, report: ApplyReport
+) -> None:
+    await bot._post_welcome(guild)  # pyright: ignore[reportPrivateUsage]
+    with patch(
+        "daimon.adapters.discord.bot.reconcile_tenant_defaults",
+        new_callable=AsyncMock,
+        return_value=report,
+    ):
+        await bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
+            tenant_id=tenant_id, guild=guild, was_ready=False
+        )
+
+
+async def test_seed_edits_the_setting_up_message_into_the_ready_message(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An install shows one message: the "setting up" post turns into the ready state."""
+    tenant_id = await _provision(db_session_factory, workspace_id="seed-edit-1")
+    runtime = _make_runtime(
+        db_session_factory,
+        anthropic_client=build_fake_anthropic(MARouter().dispatch),
+        agent_name=None,
+    )
+    bot = _make_bot(runtime)
+    guild, message = _guild_with_welcome_message(6)
+
+    await _seed_after_welcome(bot, tenant_id, guild, report=ApplyReport())
+
+    guild.system_channel.send.assert_awaited_once()
+    setting_up = guild.system_channel.send.await_args.kwargs["embed"]
+    assert setting_up.description == "Getting ready. This takes a moment."
+    message.edit.assert_awaited_once()
+    ready = message.edit.await_args.kwargs["embed"]
+    assert ready.title == "👋 Daimon is ready"
+
+
+async def test_ready_message_names_credit_when_the_tenant_has_some(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _provision(
+        db_session_factory, workspace_id="seed-credit-1", signup_credit=Decimal("10")
+    )
+    runtime = _make_runtime(
+        db_session_factory,
+        anthropic_client=build_fake_anthropic(MARouter().dispatch),
+        agent_name=None,
+    )
+    bot = _make_bot(runtime)
+    guild, message = _guild_with_welcome_message(7)
+
+    await _seed_after_welcome(bot, tenant_id, guild, report=ApplyReport())
+
+    description = message.edit.await_args.kwargs["embed"].description
+    assert "You have $10.00 of credit. Each answer shows what's left." in description
+
+
+async def test_ready_message_is_posted_fresh_when_the_welcome_cannot_be_edited(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _provision(db_session_factory, workspace_id="seed-edit-fail-1")
+    runtime = _make_runtime(
+        db_session_factory,
+        anthropic_client=build_fake_anthropic(MARouter().dispatch),
+        agent_name=None,
+    )
+    bot = _make_bot(runtime)
+    guild, message = _guild_with_welcome_message(8)
+    message.edit.side_effect = discord.NotFound(MagicMock(status=404), "Unknown Message")
+
+    await _seed_after_welcome(bot, tenant_id, guild, report=ApplyReport())
+
+    assert guild.system_channel.send.await_count == 2, "the ready message is posted instead"
+    ready = guild.system_channel.send.await_args.kwargs["embed"]
+    assert ready.title == "👋 Daimon is ready"
+
+
+async def test_snag_edits_the_setting_up_message_too(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _provision(db_session_factory, workspace_id="seed-snag-edit-1")
+    runtime = _make_runtime(
+        db_session_factory,
+        anthropic_client=build_fake_anthropic(MARouter().dispatch),
+        agent_name=None,
+    )
+    bot = _make_bot(runtime)
+    guild, message = _guild_with_welcome_message(9)
+    failing = ApplyReport()
+    failing.add(ResourceOutcome(kind="skill", name="boom", action=Action.FAILED, error="5xx"))
+
+    await _seed_after_welcome(bot, tenant_id, guild, report=failing)
+
+    guild.system_channel.send.assert_awaited_once()
+    assert "snag" in message.edit.await_args.kwargs["embed"].title.lower()

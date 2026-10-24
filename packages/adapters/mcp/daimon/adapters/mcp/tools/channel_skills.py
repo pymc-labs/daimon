@@ -21,6 +21,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.core.authz import Action
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel, may_set_channel_skills
 from daimon.core.defaults.loader import load_platform_skills
@@ -32,11 +33,14 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 _PLATFORMS = ("discord", "slack", "teams")
-_NEEDS_SKILLS_ADMIN = (
-    "Changing a channel's skills needs a workspace or server admin, and the caller is not "
-    "one; a channel's own admins can't change them either. Tell them who can, and give "
-    "them a sentence that admin can say. Do not retry."
-)
+
+
+def _needs_skills_admin(auth: AuthIdentity) -> str:
+    return (
+        f"Changing a channel's skills needs {admin_noun(auth.platform)}, and the caller is not "
+        "one; a channel's own admins can't change them either. Tell them who can, and give "
+        "them a sentence that admin can say. Do not retry."
+    )
 
 
 @dataclass(frozen=True)
@@ -84,7 +88,7 @@ def _summary(channel_id: str, rows: Sequence[ChannelSkillRow]) -> str:
 
 async def _target(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> tuple[str, str]:
     if auth.platform not in _PLATFORMS:
-        raise ToolError("channel skills exist only for Discord, Slack and Teams channels")
+        raise ToolError("channel skills aren't available here")
     if not channel_id.strip():
         raise ToolError("channel_id is required: the channel the user named.")
     target = (await resolve_channel(runtime, auth, channel_id.strip())).channel_id
@@ -95,7 +99,7 @@ def _require_write(auth: AuthIdentity, channel_id: str) -> None:
     decision = may_set_channel_skills(mcp_subject(auth, is_admin=auth.is_admin), channel_id)
     if not decision:
         record_authz_denial(Action.SET_CHANNEL_SKILLS, decision.reason)
-        raise ToolError(_NEEDS_SKILLS_ADMIN)
+        raise ToolError(_needs_skills_admin(auth))
     record_policy_decision(Action.SET_CHANNEL_SKILLS, "allow")
 
 
@@ -133,9 +137,7 @@ async def _add(
                 ),
             )
         except SkillsListTruncatedError as exc:
-            raise ToolError(
-                "This workspace's skills could not all be read. Nothing changed."
-            ) from exc
+            raise ToolError("The skills here could not all be read. Nothing changed.") from exc
         if isinstance(added, str):
             raise ToolError(REFUSALS[added])
         rows = await store.list_channel_skills(

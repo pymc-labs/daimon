@@ -348,7 +348,7 @@ async def test_naive_grant_clock_is_typed_refused_or_disabled_noop(root_turn, op
 @pytest.mark.parametrize("field", ["model", "system", "version", "tools", "environment"])
 async def test_fresh_native_drift_refuses_under_retained_source_authority(root_turn, field):
     import httpx
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     deps, prepared, *_ = root_turn
     parent = await retained(root_turn)
@@ -654,8 +654,8 @@ def test_environment_facade_preserves_null_description_and_validates_authority(f
 async def test_after_source_await_refuses_before_environment_read(root_turn, change):
     import httpx
     from daimon.core.errors import TurnError
-    from daimon.testing.ma import MARouter
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma import MARouter
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     deps, prepared, *_ = root_turn
     parent = await retained(root_turn)
@@ -955,17 +955,19 @@ async def test_default_grant_duration_and_turn_count_bound_the_frozen_run(root_t
         deps.sessionmaker, tenant_id=source.tenant_id, run_id=parent.fleet.run_id
     )
     assert parent.limits.deadline == run.deadline_at
-    assert 0 < (parent.limits.deadline - now).total_seconds() <= 125
+    # The run gets the grant's run time; each worker's time is applied at spawn.
+    assert 0 < (parent.limits.deadline - now).total_seconds() <= current.max_run_seconds + 5
+    assert parent.max_worker_seconds == current.max_worker_seconds
     assert parent.limits.max_turns == current.limits.max_turns == 4
     assert parent.backend_grants == current.backends and parent.models == current.models
     assert len(transport.requests) == before
 
 
 @pytest.fixture
-async def retained_budget_root_turn(db_preflight, db_nullpool_engine, request):
+async def retained_budget_root_turn(db_preflight, db_committing_engine, request):
     async for value in root_turn.__wrapped__(
         db_preflight,
-        db_nullpool_engine,
+        db_committing_engine,
         live_root=getattr(request, "param", None)
         in ("recorded_i7", "recorded_i7_null_description"),
         null_environment_description=getattr(request, "param", None)
@@ -1001,8 +1003,12 @@ async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
         for backend, model in plan["grant"]["choices"]:
             if model["provider"] == "gemini":
                 backend["model"] = model["id"] = "gemini-3.8-flash"
-    # Refresh only the host-owned lease; retain every recorded financial limit.
+    # Refresh the host-owned lease. The recorded provider lines total .585, over
+    # the recorded .49 run budget, which the grant preview now refuses (financial
+    # admission always did); raise only the run budget to their sum and keep every
+    # recorded provider line and worker budget.
     plan["grant"]["limits"]["deadline"] = current.expires_at.isoformat()
+    plan["grant"]["limits"]["budget_usd"] = "0.585"
     value = AgentFleetGrant.model_validate_json(json.dumps(plan["grant"]))
     service = AgentBackendService(deps.sessionmaker, enabled=True)
     actor = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
@@ -1019,7 +1025,7 @@ async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
     parent, policy = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
     original_limits = parent.limits
     assert parent.spec.model.provider == "anthropic"
-    assert parent.limits.budget_usd == Decimal("0.49")
+    assert parent.limits.budget_usd == Decimal("0.585")
     assert parent.limits.provider_limits_usd["anthropic"] == Decimal("0.04")
     before = len(transport.requests)
     request = await read_frozen_preparation(

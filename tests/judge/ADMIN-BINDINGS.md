@@ -148,7 +148,7 @@ Every sessionmaker destination is checked before I/O: the main bind and each per
 
 Both provisioning and callbacks use the public `daimon.testing.db.require_owned_sessionmaker()` guard. They validate every main/model bind with the shared isolated-CI exception; no admin-local database policy remains. Offline HTTP clients disable ambient proxy and TLS overrides.
 
-Admin SDK clients are built through the shared `daimon.testing.isolated_sdk` factories, including their guarded SDK reconstruction and native User-Agent preservation. ORM-specific bind routing tests live in the permitted `packages/testing/tests` tree; the T9 allowlist is unchanged.
+Admin SDK clients are built through the shared `mux.testing.isolated_sdk` factories, including their guarded SDK reconstruction and native User-Agent preservation. ORM-specific bind routing tests live in the permitted `packages/testing/tests` tree; the T9 allowlist is unchanged.
 
 Dispatched and direct resource callbacks require the same loopback/database/CI
 provenance guard before DB or SDK I/O. CI regressions read the original fixture

@@ -32,10 +32,13 @@ from daimon.core.turn.card_state import (
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.status_lines import (
+    SECTION_LABELS,
     SUMMARY_GAP,
+    draft_log,
     format_duration,
     format_headline,
     format_summary,
+    in_card_order,
 )
 
 EmbedEvent = _CardEvent
@@ -54,6 +57,7 @@ class EmbedData:
     description: str
     color: int
     footer: str | None
+    plan: str | None = None
     details: str | None = None
     notice: str | None = None
 
@@ -89,6 +93,11 @@ def _escape_markdown(text: str) -> str:
     for char in r"\`*_~|>[]()#":
         text = text.replace(char, f"\\{char}")
     return text
+
+
+def _code_lines(lines: tuple[str, ...]) -> str | None:
+    """Each line as inline code, one per line; None when there are none."""
+    return "\n".join(f"`{line.replace('`', "'")}`" for line in lines) if lines else None
 
 
 def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
@@ -132,27 +141,38 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
             notice=notice_text,
         )
 
-    # In progress: one embed, the headline, the tool lines, then the latest draft.
+    # In progress: one embed. The latest draft lines are the description; the
+    # plan and the tool lines ride the Plan and Details fields under it
+    # (`embed_fields`), each line inline code so their emoji look alike.
     elapsed_seconds = now - state.started_at if now is not None and state.started_at else None
     title = format_headline(
         is_working=state.phase is TurnPhase.TOOL_RUNNING,
         elapsed_seconds=elapsed_seconds,
         bold=lambda word: word,
     )
-    sections: list[str] = []
-    if state.text_preview:
-        sections.append(f"> {_escape_markdown(state.text_preview)}")
+    draft_lines = draft_log(state.earlier_drafts, state.text_preview)
     return EmbedData(
         phase=state.phase,
         title=title,
-        description="\n\n".join(sections),
+        description="\n".join(f"> {_escape_markdown(line)}" for line in draft_lines),
         color=color,
         footer=format_duration(elapsed_seconds) if elapsed_seconds is not None else None,
-        details=(
-            "\n".join(f"`{line.replace('`', "'")}`" for line in state.tool_lines)
-            if state.tool_lines
-            else None
-        ),
+        plan=_code_lines(state.plan_lines),
+        details=_code_lines(state.tool_lines),
+    )
+
+
+def embed_fields(data: EmbedData) -> list[tuple[str, str]]:
+    """The Plan and Details fields as ``(name, value)``, in `CARD_SECTIONS` order.
+
+    Both stay well under Discord's 1,024-character field value: at most
+    ``MAX_PLAN_LINES`` and ``MAX_TOOL_LINES`` short lines.
+    """
+    return in_card_order(
+        {
+            "plan": (SECTION_LABELS["plan"], data.plan) if data.plan is not None else None,
+            "tools": (SECTION_LABELS["tools"], data.details) if data.details is not None else None,
+        }
     )
 
 

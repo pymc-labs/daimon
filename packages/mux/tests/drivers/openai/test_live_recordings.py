@@ -7,12 +7,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from daimon.testing.conformance.recording import RecordingError, Replay
 from mux.contracts.events import Event, NativeProvenance
+from mux.testing.conformance.recording import RecordingError, Replay
 
 from .recording_checks import check
 
-CORPUS = Path(__file__).resolve().parents[5] / "tests/conformance/recordings/openai"
+CORPUS = Path(__file__).resolve().parents[2] / "fixtures/openai/recordings"
 
 
 @pytest.mark.asyncio

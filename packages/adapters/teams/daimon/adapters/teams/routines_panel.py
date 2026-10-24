@@ -19,6 +19,7 @@ from daimon.adapters.teams.card_actions import (
     card_actor,
     dialog,
     dialog_message,
+    dialog_notice,
     edit_origin_card,
     guarded,
     replace_card,
@@ -63,6 +64,7 @@ log = structlog.get_logger()
 GONE = "This routine no longer exists."
 NOT_OWNER = "Only the routine's creator or an admin can do that."
 ADMIN_ONLY = "Only an admin can create routines."
+NEW_ROUTINE = "New routine"
 _EVENT = "teams.routines.failed"
 
 
@@ -86,7 +88,7 @@ class RoutinesPanel:
     async def on_dialog_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await guarded(self._open(ctx.activity), dialog_message(FAILED), _EVENT)
+        return await guarded(self._open(ctx.activity), dialog_notice(NEW_ROUTINE, FAILED), _EVENT)
 
     async def on_dialog_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -165,12 +167,12 @@ class RoutinesPanel:
         agents = await list_agents_by_tenant(self._runtime.anthropic, tenant_id=actor.tenant_id)
         names = (agent.metadata.get(MA_METADATA_KEY_NAME) for agent in agents)
         form = create_form(sorted(name for name in names if name), values, error)
-        return dialog("New routine", form)
+        return dialog(NEW_ROUTINE, form)
 
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None or not actor.is_admin:
-            return dialog_message(DENIED if actor is None else ADMIN_ONLY)
+            return dialog_notice(NEW_ROUTINE, DENIED if actor is None else ADMIN_ONLY)
         return await self._form(actor, {})
 
     async def _submit(

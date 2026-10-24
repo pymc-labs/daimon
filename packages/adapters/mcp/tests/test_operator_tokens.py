@@ -19,8 +19,9 @@ from daimon.core.mcp_auth import mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.security_audit import list_events
-from daimon.testing import MARouter, build_fake_anthropic, ma_environment
 from daimon.testing.asgi import call_mcp_tool, mcp_session
+from daimon.testing.ma_models import ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

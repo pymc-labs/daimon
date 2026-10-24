@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from daimon.adapters.slack.agent_setup import actions as setup_actions
 from daimon.adapters.slack.agent_setup.panel_views import (
+    ACTION_ADD_SKILL,
     ACTION_AVATAR_CHANGE,
     ACTION_AVATAR_RESET,
     ACTION_CODING_TOOLS,
@@ -56,12 +57,12 @@ from daimon.core.config import TurnSettings
 from daimon.core.github_repo_auth import RepoAccess, RepoAccessKind
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
-from daimon.core.routing_facts import PRECEDENCE_LINE, UNROUTED_LINE
+from daimon.core.routing_facts import UNROUTED_LINE, precedence_line
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
 from daimon.core.stores.domain import (
     AgentFileRow,
 )
-from daimon.testing import ma_agent
+from daimon.testing.ma_models import ma_agent
 
 _TEAM_ID = "T_PANEL"
 _CHANNEL_ID = "C0HERE1111"
@@ -307,7 +308,7 @@ def test_agents_view_when_roster_empty_shows_empty_state_and_setup_action() -> N
         attributions={},
         channel_id=_CHANNEL_ID,
     )
-    assert "No agent answers here yet. Use Manage agents to add one." in _joined(view), (
+    assert "No agent answers here yet. Use Set up agents to add one." in _joined(view), (
         "an empty roster states the empty case in the shared copy"
     )
     assert "agent_setup__conversation" in _action_ids(view), (
@@ -470,6 +471,62 @@ def test_details_avatar_row_and_admin_controls() -> None:
     )
     assert "*Picture*" not in _joined(built_in)
     assert ACTION_AVATAR_CHANGE not in json.dumps(built_in)
+
+
+def _details_action_ids(
+    details: AgentDetails, *, is_admin: bool, coding_tools_available: bool = True
+) -> list[str]:
+    view = build_details_view(
+        details,
+        meta=_meta(),
+        is_admin=is_admin,
+        coding_tools_available=coding_tools_available,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+    )
+    return [
+        element["action_id"]
+        for block in view["blocks"]
+        for element in block.get("elements", [])
+        if element.get("type") == "button"
+    ]
+
+
+def test_details_offers_a_member_neither_add_skill_nor_coding_tools() -> None:
+    """Both only ever end in a refusal for a member, so the buttons are not shown."""
+    member = _details_action_ids(_details(is_admin=False), is_admin=False)
+    admin = _details_action_ids(_details(), is_admin=True)
+    assert ACTION_ADD_SKILL not in member and ACTION_CODING_TOOLS not in member
+    assert ACTION_ADD_SKILL in admin and ACTION_CODING_TOOLS in admin, "an admin keeps both"
+    assert "agent_setup__conversation" in member, "a member can still open setup to ask"
+
+
+def test_details_hides_the_unconfigured_coding_tools_note_from_a_member() -> None:
+    member = build_details_view(
+        _details(is_admin=False),
+        meta=_meta(),
+        is_admin=False,
+        coding_tools_available=False,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+    )
+    admin = build_details_view(
+        _details(),
+        meta=_meta(),
+        is_admin=True,
+        coding_tools_available=False,
+        channel_id=_CHANNEL_ID,
+        attribution=None,
+    )
+    assert "Coding-tool access isn't set up" not in _joined(member)
+    assert "Coding-tool access isn't set up" in _joined(admin)
+
+
+def test_details_does_not_offer_add_skill_on_a_built_in_agent_even_to_an_admin() -> None:
+    built_in = _details().model_copy(update={"daimon_managed": True})
+    assert ACTION_ADD_SKILL not in _details_action_ids(built_in, is_admin=True), (
+        "a built-in agent takes no skill from anyone"
+    )
 
 
 async def test_load_details_view_omits_avatar_when_identity_is_off(
@@ -786,7 +843,7 @@ def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -
     assert ACTION_CODING_TOOLS not in _action_ids(unavailable), (
         "a button that cannot produce a working connection is not offered"
     )
-    assert "Coding-tool access is not configured for this deployment." in _joined(unavailable), (
+    assert "Coding-tool access isn't set up yet." in _joined(unavailable), (
         "the reason the button is missing is stated"
     )
 
@@ -925,11 +982,13 @@ def test_routing_view_renders_channel_mentions_not_raw_ids_and_names_deployment_
     )
     assert "set by <@U1>" in rendered, "a recorded actor is named"
     assert "*Workspace default:* daimon" in rendered, "the workspace default is named"
-    assert "Deployment default: *daimon*" in rendered, "the deployment default is named too"
+    assert "Daimon-wide default: *daimon*" in rendered, "the deployment default is named too"
     assert "_Not used while a workspace default is set._" in rendered, (
         "a workspace default consumes the deployment fall-through, and the view says so"
     )
-    assert PRECEDENCE_LINE in rendered, "the precedence rule is stated once, from the core"
+    assert precedence_line("workspace") in rendered, (
+        "the precedence rule is stated once, from the core"
+    )
     assert "Tell Daimon: Make research-bot answer in <#C0HERE1111>." in rendered, (
         "an admin gets the request in their own voice"
     )
@@ -1021,7 +1080,7 @@ def test_routing_view_when_nothing_is_set_says_so() -> None:
     )
     rendered = _joined(view)
     assert "*Workspace default:* Not assigned" in rendered, "an unset workspace default is stated"
-    assert "_no deployment default_" in rendered, "an unset deployment default is stated"
+    assert "_no Daimon-wide default_" in rendered, "an unset deployment default is stated"
     assert "_none open_" in rendered, "no open setup conversation is stated"
 
 

@@ -335,6 +335,21 @@ class FixtureIndex(Record):
     scenarios: tuple[SourcePin, ...]
 
 
+def gemini_native_contract(request: Object) -> Object:
+    """An authored Gemini request as the driver now sends it.
+
+    The pinned fixtures predate the no-tools sentinel: an agent request authored
+    with `tools: []` is sent with the inert `daimon_no_tools` function instead (an
+    empty agent list means Gemini's built-ins). Requests with tools, and capped
+    model requests, are unchanged. The same upgrade #708 made for explicit `[]`.
+    """
+    from mux.drivers.gemini import NO_TOOLS_TOOL
+
+    if request.get("tools") == [] and ("agent" in request or "agent_config" in request):
+        return {**request, "tools": [NO_TOOLS_TOOL]}
+    return request
+
+
 def load_provider_fixtures(path: Path, *, catalog_root: Path) -> FixturePack:
     index = FixtureIndex.model_validate_json(path.read_bytes())
     scenarios: list[ScenarioFixture] = []
@@ -417,7 +432,7 @@ def turn_tape(
                     id="send",
                     method="POST",
                     path="/v1beta/interactions",
-                    request_json=turn.request,
+                    request_json=gemini_native_contract(turn.request),
                     headers=(("api-revision", "2026-05-20"),),
                     response_json={**turn.snapshot, "status": "in_progress", "steps": []},
                     releases=(gate,),

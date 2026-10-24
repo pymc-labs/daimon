@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 @pytest.mark.parametrize("timeout", [False, True], ids=["proceeds", "busy"])
 async def test_remote_fence_waiter_releases_permit_and_connection(
-    db_nullpool_engine, db_schema, monkeypatch, timeout
+    db_committing_engine, db_schema, monkeypatch, timeout
 ):
     engine = build_test_engine(
         os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, pool_size=5, max_overflow=10
@@ -45,7 +45,7 @@ async def test_remote_fence_waiter_releases_permit_and_connection(
     monkeypatch.setattr(asyncio, "sleep", observed_sleep)
     try:
         # A separate engine/connection has no knowledge of this process's gates.
-        async with db_nullpool_engine.begin() as remote:
+        async with db_committing_engine.begin() as remote:
             await remote.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                 {"key": "session_mutation:remote-holder"},

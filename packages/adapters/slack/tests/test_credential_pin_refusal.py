@@ -19,8 +19,9 @@ from daimon.core.stores.credential_requests import (
     create_credential_request,
     peek_credential_request,
 )
-from daimon.testing import MARouter, build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

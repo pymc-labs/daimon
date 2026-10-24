@@ -10,12 +10,17 @@ import anthropic
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.errors import TurnError
 from daimon.core.github_app_session import GitHubTokenMintUnavailable
-from daimon.core.turn.errors import AdmissionDenialReason
+from daimon.core.platform_words import Place, words_for
+from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
+from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from mux.contracts.config import DEFAULT_BACKEND
+from mux.errors import ProviderError
+from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
+from mux.profiles.selfhosted import LOOP
 
 __all__ = [
-    "TEAMS_BILLING_COMMAND",
     "RefusalNouns",
     "TerminationNotice",
     "admission_refusal_text",
@@ -53,10 +58,9 @@ class _Copy:
 
 _RETRY = "@mention Daimon to try again."
 _CARRY = "@mention Daimon to carry on."
-# Names who can top up and where: `{billing}` is the platform's billing command.
-_TOP_UP = "An admin can top up with {billing}."
-#: How a person reaches the billing card in Teams, for the top-up line.
-TEAMS_BILLING_COMMAND = "`billing` in a 1:1 chat with me"
+# Names who can top up and where: `{billing}` is the platform's billing command, and
+# `{Who}` is "An admin", or for a sender from another organisation, who to ask instead.
+_TOP_UP = "{Who} can top up with {billing}."
 
 _COPY: dict[TerminationReason, _Copy] = {
     TerminationReason.INTERRUPTED: _Copy(
@@ -74,6 +78,11 @@ _COPY: dict[TerminationReason, _Copy] = {
     ),
     TerminationReason.UPSTREAM: _Copy(
         "Daimon's AI service failed on this reply.", _RETRY, "Send your message again."
+    ),
+    TerminationReason.REFUSED: _Copy(
+        "Daimon's AI declined this request.",
+        "Rephrase it and @mention Daimon again.",
+        "Rephrase it and send it again.",
     ),
     TerminationReason.RATE_LIMITED: _Copy("Daimon's AI service is busy.", "Try again in a minute."),
     TerminationReason.SESSION_TERMINATED: _Copy(
@@ -131,10 +140,10 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Daimon couldn't accept this request.", "Ask an admin."
     ),
     TerminationReason.MISSING_CONFIG: _Copy(
-        "Daimon isn't set up in this channel yet.", "Ask an admin to run {setup}."
+        "Daimon isn't set up in this channel yet.", "Ask {who} to {verb} {setup}."
     ),
     TerminationReason.RESOLVER_MISS: _Copy(
-        "This channel's setup is out of date.", "Ask an admin to check {setup}."
+        "This channel's setup is out of date.", "Ask {who} to check {setup}."
     ),
     TerminationReason.SESSION_PREPARATION_FAILED: _Copy(
         "A settings change hasn't applied yet.",
@@ -162,7 +171,46 @@ class RefusalNouns:
     admin: str
     billing: str
     setup: str = "`/agent-setup`"
+    #: How a person reaches `setup`: "run" a slash command, "send" a Teams word.
+    verb: str = "run"
+    #: Who to ask for what needs an admin; for a sender from another organisation, who
+    #: acts for them, since Teams opens no private chat with them.
+    who: str = "an admin"
 
+    @classmethod
+    def for_platform(
+        cls, platform: ChatPlatform, *, place: Place = "channel", foreign: bool = False
+    ) -> RefusalNouns:
+        """The nouns and commands `platform` uses, from the shared table.
+
+        `foreign` marks a sender from another organisation, who has no private chat with Daimon."""
+        words = words_for(platform)
+        return cls(
+            scope=words.space,
+            admin=words.admin,
+            billing=words.top_up(place=place, foreign=foreign),
+            setup=words.phrase("setup", place=place, foreign=foreign) or "an admin",
+            verb=words.verb,
+            who=words.host_admin if foreign and place != "dm" else "an admin",
+        )
+
+    @classmethod
+    def for_caller(cls, platform: str | None, *, place: Place = "channel") -> RefusalNouns:
+        """`for_platform` when the caller's platform is a chat platform, else words
+        that name no command (a CLI or an MCP client with no chat behind it)."""
+        if platform in CHAT_PLATFORMS:
+            return cls.for_platform(platform, place=place)
+        return cls(
+            scope="workspace",
+            admin="an admin",
+            billing="the billing command",
+            setup="the setup panel",
+            verb="open",
+        )
+
+
+# A server that never had credit (a join with no signup credit): nothing "ran out".
+_NO_CREDIT_YET = _Copy("Your team has no Daimon credit yet.", "{Who} can add some with {billing}.")
 
 _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "balance_depleted": _COPY[TerminationReason.ADMISSION_BALANCE_DEPLETED],
@@ -174,11 +222,90 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "runs_elsewhere": _COPY[TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE],
     "own_agents_only": _COPY[TerminationReason.ADMISSION_CHANNEL_ISOLATED],
     "writers_none": _COPY[TerminationReason.ADMISSION_CHANNEL_PROTECTED],
+    "client_requester": _Copy("I only answer in the channel we share.", "Mention me there."),
     "backend_unsupported": _Copy(
-        "This channel uses an unavailable agent backend.",
-        "Ask an admin to change or clear the channel backend.",
+        "This agent's model provider isn't available here right now.",
+        "Ask {who} to check which provider {agent_mid} uses.",
+    ),
+    "provider_hold_cap_reached": _Copy(
+        "Too many replies are running or still being settled on this model for this account.",
+        "Try again in a few minutes.",
+    ),
+    "provider_setup_pending": _Copy(
+        "Couldn't set up GPT for this {scope} yet.",
+        "Try again shortly.",
+    ),
+    "provider_price_unavailable": _Copy(
+        "Daimon can't price {model} right now, so it won't run it.",
+        "Use another model, or try again later.",
+    ),
+    "provider_daily_cap_reached": _Copy(
+        "Today's {model} budget for this {scope} is used up.",
+        "It resets at midnight UTC; use another model until then.",
     ),
 }
+# A provider refusal names its real cause and the chat words that fix it.
+_BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
+    "channel_pin": _Copy(
+        "This channel is pinned to {provider}, which can't run here.",
+        'Ask {who} to say "clear this channel\'s pin", so {agent_mid} answers on its own provider.',
+    ),
+    "provider_not_allowed": _Copy(
+        "{Provider} isn't turned on for this {scope}.",
+        'Ask {who} to turn it on, or to say "switch {agent_mid} to {default}".',
+    ),
+    "provider_not_configured": _Copy(
+        "{Provider} isn't set up on this Daimon install yet.",
+        "Ask whoever runs Daimon to add the {provider} key.",
+    ),
+    "agent_backend": _Copy(
+        "{agent} runs on {provider}, which isn't set up here yet.",
+        'Ask {who} to say "switch {agent_mid} to {default}", or to finish setting up {provider}.',
+    ),
+}
+_PROVIDER_NAMES = {
+    MANAGED_AGENTS.provider: "Anthropic",
+    PERSISTENT_WORKSPACE.provider: "OpenAI",
+    INLINE_REUSE.provider: "Gemini",
+    LOOP.provider: "a self-hosted model",
+}
+
+
+def _model_label(model: str | None) -> str:
+    from daimon.core.agent_model_names import model_name
+    from mux.contracts.ids import ModelRef
+
+    if not model:
+        return "model"
+    provider = (
+        INLINE_REUSE.provider
+        if model.startswith(INLINE_REUSE.provider)
+        else PERSISTENT_WORKSPACE.provider
+    )
+    return model_name(ModelRef(provider=provider, id=model))
+
+
+def provider_name(provider: str | None) -> str:
+    """How copy names a model provider: "OpenAI", or "a model provider" when unknown."""
+    return _PROVIDER_NAMES.get(provider or "", "a model provider")
+
+
+def switched_meanwhile_text(agent: str, now_on: str | None, wanted: str | None) -> str:
+    """Two switches of one agent at once: the other landed first. The same on every platform."""
+    where = f"; it's now on {provider_name(now_on)}" if now_on else ""
+    still = provider_name(wanted) if wanted else "that change"
+    return f"Someone just switched {agent}{where}. Ask again if you still want {still}."
+
+
+def default_agent_switch_text(agent: str, wanted: str, *, place: str, me: bool) -> str:
+    """A chat switch of the server's default agent, not said to be for everyone."""
+    provider = provider_name(wanted)
+    return (
+        f"Switching {agent} changes it for everyone on this {place}. To try {provider} "
+        f"just here, I can make a copy of {'me' if me else agent} on {provider}."
+    )
+
+
 _DM_REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "runs_elsewhere": _Copy("{agent} only works in other channels.", "Ask it there."),
     "own_agents_only": _Copy("This channel only uses its own agents.", "Ask in that channel."),
@@ -195,20 +322,43 @@ def admission_refusal_text(
     bot_name: str | None = None,
     agent_name: str | None = None,
     in_dm: bool = False,
+    cause: BackendRefusalCause | None = None,
+    provider: str | None = None,
 ) -> str:
     """Two approved lines for an admission refusal.
 
     `bot_name` remains accepted for adapter callers; a pinned agent's name
     must come from `agent_name`, not the deployment bot's display name.
+    A `backend_unsupported` refusal with a `cause` names it and its fix.
     """
     copy = (_DM_REFUSALS.get(reason) if in_dm else None) or _REFUSALS[reason]
+    if reason == "backend_unsupported" and cause is not None:
+        copy = _BACKEND_REFUSALS[cause]
+    elif reason == "balance_depleted" and cause == "no_credit_yet":
+        copy = _NO_CREDIT_YET
     agent = agent_name or "This agent"
-    return "\n\n".join(
-        (
-            copy.title.format(agent=agent, setup=nouns.setup),
-            copy.next_step.format(agent=agent, setup=nouns.setup, billing=nouns.billing),
-        )
+    named = provider_name(provider)
+    # A daily model cap refusal carries the model id where `provider` would be.
+    model = (
+        _model_label(provider)
+        if reason in ("provider_daily_cap_reached", "provider_price_unavailable")
+        else named
     )
+    words = {
+        "model": model,
+        "agent": agent,
+        "agent_mid": agent_name or "this agent",
+        "provider": named,
+        "default": provider_name(DEFAULT_BACKEND),
+        "Provider": _capitalised(named),
+        "scope": nouns.scope,
+        "setup": nouns.setup,
+        "billing": nouns.billing,
+        "verb": nouns.verb,
+        "who": nouns.who,
+        "Who": _capitalised(nouns.who),
+    }
+    return "\n\n".join((copy.title.format(**words), copy.next_step.format(**words)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +411,8 @@ def render_termination_notice(
     in_dm: bool = False,
     setup_command: str = "`/agent-setup`",
     billing_command: str = "`/billing`",
+    setup_verb: str = "run",
+    admin: str = "an admin",
     agent_name: str | None = None,
 ) -> TerminationNotice | None:
     """Render one reason using the same words on every platform."""
@@ -268,11 +420,23 @@ def render_termination_notice(
         return None
     copy = _COPY.get(reason, _FALLBACK)
     failure = error or (state.error if state is not None else None)
+    quota = provider_quota_copy(failure)
     if any(isinstance(cause, GitHubTokenMintUnavailable) for cause in _error_chain(failure)):
         copy = _Copy(
             "GitHub access is temporarily unavailable.",
             "@mention Daimon to try again.",
             "Send your message again.",
+        )
+    elif quota is not None:
+        copy = _Copy(*quota)
+    elif any(
+        isinstance(cause, ProviderError) and cause.native_code == "gemini_no_tools_loop"
+        for cause in _error_chain(failure)
+    ):
+        # The model kept reaching for a tool this agent doesn't have.
+        copy = _Copy(
+            "Daimon couldn't answer that without tools.",
+            "Ask again, a little more directly.",
         )
     elif spend_limit_error(failure) is not None:
         copy = _Copy(
@@ -290,7 +454,11 @@ def render_termination_notice(
         setup=setup_command,
     )
     next_step = (copy.dm_next_step if in_dm and copy.dm_next_step else copy.next_step).format(
-        setup=setup_command, billing=billing_command
+        setup=setup_command,
+        billing=billing_command,
+        verb=setup_verb,
+        who=admin,
+        Who=_capitalised(admin),
     )
     in_flight: tuple[str, ...] = ()
     finished = 0
@@ -306,7 +474,12 @@ def render_termination_notice(
                 )
             else:
                 title = f"The connections to {names} failed, so there's no reply."
-        if reason is TerminationReason.RATE_LIMITED and state.rate_limit_until is not None:
+        # A quota's own words already say when to retry, or that waiting won't help.
+        if (
+            reason is TerminationReason.RATE_LIMITED
+            and state.rate_limit_until is not None
+            and quota is None
+        ):
             next_step = f"Try again after {_clock(state.rate_limit_until)}."
     return TerminationNotice(
         reason=reason,
@@ -316,6 +489,44 @@ def render_termination_notice(
         finished_tools=finished,
         request_id=request_id,
     )
+
+
+def provider_quota_copy(error: BaseException | None) -> tuple[str, str] | None:
+    """Plain words for a provider quota refusal anywhere in `error`'s chain, else None.
+
+    A model this deployment's provider plan gives no quota at all, or one that
+    is only rate-limited for now. Shared by a turn's notice and a fleet
+    worker's failure line, so both name the same cause and fix.
+    """
+    for cause in _error_chain(error):
+        if isinstance(cause, ProviderError) and cause.category == "rate_limited":
+            if cause.native_code not in ("quota_zero", "quota_exhausted"):
+                continue
+            model = _model_words(cause.native_param)
+            if cause.native_code == "quota_zero":
+                return (
+                    f"{_capitalised(model)} isn't available on this server's Google plan.",
+                    "Pick another model or ask an admin to upgrade it.",
+                )
+            return (
+                f"Google is rate-limiting {model} right now.",
+                "Try again in a minute.",
+            )
+    return None
+
+
+def _model_words(model_id: str | None) -> str:
+    """ "Gemini 4 Argon" for a known id, else "this model"."""
+    if not model_id:
+        return "this model"
+    from daimon.core.agent_model_names import model_name
+    from mux.contracts.ids import ModelRef
+
+    return model_name(ModelRef(provider=INLINE_REUSE.provider, id=model_id))
+
+
+def _capitalised(text: str) -> str:
+    return text[:1].upper() + text[1:]
 
 
 def _error_chain(error: BaseException | None) -> list[BaseException]:

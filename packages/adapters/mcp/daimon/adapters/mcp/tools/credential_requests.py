@@ -25,6 +25,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import caller_owns_agent
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.discord import (
     _post_credential_button_impl,  # pyright: ignore[reportPrivateUsage]
@@ -200,7 +201,7 @@ def _require_requestable_platform(auth: AuthIdentity) -> str:
     if auth.platform_user_id is None:
         raise ToolError("credential requests require a platform-bound identity")
     if auth.platform == "slack" and auth.external_id is None:
-        raise ToolError("credential requests require a workspace context")
+        raise ToolError("credential requests require a chat context")
     return auth.platform_user_id
 
 
@@ -308,7 +309,7 @@ async def _require_key_replacement_allowed(
     if outcome in ("managed_agent", "needs_admin") and adding is not None:
         raise ToolError(
             f"'{ma_agent.name}' {shared}, and adding '{adding}' "
-            f"{env_shadow_phrase(adding, key)}. That needs a server or workspace "
+            f"{env_shadow_phrase(adding, key)}. That needs an "
             "admin, and the caller is not "
             f"one. Nothing changed: the existing '{key}' is still in use and no card "
             f"was posted. Tell them an admin can ask Daimon to replace '{key}' on "
@@ -353,6 +354,7 @@ async def _require_mcp_replacement_allowed(
         caller=admin_caller(auth),
         default=runtime.deployment_default,
         shares_token=shares_token,
+        owned=await caller_owns_agent(runtime, auth, str(ma_agent.id)),
     )
     if decision.refused:
         raise ToolError(
@@ -441,9 +443,7 @@ async def _mint_and_post(
             for_update=True,
         )
         if active_origin is None:
-            raise ToolError(
-                "This turn origin expired before the request; retry in that conversation."
-            )
+            raise ToolError("That conversation timed out before the request. Ask again there.")
         retired = await _supersede_live_siblings(
             session,
             tenant_id=auth.tenant_id,
@@ -585,9 +585,11 @@ async def _request_agent_key_impl(
         # Fail closed before anyone is asked for a value that could not be stored
         # encrypted. Tell the model plainly so it relays the operator step.
         raise ToolError(
-            "This deployment has no encryption keys (DAIMON_CRYPTO__KEYS), so agent keys "
-            "can't be saved and no card was posted. Tell them the operator must set "
-            "DAIMON_CRYPTO__KEYS first. Do not ask for the value in chat."
+            "This Daimon install has no encryption key yet, so agent keys can't be "
+            "saved and no card was posted. Tell them in plain words: nothing was "
+            "saved, and whoever runs this Daimon install must add an encryption key "
+            "first. Do not name settings or environment variables, and do not ask for "
+            "the value in chat."
         )
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(
@@ -672,9 +674,9 @@ async def _request_mcp_token_impl(
 ) -> RequestCredentialResult:
     requester = _require_requestable_platform(auth)
     if urlparse(url).scheme not in ("http", "https"):
-        raise ToolError("mcp server url must be http or https")
+        raise ToolError("connection URL must be http or https")
     try:
-        assert_public_host(url, what="mcp server url")
+        assert_public_host(url, what="connection URL")
     except McpUrlError as err:
         raise ToolError(str(err)) from err
     _reject_reserved_server(runtime, server_name=server_name, url=url)
@@ -708,7 +710,7 @@ async def _request_mcp_token_impl(
         ma_agent=ma_agent,
         requester_platform_user_id=requester,
         agent_name=agent_name,
-        purpose=f"connecting the MCP server '{server_name}'",
+        purpose=f"connecting '{server_name}'",
         channel_id=channel_id,
         origin=origin,
         requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, server_name)),
@@ -732,9 +734,9 @@ async def _request_mcp_oauth_impl(
     # browser and the callback, and no authorization server accepts a plain
     # http redirect target.
     if urlparse(url).scheme != "https":
-        raise ToolError("an OAuth MCP server url must be https")
+        raise ToolError("an OAuth connection URL must be https")
     try:
-        assert_public_host(url, what="mcp server url")
+        assert_public_host(url, what="connection URL")
     except McpUrlError as err:
         raise ToolError(str(err)) from err
     _reject_reserved_server(runtime, server_name=server_name, url=url)
@@ -762,7 +764,7 @@ async def _request_mcp_oauth_impl(
         ma_agent=ma_agent,
         requester_platform_user_id=requester,
         agent_name=agent_name,
-        purpose=f"connecting the MCP server '{server_name}' with your account",
+        purpose=f"connecting '{server_name}' with your account",
         channel_id=channel_id,
         origin=origin,
         requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, server_name)),
@@ -844,13 +846,13 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
     ) -> RequestCredentialResult:
         """Connect an agent such as research-bot to Linear through an MCP endpoint
         with a bearer token, not browser OAuth. GitHub repos use github_connect.
-        For a server that only signs people in through a browser (Notion, Slack,
+        For a server that only signs people in through a browser (Notion,
         Atlassian) use
         ``request_mcp_oauth`` instead; such servers reject a pasted key.
         Match supported authentication; an API key is not automatically an MCP token.
 
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
-        credentials in chat. Connecting requires a workspace or server admin.
+        credentials in chat. Connecting requires an admin.
         This applies to new servers and replacements.
 
         Posts a requester-only card naming the agent and the server, opening a private
@@ -894,7 +896,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         pending_task: Annotated[str | None, Field(description=_PENDING_TASK_DESCRIPTION)] = None,
     ) -> RequestCredentialResult:
         """Connect an agent to an MCP server that signs people in through the browser,
-        such as Notion, Slack or Atlassian. Each person connects their own account:
+        such as Notion or Atlassian. Each person connects their own account:
         the grant is theirs alone, and other members connect separately when asked.
 
         Use ``request_mcp_token`` for servers that take a pasted bearer token and

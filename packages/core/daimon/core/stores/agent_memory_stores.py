@@ -1,7 +1,8 @@
 """MA memory store bindings (agent memory feature).
 
 The shared store is one per (tenant, agent); a personal store is one per
-(tenant, agent, account).
+(tenant, agent, account); a channel store is one per (tenant, agent, platform,
+parent channel) and is what a held turn mounts instead of the other two.
 
 `insert_memory_store` is the race-safe half of lazy provisioning: two
 concurrent first sessions may both create an MA store; ON CONFLICT DO NOTHING
@@ -13,7 +14,12 @@ from __future__ import annotations
 
 import uuid
 
-from daimon.core._models import Account, AgentMemoryStore, AgentPersonalMemoryStore
+from daimon.core._models import (
+    Account,
+    AgentChannelMemoryStore,
+    AgentMemoryStore,
+    AgentPersonalMemoryStore,
+)
 from daimon.core.errors import StoreError
 from sqlalchemy import Select, delete, exists, func, select, update
 from sqlalchemy.dialects.postgresql import Insert
@@ -237,6 +243,120 @@ async def clear_personal_memory_store(
             AgentPersonalMemoryStore.tenant_id == tenant_id,
             AgentPersonalMemoryStore.agent_id == agent_id,
             AgentPersonalMemoryStore.account_id == account_id,
+        )
+    )
+    await session.flush()
+
+
+# --- Channel stores: one per (tenant, agent, platform, parent channel) -------
+
+
+async def get_channel_memory_store_id(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+) -> str | None:
+    """Return the held channel's memstore_... id for this agent, or None when unbound."""
+    orm = await session.get(AgentChannelMemoryStore, (tenant_id, agent_id, platform, channel_id))
+    return None if orm is None else orm.memory_store_id
+
+
+async def insert_channel_memory_store(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    memory_store_id: str,
+) -> str:
+    """Race-safe insert. Returns the WINNING memory_store_id (`_insert_winner`)."""
+    stmt = (
+        pg_insert(AgentChannelMemoryStore)
+        .values(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            platform=platform,
+            channel_id=channel_id,
+            memory_store_id=memory_store_id,
+        )
+        .on_conflict_do_nothing(constraint="pk_agent_channel_memory_store")
+    )
+    return await _insert_winner(
+        session,
+        stmt,
+        select(AgentChannelMemoryStore.memory_store_id).where(
+            AgentChannelMemoryStore.tenant_id == tenant_id,
+            AgentChannelMemoryStore.agent_id == agent_id,
+            AgentChannelMemoryStore.platform == platform,
+            AgentChannelMemoryStore.channel_id == channel_id,
+        ),
+        binding=f"tenant={tenant_id} agent={agent_id} {platform}:{channel_id}",
+    )
+
+
+async def list_channel_memory_stores_for_agent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> list[tuple[str, str, str]]:
+    """Every `(platform, channel_id, memory_store_id)` bound for one agent."""
+    rows = await session.execute(
+        select(
+            AgentChannelMemoryStore.platform,
+            AgentChannelMemoryStore.channel_id,
+            AgentChannelMemoryStore.memory_store_id,
+        )
+        .where(
+            AgentChannelMemoryStore.tenant_id == tenant_id,
+            AgentChannelMemoryStore.agent_id == agent_id,
+        )
+        .order_by(AgentChannelMemoryStore.platform, AgentChannelMemoryStore.channel_id)
+    )
+    return [(platform, channel_id, store_id) for platform, channel_id, store_id in rows.tuples()]
+
+
+async def list_channel_memory_stores(
+    session: AsyncSession, *, tenant_id: uuid.UUID | None = None
+) -> list[tuple[uuid.UUID, uuid.UUID, str, str, str]]:
+    """Every `(tenant_id, agent_id, platform, channel_id, store_id)`, optionally for one tenant."""
+    stmt = select(
+        AgentChannelMemoryStore.tenant_id,
+        AgentChannelMemoryStore.agent_id,
+        AgentChannelMemoryStore.platform,
+        AgentChannelMemoryStore.channel_id,
+        AgentChannelMemoryStore.memory_store_id,
+    ).order_by(
+        AgentChannelMemoryStore.tenant_id,
+        AgentChannelMemoryStore.agent_id,
+        AgentChannelMemoryStore.platform,
+        AgentChannelMemoryStore.channel_id,
+    )
+    if tenant_id is not None:
+        stmt = stmt.where(AgentChannelMemoryStore.tenant_id == tenant_id)
+    rows = await session.execute(stmt)
+    return [(t, a, p, c, s) for t, a, p, c, s in rows.tuples()]
+
+
+async def clear_channel_memory_store(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+) -> None:
+    """Delete one channel's binding. Idempotent."""
+    await session.execute(
+        delete(AgentChannelMemoryStore).where(
+            AgentChannelMemoryStore.tenant_id == tenant_id,
+            AgentChannelMemoryStore.agent_id == agent_id,
+            AgentChannelMemoryStore.platform == platform,
+            AgentChannelMemoryStore.channel_id == channel_id,
         )
     )
     await session.flush()

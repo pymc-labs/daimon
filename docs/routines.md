@@ -102,6 +102,26 @@ Slot arithmetic lives in `packages/core/daimon/core/cron.py`, whose
 `next_slot_at_or_after` converts into the routine's zone, steps one second
 past the reference instant so it cannot land on it, and returns UTC.
 
+Routines whose saved channel or delivery destination selects the self-hosted
+backend stop before provider resolution, with
+`last_error=selfhosted_routines_unsupported`. Headless routines currently require
+Anthropic Managed Agents; switching a channel to self-hosted does not silently
+run its scheduled prompts through Anthropic. Thread destinations also check the
+requesting caller's retained backend. Legacy thread destinations whose parent
+channel is unknown stop with `last_error=routine_destination_parent_unknown`;
+set their destination again to record the parent before running them.
+
+Timers and task continuations retain their thread's backend after a channel
+backend change, including Anthropic timers in channels switched to self-hosted.
+Each queued wake resolves its own provider guard, even when another caller's
+turn drains the queue. A provider guard denial releases the claim for retry and
+never discards the timer or counts as a failed attempt.
+
+Timers and task continuations in a self-hosted conversation resolve their
+target from tenant-scoped local records. They run through the conversation
+runtime when installed; otherwise they stop with a notice asking the person
+to send a message to continue. They never fall back to Anthropic resolution.
+
 ## Creating one
 
 Operators can opt into requiring a destination for the MCP `create_routine`
@@ -152,12 +172,16 @@ The platform surfaces differ, and the difference is deliberate:
 - **Slack** `/routines` can create and delete. The panel writes the row
   directly rather than going through the MCP tool, because the Slack
   interaction carries the real user id while an agent's token does not
-  (`packages/adapters/slack/daimon/adapters/slack/routines_panel/`).
+  (`packages/adapters/slack/daimon/adapters/slack/routines_panel/`). The
+  New Routine form opens with the plain way, asking the agent in a channel
+  ("every weekday at 9am, post the sales numbers"), and labels the schedule
+  field "Schedule (advanced: cron, like 0 9 * * 1-5)". The panel rows and the
+  confirmation show the schedule in words (`daimon.core.cron_words`).
 - **Teams** `routines` (1:1 chat) matches Slack: admins create through a
   dialog, and the panel writes the row the same way
-  (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). The
-  shared rules (glyph, label, ordering, admin-or-creator) live in
-  `daimon.core.routines`.
+  (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). Its form
+  and schedule words read the same as Slack's. The shared rules (glyph, label,
+  ordering, admin-or-creator) live in `daimon.core.routines`.
 - **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
   view its last output. Creating one on Discord means asking the agent in
   chat, which calls `create_routine`
@@ -470,8 +494,16 @@ such a channel never falls back to a DM. See
 
 ## When a run fails
 
-There is no retry, no backoff, no failure counter and no disable-after-N. A
-failed run writes `last_error` and clears `last_result_tail`; a successful one
+The scheduler does not retry a failed run, count consecutive failures, or
+disable a routine after repeated failures. On the mux turn path, an individual
+provider write can retry within the caller's existing attempt allowance and
+the turn deadline when the provider definitely refused it, such as a rate
+limit with `Retry-After`. A timeout or lost response that may follow acceptance
+never causes that write to be sent again. Retry state lasts for that running
+turn only; a process restart does not resume the routine or its retry allowance.
+Session setup and the legacy turn path retain their existing SDK retry policy.
+
+A failed run writes `last_error` and clears `last_result_tail`; a successful one
 does the reverse. Both columns are overwritten every run, so `last_error is
 not null` means exactly "the most recent run failed" — which is what the
 Discord, Slack and Teams panels render.
@@ -553,6 +585,15 @@ and admin bypass switch, tenant DM controls, recipient policy, agent eligibility
 and immutable creation provenance. It uses the ordinary admission, binding and
 runner, including normal owner credentials, personal/shared memory and memory
 write policy. A memory outage degrades as it does for a live DM.
+
+Headless routine sessions, including legacy destination-free and owner-only runs,
+mount the agent's shared memory read-only and never mount personal memory. They
+can use saved memory but cannot change it. Explicit owner-DM routines use the
+live-DM path described above. A routine firing into a channel recorded as shared
+with another organisation runs held to that channel: only that channel's memory
+mounts, read-only, and the Daimon credential carries the same hold. A held result
+stays in its destination, with no direct-message fallback or Teams activity-feed
+notice quoting it.
 
 Each fire owns a fresh private scope with empty history. It never changes the
 selected conversation or reads its physical DM history. A shared database owner
@@ -777,8 +818,9 @@ after a server error or connection reset. Changing the destination cancels pendi
 payloads, including their files. Each file send rechecks the saved destination
 and live owner access. Creator fallback DMs also recheck current DM controls,
 recipient eligibility and isolation, including a resolved Discord thread parent,
-before each file and after download. Owner DM delivery retains the same privacy and
-no-personal-memory rules as text. Run-failure notices never carry files.
+before each file and after download. Files follow the same memory and privacy rules
+as text: headless runs never mount personal memory, and explicit owner-DM runs use
+the normal live-DM path. Run-failure notices never carry files.
 
 For configured [lead intake](lead-intake.md), begin each triage run with
 `lead_intake_resume`, classify every discovered message (including `other`),
@@ -796,7 +838,7 @@ unattended.
 Retained output and diagnostics on destination-free routines (no destination kind,
 destination ID, or channel ID) are owner-only, like DM results. Administrators can
 manage their metadata but cannot read those private previews, errors, delivery
-payloads, or delivery notes. Upgrade migration `0117_clear_legacy_routine_output`
+payloads, or delivery notes. Upgrade migration `0140_clear_legacy_routine_output`
 erases previously retained output for these legacy rows; see the
 [self-hosting rollout instructions](self-hosting.md#clearing-retained-legacy-routine-output).
 

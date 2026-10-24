@@ -14,6 +14,7 @@ import asyncio
 import uuid
 
 import structlog
+from daimon.adapters.teams.card_actions import text_lines
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S, TEAMS_SEND_ERRORS
 from daimon.core.ops_alerts import alert_ops
@@ -22,8 +23,14 @@ from daimon.core.stores.teams_installations import (
     record_teams_installation,
 )
 from daimon.core.teams_graph import GraphUnavailable, TeamGroups
-from microsoft_teams.api import ActivityBase, InstalledActivity, UninstalledActivity
+from microsoft_teams.api import (
+    ActivityBase,
+    InstalledActivity,
+    MessageActivityInput,
+    UninstalledActivity,
+)
 from microsoft_teams.apps import ActivityContext
+from microsoft_teams.cards import AdaptiveCard, OpenUrlAction
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -31,18 +38,49 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger(__name__)
 
 
-def welcome_text(bot: str, *, team: bool) -> str:
+_CHAT_LINK = "https://teams.microsoft.com/l/chat/0/0?users={bot_id}"
+"""The documented deep link that opens a 1:1 chat with a bot, by its `28:` account id."""
+
+
+def welcome_lines(bot: str, *, team: bool) -> tuple[str, str, str]:
+    """What the welcome says, one idea per line."""
     if team:
         return (
-            f"👋 Hi, I'm {bot}. @mention me in a post or a reply and I'll answer in that "
-            "thread, with the thread (or the channel's recent posts) as context. Commands "
-            f"like `setup`, `routines` and `billing` work in a 1:1 chat with me: open one "
-            "and send `help`."
+            f"👋 I'm {bot}. I answer in the thread where you mention me.",
+            "@mention me in a post or a reply to ask something.",
+            'For setup, open a chat with me and say "help me set up".',
         )
     return (
-        f"👋 Hi, I'm {bot}. Ask me anything here: every message goes to your agent. "
-        "Send `help` for commands, or `setup` to see who answers where."
+        f"👋 I'm {bot}. I help with questions and data.",
+        "Ask a question or send me a data file.",
+        'To set things up, say "help me set up". Send `help` for the rest.',
     )
+
+
+def welcome_text(bot: str, *, team: bool) -> str:
+    return "\n\n".join(welcome_lines(bot, team=team))
+
+
+def chat_link(bot_id: str | None) -> str | None:
+    """A link that opens a 1:1 chat with the bot; None unless `bot_id` is a bot account id."""
+    return _CHAT_LINK.format(bot_id=bot_id) if bot_id and bot_id.startswith("28:") else None
+
+
+def team_welcome_card(bot: str, url: str) -> AdaptiveCard:
+    """The team welcome with an Open chat button, so the 1:1 chat it names is one click away."""
+    return AdaptiveCard(
+        body=text_lines(*welcome_lines(bot, team=True)),
+        actions=[OpenUrlAction(title="Open chat", url=url)],
+        fallback_text=welcome_text(bot, team=True),
+    )
+
+
+def welcome_message(bot: str, *, team: bool, bot_id: str | None) -> MessageActivityInput:
+    """The welcome as sent: a card with Open chat for a team, plain text otherwise."""
+    url = chat_link(bot_id) if team else None
+    if url is None:
+        return MessageActivityInput(text=welcome_text(bot, team=team))
+    return MessageActivityInput().add_card(team_welcome_card(bot, url))
 
 
 class TeamInstalls:
@@ -119,7 +157,10 @@ class TeamInstalls:
             )
         bot = activity.recipient.name or "daimon"
         try:
-            await asyncio.wait_for(ctx.send(welcome_text(bot, team=is_team)), SEND_TIMEOUT_S)
+            await asyncio.wait_for(
+                ctx.send(welcome_message(bot, team=is_team, bot_id=activity.recipient.id)),
+                SEND_TIMEOUT_S,
+            )
         except TEAMS_SEND_ERRORS as err:
             log.warning("teams.welcome.send_failed", error=type(err).__name__)
 

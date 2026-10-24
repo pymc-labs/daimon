@@ -5,6 +5,8 @@ Import these into a package conftest to make them discoverable by pytest:
     # tests/conftest.py
     from daimon.testing.db import (  # noqa: F401
         db_clean,
+        db_committing_engine,
+        db_committing_pool,
         db_engine,
         db_nullpool_engine,
         db_schema,
@@ -30,9 +32,17 @@ Model:
 - Per test, ``db_clean`` wipes every ORM table in the worker schema at SETUP
   (one DO block of child-first DELETEs, a few ms). ``public`` is never touched:
   other worktrees share it, and a few own-engine tests write there on purpose.
-- ``@pytest.mark.fresh_schema`` opts a test out of the shared schema: it gets a
-  private ``test_f<pid>_<8hex>`` schema on its own NullPool engine
-  (CREATE / create_all / DROP around the test). Use it for tests that run DDL.
+- ``@pytest.mark.fresh_schema`` opts a test out of the shared schema, for tests
+  that run DDL. It gets one reusable per-worker DDL schema, ``test_f<pid>_<8hex>``,
+  built on first use. The test runs in a transaction ``db_session`` rolls back, and
+  Postgres rolls DDL back with it. The next such test first compares a catalog
+  fingerprint with the baseline: unchanged, it deletes every row; changed (a test
+  committed DDL), it drops and rebuilds the schema. ``DAIMON_TEST_FRESH_SCHEMA=1``
+  restores a private schema per test (CREATE / create_all / DROP around it).
+- ``db_committing_engine`` is a pooled engine (production's 5 + 10) on the worker
+  schema for tests whose sessions really COMMIT; ``db_nullpool_engine`` (a new
+  connection per checkout, ~20 ms each) remains for code that runs its own event
+  loop per call and for session-level advisory locks.
 - A worker that dies by SIGKILL leaves its schema behind; ``sweep_orphan_schemas``
   reclaims a bounded number of such orphans at engine setup.
 - Schema DDL runs in small transactions. One ``DROP SCHEMA ... CASCADE`` over
@@ -48,7 +58,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal, cast
@@ -60,7 +70,8 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 from daimon.core import platform_names
 from daimon.core._models import Base
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.dialects.postgresql import asyncpg as asyncpg_dialect
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError, DBAPIError
 from sqlalchemy.ext.asyncio import (
@@ -70,7 +81,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import NullPool, Pool
+from sqlalchemy.pool import ConnectionPoolEntry, NullPool, Pool, QueuePool
 
 #: Names this module creates: ``test_w<pid>_<8hex>`` (worker) / ``test_f<pid>_<8hex>`` (fresh).
 WORKER_SCHEMA_PATTERN = re.compile(r"^test_[wf](\d+)_[0-9a-f]{8}$")
@@ -78,8 +89,12 @@ _IDENTIFIER_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
 _INTERVAL_PATTERN = re.compile(r"^\d+(ms|s|min)?$")
 _SWEEP_LOCK_KEY = "daimon:test-schema-sweep"
 _LOCK_NOT_AVAILABLE_SQLSTATE = "55P03"
+_DEADLOCK_DETECTED_SQLSTATE = "40P01"
+# A wipe that loses a deadlock to an earlier test's late writer retries this often.
+_WIPE_ATTEMPTS = 3
 _CREATE_CHUNK_SIZE = 8
 _DROP_CHUNK_SIZE = 4
+_LOCK_TIMEOUT = "60s"
 
 # nodeid of the last test that used the DB in this worker; named in the error
 # when the next test's wipe times out on a lock that test left behind.
@@ -91,6 +106,59 @@ _OWNED_DATABASE_REFUSAL = (
 )
 
 
+_DialectConnection = asyncpg_dialect.AsyncAdapt_asyncpg_connection
+
+
+def _end_transactions_under_the_statement_mutex() -> None:
+    """Make COMMIT and ROLLBACK on a shared test connection wait for its running statement.
+
+    Several fixtures hand one ``AsyncConnection`` to more than one task (the test
+    body, a bot's background sweep, a teardown ``rollback``). SQLAlchemy's asyncpg
+    dialect serialises statements with ``_execute_mutex`` but not the commit and
+    rollback that end the transaction. Two tasks ending it together, with a third
+    starting the next one, interleave like this::
+
+        T2: ROLLBACK sent        T1: ROLLBACK -> InterfaceError (operation in progress)
+        T0: BEGIN sent and acknowledged; asyncpg now holds T0's transaction
+        T2: ROLLBACK returns; the dialect clears its ``_transaction`` / ``_started``
+
+    SQLAlchemy has forgotten a transaction asyncpg still holds. The connection
+    goes back to the pool mid-transaction, the pool's rollback is skipped, and
+    the next user's ``COMMIT`` is a ``RELEASE SAVEPOINT`` inside it. Its row and
+    advisory locks stay held, so the sibling pooled connection's next wipe waits
+    on them until the job times out. Production gives each task its own
+    connection, so only tests see this. Taking the statement mutex around both
+    calls removes the interleaving; ``_guard_pooled_transactions`` still reports
+    a connection that comes back mid-transaction for any other reason.
+    """
+    connection_class = _DialectConnection
+    if getattr(connection_class, "_daimon_serialised_transaction_end", False):
+        return
+    for name in ("_rollback_and_discard", "_commit_and_discard"):
+        end_transaction = getattr(connection_class, name, None)
+        if end_transaction is None:
+            raise RuntimeError(
+                f"SQLAlchemy's asyncpg dialect no longer has {name}; revisit "
+                "_end_transactions_under_the_statement_mutex in daimon.testing.db"
+            )
+        setattr(connection_class, name, _under_statement_mutex(end_transaction))
+    connection_class._daimon_serialised_transaction_end = True  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def _under_statement_mutex(
+    end_transaction: Callable[[_DialectConnection], Awaitable[None]],
+) -> Callable[[_DialectConnection], Awaitable[None]]:
+    async def serialised(adapted_connection: _DialectConnection) -> None:
+        async with adapted_connection._execute_mutex:  # pyright: ignore[reportPrivateUsage]
+            await end_transaction(adapted_connection)
+
+    serialised.__name__ = end_transaction.__name__
+    return serialised
+
+
+_end_transactions_under_the_statement_mutex()
+
+
 @dataclass(frozen=True)
 class DatabasePreflight:
     """Validated fixture configuration; never expose credentials in its repr."""
@@ -100,9 +168,19 @@ class DatabasePreflight:
 
 
 @dataclass
+class _DdlSchema:
+    """A worker's reusable ``@pytest.mark.fresh_schema`` schema (see ``db_session``)."""
+
+    name: str
+    engine: AsyncEngine = field(repr=False)
+    baseline: str = field(repr=False)
+
+
+@dataclass
 class _WorkerEngine:
     engine: AsyncEngine = field(repr=False)
     users: int = 0
+    ddl: _DdlSchema | None = None
 
 
 _WORKER_ENGINES = pytest.StashKey[dict[tuple[URL, str], _WorkerEngine]]()
@@ -225,6 +303,11 @@ def build_test_engine(
             "server_settings": {
                 "search_path": f"{schema}, public",
                 "application_name": schema,
+                # A test whose own connections wait on each other (an orphaned
+                # background write against the test's open transaction) fails
+                # in a minute with the lock named, instead of idling to the job
+                # timeout. Tests that wait for a lock on purpose set a shorter one.
+                "lock_timeout": _LOCK_TIMEOUT,
             }
         },
         execution_options={"crypto_keys": _TEST_CRYPTO_KEYS},
@@ -232,6 +315,21 @@ def build_test_engine(
     )
     _TEST_ENGINE_SCHEMAS[engine] = schema
     return engine
+
+
+def sibling_nullpool_engine(engine: AsyncEngine) -> AsyncEngine:
+    """A new NullPool engine on the same database and schema as ``engine``.
+
+    For code under test that disposes the engine it is handed: disposing a shared
+    pooled engine replaces its pool, which the next test would inherit. The caller
+    owns the sibling and may let that code dispose it.
+    """
+    schema = isolated_test_schema(engine)
+    if schema is None:
+        raise ValueError("sibling_nullpool_engine needs an engine from build_test_engine")
+    return build_test_engine(
+        engine.url.render_as_string(hide_password=False), schema, poolclass=NullPool
+    )
 
 
 def isolated_test_schema(engine: AsyncEngine) -> str | None:
@@ -298,6 +396,29 @@ def _is_lock_timeout(err: DBAPIError) -> bool:
     # The asyncpg dialect stamps the SQLSTATE on the error it translates to.
     sqlstate: str | None = getattr(err.orig, "sqlstate", None)
     return sqlstate == _LOCK_NOT_AVAILABLE_SQLSTATE
+
+
+def _is_deadlock(err: DBAPIError) -> bool:
+    sqlstate: str | None = getattr(err.orig, "sqlstate", None)
+    return sqlstate == _DEADLOCK_DETECTED_SQLSTATE
+
+
+async def wipe_schema(engine: AsyncEngine, schema: str, *, lock_timeout: str = "5s") -> None:
+    """``truncate_all`` in its own transaction, retried when Postgres picks it as a deadlock victim.
+
+    The child-first DELETEs can deadlock with a write an earlier test left running
+    (its FK check holds ``FOR KEY SHARE`` on a parent row the wipe deletes later,
+    while it waits on a row the wipe already deleted). Postgres aborts one side; when
+    it is the wipe, the other side commits and a retry deletes its rows too.
+    """
+    for attempt in range(1, _WIPE_ATTEMPTS + 1):
+        try:
+            async with engine.begin() as conn:
+                await truncate_all(conn, schema, lock_timeout=lock_timeout)
+            return
+        except DBAPIError as err:
+            if not _is_deadlock(err) or attempt == _WIPE_ATTEMPTS:
+                raise
 
 
 async def truncate_all(conn: AsyncConnection, schema: str, *, lock_timeout: str = "5s") -> None:
@@ -472,6 +593,7 @@ async def db_engine(
         )
         try:
             require_owned_sessionmaker(engine)
+            _guard_pooled_transactions(engine)
             async with engine.connect() as conn:
                 await _require_migrated(conn)
             await sweep_orphan_schemas(engine)
@@ -492,6 +614,11 @@ async def db_engine(
             del engines[key]
             try:
                 await _drain_background_tasks()
+                if worker.ddl is not None:
+                    try:
+                        await _drop_schema(worker.ddl.engine, worker.ddl.name)
+                    finally:
+                        await worker.ddl.engine.dispose()
                 await _drop_schema(worker.engine, db_schema)
             finally:
                 await worker.engine.dispose()
@@ -514,6 +641,308 @@ async def db_nullpool_engine(
         yield engine
     finally:
         await engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def db_committing_pool(
+    db_preflight: DatabasePreflight, db_engine: AsyncEngine, db_schema: str
+) -> AsyncIterator[AsyncEngine]:
+    """Session-scoped pooled engine for committing sessions (see ``db_committing_engine``).
+
+    Sized like production's ``build_engine`` default (5 + 10), so code that gates
+    on its pool (``session_preparation_gate.pool_headroom``) takes the same path
+    as in production, and four xdist workers stay under the stock
+    ``max_connections = 100``. ``pool_pre_ping`` replaces a connection a test
+    killed with ``pg_terminate_backend``, and every connection returns to the pool
+    with its transaction rolled back (``pool_reset_on_return="rollback"``, spelled
+    out because the isolation contract rests on it).
+    ``DAIMON_TEST_NULLPOOL=1`` restores one fresh connection per checkout.
+    """
+    if os.environ.get("DAIMON_TEST_NULLPOOL") == "1":
+        engine = build_test_engine(db_preflight.url, db_schema, poolclass=NullPool)
+    else:
+        engine = build_test_engine(
+            db_preflight.url,
+            db_schema,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_pre_ping=True,
+            pool_reset_on_return="rollback",
+        )
+        _watch_pool(engine)
+        _guard_pooled_transactions(engine)
+    try:
+        require_owned_sessionmaker(engine)
+        await _record_session_baseline(engine, db_schema)
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_committing_engine(
+    db_committing_pool: AsyncEngine, db_schema: str, request: pytest.FixtureRequest
+) -> AsyncIterator[AsyncEngine]:
+    """Pooled engine on the worker schema for tests whose sessions really COMMIT.
+
+    Use it where code under test opens its own sessions (``sm.begin()``) or a
+    test needs several independent connections, and everything runs on the
+    session event loop. Each checkout is a fresh transaction on a warm
+    connection, so statements stay prepared across tests; opening a new
+    connection per session (``db_nullpool_engine``) costs about 20 ms each.
+
+    Keep ``db_nullpool_engine`` for what pooling would change:
+
+    - code that runs ``asyncio.run`` per call (Typer commands under
+      ``CliRunner``): asyncpg connections are bound to the loop that opened them;
+    - session-level advisory locks, which Postgres releases only when the
+      connection closes, or tests that kill a backend with
+      ``pg_terminate_backend``.
+
+    At teardown the pool must be clean: every connection checked in, no session
+    fence permit held, and every connection the test touched back in its
+    starting session state (``search_path``, no ``SET`` GUC, temp object,
+    ``LISTEN`` or session-level advisory lock). A test that leaks one fails here,
+    and the connection is repaired, not left to fail an unrelated later test.
+    """
+    pool = db_committing_pool.pool
+    await _drain_background_tasks()
+    baseline = _pool_checkedout(pool)
+    _forget_touched_connections(pool)
+    yield db_committing_pool
+    await _drain_background_tasks()
+    _raise_on_leaked_transactions(pool, _request_item(request).nodeid)
+    await _assert_committing_pool_clean(db_committing_pool, pool, baseline, db_schema)
+
+
+async def _assert_committing_pool_clean(
+    engine: AsyncEngine, pool: Pool, baseline: int, schema: str
+) -> None:
+    """Raise when a test left ``engine`` (whose pool was ``pool``) dirty for the next one."""
+    problems: list[str] = []
+    if engine.pool is not pool:
+        problems.append("the test replaced the engine's pool")
+    if (leaked := _pool_checkedout(pool) - baseline) > 0:
+        problems.append(f"{leaked} pooled connection(s) are still checked out")
+    if (stuck := _pool_gate_deficit(pool)) is not None:
+        problems.append(f"a session fence permit was never released ({stuck})")
+    if problems:
+        raise AssertionError(
+            f"test left db_committing_engine dirty: {'; '.join(problems)}; close its sessions "
+            "and release its fences, or use db_nullpool_engine"
+        )
+    if leaks := await _repair_touched_connections(pool):
+        raise AssertionError(
+            f"test left session state on pooled connection(s): {'; '.join(leaks)}. A pooled "
+            "connection keeps it for the next test; undo it (RESET, DROP, UNLISTEN, advisory "
+            "unlock), use SET LOCAL, or use db_nullpool_engine"
+        )
+
+
+# The session settings a test may SET and forget. Their values are compared with a
+# brand-new connection's, so a startup-packet setting (``search_path``,
+# ``lock_timeout``) counts as changed when it differs from what the pool opens
+# connections with. ``current_setting`` is free; ``pg_settings`` would cost 0.6 ms.
+_WATCHED_GUCS = (
+    "search_path",
+    "statement_timeout",
+    "lock_timeout",
+    "idle_in_transaction_session_timeout",
+    "TimeZone",
+    "DateStyle",
+    "role",
+    "default_transaction_isolation",
+    "default_transaction_read_only",
+    "synchronous_commit",
+    "work_mem",
+    "client_min_messages",
+    "application_name",
+)
+
+# One round trip per connection a test touched. A temp table makes
+# ``pg_my_temp_schema()`` non-empty; on a connection outside any transaction every
+# advisory lock is session-level.
+_SESSION_STATE_SQL = (
+    "SELECT "
+    + ", ".join(f"current_setting('{name}') AS \"{name}\"" for name in _WATCHED_GUCS)
+    + """,
+  (SELECT count(*) FROM pg_class WHERE relnamespace = pg_my_temp_schema()) AS temp_objects,
+  (SELECT count(*) FROM pg_listening_channels()) AS channels,
+  (SELECT count(*) FROM pg_locks
+    WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()) AS advisory_locks
+"""
+)
+
+# Pooled connections each test touched, kept by the pool's checkout event.
+_POOL_WATCHES: WeakKeyDictionary[Pool, dict[int, ConnectionPoolEntry]] = WeakKeyDictionary()
+# What a brand-new connection of the pool reports for ``_WATCHED_GUCS``.
+_POOL_BASELINES: WeakKeyDictionary[Pool, dict[str, str]] = WeakKeyDictionary()
+
+
+def _watch_pool(engine: AsyncEngine) -> None:
+    """Record every connection checked out of ``engine``'s pool; refuse one mid-transaction.
+
+    NullPool (the kill switch) closes each connection on checkin, so it carries
+    nothing to the next test and needs no watch.
+    """
+    pool = engine.pool
+    if not isinstance(pool, QueuePool):
+        return
+    touched = _POOL_WATCHES.setdefault(pool, {})
+
+    @event.listens_for(engine.sync_engine, "checkout")
+    def _on_checkout(  # pyright: ignore[reportUnusedFunction]
+        dbapi_connection: object, record: ConnectionPoolEntry, proxy: object
+    ) -> None:
+        raw = record.driver_connection
+        if raw is not None and raw.is_in_transaction():  # pyright: ignore[reportUnknownMemberType]
+            raise AssertionError(
+                "a pooled connection came back from the pool inside a transaction: "
+                "its previous user did not roll back"
+            )
+        touched[id(record)] = record
+
+
+# Pooled connections a pool took back while their server-side transaction was
+# still open, with the state that gave it away. Filled by ``_guard_pooled_transactions``,
+# emptied by ``_raise_on_leaked_transactions``.
+_POOL_TRANSACTION_LEAKS: WeakKeyDictionary[Pool, list[str]] = WeakKeyDictionary()
+
+
+def _guard_pooled_transactions(engine: AsyncEngine) -> None:
+    """Close any connection ``engine``'s pool takes back with a transaction still open.
+
+    ``pool_reset_on_return="rollback"`` rolls back only a transaction SQLAlchemy
+    still tracks. When the asyncpg connection is mid-transaction without SQLAlchemy
+    knowing (a ``BEGIN`` it lost track of, a nested asyncpg transaction left behind
+    by an earlier one), the rollback is skipped and the next user's every ``COMMIT``
+    becomes a ``RELEASE SAVEPOINT`` inside the stale transaction. Its row and
+    advisory locks then stay held, so the sibling pool connection's next wipe waits
+    on them until the job times out. The connection is terminated here, which frees
+    those locks and makes the pool open a fresh one; the test that was running is
+    named by ``_raise_on_leaked_transactions`` at its teardown.
+    """
+    pool = engine.pool
+    if not isinstance(pool, QueuePool):
+        return
+    leaks = _POOL_TRANSACTION_LEAKS.setdefault(pool, [])
+
+    @event.listens_for(engine.sync_engine, "checkin")
+    def _on_checkin(  # pyright: ignore[reportUnusedFunction]
+        dbapi_connection: object, record: ConnectionPoolEntry
+    ) -> None:
+        raw = record.driver_connection
+        if raw is None or raw.is_closed():  # pyright: ignore[reportUnknownMemberType]
+            return
+        in_transaction = raw.is_in_transaction()  # pyright: ignore[reportUnknownMemberType]
+        outer = raw._top_xact  # pyright: ignore[reportUnknownMemberType, reportPrivateUsage]
+        if in_transaction or outer is not None:
+            leaks.append(
+                f"backend pid {raw.get_server_pid()} was returned to the pool "  # pyright: ignore[reportUnknownMemberType]
+                f"with the server transaction {'open' if in_transaction else 'closed'} and "
+                f"asyncpg's transaction {'still registered' if outer is not None else 'cleared'}"
+            )
+            record.invalidate()
+
+
+def _raise_on_leaked_transactions(pool: Pool, nodeid: str) -> None:
+    """Fail the test named ``nodeid`` when it returned a connection mid-transaction."""
+    if (leaks := _POOL_TRANSACTION_LEAKS.get(pool)) and (found := list(leaks)):
+        leaks.clear()
+        raise AssertionError(
+            f"{nodeid} returned a pooled connection to the worker pool inside an open "
+            f"transaction: {'; '.join(found)}. Its locks would have stalled every later "
+            "test on this worker, so the connection was terminated. Find the session, "
+            "connection or task of this test that began a transaction and never ended it."
+        )
+
+
+async def _record_session_baseline(engine: AsyncEngine, schema: str) -> None:
+    """Remember the settings a brand-new connection of ``engine``'s pool starts with."""
+    pool = engine.pool
+    if not isinstance(pool, QueuePool):
+        return
+    async with engine.connect() as conn:
+        fairy = await conn.get_raw_connection()
+        raw = fairy.driver_connection
+        row = await raw.fetchrow(_SESSION_STATE_SQL)  # pyright: ignore[reportUnknownMemberType, reportOptionalMemberAccess]
+    baseline = {name: str(row[name]) for name in _WATCHED_GUCS}
+    if baseline["search_path"] != f"{schema}, public":
+        raise AssertionError(
+            f"pooled connections open with search_path {baseline['search_path']!r}"
+        )
+    _POOL_BASELINES[pool] = baseline
+    _forget_touched_connections(pool)
+
+
+def _forget_touched_connections(pool: Pool) -> None:
+    if (touched := _POOL_WATCHES.get(pool)) is not None:
+        touched.clear()
+
+
+async def _repair_touched_connections(pool: Pool) -> list[str]:
+    """Check every connection the test touched against a fresh session; reset the ones that differ.
+
+    Returns one description per dirty connection. A connection still checked out
+    is skipped: the checked-out count already reports it.
+    """
+    touched = _POOL_WATCHES.get(pool)
+    if not touched:
+        return []
+    records = list(touched.values())
+    touched.clear()
+    leaks: list[str] = []
+    for record in records:
+        raw = record.driver_connection  # pyright: ignore[reportUnknownMemberType]
+        if record.in_use or raw is None or raw.is_closed():  # pyright: ignore[reportUnknownMemberType]
+            continue
+        row = await raw.fetchrow(_SESSION_STATE_SQL)  # pyright: ignore[reportUnknownMemberType]
+        found: list[str] = []
+        baseline = _POOL_BASELINES.get(pool, {})
+        for name in _WATCHED_GUCS:
+            if name in baseline and row[name] != baseline[name]:
+                found.append(f"{name} is {row[name]!r}, not {baseline[name]!r}")
+        if row["temp_objects"]:
+            found.append(f"{row['temp_objects']} temp object(s)")
+        if row["channels"]:
+            found.append("LISTEN channel(s)")
+        if row["advisory_locks"]:
+            found.append(f"{row['advisory_locks']} session-level advisory lock(s)")
+        if found:
+            leaks.append(", ".join(found))
+            await raw.execute("RESET ALL")  # pyright: ignore[reportUnknownMemberType]
+            await raw.execute("DISCARD TEMP")  # pyright: ignore[reportUnknownMemberType]
+            await raw.execute("UNLISTEN *")  # pyright: ignore[reportUnknownMemberType]
+            await raw.execute("SELECT pg_advisory_unlock_all()")  # pyright: ignore[reportUnknownMemberType]
+    return leaks
+
+
+def _pool_checkedout(pool: Pool) -> int:
+    # NullPool (the kill switch) keeps no count.
+    return pool.checkedout() if isinstance(pool, QueuePool) else 0
+
+
+def _pool_gate_deficit(pool: Pool) -> str | None:
+    """Describe a session fence (``pool_headroom``) permit that is still held, else None.
+
+    The gates are keyed by pool and live as long as it does, which here is the
+    whole worker session: one test that never releases a permit would starve
+    every later test through it.
+    """
+    from daimon.core import session_preparation_gate as fences
+
+    mutation = fences._pool_gates.get(pool)  # pyright: ignore[reportPrivateUsage]
+    preparation = fences._preparation_pool_gates.get(pool)  # pyright: ignore[reportPrivateUsage]
+    if mutation is None or preparation is None or not isinstance(pool, QueuePool):
+        return None
+    holders = (pool.size() + max(0, pool._max_overflow)) // 2  # pyright: ignore[reportPrivateUsage]
+    if holders == 1:
+        return None if mutation._value == 1 else "single shared gate"  # pyright: ignore[reportPrivateUsage]
+    prep = min(max(1, pool.size() // 2), holders - 1)
+    want = {"preparation": prep, "mutation": holders - prep}
+    have = {"preparation": preparation._value, "mutation": mutation._value}  # pyright: ignore[reportPrivateUsage]
+    return None if have == want else f"{have} of {want}"
 
 
 # Name writes (`daimon.core.platform_names`) run in the background in
@@ -541,10 +970,10 @@ async def db_clean(
     # A test before this one may have left name writes running, or remembered
     # names the wipe below deletes.
     await _drain_background_tasks()
+    _raise_on_leaked_transactions(db_engine.pool, f"{_last_db_test} (or a test between)")
     if item.get_closest_marker("fresh_schema") is None:
         try:
-            async with db_engine.begin() as conn:
-                await truncate_all(conn, db_schema, lock_timeout="5s")
+            await wipe_schema(db_engine, db_schema, lock_timeout="5s")
         except RuntimeError as err:
             raise RuntimeError(
                 f"{err}; the previous DB test in this worker was {_last_db_test}"
@@ -554,6 +983,7 @@ async def db_clean(
     finally:
         await _drain_background_tasks()
         _last_db_test = item.nodeid
+        _raise_on_leaked_transactions(db_engine.pool, item.nodeid)
 
 
 async def _drain_background_tasks() -> None:
@@ -573,6 +1003,118 @@ async def _drain_background_tasks() -> None:
     await drain_budget_notices()
     await platform_names.settle()
     platform_names.forget_all()
+
+
+# Everything DDL can change in one schema: columns (type, nullability, default,
+# identity, generation, collation), indexes, constraints, triggers, functions,
+# views, sequences, enum and domain types. A rolled-back transaction leaves it
+# untouched; a committed ALTER/CREATE/DROP does not. Row data is not part of it:
+# every fresh test starts by deleting every row.
+_FINGERPRINT_SQL = text(
+    """
+SELECT md5(concat_ws('|',
+  (SELECT coalesce(string_agg(c.relname || '.' || a.attname || ':'
+          || format_type(a.atttypid, a.atttypmod) || ':' || a.attnotnull::text || ':'
+          || a.attidentity::text || a.attgenerated::text || ':'
+          || coalesce((SELECT collname FROM pg_collation WHERE oid = a.attcollation), '') || ':'
+          || coalesce(pg_get_expr(d.adbin, d.adrelid), ''),
+          ',' ORDER BY c.relname, a.attnum), '')
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+     LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
+    WHERE n.nspname = :schema AND c.relkind IN ('r', 'p', 'v', 'm', 'S')),
+  (SELECT coalesce(string_agg(pg_get_indexdef(i.indexrelid), ','
+          ORDER BY i.indexrelid::regclass::text), '')
+     FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = :schema),
+  (SELECT coalesce(string_agg(k.conname || ':' || pg_get_constraintdef(k.oid),
+          ',' ORDER BY k.conname, k.oid), '')
+     FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace
+    WHERE n.nspname = :schema),
+  (SELECT coalesce(string_agg(pg_get_triggerdef(g.oid), ',' ORDER BY g.tgname, g.oid), '')
+     FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = :schema AND NOT g.tgisinternal),
+  (SELECT coalesce(string_agg(pg_get_functiondef(p.oid), ',' ORDER BY p.proname, p.oid), '')
+     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = :schema AND p.prokind IN ('f', 'p')),
+  (SELECT coalesce(string_agg(c.relname || ':' || pg_get_viewdef(c.oid), ',' ORDER BY c.relname),
+          '')
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = :schema AND c.relkind IN ('v', 'm')),
+  (SELECT coalesce(string_agg(t.typname || ':' || t.typtype::text, ',' ORDER BY t.typname), '')
+     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname = :schema AND t.typtype IN ('e', 'd')),
+  (SELECT coalesce(string_agg(e.enumtypid::text || e.enumlabel, ',' ORDER BY e.oid), '')
+     FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+     JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = :schema)
+)) AS fingerprint
+"""
+)
+
+
+async def _schema_fingerprint(engine: AsyncEngine, schema: str) -> str:
+    async with engine.connect() as conn:
+        return (await conn.execute(_FINGERPRINT_SQL, {"schema": schema})).scalar_one()
+
+
+async def _ready_ddl_schema(worker: _WorkerEngine, url: str) -> _DdlSchema:
+    """The worker's DDL schema, empty and shaped exactly like the ORM models.
+
+    Built on first use and reused: a ``fresh_schema`` test runs inside a
+    transaction that ``db_session`` rolls back, and Postgres rolls DDL back with
+    it. A test that commits anyway (``session.commit()``, ``engine.begin()``)
+    leaves rows and maybe a changed shape; the next test rewipes the rows,
+    restarts the sequences a test advanced, and rebuilds the schema when the
+    shape differs from the baseline.
+    """
+    ddl = worker.ddl
+    if ddl is not None and await _schema_fingerprint(ddl.engine, ddl.name) == ddl.baseline:
+        async with ddl.engine.begin() as conn:
+            await truncate_all(conn, ddl.name, lock_timeout="5s")
+            # A rolled-back nextval() still advances its sequence; a private
+            # schema would have started every test at 1.
+            advanced = (
+                await conn.execute(
+                    text(
+                        "SELECT sequencename FROM pg_sequences "
+                        "WHERE schemaname = :schema AND last_value IS NOT NULL"
+                    ),
+                    {"schema": ddl.name},
+                )
+            ).scalars()
+            for sequence in list(advanced):
+                quoted = sequence.replace('"', '""')
+                await conn.execute(text(f'ALTER SEQUENCE "{ddl.name}"."{quoted}" RESTART'))
+        return ddl
+    if ddl is not None:
+        await _drop_schema(ddl.engine, ddl.name)
+        await _create_schema_with_tables(ddl.engine, ddl.name)
+        return ddl
+    name = _new_schema_name("f")
+    engine = build_test_engine(url, name, poolclass=NullPool)
+    try:
+        require_owned_sessionmaker(engine)
+        await _create_schema_with_tables(engine, name)
+        worker.ddl = _DdlSchema(name, engine, await _schema_fingerprint(engine, name))
+    except BaseException:
+        await engine.dispose()
+        raise
+    return worker.ddl
+
+
+@asynccontextmanager
+async def _ddl_schema_session(worker: _WorkerEngine, url: str) -> AsyncIterator[AsyncSession]:
+    """A session on the worker's reusable DDL schema; its transaction is rolled back."""
+    ddl = await _ready_ddl_schema(worker, url)
+    async with ddl.engine.connect() as conn:
+        session = AsyncSession(bind=conn, expire_on_commit=False)
+        try:
+            yield session
+        finally:
+            await _drain_background_tasks()
+            await session.close()
+            await conn.rollback()
 
 
 @asynccontextmanager
@@ -602,6 +1144,7 @@ async def _fresh_schema_session(url: str) -> AsyncIterator[AsyncSession]:
 async def db_session(
     db_preflight: DatabasePreflight,
     db_engine: AsyncEngine,
+    db_schema: str,
     db_clean: None,
     request: pytest.FixtureRequest,
 ) -> AsyncIterator[AsyncSession]:
@@ -612,8 +1155,13 @@ async def db_session(
     schema instead (see module docstring).
     """
     if _request_item(request).get_closest_marker("fresh_schema") is not None:
-        async with _fresh_schema_session(db_preflight.url) as session:
-            yield session
+        worker = request.config.stash[_WORKER_ENGINES].get((make_url(db_preflight.url), db_schema))
+        if worker is None or os.environ.get("DAIMON_TEST_FRESH_SCHEMA") == "1":
+            async with _fresh_schema_session(db_preflight.url) as session:
+                yield session
+        else:
+            async with _ddl_schema_session(worker, db_preflight.url) as session:
+                yield session
         return
     async with db_engine.connect() as conn:
         session = AsyncSession(bind=conn, expire_on_commit=False)

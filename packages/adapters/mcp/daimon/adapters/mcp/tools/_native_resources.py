@@ -57,7 +57,7 @@ def bind_native_host(
     from daimon.core.neutral_resources import NeutralResourceHost
 
     if not isinstance(host, NeutralResourceHost):
-        raise ToolError("This deployment's resource host is misconfigured. Nothing was changed.")
+        raise ToolError("Daimon's resources are set up wrongly. Nothing was changed.")
     scope = host.scope
     capabilities = host.backend.capabilities()
     adapter = host.backend.agents
@@ -78,7 +78,6 @@ def bind_native_host(
         or getattr(adapter, "account_scope_id", None) != workspace
     ):
         raise ToolError(
-            "This deployment's resource host is for a different tenant, account or workspace. "
-            "Nothing was changed. Do not retry."
+            "These resources belong to someone else. Nothing was changed. Do not retry."
         )
     return host

@@ -9,7 +9,7 @@ from anthropic.types.beta.beta_managed_agents_file_resource_params import (
 from daimon.core.mux_backend import managed_agents, resource_ref
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic.sessions_lifecycle import WorkspaceTransfer
+from mux.drivers.anthropic import WorkspaceTransfer
 
 
 def restore_transfer_records(

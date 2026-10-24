@@ -67,7 +67,7 @@ async def resolve_channel(
     if lenient and auth.platform != "discord":
         return parsed
     if auth.platform == "discord" and not parsed.channel_id.isdigit():
-        raise ToolError(f"{parsed.channel_id!r} is not a Discord channel id")
+        raise ToolError(f"{parsed.channel_id!r} is not a channel id")
     try:
         if auth.platform == "discord":
             parent = await resolve_visible_channel(runtime, auth, parsed.channel_id)
@@ -80,7 +80,7 @@ async def resolve_channel(
         if lenient:
             return parsed
         raise
-    raise ToolError("channel tools exist only for Discord, Slack and Teams channels")
+    raise ToolError("channel tools aren't available here")
 
 
 async def _visible_slack_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
@@ -88,9 +88,11 @@ async def _visible_slack_channel(runtime: McpRuntime, auth: AuthIdentity, channe
     try:
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
     except SlackApiError as err:
-        raise ToolError(f"Slack could not find {channel_id} in this workspace") from err
+        raise ToolError(f"Slack could not find {channel_id} here") from err
     channel = cast("dict[str, object]", info["channel"])
-    await check_channel_access(client, channel=channel, user_id=_require_slack_identity(auth))
+    await check_channel_access(
+        client, channel=channel, user_id=_require_slack_identity(auth), is_client=auth.client
+    )
     return channel_id
 
 

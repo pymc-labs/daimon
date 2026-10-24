@@ -25,6 +25,11 @@ The separate ``chat_agent_id`` claim populates ``chat_agent_id`` only. Ordinary
 chat keeps ``agent_id=None``. Origin tools additionally require the signed
 ``chat_session_id`` grant to match the live origin's server-prepared session.
 
+``hold`` comes from the signed hold claim of a held turn's chat credential, which the
+verifier admitted only because it matched the token row's channel binding. A held
+identity is never an administrator and sees only the tools on the held allowlist
+(`daimon.adapters.mcp.middleware.held_tools`).
+
 ``token_kind``, ``token_jti`` and ``scopes`` come from the token's registry row
 (the verifier writes them under verifier-only claim keys). An operator token
 sees only the tools tagged with its scopes.
@@ -36,6 +41,7 @@ import uuid
 from dataclasses import dataclass
 
 from daimon.core.stores.domain import McpTokenKind, Role
+from daimon.core.turn_hold import TurnHold
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -54,7 +60,14 @@ class AuthIdentity:
     platform_user_id: str | None = None
     # True when the minted JWT carries is_admin=True.
     # Derived by the adapter from Discord owner/manage_guild/administrator or CLI context.
+    # Always False for a held identity, whatever `role` stores.
     is_admin: bool = False
+    # The channel this turn is held to, from the signed claim the verifier checked
+    # against the token row; None for every unheld credential.
+    hold: TurnHold | None = None
+    # The principal was verified to belong to another organisation (read live from
+    # the principal by the verifier): a client on every call, held credential or not.
+    foreign_home_id: str | None = None
     # Signed execution grant; never supplied as a tool parameter.
     slack_turn_context_id: uuid.UUID | None = None
     # Signed grant for one isolated provider session, never a tool argument.
@@ -67,10 +80,20 @@ class AuthIdentity:
     # The channel the agent key was minted in, from its mcp_tokens row; read
     # through `token_channel_id`.
     bound_channel_id: str | None = None
+    # Signed provider prohibition survives agent deletion until token expiry.
+    anthropic_disabled: bool = False
+    # A provider turn with no confirmation card: confirmation-gated tools refuse.
+    no_confirmation_surface: bool = False
 
     @property
     def is_operator(self) -> bool:
         return self.token_kind == "operator"
+
+    @property
+    def client(self) -> bool:
+        """The caller is from another organisation (or unknown for this turn): its held
+        credential says so, or its principal is marked foreign."""
+        return (self.hold is not None and self.hold.client) or self.foreign_home_id is not None
 
 
 def token_channel_id(auth: AuthIdentity) -> str | None:

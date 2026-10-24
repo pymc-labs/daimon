@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,9 +16,14 @@ from daimon.adapters.mcp.tools.here import (  # pyright: ignore[reportPrivateUsa
     _setter_display_name,
     _where_am_i_impl,
 )
+from daimon.core.access_policy import ChannelRule
 from daimon.core.config import RecruitmentSettings
+from daimon.core.here_card import HereCard
 from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
+
+#: "1:1" as the chat, not inside a time such as "21:15".
+_ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
 
 
 def _auth(*, platform: str = "discord") -> AuthIdentity:
@@ -183,6 +189,9 @@ async def test_teams_channel_turn_lists_its_channels_and_names_the_setter_from_s
             new=AsyncMock(return_value=rows),
         ),
         patch("daimon.adapters.mcp.tools.here.load_here_card", new=AsyncMock()) as load,
+        patch(
+            "daimon.adapters.mcp.tools.here.caller_is_foreign", new=AsyncMock(return_value=False)
+        ),
     ):
         await _where_am_i_impl(
             _runtime(),
@@ -194,6 +203,55 @@ async def test_teams_channel_turn_lists_its_channels_and_names_the_setter_from_s
     assert kwargs["visible_channel_ids"] == {row.id for row in rows}, "the caller's channels"
     assert kwargs["thread_id"] == "19:ops@thread.tacv2;messageid=1", "the post's thread"
     assert kwargs["resolve_setter_display"] is None, "the card falls back to the stored name"
+
+
+def _no_agent_card() -> HereCard:
+    return HereCard(
+        platform="teams",
+        agent_name=None,
+        tier=None,
+        channel_rule=ChannelRule(),
+        who_may_answer="",
+        reads_kept_inside=False,
+        bot_can_view=True,
+        effective_writers="any",
+        effective_readers="any",
+        text="No agent answers here\nAn admin can pick one in setup, in a 1:1 chat with Daimon.",
+    )
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+async def test_teams_card_for_a_guest_from_another_organisation_names_no_one_to_one_chat(
+    foreign: bool,
+) -> None:
+    caller = SimpleNamespace(inside_channel_id=None, home_place=lambda _id: None)
+    rows = [SimpleNamespace(id="19:ops@thread.tacv2")]
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.here.load_isolation_view", new=AsyncMock(return_value=caller)
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.here._teams_list_channels_impl",
+            new=AsyncMock(return_value=rows),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.here.load_here_card",
+            AsyncMock(return_value=_no_agent_card()),
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.here.caller_is_foreign", new=AsyncMock(return_value=foreign)
+        ),
+    ):
+        card = await _where_am_i_impl(
+            _runtime(), _auth(platform="teams"), "19:ops@thread.tacv2", None
+        )
+
+    assert card.foreign is foreign
+    if foreign:
+        assert _ONE_TO_ONE.search(card.text) is None, card.text
+        assert "Someone in the organisation that added Daimon can pick one" in card.text
+    else:
+        assert "1:1 chat" in card.text, "a local sender is told as before"
 
 
 @pytest.mark.parametrize(

@@ -20,11 +20,13 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any, Literal, cast
 
-from daimon.core._models import Account
+import structlog
+from daimon.core._models import Account, Tenant
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import FleetWorker as FleetWorkerRow
 from daimon.core.fleet import (
@@ -38,14 +40,23 @@ from daimon.core.fleet import (
     RunStatus,
     WorkerStatus,
     check_result,
+    holds_slot,
     worker_slot,
 )
-from daimon.core.stores import mux_state, read_persisted_columns, task_continuations, tenant_ledger
+from daimon.core.stores import (
+    check_persisted_read,
+    mux_state,
+    read_persisted_columns,
+    task_continuations,
+    tenant_ledger,
+)
 from pydantic import JsonValue
-from sqlalchemy import Row, func, or_, select, text, update
+from sqlalchemy import ColumnElement, Row, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+log = structlog.get_logger(__name__)
 _ACTIVE: tuple[WorkerStatus, ...] = ("starting", "running")
 _MICRO_EXPONENT = -6  # whole micro-dollars: Numeric(12, 6)
 _MAX_AMOUNT = Decimal("999999.999999")
@@ -197,7 +208,9 @@ async def create_run(
         await session.execute(
             insert(FleetRunRow)
             .values(
-                id=uuid.uuid4(),
+                # Derived from the tenant's unique key (a retry hits the same row anyway),
+                # so creating a run draws no random id.
+                id=uuid.uuid5(tenant_id, "fleet-run:" + operation_key),
                 tenant_id=tenant_id,
                 operation_key=operation_key,
                 status="running",
@@ -236,8 +249,10 @@ async def add_worker(
 ) -> FleetWorker:
     """A pending worker at `ordinal`, or the same one again; any other input there conflicts.
 
-    The run must be running, the ordinal below its `max_workers`, and the worker's
-    deadline no later than the run's.
+    The run must be running, fewer than `max_workers` of its workers may hold a slot
+    (a spawn refused at admission frees its slot, see `holds_slot`), the ordinal is
+    below twice `max_workers` so refusals stay bounded, and the worker's deadline is
+    no later than the run's.
     """
     intent: dict[str, Any] = {
         "role": role,
@@ -274,8 +289,20 @@ async def add_worker(
             return _worker(existing)
         if run.status != "running":
             raise FleetConflict(f"run {run_id} is {run.status}")
-        if not 0 <= ordinal < run.max_workers:
-            raise FleetConflict(f"run {run_id} allows {run.max_workers} workers")
+        if not 0 <= ordinal < 2 * run.max_workers:
+            raise FleetConflict(
+                f"run {run_id} allows {run.max_workers} workers", reason="worker_limit"
+            )
+        rows = (
+            await session.scalars(select(FleetWorkerRow).where(FleetWorkerRow.run_id == run_id))
+        ).all()
+        if (
+            sum(1 for other in rows if other.started_at is not None or holds_slot(_worker(other)))
+            >= run.max_workers
+        ):
+            raise FleetConflict(
+                f"run {run_id} allows {run.max_workers} workers", reason="worker_limit"
+            )
         if deadline_at > run.deadline_at:
             raise FleetConflict("a worker's deadline cannot outlast its run")
         row = FleetWorkerRow(
@@ -292,6 +319,37 @@ async def add_worker(
         return _worker(row)
 
 
+def lock_timed_out(error: DBAPIError) -> bool:
+    """A statement gave up on its lock_timeout (SQLSTATE 55P03), not some other failure."""
+    return (
+        getattr(error.orig, "sqlstate", None) == "55P03"
+        or "lock timeout" in str(error.orig).lower()
+    )
+
+
+def _sweep_due() -> ColumnElement[bool]:
+    """Runs past their deadline, or with a non-terminal worker past its own."""
+    expired_worker = (
+        select(FleetWorkerRow.id)
+        .where(
+            FleetWorkerRow.run_id == FleetRunRow.id,
+            FleetWorkerRow.tenant_id == FleetRunRow.tenant_id,
+            FleetWorkerRow.status.not_in(TERMINAL),
+            or_(FleetWorkerRow.deadline_at <= func.now(), FleetRunRow.deadline_at <= func.now()),
+        )
+        .exists()
+    )
+    return or_(
+        FleetRunRow.status.in_(tuple(RUN_TRANSITIONS)) & (FleetRunRow.deadline_at <= func.now()),
+        expired_worker,
+    )
+
+
+#: How long the scheduler's sweep waits for one tenant's fleet lock before it leaves
+#: that tenant to the next tick.
+SWEEP_LOCK_TIMEOUT = "2s"
+
+
 async def sweep_expired(
     sessionmaker: Source, *, tenant_id: uuid.UUID | None = None
 ) -> tuple[int, int]:
@@ -299,27 +357,44 @@ async def sweep_expired(
 
     Claims share the tenant lock with this sweep. Native termination and money
     remain their respective owners' responsibility; no result or released hold
-    is inferred from a deadline.
+    is inferred from a deadline. Across tenants (the scheduler), each tenant is swept
+    in its own transaction with a short lock wait, so one busy tenant neither waits
+    out the others nor holds their locks until the end.
     """
+    if tenant_id is None and not isinstance(sessionmaker, AsyncSession):
+        async with sessionmaker() as session:
+            tenants = list(
+                (
+                    await session.scalars(
+                        select(FleetRunRow.tenant_id)
+                        .where(_sweep_due())
+                        .distinct()
+                        .order_by(FleetRunRow.tenant_id)
+                    )
+                ).all()
+            )
+        workers_ended = runs_ended = 0
+        for tenant in tenants:
+            try:
+                async with sessionmaker.begin() as session:
+                    await session.execute(text(f"SET LOCAL lock_timeout = '{SWEEP_LOCK_TIMEOUT}'"))
+                    workers, runs = await sweep_expired(session, tenant_id=tenant)
+            except DBAPIError as error:
+                if lock_timed_out(error):
+                    log.info("fleet.sweep_tenant_busy", tenant_id=str(tenant))
+                else:
+                    # One tenant's failure must not stop the sweep for every other tenant.
+                    log.warning(
+                        "fleet.sweep_tenant_failed",
+                        tenant_id=str(tenant),
+                        error_class=type(error.orig).__name__,
+                    )
+                continue
+            workers_ended, runs_ended = workers_ended + workers, runs_ended + runs
+        return workers_ended, runs_ended
     workers_ended = runs_ended = 0
     async with _transaction(sessionmaker) as session:
-        expired_worker = (
-            select(FleetWorkerRow.id)
-            .where(
-                FleetWorkerRow.run_id == FleetRunRow.id,
-                FleetWorkerRow.tenant_id == FleetRunRow.tenant_id,
-                FleetWorkerRow.status.not_in(TERMINAL),
-                or_(
-                    FleetWorkerRow.deadline_at <= func.now(), FleetRunRow.deadline_at <= func.now()
-                ),
-            )
-            .exists()
-        )
-        due = or_(
-            FleetRunRow.status.in_(tuple(RUN_TRANSITIONS))
-            & (FleetRunRow.deadline_at <= func.now()),
-            expired_worker,
-        )
+        due = _sweep_due()
         tenants = (
             [tenant_id]
             if tenant_id is not None
@@ -383,6 +458,18 @@ async def sweep_expired(
                         status="failed",
                     )
                     runs_ended += 1
+                elif workers:
+                    # The worker's own failure record may have been deferred to this sweep
+                    # (a busy fleet lock): publish its batch as that record would, or the
+                    # root never resumes.
+                    from daimon.core.continuity.wakes import enqueue_worker_finished
+
+                    await enqueue_worker_finished(
+                        session,
+                        tenant_id=tenant,
+                        run_id=run.id,
+                        now=await mux_state.database_clock(session),
+                    )
     return workers_ended, runs_ended
 
 
@@ -714,9 +801,43 @@ async def set_run_status(
     run_id: uuid.UUID,
     expected_version: int,
     status: RunStatus,
+    wake_id: uuid.UUID | None = None,
+    unless_waking: bool = False,
 ) -> FleetRun:
-    finished = {"finished_at": func.now()} if status not in RUN_TRANSITIONS else {}
+    """Compare-and-set the run's status; an ended run withdraws its wakes.
+
+    `wake_id` is the wake whose turn makes this move; its own claim is kept for
+    the wake owner to settle. With `unless_waking`, another pending or claimed
+    wake of this run refuses the move in the same transaction (FleetConflict),
+    so a turn already owed to the root is never cancelled under it.
+    """
+    # An ended run with a worker owes its thread a terminal card until one is
+    # rendered. One nothing was spawned into (every turn holds a run) owes none.
+    spawned = (
+        select(FleetWorkerRow.id)
+        .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.run_id == run_id)
+        .exists()
+    )
+    finished = (
+        {
+            "finished_at": func.now(),
+            "end_notice": case((spawned, "owed"), else_=None),
+            "end_notice_due_at": case((spawned, func.now() + END_NOTICE_GRACE), else_=None),
+        }
+        if status not in RUN_TRANSITIONS
+        else {}
+    )
     async with _transaction(sessionmaker) as session:
+        if finished:
+            # Take the run's lock first, in its own statement: a first spawn holds it
+            # (`add_worker`) while it inserts the worker, and an UPDATE that only waited
+            # for it would recheck its `spawned` subquery against its old snapshot, so a
+            # Stop racing the first spawn would end the run owing no terminal card.
+            await session.execute(
+                select(FleetRunRow.id)
+                .where(FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id)
+                .with_for_update()
+            )
         row = (
             await session.execute(
                 update(FleetRunRow)
@@ -740,9 +861,175 @@ async def set_run_status(
                 f"run {run_id} cannot become {status} at version {expected_version}"
             )
         run = _run(row)
+        if unless_waking and await task_continuations.count_run_wakes(
+            session, run=run, exclude_id=wake_id
+        ):
+            raise FleetConflict(f"run {run_id} has a pending wake", reason="wake_pending")
         if finished:
-            await task_continuations.retire_worker_finished_rows(session, run=run)
+            await task_continuations.retire_worker_finished_rows(session, run=run, keep_id=wake_id)
     return run
+
+
+#: Time for the turn that ended a run to render its own terminal card.
+END_NOTICE_GRACE = timedelta(seconds=60)
+#: How long a wake turn that was running when its run ended may still answer.
+WAKE_TURN_GRACE = timedelta(minutes=15)
+END_NOTICE_MAX_ATTEMPTS = 6
+_END_NOTICE_BACKOFF = timedelta(seconds=30)
+_END_NOTICE_BACKOFF_CAP = timedelta(minutes=15)
+
+
+@dataclass(frozen=True)
+class EndNotice:
+    """An ended run whose thread has not seen its terminal card."""
+
+    run: FleetRun
+    workers: tuple[FleetWorker, ...]
+    card_message_id: str | None
+    #: A wake delivered the root's answer: settle the card, post no notice.
+    delivered: bool
+    attempts: int
+
+
+async def claim_end_notices(
+    sessionmaker: async_sessionmaker[AsyncSession], *, platform: str, limit: int = 10
+) -> tuple[EndNotice, ...]:
+    """Lease this platform's due run-end notices: each attempt pushes `due` back.
+
+    The caller posts outside this transaction and then calls `settle_end_notice`.
+    A crash between the post and the settle posts again after the backoff, so
+    delivery is at least once. A run whose wake turn may still be running waits
+    for it; one out of attempts is given up.
+    """
+    claimed: list[EndNotice] = []
+    async with sessionmaker.begin() as session:
+        now = await session.scalar(select(func.now()))
+        assert now is not None
+        rows = (
+            await session.scalars(
+                select(FleetRunRow)
+                .where(
+                    FleetRunRow.platform == platform,
+                    FleetRunRow.end_notice == "owed",
+                    FleetRunRow.end_notice_due_at <= now,
+                )
+                .order_by(FleetRunRow.end_notice_due_at, FleetRunRow.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+        for row in rows:
+            run = _run(row)
+            workers = (
+                await session.scalars(
+                    select(FleetWorkerRow)
+                    .where(
+                        FleetWorkerRow.tenant_id == run.tenant_id, FleetWorkerRow.run_id == run.id
+                    )
+                    .order_by(FleetWorkerRow.ordinal)
+                )
+            ).all()
+            if not workers:
+                # Nothing was spawned into it: there is no fleet to tell anyone about.
+                row.end_notice = None
+                row.end_notice_due_at = None
+                continue
+            started, delivered = await task_continuations.run_end_wakes(session, run=run)
+            if started is not None and started + WAKE_TURN_GRACE > now:
+                row.end_notice_due_at = started + WAKE_TURN_GRACE
+                continue
+            if row.end_notice_attempts >= END_NOTICE_MAX_ATTEMPTS:
+                row.end_notice = "given_up"
+                log.error("fleet.end_notice_given_up", run_id=str(run.id), reason="attempts")
+                continue
+            row.end_notice_attempts += 1
+            row.end_notice_due_at = now + min(
+                _END_NOTICE_BACKOFF * 2 ** (row.end_notice_attempts - 1), _END_NOTICE_BACKOFF_CAP
+            )
+            claimed.append(
+                EndNotice(
+                    run=run,
+                    workers=tuple(_worker(worker) for worker in workers),
+                    card_message_id=row.card_message_id,
+                    delivered=delivered,
+                    attempts=row.end_notice_attempts,
+                )
+            )
+        await session.flush()
+    return tuple(claimed)
+
+
+async def settle_end_notice(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    outcome: Literal["shown", "given_up"],
+) -> bool:
+    """Close an owed notice; False when something else already closed it."""
+    async with sessionmaker.begin() as session:
+        settled = await session.scalar(
+            update(FleetRunRow)
+            .where(
+                FleetRunRow.tenant_id == tenant_id,
+                FleetRunRow.id == run_id,
+                FleetRunRow.end_notice == "owed",
+            )
+            .values(end_notice=outcome)
+            .returning(FleetRunRow.id)
+        )
+    return settled is not None
+
+
+async def record_card(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    message_id: str,
+    terminal: bool,
+) -> None:
+    """Remember the run's card; a rendered terminal card settles an owed notice."""
+    values: dict[str, Any] = {"card_message_id": message_id}
+    if terminal:
+        values["end_notice"] = case(
+            (FleetRunRow.end_notice == "owed", "shown"), else_=FleetRunRow.end_notice
+        )
+    async with sessionmaker.begin() as session:
+        await session.execute(
+            update(FleetRunRow)
+            .where(FleetRunRow.tenant_id == tenant_id, FleetRunRow.id == run_id)
+            .values(**values)
+        )
+
+
+async def live_run_card(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> tuple[uuid.UUID, str] | None:
+    """The newest still-running fleet run of a thread with a posted card: (run id, card message).
+
+    For a typed stop in that thread; the card's own control path proves authority.
+    """
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                select(FleetRunRow.id, FleetRunRow.card_message_id)
+                .where(
+                    FleetRunRow.tenant_id == tenant_id,
+                    FleetRunRow.platform == platform,
+                    FleetRunRow.thread_id == thread_id,
+                    FleetRunRow.status.in_(_run_from("cancelled")),
+                    FleetRunRow.card_message_id.is_not(None),
+                )
+                .order_by(FleetRunRow.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+    return None if row is None or row.card_message_id is None else (row.id, row.card_message_id)
 
 
 async def run_status(
@@ -867,6 +1154,7 @@ async def lock_budget(
     run_id: uuid.UUID | None,
     financial: bool = True,
     persisted: bool = False,
+    locking: bool = True,
 ) -> tuple[BudgetGraph, Mapping[uuid.UUID, datetime | None]]:
     """Join the caller's financial transaction before any fleet row transition.
 
@@ -878,19 +1166,24 @@ async def lock_budget(
     requested run for terminal readback. Passive refresh uses tenant KEY SHARE;
     reservation and fresh native admission retain FOR UPDATE. Return original
     allocation stamps.
+
+    Without `locking` this is a read of the caller's snapshot: no tenant lock and no
+    row locks, for a read-only transaction that must never wait behind writers.
     """
     if not session.in_transaction():
         raise FleetConflict("fleet budget requires an active transaction")
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"fleet:{tenant_id}"},
-    )
-    # Same tenant/account order as audit and erasure.
-    tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id, financial=financial)
+    if locking:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"fleet:{tenant_id}"},
+        )
+        # Same tenant/account order as audit and erasure.
+        tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id, financial=financial)
+    else:
+        tenant = await session.scalar(select(Tenant.id).where(Tenant.id == tenant_id))
+    actor_query = select(Account.id).where(Account.id == actor_id, Account.tenant_id == tenant_id)
     actor = await session.scalar(
-        select(Account.id)
-        .where(Account.id == actor_id, Account.tenant_id == tenant_id)
-        .with_for_update(read=True, key_share=True)
+        actor_query.with_for_update(read=True, key_share=True) if locking else actor_query
     )
     if tenant is None or actor is None:
         raise FleetConflict("financial admission requires a live tenant actor")
@@ -903,8 +1196,9 @@ async def lock_budget(
             | (FleetRunRow.reserved_usd > FleetRunRow.observed_usd),
         )
         .order_by(FleetRunRow.id)
-        .with_for_update()
     )
+    if locking:
+        run_query = run_query.with_for_update()
     runs = (
         (await read_persisted_columns(session, run_query, reject_new=True)).all()
         if persisted
@@ -917,8 +1211,9 @@ async def lock_budget(
             FleetWorkerRow.run_id.in_(run.id for run in runs),
         )
         .order_by(FleetWorkerRow.id)
-        .with_for_update()
     )
+    if locking:
+        worker_query = worker_query.with_for_update()
     workers = (
         (await read_persisted_columns(session, worker_query, reject_new=True)).all()
         if persisted
@@ -930,6 +1225,37 @@ async def lock_budget(
         ),
         {w.id: w.started_at for w in workers},
     )
+
+
+def project_budget(
+    graph: BudgetGraph,
+    *,
+    exposures: Mapping[uuid.UUID, Decimal],
+    debits: Mapping[uuid.UUID, Decimal],
+    zero_spend: frozenset[uuid.UUID] = frozenset(),
+) -> BudgetGraph:
+    """What `save_budget` would persist, computed without writing, for a snapshot read.
+
+    The same release rule applies; run sums use the same exact stored amounts.
+    """
+    result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
+    for run, workers in graph:
+        projected: list[FleetWorker] = []
+        for worker in workers:
+            amount = _amount(exposures[worker.id])
+            if amount < worker.reserved_usd and worker.id not in zero_spend:
+                raise FleetConflict("unknown worker exposure cannot be released")
+            projected.append(replace(worker, reserved_usd=amount))
+        with localcontext() as arithmetic:
+            arithmetic.prec = 80  # exact for stored micro-dollar amounts, as SQL sums are
+            total = sum((worker.reserved_usd for worker in projected), Decimal(0))
+        result.append(
+            (
+                replace(run, reserved_usd=total, observed_usd=_amount(debits[run.id])),
+                tuple(projected),
+            )
+        )
+    return tuple(result)
 
 
 async def save_budget(
@@ -947,57 +1273,83 @@ async def save_budget(
     with the same exact Numeric basis as the rows, never ambient Decimal math.
     No status, result, usage outbox or tenant debit is changed here.
     Only the producer's proven never-allocated evidence class may decrease.
+
+    The graph's rows are locked, so they are the stored rows: a run none of whose
+    workers changed writes nothing when its stored sum and debit already match
+    (an exact sum of stored micro-dollar amounts, as `project_budget` takes), and the
+    result is those rows plus what each UPDATE returned, workers in ordinal order,
+    as `run_status` would read them back.
     """
     if not session.in_transaction():
         raise FleetConflict("fleet budget requires an active transaction")
+    result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
     for run, workers in graph:
+        saved: list[FleetWorker] = []
         for worker in workers:
             amount = _amount(exposures[worker.id])
             if amount < worker.reserved_usd and worker.id not in zero_spend:
                 raise FleetConflict("unknown worker exposure cannot be released")
             if amount == worker.reserved_usd:
+                saved.append(worker)
                 continue
-            changed = await session.scalar(
-                update(FleetWorkerRow)
-                .where(
-                    FleetWorkerRow.tenant_id == tenant_id,
-                    FleetWorkerRow.id == worker.id,
-                    FleetWorkerRow.version == worker.version,
+            changed = (
+                await session.execute(
+                    update(FleetWorkerRow)
+                    .where(
+                        FleetWorkerRow.tenant_id == tenant_id,
+                        FleetWorkerRow.id == worker.id,
+                        FleetWorkerRow.version == worker.version,
+                    )
+                    .values(
+                        reserved_usd=amount,
+                        version=FleetWorkerRow.version + 1,
+                        updated_at=func.now(),
+                    )
+                    .returning(*FleetWorkerRow.__table__.c)
                 )
-                .values(
-                    reserved_usd=amount, version=FleetWorkerRow.version + 1, updated_at=func.now()
-                )
-                .returning(FleetWorkerRow.id)
-            )
+            ).one_or_none()
             if changed is None:
                 raise FleetConflict("worker changed during monetary update")
+            saved.append(_worker(changed))
+        observed = _amount(debits[run.id])
+        if all(new is old for new, old in zip(saved, workers, strict=True)):
+            with localcontext() as arithmetic:
+                arithmetic.prec = 80  # exact for stored micro-dollar amounts, as SQL sums are
+                held = sum((worker.reserved_usd for worker in workers), Decimal(0))
+            if held == run.reserved_usd and observed == run.observed_usd:
+                result.append((run, tuple(sorted(saved, key=lambda w: w.ordinal))))
+                continue
         total = await session.scalar(
             select(func.coalesce(func.sum(FleetWorkerRow.reserved_usd), 0)).where(
                 FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.run_id == run.id
             )
         )
-        observed = _amount(debits[run.id])
         if total == run.reserved_usd and observed == run.observed_usd:
+            result.append((run, tuple(sorted(saved, key=lambda w: w.ordinal))))
             continue
-        changed = await session.scalar(
-            update(FleetRunRow)
-            .where(
-                FleetRunRow.tenant_id == tenant_id,
-                FleetRunRow.id == run.id,
-                FleetRunRow.version == run.version,
+        changed_run = (
+            await session.execute(
+                update(FleetRunRow)
+                .where(
+                    FleetRunRow.tenant_id == tenant_id,
+                    FleetRunRow.id == run.id,
+                    FleetRunRow.version == run.version,
+                )
+                .values(
+                    reserved_usd=total,
+                    observed_usd=observed,
+                    version=FleetRunRow.version + 1,
+                    updated_at=func.now(),
+                )
+                .returning(*FleetRunRow.__table__.c)
             )
-            .values(
-                reserved_usd=total,
-                observed_usd=observed,
-                version=FleetRunRow.version + 1,
-                updated_at=func.now(),
-            )
-            .returning(FleetRunRow.id)
-        )
-        if changed is None:
+        ).one_or_none()
+        if changed_run is None:
             raise FleetConflict("run changed during monetary update")
-    # Already-held locks are retained; do not acquire the funds lock twice.
-    result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
-    for run, _ in graph:
-        result.append(await run_status(session, tenant_id=tenant_id, run_id=run.id))
+        result.append((_run(changed_run), tuple(sorted(saved, key=lambda w: w.ordinal))))
+    # Already-held locks are retained; do not acquire the funds lock twice. The rows
+    # are not read back, but a read back would refuse the caller's unflushed changes.
+    if graph:
+        check_persisted_read(session, select(FleetRunRow.id))
+        check_persisted_read(session, select(FleetWorkerRow.id))
     return tuple(result)

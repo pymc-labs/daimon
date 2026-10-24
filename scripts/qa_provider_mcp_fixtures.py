@@ -17,7 +17,6 @@ from typing import Protocol, cast
 from unittest.mock import patch
 
 import httpx
-from daimon.testing.isolated_sdk import build_async_anthropic
 from daimon.testing.provider_fixtures import (
     BackendFixture,
     FixtureGap,
@@ -32,6 +31,7 @@ from daimon.testing.provider_fixtures import (
 from daimon.testing.provider_replay import Object, SourcePin
 from jsonschema import Draft202012Validator
 from mux.contracts.resources import MCPConnection
+from mux.testing.isolated_sdk import build_async_anthropic
 from pydantic import JsonValue, TypeAdapter
 
 from scripts.generate_mcp_tool_catalogue import (

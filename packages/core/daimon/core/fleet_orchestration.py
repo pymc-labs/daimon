@@ -10,20 +10,27 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager, nullcontext, suppress
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal
-from typing import TYPE_CHECKING, Literal, Protocol
+from decimal import ROUND_HALF_UP, Decimal
+from typing import TYPE_CHECKING, Literal, Protocol, cast, get_args
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.security_audit import record_authz_denial
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import AgentMessagePayload, Event, TextPart
-from mux.contracts.ids import ResourceRef, Revision, Scope
-from mux.contracts.resources import Agent, AgentPatch, AgentSpec, SessionSpec
+from mux.contracts.ids import Provider, ResourceRef, Revision, Scope
+from mux.contracts.resources import (
+    Agent,
+    AgentPatch,
+    AgentSpec,
+    CapabilityDrop,
+    DeclaredDrop,
+    SessionSpec,
+)
 from pydantic import JsonValue, TypeAdapter
 
 if TYPE_CHECKING:
@@ -38,10 +45,18 @@ if TYPE_CHECKING:
 
 
 type Control = Literal["kill", "resume"]
+type SettledStatus = Literal["completed", "cancelled", "failed"]
+
+_ACTIVE = ("pending", "starting", "running")
 
 log = structlog.get_logger(__name__)
 
 WORKER_PREPARATION_TIMEOUT_S = 30.0
+#: How often a pending worker retries its slot claim, doubling up to the max. Each
+#: attempt takes the tenant fleet lock, so a full tenant must not be polled four times a
+#: second per waiting worker.
+PENDING_CLAIM_POLL_S = 0.5
+PENDING_CLAIM_POLL_MAX_S = 2.0
 
 
 def _unique_object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
@@ -53,12 +68,285 @@ def _unique_object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
     return result
 
 
+#: Refusals a user hits by asking for more than the fleet allows, said plainly.
+_PLAIN_REFUSALS = {
+    "worker_limit_reached": (
+        "Use fewer workers or wait for one to finish; only the agent's owner or an admin "
+        "can raise the limit, by asking for it themselves."
+    ),
+    "over_fleet_limits": (
+        "Ask for at most that many workers. Only the agent's owner or an admin can raise "
+        "the limit, by asking for it themselves; don't offer a bigger limit instead."
+    ),
+    "financial_admission_refused": (
+        "That worker would go over this fleet's budget per run or the server's spending "
+        "limit. Use fewer or cheaper workers, or ask the agent's owner or an admin to "
+        "raise the fleet budget."
+    ),
+    "argon_requires_bounded_worker": (
+        "Gemini 4 Argon runs as a fleet worker only with token limits its budget covers. "
+        "Give it a smaller task or a larger budget, or pick another model."
+    ),
+    "prompt_exceeds_worker_token_cap": (
+        "That task is longer than this worker's token limit. Shorten it or pick another model."
+    ),
+    "worker_agent_unbound": "That agent isn't one you can use as a worker here.",
+    "worker_agent_required": "Name the agent the worker should run as.",
+    "worker_agent_model_mismatch": (
+        "A worker that runs as an agent uses that agent's own model; don't pick a model for it."
+    ),
+    "worker_agent_drops_unsupported": (
+        "That agent can't run as a worker on its model without losing something it needs."
+    ),
+    "terminal_run": "This fleet has already finished. Start a new one.",
+    "wake_pending": "This fleet is still collecting results. Wait for them, then try again.",
+    "prerequisites_unavailable": "Fleets aren't available right now. Try again in a moment.",
+}
+
+
+def _provider_failures() -> tuple[type[BaseException], ...]:
+    """Raw provider/transport errors: an outage or a provider-side error, not our bug."""
+    import anthropic
+    import httpx
+
+    failures: list[type[BaseException]] = [httpx.HTTPError, OSError, anthropic.APIError]
+    try:
+        import openai
+
+        failures.append(openai.APIError)
+    except ImportError:  # pragma: no cover - optional provider SDK
+        pass
+    try:
+        from google.genai import errors as genai_errors
+
+        failures.append(genai_errors.APIError)
+    except ImportError:  # pragma: no cover - optional provider SDK
+        pass
+    return tuple(failures)
+
+
+WorkerFailureCode = Literal[
+    "preparation_refused",
+    "dispatch_refused",
+    "provider_error",
+    "provider_not_configured",
+    "provider_not_allowed",
+    "channel_backend_pinned",
+    "worker_runtime_missing",
+    "provider_daily_cap_reached",
+    "provider_price_unavailable",
+    "setup_error",
+    "balance_depleted",
+    "cap_exceeded",
+    "channel_budget_exceeded",
+    "provider_hold_cap_reached",
+    "provider_setup_pending",
+    "preparation_deadline_exceeded",
+    "timed_out",
+    "provider_busy",
+    "provider_quota_zero",
+    "provider_rate_limited",
+    "stop_requested",
+    "watch_ended",
+    "shutdown",
+    "run_deadline",
+    "usage_unavailable",
+]
+
+# Why the budget watch cancelled a worker (`cancel_workers`), as its failure code.
+_CANCEL_CODES: dict[str, WorkerFailureCode] = {
+    "shutdown": "shutdown",
+    "run_deadline": "run_deadline",
+    "usage_unavailable": "usage_unavailable",
+    "budget": "cap_exceeded",
+    "terminal": "watch_ended",
+    "watch_ended": "watch_ended",
+    "watch_cancelled": "watch_ended",
+}
+
+
+def cancel_failure_code(cancel: asyncio.Event) -> WorkerFailureCode | None:
+    """Why the budget watch cancelled this worker, as its failure code; None when it
+    didn't (not set, or no reason the watch names)."""
+    if not cancel.is_set():
+        return None
+    return _CANCEL_CODES.get(getattr(cancel, "reason", None) or "")
+
+
+# Admission refusals a person can act on, by their closed reason.
+_ADMISSION_REASON_CODES: dict[str, WorkerFailureCode] = {
+    "balance_depleted": "balance_depleted",
+    "cap_exceeded": "cap_exceeded",
+    "channel_budget_exceeded": "channel_budget_exceeded",
+    "provider_hold_cap_reached": "provider_hold_cap_reached",
+    "provider_setup_pending": "provider_setup_pending",
+    # The daily per-model cap (#1398/#1419), before any provider request.
+    "provider_daily_cap_reached": "provider_daily_cap_reached",
+    "provider_price_unavailable": "provider_price_unavailable",
+}
+_BACKEND_CAUSE_CODES: dict[str, WorkerFailureCode] = {
+    "provider_not_configured": "provider_not_configured",
+    "provider_not_allowed": "provider_not_allowed",
+    "channel_pin": "channel_backend_pinned",
+    "agent_backend": "worker_runtime_missing",
+}
+
+
+def _timed_out(error: BaseException) -> bool:
+    """A timeout anywhere in the chain: a raw TimeoutError, or the turn ceiling
+    `run_worker` re-raises it as (`TurnError(kind="ceiling")`)."""
+    from daimon.core.errors import TurnError
+
+    return any(
+        isinstance(current, TimeoutError)
+        or (isinstance(current, TurnError) and current.kind == "ceiling")
+        for current in _chain(error)
+    )
+
+
+def _chain(error: BaseException) -> Iterator[BaseException]:
+    """`error` and the chain a traceback shows under it: an explicit `__cause__`, else
+    an implicit `__context__` unless `raise ... from None` suppressed it (#1380 review).
+
+    One rule for every cause this module reads (a refusal's, a timeout, a quota).
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = (
+            current.__cause__
+            if current.__cause__ is not None
+            else None
+            if current.__suppress_context__
+            else current.__context__
+        )
+
+
+def _quota_cause(error: BaseException) -> WorkerFailureCode | None:
+    """A provider quota refusal in `error`'s chain (the codes `provider_quota_copy` reads)."""
+    from mux.errors import ProviderError
+
+    for current in _chain(error):
+        if isinstance(current, ProviderError) and current.category == "rate_limited":
+            if current.native_code == "quota_zero":
+                return "provider_quota_zero"
+            if current.native_code == "quota_exhausted":
+                return "provider_rate_limited"
+    return None
+
+
+def _admission_cause(error: BaseException) -> WorkerFailureCode | None:
+    """A plain cause for an admission refusal, from its closed reason, cause or raise site."""
+    from daimon.core.turn.errors import AdmissionDenied
+
+    for current in _chain(error):
+        if isinstance(current, AdmissionDenied):
+            if (code := _ADMISSION_REASON_CODES.get(current.reason)) is not None:
+                return code
+            if current.reason == "backend_unsupported":
+                if (code := _BACKEND_CAUSE_CODES.get(current.cause or "")) is not None:
+                    return code
+                # No installed or default runtime row serves this worker's model/profile.
+                if (current.site or "").startswith(
+                    "turn.runtime_manifest.select_runtime_manifest:"
+                ):
+                    return "worker_runtime_missing"
+    return None
+
+
+def worker_failure_code(
+    error: BaseException,
+    phase: Literal["preparation_refused", "dispatch_refused"],
+    *,
+    backend: str | None = None,
+) -> WorkerFailureCode:
+    """The closed code a failed worker records: a refusal keeps its phase; a bug is ours.
+
+    Refusals are the typed errors admission, preparation and providers raise. A raw
+    provider or transport error (an outage, a 5xx) is the provider's, so it reads as
+    such. Any other exception (a ValidationError, TypeError, ...) is a defect on our
+    side, so the card must never present it as the model being unable to run here.
+    """
+    from daimon.core.errors import DaimonError
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.neutral_resources import WorkerSpecRefused
+    from mux.errors import MuxError
+
+    if isinstance(error, FleetConflict) and error.reason == "worker_setup_busy":
+        # Our own setup or a busy fleet lock, in either phase: never the model's fault.
+        return "preparation_deadline_exceeded"
+    refusal = (DaimonError, MuxError, WorkerSpecRefused, FleetRefused, FleetConflict, TimeoutError)
+    if (quota := _quota_cause(error)) is not None:
+        return quota
+    if _timed_out(error):
+        if phase == "preparation_refused":
+            return "preparation_deadline_exceeded"
+        from mux.profiles import INLINE_REUSE
+
+        # Gemini can accept a turn and never start it; at the deadline that can't be
+        # told from a slow answer (usage arrives only at the end), so say both.
+        return "provider_busy" if backend == INLINE_REUSE.provider else "timed_out"
+    if isinstance(error, asyncio.CancelledError):
+        # Cancelled from outside (the run's watch, a restart): never a refusal. A
+        # person's Stop is kept as stop_requested by the transition itself.
+        return "watch_ended"
+    if not isinstance(error, Exception) or isinstance(error, refusal):
+        return _admission_cause(error) or phase
+    if isinstance(error, _provider_failures()):
+        return "provider_error"
+    return "setup_error"
+
+
 class FleetRefused(ValueError):
     """Closed refusal code, with no request, result or credential material."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, detail: str | None = None) -> None:
         self.reason = reason
-        super().__init__(f"fleet: {reason}")
+        # The real limits and what the user can do, for whoever relays the refusal.
+        self.plain = " ".join(part for part in (detail, _PLAIN_REFUSALS.get(reason)) if part)
+        super().__init__(f"fleet: {reason}" + (f". {self.plain}" if self.plain else ""))
+
+
+# A cost read bounds its wait for a connection: results never wait on it.
+RUN_COST_TIMEOUT_S = 2.0
+
+
+def fleet_cost_words(usd: Decimal | None) -> str:
+    """A run's cost as people read it: "$0.42", "less than $0.01", or "not available yet"."""
+    if usd is None:
+        return "not available yet"
+    if 0 < usd < Decimal("0.005"):
+        return "less than $0.01"
+    return f"${usd.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
+
+
+def fleet_cost_sentence(usd: Decimal | None) -> str:
+    """The plain line a fleet's result reply ends with (J3: "the cost is shown")."""
+    if usd is None:
+        return "This cost isn't available yet."
+    return f"This cost {fleet_cost_words(usd)}."
+
+
+def fleet_limits_sentence(max_workers: int, budget_usd: Decimal) -> str:
+    """The real limits, said the way a user can act on them."""
+    return f"This fleet is limited to {max_workers} workers and ${budget_usd.normalize():f} a run."
+
+
+def _validation_categories(error: BaseException) -> list[str] | None:
+    """A validation error's field paths and error types, never its input values."""
+    from pydantic import ValidationError
+
+    if not isinstance(error, ValidationError):
+        return None
+    # Only the top-level field: deeper path parts can be keys taken from the input.
+    return sorted(
+        {
+            f"{item['loc'][0] if item['loc'] else ''}:{item['type']}"
+            for item in error.errors(include_url=False, include_input=False)
+        }
+    )[:10]
 
 
 def _review_required(contract: Mapping[str, JsonValue] | None) -> bool:
@@ -105,11 +393,27 @@ class FleetPorts(Protocol):
 
     async def controller_account(self, parent: WorkerPermissions) -> uuid.UUID | None: ...
 
+    async def admitted_worker(
+        self, parent: WorkerPermissions, operation_key: str
+    ) -> FleetWorker | None: ...
+
     async def capture_source(self, parent: WorkerPermissions) -> BackendAgent | None: ...
 
     async def read_clone(
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision
     ) -> Agent: ...
+
+    async def agent_worker_parent(
+        self, parent: WorkerPermissions, agent_name: str
+    ) -> WorkerPermissions: ...
+
+    async def worker_agents(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy
+    ) -> list[dict[str, JsonValue]]: ...
+
+    async def agent_consented_drops(
+        self, parent: WorkerPermissions
+    ) -> tuple[DeclaredDrop, ...]: ...
 
     async def admit(
         self,
@@ -179,6 +483,29 @@ class FleetPorts(Protocol):
         """
         ...
 
+    async def settle_run(
+        self,
+        parent: WorkerPermissions,
+        run: FleetRun,
+        status: SettledStatus,
+        *,
+        wake_id: uuid.UUID | None,
+        unless_waking: bool,
+    ) -> FleetRun:
+        """Move a run with no active worker to its terminal status (version CAS).
+
+        Retires the run's other wakes; keeps `wake_id`, the wake whose turn ends
+        the run. `unless_waking` refuses (wake_pending) while another wake of
+        this run is pending or claimed, in the same transaction as the move.
+        """
+        ...
+
+    async def pending_wakes(
+        self, parent: WorkerPermissions, run: FleetRun, *, exclude: uuid.UUID | None
+    ) -> int:
+        """Count this run's pending or claimed worker_finished wakes, except `exclude`."""
+        ...
+
 
 def _authorize(parent: WorkerPermissions, policy: TenantAccessPolicy) -> None:
     from daimon.core.authz import Action, Surface, authorize
@@ -240,6 +567,41 @@ def _session_authorize(
         raise FleetRefused(decision.reason or "permission_refused")
 
 
+def worker_trigger(reviewed_result: Event | None) -> str:
+    """The input a worker's turn starts with; a reviewer's embeds the reviewed result."""
+    from daimon.core.fleet import result_digest
+
+    if reviewed_result is None:
+        return "Complete the task in your instructions."
+    return json.dumps(
+        {
+            "instruction": "Return JSON verdict approved or refused and reviewed_digest.",
+            "reviewed_digest": result_digest(dict(reviewed_result.payload)),
+            "result": dict(reviewed_result.payload),
+        }
+    )
+
+
+def _worker_source(
+    parent: WorkerPermissions, resolved: ResolvedWorkerSpec
+) -> tuple[str | None, int | None]:
+    """The agent and live version a worker's admission binds: its own source, else the root's pin.
+
+    None when neither is known, so only rows that pin no source can size it.
+    """
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    if resolved.source_agent is not None:
+        ref, revision = resolved.source_agent
+    elif len(parent.source_revisions) == 1:
+        # Admission retrieves the root agent at exactly this revision and refuses a stale one.
+        ((ref, revision),) = parent.source_revisions
+    else:
+        return None, None
+    tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
+    return str(derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ref.id)), revision.local
+
+
 class FleetOrchestrator:
     """Shared operations for authenticated MCP and platform control adapters."""
 
@@ -275,6 +637,212 @@ class FleetOrchestrator:
             raise FleetRefused("ambiguous_workers")
         return run, workers
 
+    async def admitted_worker(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, operation_key: str
+    ) -> FleetWorker | None:
+        """The worker a spawn with this operation key already admitted in the root's run.
+
+        A retry reuses its stored limits, so host defaults that move with time or with
+        the run's other workers cannot turn a replay into an operation conflict.
+        """
+        _authorize(parent, policy)
+        worker = await self._owner().admitted_worker(parent, operation_key)
+        if worker is not None and worker.run_id != parent.fleet.run_id:
+            raise FleetRefused("foreign_worker")
+        return worker
+
+    async def spawn_limits(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        *,
+        operation_key: str,
+        provider: Provider,
+        now: datetime,
+        budget_usd: Decimal | None = None,
+        deadline: datetime | None = None,
+        max_turns: int | None = None,
+        max_input_tokens: int | None = None,
+        max_output_tokens: int | None = None,
+        planned_workers: int | None = None,
+        planned_on_provider: int | None = None,
+        max_runtime_s: int | None = None,
+    ) -> WorkerLimits:
+        """Limits for a spawn, with omitted ones defaulted from the frozen root.
+
+        A retry of an admitted operation reuses that worker's budget and deadline:
+        fresh defaults move with time and the run's other workers, and would turn the
+        replay into an operation conflict.
+        """
+        from daimon.core.neutral_resources import default_worker_limits
+
+        if budget_usd is None or deadline is None:
+            retained = await self.admitted_worker(parent, policy, operation_key=operation_key)
+            if retained is not None:
+                if budget_usd is None:
+                    # Defaulted budgets are whole cents; the stored value keeps them.
+                    budget_usd = retained.budget_usd.quantize(Decimal("0.01"))
+                if deadline is None:
+                    deadline = retained.deadline_at
+        run, workers = (
+            await self.read_snapshot(parent, policy, parent.fleet.run_id)
+            if budget_usd is None
+            else (None, ())
+        )
+        if run is not None and planned_workers is not None and planned_workers > run.max_workers:
+            # Refuse the whole plan up front, with the real limits, before any worker.
+            raise FleetRefused(
+                "over_fleet_limits",
+                detail=fleet_limits_sentence(run.max_workers, run.total_budget_usd),
+            )
+        from daimon.core.neutral_resources import WorkerSpecRefused
+
+        try:
+            return default_worker_limits(
+                parent.limits,
+                run,
+                workers,
+                provider=provider,
+                budget_usd=budget_usd,
+                deadline=deadline,
+                max_turns=max_turns,
+                max_input_tokens=max_input_tokens,
+                max_output_tokens=max_output_tokens,
+                planned_workers=planned_workers,
+                planned_on_provider=planned_on_provider,
+                now=now,
+                max_runtime_s=max_runtime_s,
+            )
+        except WorkerSpecRefused as error:
+            from daimon.core.fleet import holds_slot
+
+            # Only a run out of worker slots is the worker limit; a run out of money
+            # keeps its own budget refusal.
+            if (
+                run is None
+                or (error.field, error.reason) != ("budget", "exhausted")
+                or sum(1 for worker in workers if holds_slot(worker)) < run.max_workers
+            ):
+                raise
+            raise FleetRefused(
+                "worker_limit_reached",
+                detail=fleet_limits_sentence(run.max_workers, run.total_budget_usd),
+            ) from None
+
+    def _bounded_gemini(
+        self,
+        parent: WorkerPermissions,
+        resolved: ResolvedWorkerSpec,
+        resolve: Callable[[WorkerLimits], ResolvedWorkerSpec],
+        *,
+        fill: bool,
+        trigger: str,
+    ) -> ResolvedWorkerSpec:
+        """Keep a Gemini worker off the unbounded path when its prompt cannot fit it.
+
+        The unbounded path caps a whole turn at WORKER_MAX_TOTAL_TOKENS, which the
+        inherited root instructions alone exceed. When the caller set no token limits,
+        a Flash worker gets a bounded envelope derived from its own prompt and budget;
+        an unbounded worker whose prompt clearly exceeds the cap is refused here rather
+        than sent to a guaranteed provider 400. The prompt counted is the instructions
+        plus the exact trigger dispatch sends, which embeds a reviewer's reviewed result,
+        and the envelope's worst case stays within the deployment's per-turn hold.
+        """
+        from daimon.core.neutral_resources import (
+            bounded_gemini_worker_tokens,
+            require_gemini_worker_envelope,
+        )
+        from daimon.core.turn.runtime_manifest import manifest_hold_usd
+        from mux.contracts.config import ConfigRevision
+        from mux.drivers.gemini import FLASH_PRIMARY
+        from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, WORKER_MAX_TOTAL_TOKENS
+
+        limits = resolved.limits
+        if resolved.backend.profile != INLINE_REUSE.profile_id:
+            return resolved
+        system = resolved.spec.system or ""
+        model = resolved.spec.model.id
+
+        def money() -> tuple[Decimal, Decimal | None]:
+            markup = getattr(self._ports, "markup", None)
+            markup = markup if isinstance(markup, Decimal) else Decimal(1)
+            source_id, source_version = _worker_source(parent, resolved)
+            hold = manifest_hold_usd(
+                ConfigRevision.create(parent.fleet.root.channel, 1, resolved.backend),
+                tenant_id=parent.fleet.scope.tenant_id,
+                account_id=parent.fleet.scope.account_id,
+                source_agent_id=source_id,
+                source_agent_version=source_version,
+            )
+            return markup, hold
+
+        if limits.max_input_tokens is not None:
+            # Caller-supplied limits: the worst case must still fit budget and hold.
+            markup, hold = money()
+            require_gemini_worker_envelope(
+                model,
+                limits.max_input_tokens,
+                limits.max_output_tokens,
+                limits.budget_usd,
+                markup=markup,
+                hold_usd=hold,
+            )
+            return resolved
+        if (
+            fill
+            and limits.max_output_tokens is None
+            and model in (FLASH_PRIMARY, ARGON_MODEL)
+            and "sandbox" in resolved.declared_drops
+        ):
+            markup, hold = money()
+            tokens = bounded_gemini_worker_tokens(
+                system,
+                limits.budget_usd,
+                model=resolved.spec.model.id,
+                markup=markup,
+                hold_usd=hold,
+                extra_input=trigger,
+            )
+            return resolve(limits.model_copy(update=tokens))
+        if model == ARGON_MODEL:
+            # Argon runs workers only on the bounded envelope, never the unbounded token cap.
+            raise FleetRefused("argon_requires_bounded_worker")
+        # About four characters per token: an estimate, used only to refuse early.
+        if (len(system) + len(trigger)) // 4 >= WORKER_MAX_TOTAL_TOKENS:
+            raise FleetRefused("prompt_exceeds_worker_token_cap")
+        return resolved
+
+    async def worker_agents(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy
+    ) -> list[dict[str, JsonValue]]:
+        """The on-server agents this root's workers may run as, for a plain-language ask.
+
+        Advice only: every spawn decides again with fresh authority.
+        """
+        _authorize(parent, policy)
+        return await self._owner().worker_agents(parent, policy)
+
+    async def agent_worker(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, agent_name: str
+    ) -> WorkerPermissions:
+        """The authority for a worker that runs as `agent_name`, inside this root's run.
+
+        The root must be allowed to spawn here; the owner then admits that agent for
+        the requester in the run's place and checks the grant's worker agents.
+        """
+        _authorize(parent, policy)
+        if not agent_name.strip():
+            raise FleetRefused("worker_agent_required")
+        worker_parent = await self._owner().agent_worker_parent(parent, agent_name.strip())
+        if (
+            worker_parent.fleet != parent.fleet
+            or worker_parent.subject != parent.subject
+            or worker_parent.limits != parent.limits
+        ):
+            raise FleetRefused("worker_agent_unbound")
+        _authorize(worker_parent, policy)
+        return worker_parent
+
     async def spawn(
         self,
         parent: WorkerPermissions,
@@ -283,7 +851,7 @@ class FleetOrchestrator:
         now: datetime,
         operation_key: str,
         role: str,
-        backend: BackendConfig,
+        backend: BackendConfig | None,
         limits: WorkerLimits,
         run_id: uuid.UUID | None = None,
         agent: AgentSpec | None = None,
@@ -294,15 +862,54 @@ class FleetOrchestrator:
         result_contract: Mapping[str, JsonValue] | None = None,
         reviewer_of: uuid.UUID | None = None,
         captured_source: BackendAgent | None = None,
+        fill_token_limits: bool = False,
+        as_agent: str | None = None,
+        task: str | None = None,
+        as_agent_drops: tuple[DeclaredDrop, ...] = (),
     ) -> Mapping[str, JsonValue]:
         """Resolve once, then hand admission to the atomic owner operation.
 
         Cross-review follows exactly this path with the target's durable result
         attached as input by the host. The model cannot supply review evidence.
+        With `as_agent`, the worker runs AS that on-server agent: its own pinned
+        revision is the clone, its captured source the ceiling, and the task is
+        appended to its own instructions rather than replacing them. It declares the
+        losses its owner accepted for its backend and any the root passes
+        (`as_agent_drops`). On another provider, what that provider's worker can't
+        carry becomes a declared loss too (AGENT_WORKER_AUTO_DROPS), as the agent's
+        own chat turn there declares it; a loss only takes capability away.
         """
         _authorize(parent, policy)
         owner = self._owner()
-        from daimon.core.neutral_resources import resolve_worker_spec
+        from daimon.core.neutral_resources import (
+            AGENT_WORKER_AUTO_DROPS,
+            WorkerSpecRefused,
+            agent_worker_patch,
+            resolve_worker_spec,
+        )
+
+        if as_agent is not None:
+            if agent is not None or clone is not None or overrides is not None:
+                raise FleetRefused("worker_agent_excludes_spec")
+            parent = await self.agent_worker(parent, policy, agent_name=as_agent)
+            captured_source = await owner.capture_source(parent)
+            if (
+                captured_source is None
+                or captured_source.source is None
+                or captured_source.effective_spec is None
+            ):
+                raise FleetRefused("clone_evidence_unavailable")
+            clone = captured_source.source.ref
+            clone_revision = captured_source.source.revision
+            if as_agent_drops and not set(as_agent_drops) <= set(get_args(CapabilityDrop)):
+                raise FleetRefused("worker_agent_drops_unsupported")
+            # The agent's own configured model comes first (agent_worker_permissions).
+            overrides = agent_worker_patch(
+                captured_source.effective_spec,
+                task,
+                parent.models[0],
+                (*await owner.agent_consented_drops(parent), *as_agent_drops),
+            )
 
         selected_run = parent.fleet.run_id if run_id is None else run_id
         if selected_run != parent.fleet.run_id:
@@ -336,27 +943,80 @@ class FleetOrchestrator:
             source = agent
         if captured_source is None:
             captured_source = await self._owner().capture_source(parent)
-        resolved = resolve_worker_spec(
-            parent,
-            source,
-            policy=policy,
-            now=now,
-            backend=backend,
-            overrides=overrides,
-            # Source memory is a host-owned binding already bounded by the
-            # retained root. The resolver validates its scope, native payload,
-            # read-only policy and explicit drops before materialization.
-            resources=tuple(
-                binding
-                for binding in parent.resources
-                if captured_source is not None
-                and binding.resource is not None
-                and binding.resource.kind == "memory_store"
-                and binding.resource.id == captured_source.memory_store_id
-            ),
-            limits=limits,
-            captured_source=captured_source,
+
+        def resolve(limits: WorkerLimits) -> ResolvedWorkerSpec:
+            return resolve_worker_spec(
+                parent,
+                source,
+                policy=policy,
+                now=now,
+                backend=backend,
+                overrides=overrides,
+                # Source memory is a host-owned binding already bounded by the
+                # retained root. The resolver validates its scope, native payload,
+                # read-only policy and explicit drops before materialization.
+                resources=tuple(
+                    binding
+                    for binding in parent.resources
+                    if captured_source is not None
+                    and binding.resource is not None
+                    and binding.resource.kind == "memory_store"
+                    and binding.resource.id == captured_source.memory_store_id
+                ),
+                limits=limits,
+                captured_source=captured_source,
+                digest_phase="spawn",
+            )
+
+        from mux.profiles import backend_selection
+
+        # Another provider, or the same provider on another profile (an OpenAI
+        # worker under a GPT source's persistent workspace), can't carry everything.
+        source_model = (
+            captured_source.effective_spec.model
+            if captured_source is not None and captured_source.effective_spec is not None
+            else None
         )
+        worker_profile = next(
+            (
+                grant.profile
+                for grant in parent.backend_grants
+                if grant.backend == parent.models[0].provider
+                and grant.model in (None, parent.models[0].id)
+            ),
+            None,
+        )
+        foreign = (
+            as_agent is not None
+            and source_model is not None
+            and (
+                parent.models[0].provider != source_model.provider
+                or worker_profile != backend_selection(source_model.provider).profile
+            )
+        )
+        while True:
+            try:
+                resolved = resolve(limits)
+                break
+            except WorkerSpecRefused as error:
+                declared: set[DeclaredDrop] = (
+                    set(overrides.declared_drops or ()) if overrides is not None else set()
+                )
+                if (
+                    not foreign
+                    or error.field not in AGENT_WORKER_AUTO_DROPS
+                    or error.field in declared
+                    or overrides is None
+                ):
+                    raise
+                # That provider's worker can't carry it: declare the loss, try again.
+                lost = cast("DeclaredDrop", error.field)
+                overrides = overrides.model_copy(
+                    update={"declared_drops": tuple(sorted({*declared, lost}))}
+                )
+        if as_agent is not None and resolved.spec.model != parent.models[0]:
+            # A worker that runs as an agent runs on that agent's model, nothing else.
+            raise FleetRefused("worker_agent_model_mismatch")
         reviewed: Event | None = None
         if reviewer_of is not None:
             run, workers = await self.read_snapshot(parent, policy, selected_run)
@@ -366,6 +1026,9 @@ class FleetOrchestrator:
                 "format": "review",
                 "reviewed_digest": target.result.digest if target.result is not None else "",
             }
+        resolved = self._bounded_gemini(
+            parent, resolved, resolve, fill=fill_token_limits, trigger=worker_trigger(reviewed)
+        )
         run, worker = await owner.admit(
             parent,
             resolved,
@@ -394,7 +1057,15 @@ class FleetOrchestrator:
             or worker.id == reviewer_of
         ):
             raise FleetRefused("admitted_worker_mismatch")
-        return {"run_id": str(run.id), "worker_id": str(worker.id), "status": worker.status}
+        reply: dict[str, JsonValue] = {
+            "run_id": str(run.id),
+            "worker_id": str(worker.id),
+            "status": worker.status,
+        }
+        if as_agent is not None:
+            # What this agent can't do as this worker, so the root can say so.
+            reply["declared_drops"] = list(resolved.spec.declared_drops)
+        return reply
 
     async def status(
         self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, run_id: uuid.UUID
@@ -597,14 +1268,14 @@ class FleetOrchestrator:
         run, workers = await self.read_snapshot(parent, policy, run_id)
         await self._controller_authorize(parent)
         if run.status in ("cancelled", "failed"):
-            return {"run_id": str(run.id), "status": "blocked", "reason": "run_stopped"}
+            return {
+                "run_id": str(run.id),
+                "status": "blocked",
+                "reason": "run_stopped",
+            } | await self._partial(parent, policy, run, workers)
         if not workers:
             raise FleetRefused("empty_run")
-        active = {
-            worker.reviewer_of
-            for worker in workers
-            if worker.status in ("pending", "starting", "running")
-        }
+        active = {worker.reviewer_of for worker in workers if worker.status in _ACTIVE}
         if active:
             # The initial phase precedes separate review cohorts for each target.
             for target in {None} if None in active else active:
@@ -613,7 +1284,11 @@ class FleetOrchestrator:
                 )
             return {"run_id": str(run.id), "status": "waiting"}
         if any(worker.status != "succeeded" for worker in workers):
-            return {"run_id": str(run.id), "status": "blocked", "reason": "worker_failed"}
+            return {
+                "run_id": str(run.id),
+                "status": "blocked",
+                "reason": "worker_failed",
+            } | await self._partial(parent, policy, run, workers)
         if any(
             worker.reviewer_of is None
             and _review_required(worker.result_contract)
@@ -658,7 +1333,159 @@ class FleetOrchestrator:
             for worker in workers
             if worker.reviewer_of is None
         ]
-        return {"run_id": str(run.id), "status": "ready", "results": outputs}
+        return {
+            "run_id": str(run.id),
+            "status": "ready",
+            "results": outputs,
+            **await self._cost_fields(parent, run),
+        }
+
+    async def _cost_fields(self, parent: WorkerPermissions, run: FleetRun) -> dict[str, JsonValue]:
+        """The reply's cost line, and the figure behind it (None while not available)."""
+        cost = await self._run_cost(parent, run)
+        return {
+            "cost": fleet_cost_sentence(cost),
+            "cost_usd": None if cost is None else str(cost),
+        }
+
+    async def run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal | None:
+        """What the run's workers cost so far, for the result reply and the card."""
+        return await self._run_cost(parent, run)
+
+    async def _run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal | None:
+        """The run's cost read fresh, or None: never the stored figure, which trails."""
+        reader = getattr(self._owner(), "run_cost", None)
+        if reader is None:
+            return None
+        try:
+            return await reader(parent, run.id)
+        except Exception as error:  # a cost read never blocks the results
+            log.warning("fleet.run_cost_unavailable", error=type(error).__name__)
+            return None
+
+    async def _partial(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        run: FleetRun,
+        workers: tuple[FleetWorker, ...],
+    ) -> dict[str, JsonValue]:
+        """Verified results of the workers that succeeded, beside the ones that did not.
+
+        Only a settled run without review cohorts qualifies: a pending worker,
+        a reviewer or a review requirement keeps the run blocked without results.
+        Each result passes the same pointer/journal/contract checks as a ready one.
+        """
+        succeeded = [worker for worker in workers if worker.status == "succeeded"]
+        if (
+            not succeeded
+            or any(worker.status in _ACTIVE or worker.reviewer_of is not None for worker in workers)
+            or any(_review_required(worker.result_contract) for worker in succeeded)
+        ):
+            return {}
+        try:
+            results: list[JsonValue] = [
+                {
+                    "worker_id": str(worker.id),
+                    "role": worker.role,
+                    "result": self._owner().validate_contract(
+                        worker.result_contract,
+                        await self._result(parent, policy, run, worker),
+                    ),
+                }
+                for worker in succeeded
+            ]
+        except FleetRefused:
+            return {}
+        failed: list[JsonValue] = [
+            {
+                "worker_id": str(worker.id),
+                "role": worker.role,
+                "status": worker.status,
+                "error_code": worker.error_code,
+            }
+            for worker in workers
+            if worker.status != "succeeded"
+        ]
+        return {
+            "partial": True,
+            "results": results,
+            "failed": failed,
+            **await self._cost_fields(parent, run),
+        }
+
+    async def settle(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        *,
+        run_id: uuid.UUID,
+        wake_id: uuid.UUID | None = None,
+        unless_waking: bool = True,
+    ) -> FleetRun | None:
+        """End a run whose root turn delivered its final answer.
+
+        Zero workers cancel the run; all-terminal workers complete it when every
+        result is collectable, else fail it. An active worker, a run already
+        ended, or (with `unless_waking`) a wake still owed to the root other
+        than `wake_id` leaves it unchanged (None). Money and native work keep
+        their owners.
+        """
+        run, workers = await self.read_snapshot(parent, policy, run_id)
+        await self._controller_authorize(parent)
+        if run.status not in ("running", "collecting") or any(
+            worker.status in _ACTIVE for worker in workers
+        ):
+            return None
+        status: SettledStatus
+        if not workers:
+            status = "cancelled"
+        else:
+            reply = await self.collect(parent, policy, run_id=run.id)
+            status = "completed" if reply.get("status") == "ready" else "failed"
+        try:
+            return await self._owner().settle_run(
+                parent, run, status, wake_id=wake_id, unless_waking=unless_waking
+            )
+        except FleetRefused as error:
+            if error.reason == "wake_pending":
+                return None
+            raise
+
+    async def defer(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        *,
+        run_id: uuid.UUID,
+        wake_id: uuid.UUID | None = None,
+    ) -> bool:
+        """Owe the root a wake for finished workers whose result it has not seen.
+
+        The root's answer predates the result, so the wake turn delivers it.
+        An existing wake (other than `wake_id`) already owes that turn; an
+        active worker is armed by collect. True when a wake is owed.
+        """
+        run, workers = await self.read_snapshot(parent, policy, run_id)
+        await self._controller_authorize(parent)
+        if (
+            not workers
+            or run.status != "running"
+            or any(worker.status in _ACTIVE for worker in workers)
+        ):
+            return False
+        if await self._owner().pending_wakes(parent, run, exclude=wake_id):
+            return True
+        # The newest cohort: reviewers of one target, or the initial workers.
+        cohort = max(workers, key=lambda row: row.ordinal).reviewer_of
+        try:
+            await self._owner().wait(
+                parent, run, tuple(worker for worker in workers if worker.reviewer_of == cohort)
+            )
+        except FleetRefused:
+            # No wake can be owed (an ended origin or run): the caller delivers now.
+            return False
+        return True
 
 
 class HostFleetPorts:
@@ -708,9 +1535,37 @@ class HostFleetPorts:
             self._dispatch = self._dispatch_worker
         self._clone_reader, self._wait = clone_reader, wait
         self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
+        # The declared losses each such agent's owner accepted for its backend.
+        self._agent_drops: dict[tuple[uuid.UUID, uuid.UUID], tuple[DeclaredDrop, ...]] = {}
+        # Preparation requests of workers that run as another agent, per (run, agent).
+        # In-process only: after a restart, or on another replica, an agent worker's
+        # preparation falls back to the root's request, which no longer matches that
+        # agent and refuses (origin unbound). That fails safe; persisting it is a follow-up.
+        self._agent_requests: dict[tuple[uuid.UUID, uuid.UUID], ProviderPreparationRequest] = {}
         self._watches: dict[
             uuid.UUID, tuple[dict[uuid.UUID, asyncio.Event], asyncio.Event, asyncio.Task[None]]
         ] = {}
+
+    async def run_cost(self, parent: WorkerPermissions, run_id: uuid.UUID) -> Decimal | None:
+        """This run's cost from its own rows, bounded in time; None if not available.
+
+        A pooled connection under load, or a run whose usage can't be priced yet,
+        never stalls or misstates the result: it reads as "not available yet".
+        """
+        from daimon.core.channel_budget import read_fleet_run_cost
+        from daimon.core.errors import DaimonError
+        from daimon.core.fleet import FleetConflict
+
+        if run_id != parent.fleet.run_id:
+            return None
+        try:
+            async with asyncio.timeout(RUN_COST_TIMEOUT_S):
+                return await read_fleet_run_cost(
+                    self.sessions, parent=parent, prices=self.prices, markup=self.markup
+                )
+        except (TimeoutError, FleetConflict, DaimonError) as error:
+            log.warning("fleet.run_cost_unavailable", error=type(error).__name__)
+            return None
 
     async def _prepare_original(self, parent: WorkerPermissions) -> ProviderPreparationRequest:
         from daimon.core.turn.runtime_manifest import read_frozen_preparation
@@ -731,11 +1586,23 @@ class HostFleetPorts:
         resolved: ResolvedWorkerSpec,
         reviewed_result: Event | None,
     ) -> None:
-        from daimon.core.channel_budget import watch_fleet_budget
-        from daimon.core.fleet import FleetConflict, result_digest
-        from daimon.core.headless_runner import commit_worker_transition, run_worker
+        from daimon.core.channel_budget import (
+            WorkerCancel,
+            WorkerCancelReason,
+            cancel_workers,
+            watch_fleet_budget,
+        )
+        from daimon.core.fleet import FleetConflict
+        from daimon.core.headless_runner import (
+            FAILURE_RECORDED,
+            WORKER_FAILURE_COMMIT_LOCK_TIMEOUT,
+            commit_worker_failure,
+            commit_worker_transition,
+            run_worker,
+        )
         from daimon.core.stores import fleet
         from daimon.core.turn.ceiling import remaining_s
+        from sqlalchemy.exc import DBAPIError
 
         async with self._load_preparation(parent, deadline=worker.deadline_at) as request:
             pool = self._pool
@@ -750,6 +1617,7 @@ class HostFleetPorts:
                 finished = asyncio.Event()
 
                 async def monitor() -> None:
+                    reason: WorkerCancelReason = "watch_ended"
                     try:
                         with request.deps.running_turns.track():
                             async with asyncio.timeout(
@@ -765,9 +1633,14 @@ class HostFleetPorts:
                                     cancelled=cancellations,
                                     finished=finished,
                                 )
+                    except TimeoutError:
+                        reason = "run_deadline"
+                        raise
+                    except asyncio.CancelledError:
+                        reason = "watch_cancelled"
+                        raise
                     finally:
-                        for event in cancellations.values():
-                            event.set()
+                        cancel_workers(cancellations, reason, run_id=worker.run_id)
 
                 watch = cancellations, finished, asyncio.create_task(monitor())
                 self._watches[worker.run_id] = watch
@@ -776,27 +1649,61 @@ class HostFleetPorts:
                     retained = self._watches.get(worker.run_id)
                     if retained is not None and retained[2] is done:
                         self._watches.pop(worker.run_id)
+                        for key in [k for k in self._agent_requests if k[0] == worker.run_id]:
+                            self._agent_requests.pop(key, None)
+                            self._agent_drops.pop(key, None)
                     if not done.cancelled():
                         done.exception()
 
                 watch[2].add_done_callback(ended)
-            cancel = watch[0].setdefault(worker.id, asyncio.Event())
-            trigger = "Complete the task in your instructions."
-            if reviewed_result is not None:
-                trigger = json.dumps(
-                    {
-                        "instruction": (
-                            "Return JSON verdict approved or refused and reviewed_digest."
-                        ),
-                        "reviewed_digest": result_digest(dict(reviewed_result.payload)),
-                        "result": dict(reviewed_result.payload),
-                    }
-                )
+            cancel = watch[0].setdefault(worker.id, WorkerCancel())
+            trigger = worker_trigger(reviewed_result)
+
+            async def end_pending(code: WorkerFailureCode | None) -> None:
+                if code is None:
+                    return  # A plain cancel (not the watch's): the sweep or its owner ends it.
+
+                async def still_pending(db: AsyncSession, latest: FleetWorker) -> FleetWorker:
+                    if latest.status != "pending":
+                        return latest  # Claimed or ended meanwhile: its own path records it.
+                    run, _ = await fleet.run_status(
+                        db, tenant_id=worker.tenant_id, run_id=worker.run_id
+                    )
+                    # A person's Stop (this worker, or the whole fleet) ends it as stopped,
+                    # as commit_worker_transition's own path does, never as a failure.
+                    stopped = latest.error_code == "stop_requested" or run.status == "cancelled"
+                    return await fleet.finish(
+                        db,
+                        tenant_id=worker.tenant_id,
+                        worker_id=worker.id,
+                        expected_version=latest.version,
+                        status="cancelled" if stopped else "failed",
+                        error_code="stop_requested" if stopped else code,
+                    )
+
+                try:
+                    await commit_worker_transition(
+                        request,
+                        parent,
+                        worker,
+                        still_pending,
+                        lock_timeout=WORKER_FAILURE_COMMIT_LOCK_TIMEOUT,
+                    )
+                except (FleetConflict, DBAPIError) as error:
+                    # Bounded: a busy lock leaves the row to the deadline sweep, as before.
+                    log.warning(
+                        "fleet.pending_worker_end_deferred",
+                        run_id=str(worker.run_id),
+                        worker_id=str(worker.id),
+                        failure_code=code,
+                        error_class=type(error).__name__,
+                    )
 
             async def execute() -> None:
+                poll = PENDING_CLAIM_POLL_S
                 with request.deps.running_turns.track():
                     if request.deps.running_turns.shutting_down:
-                        cancel.set()
+                        cancel_workers({worker.id: cancel}, "shutdown", run_id=worker.run_id)
                     bound = min(request.deadline, worker.deadline_at)
                     async with asyncio.timeout(
                         remaining_s(bound, now=request.now(), refuse_expired=True)
@@ -823,14 +1730,34 @@ class HostFleetPorts:
                                             prices=self.prices,
                                             cancel=cancel,
                                         )
-                                    except BaseException:
-                                        with suppress(FleetConflict):
+                                    except BaseException as error:
+                                        # This task's own deadline (the asyncio.timeout above)
+                                        # shows here as a cancel: record it as the timeout.
+                                        cause: BaseException = (
+                                            TimeoutError()
+                                            if isinstance(error, asyncio.CancelledError)
+                                            and request.now() >= bound
+                                            else error
+                                        )
+                                        code = worker_failure_code(
+                                            cause, failure_code, backend=claimed.backend
+                                        )
+                                        # The budget watch says why it cancelled (a
+                                        # restart, the run's deadline, a limit). A turn it
+                                        # cancelled after bind ends non-COMPLETED, so the
+                                        # cancel shows as result_not_successful rather
+                                        # than a CancelledError (SMOKE 5ad12cc3).
+                                        if (watched := cancel_failure_code(cancel)) is not None:
+                                            code = watched
+                                        # run_worker records its own pre-native failures;
+                                        # a second commit would only wait on the lock again.
+                                        if not getattr(error, FAILURE_RECORDED, False):
                                             await asyncio.shield(
-                                                commit_worker_transition(
+                                                commit_worker_failure(
                                                     request,
                                                     parent,
                                                     claimed,
-                                                    failure_code=failure_code,
+                                                    failure_code=code,
                                                 )
                                             )
                                         raise
@@ -843,7 +1770,16 @@ class HostFleetPorts:
                             actual = next((row for row in rows if row.id == worker.id), None)
                             if actual is None or actual.status != "pending":
                                 return
-                            await asyncio.sleep(0.25)
+                            # Each claim attempt takes the tenant fleet lock: back off while
+                            # the tenant's worker slots stay full.
+                            await asyncio.sleep(poll)
+                            poll = min(PENDING_CLAIM_POLL_MAX_S, poll * 2)
+                        # Cancelled before it was ever claimed: end it now with why, so it
+                        # neither waits for the deadline sweep ("ran out of time") nor holds
+                        # the run open (SMOKE 26250cd6 J10).
+                        await asyncio.shield(
+                            end_pending(_CANCEL_CODES.get(getattr(cancel, "reason", None) or ""))
+                        )
 
             task = asyncio.create_task(execute())
             self._tasks[worker.id] = task
@@ -862,14 +1798,22 @@ class HostFleetPorts:
                         worker_id=str(worker.id),
                         error_class=type(error).__name__,
                         causes=causes,
+                        **(
+                            {"validation": validation}
+                            if (validation := _validation_categories(error))
+                            else {}
+                        ),
                     )
 
             task.add_done_callback(completed)
 
     async def close(self) -> None:
-        for events, finished, _ in self._watches.values():
-            for event in events.values():
-                event.set()
+        from daimon.core.channel_budget import cancel_workers
+
+        # Host shutdown (a deploy, scale-in or an out-of-memory restart) ends every
+        # in-flight worker; say so, since the workers only see an interruption.
+        for run_id, (events, finished, _) in self._watches.items():
+            cancel_workers(events, "shutdown", run_id=run_id)
             finished.set()
         tasks = (*self._tasks.values(), *(watch[2] for watch in self._watches.values()))
         if tasks:
@@ -898,7 +1842,12 @@ class HostFleetPorts:
                 async with asyncio.timeout(
                     remaining_s(bound, now=datetime.now(UTC), refuse_expired=True)
                 ):
-                    request = await self._preparation(parent)
+                    cached = (
+                        self._agent_requests.get((parent.fleet.run_id, parent.agent_id))
+                        if parent.agent_id is not None
+                        else None
+                    )
+                    request = cached if cached is not None else await self._preparation(parent)
                     bound = min(bound, request.deadline)
                     remaining_s(bound, now=request.now(), refuse_expired=True)
                     yield replace(request, deadline=bound)
@@ -915,6 +1864,22 @@ class HostFleetPorts:
             return None
         async with self._load_preparation(parent) as request:
             return (await request.capture_root(parent)).source
+
+    async def admitted_worker(
+        self, parent: WorkerPermissions, operation_key: str
+    ) -> FleetWorker | None:
+        from daimon.core.stores import mux_state
+
+        run_id = parent.fleet.run_id
+        async with self.sessions() as db:
+            record = await mux_state.get_operation(
+                db, parent.fleet.scope, f"fleet:{run_id}:admit:{operation_key}"
+            )
+        if record is None or record.operation.status != "processed":
+            return None
+        worker_id = record.result.get("worker_id")
+        _, workers = await self.read_run(parent.fleet.scope, run_id)
+        return next((worker for worker in workers if str(worker.id) == worker_id), None)
 
     async def controller_account(self, parent: WorkerPermissions) -> uuid.UUID | None:
         from daimon.core.stores.identity import find_platform_principal
@@ -943,6 +1908,253 @@ class HostFleetPorts:
         if str(run.orchestrator_account_id) != scope.account_id:
             raise FleetRefused("foreign_run")
         return run, workers
+
+    async def settle_run(
+        self,
+        parent: WorkerPermissions,
+        run: FleetRun,
+        status: SettledStatus,
+        *,
+        wake_id: uuid.UUID | None,
+        unless_waking: bool,
+    ) -> FleetRun:
+        from daimon.core.fleet import FleetConflict
+        from daimon.core.stores import fleet, task_continuations
+
+        _scope(parent, run)
+        try:
+            async with self.sessions.begin() as db:
+                if unless_waking and await task_continuations.count_run_wakes(
+                    db, run=run, exclude_id=wake_id
+                ):
+                    raise FleetRefused("wake_pending")
+                if status == "completed" and run.status == "running":
+                    run = await fleet.set_run_status(
+                        db,
+                        tenant_id=run.tenant_id,
+                        run_id=run.id,
+                        expected_version=run.version,
+                        status="collecting",
+                    )
+                # The move locks the run row, which wake arming locks first;
+                # the recount under that lock closes the race with a new wake.
+                return await fleet.set_run_status(
+                    db,
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    expected_version=run.version,
+                    status=status,
+                    wake_id=wake_id,
+                    unless_waking=unless_waking,
+                )
+        except FleetConflict as error:
+            raise FleetRefused(
+                "wake_pending" if error.reason == "wake_pending" else "run_changed"
+            ) from None
+
+    async def pending_wakes(
+        self, parent: WorkerPermissions, run: FleetRun, *, exclude: uuid.UUID | None
+    ) -> int:
+        from daimon.core.stores import task_continuations
+
+        _scope(parent, run)
+        async with self.sessions() as db:
+            return await task_continuations.count_run_wakes(db, run=run, exclude_id=exclude)
+
+    async def agent_worker_parent(
+        self, parent: WorkerPermissions, agent_name: str
+    ) -> WorkerPermissions:
+        from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
+        from daimon.core.neutral_resources import (
+            WorkerSpecRefused,
+            agent_worker_backend,
+            agent_worker_permissions,
+            worker_agent_allowed,
+        )
+        from daimon.core.stores import agent_backends
+        from daimon.core.stores.access_policy import load_access_policy
+        from daimon.core.turn.admission import prepare_worker_agent
+        from daimon.core.turn.errors import AdmissionDenied
+        from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+        from mux.profiles import MANAGED_AGENTS
+
+        deps = self._deps
+        if deps is None or self._preparation is None:
+            raise FleetRefused("prerequisites_unavailable")
+        async with self._load_preparation(parent) as root:
+            try:
+                source = await load_backend_agent(
+                    deps.anthropic,
+                    deps.sessionmaker,
+                    tenant_id=root.tenant_id,
+                    agent_name=agent_name,
+                )
+            except AgentBackendRefused:
+                raise FleetRefused("worker_agent_unavailable") from None
+            if source.agent_id == parent.agent_id:
+                return parent
+            grant = await read_agent_fleet_grant(deps, root.admission, now=datetime.now(UTC))
+            if grant is None:
+                raise FleetRefused("fleet_grant_unavailable")
+            if not worker_agent_allowed(grant, parent.agent_id, source.agent_id):
+                # Before any admission work, and before its memory store could be made.
+                raise FleetRefused("worker_agent_not_in_grant")
+            try:
+                request = await prepare_worker_agent(deps, root, source)
+                if request.source is not None and request.source.memory_store_id is None:
+                    # Agents get their shared memory store on their first session. One
+                    # that never ran yet gets it now, as that session would, so its
+                    # worker mounts it read-only; then its source is captured again.
+                    await self._provision_agent_memory(source)
+                    request = await prepare_worker_agent(deps, root, source)
+            except (AgentBackendRefused, AdmissionDenied):
+                raise FleetRefused("worker_agent_not_allowed_here") from None
+            if request.source is None or request.admission.grant is None:
+                raise FleetRefused("worker_agent_unavailable")
+            if request.source.memory_store_id is None:
+                raise FleetRefused("worker_agent_memory_unavailable")
+            async with self.sessions() as db:
+                policy = await load_access_policy(db, tenant_id=root.tenant_id)
+                setting = await agent_backends.current(db, root.tenant_id, source.agent_id)
+            try:
+                spec = request.source.effective_spec
+                if spec is None:
+                    raise WorkerSpecRefused("origin", "unbound")
+                worker_parent = agent_worker_permissions(
+                    parent,
+                    request.source,
+                    request.admission.grant,
+                    grant,
+                    policy=policy,
+                    now=datetime.now(UTC),
+                    # Its model and backend come from its own agent config.
+                    backend=agent_worker_backend(
+                        spec,
+                        setting.backend if setting is not None else None,
+                        setting.model if setting is not None else None,
+                    ),
+                )
+            except WorkerSpecRefused as error:
+                raise FleetRefused(
+                    "worker_agent_not_in_grant"
+                    if error.field == "scope"
+                    else "worker_agent_backend_not_enabled"
+                    if (error.field, error.reason) == ("backend", "unbound")
+                    else "worker_agent_model_cannot_run_workers"
+                    if (error.field, error.reason) == ("backend", "unsupported")
+                    else f"worker_agent_{error.field}_{error.reason}"
+                ) from None
+            self._agent_requests[(parent.fleet.run_id, source.agent_id)] = request
+            # Its chat turns on that backend declare these losses; so does its worker.
+            self._agent_drops[(parent.fleet.run_id, source.agent_id)] = (
+                cast("tuple[DeclaredDrop, ...]", tuple(setting.declared_drops))
+                if setting is not None and setting.backend not in (None, MANAGED_AGENTS.provider)
+                else ()
+            )
+            return worker_parent
+
+    async def agent_consented_drops(self, parent: WorkerPermissions) -> tuple[DeclaredDrop, ...]:
+        if parent.agent_id is None:
+            return ()
+        return self._agent_drops.get((parent.fleet.run_id, parent.agent_id), ())
+
+    async def _provision_agent_memory(self, source: BackendAgent) -> None:
+        """Create an agent's shared memory store the way its first session does."""
+        from daimon.core.memory_resource import ensure_memory_store_and_mount
+
+        deps = self._deps
+        if deps is None:
+            raise FleetRefused("prerequisites_unavailable")
+        try:
+            await ensure_memory_store_and_mount(
+                deps.anthropic,
+                deps.sessionmaker,
+                tenant_id=source.tenant_id,
+                agent_id=source.agent_id,
+                agent_name=source.name,
+                read_only=True,
+            )
+        except Exception as error:  # an API, store, timeout or binding failure; not cancel
+            log.warning("fleet.worker_agent_memory_unavailable", error=type(error).__name__)
+            raise FleetRefused("worker_agent_memory_unavailable") from None
+
+    async def worker_agents(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy
+    ) -> list[dict[str, JsonValue]]:
+        from daimon.core import pricing
+        from daimon.core.authz import Action, Surface, authorize, build_agent_ref
+        from daimon.core.defaults.ma_index import list_agents_by_tenant
+        from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.neutral_resources import worker_agent_allowed
+        from daimon.core.stores import agent_backends
+        from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+        from mux.errors import InvalidConfig
+        from mux.profiles import MANAGED_AGENTS, backend_selection
+
+        deps = self._deps
+        if deps is None or self._preparation is None:
+            raise FleetRefused("prerequisites_unavailable")
+        tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
+        async with self._load_preparation(parent) as root:
+            grant = await read_agent_fleet_grant(deps, root.admission, now=datetime.now(UTC))
+        if grant is None:
+            raise FleetRefused("fleet_grant_unavailable")
+        listed: list[dict[str, JsonValue]] = []
+        for native in await list_agents_by_tenant(deps.anthropic, tenant_id=tenant_id):
+            name = (native.metadata or {}).get(MA_METADATA_KEY_NAME) or native.name
+            agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=native.id)
+            async with self.sessions() as db:
+                setting = await agent_backends.current(db, tenant_id, agent_id)
+            backend = (setting.backend if setting is not None else None) or MANAGED_AGENTS.provider
+            native_model = native.model if isinstance(native.model, str) else native.model.id
+            if backend == MANAGED_AGENTS.provider:
+                model: str | None = native_model
+                rates: pricing.ModelRates | pricing.ProviderPrice | None = (
+                    pricing.AGENT_MODEL_PRICING.get(native_model)
+                )
+            else:
+                try:
+                    selection = backend_selection(backend)
+                except InvalidConfig:
+                    continue
+                model = (setting.model if setting is not None else None) or selection.model
+                rates = (
+                    pricing.provider_prices(selection.profile).get((backend, model))
+                    if model is not None
+                    else None
+                )
+            # Its model is its own config's; the grant's model list does not apply.
+            allowed = (
+                model is not None
+                and backend in policy.enabled_backends
+                and worker_agent_allowed(grant, parent.agent_id, agent_id)
+                and authorize(
+                    policy,
+                    subject=parent.subject,
+                    action=Action.SPAWN_WORKER,
+                    surface=Surface.FLEET,
+                    agent=build_agent_ref(native.name, native.metadata or {}, name),
+                    place=parent.fleet.place,
+                    fleet=parent.fleet,
+                ).allowed
+            )
+            if allowed:
+                listed.append(
+                    {
+                        "name": name,
+                        "description": native.description or "",
+                        "backend": backend,
+                        "model": model,
+                        "price_per_million_tokens": (
+                            f"input ${rates.input}, output ${rates.output}"
+                            if rates is not None
+                            else "unknown"
+                        ),
+                        "root": agent_id == parent.agent_id,
+                    }
+                )
+        return sorted(listed, key=lambda row: (not row["root"], str(row["name"])))
 
     async def read_clone(
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision
@@ -981,6 +2193,17 @@ class HostFleetPorts:
         from mux.state.operations import request_digest
 
         if self._dispatch is None or session is not None or run_id != parent.fleet.run_id:
+            raise FleetRefused("prerequisites_unavailable")
+        deps = self._deps
+        if deps is not None and (
+            not deps.fleet_enabled
+            or deps.turn_path != "mux"
+            or not deps.channel_backends
+            or not deps.agent_backends
+        ):
+            # An operator stop: refuse before the worker is funded or claims a slot,
+            # instead of failing it later in `run_worker`. A fleet stop also builds no
+            # ports; this check is the second line of defence.
             raise FleetRefused("prerequisites_unavailable")
         if (reviewer_of is None) != (reviewed_result is None):
             raise FleetRefused("review_evidence_invalid")
@@ -1075,15 +2298,21 @@ class HostFleetPorts:
                         result={"worker_id": str(usage.worker.id)},
                     )
                     run, worker = usage.run, usage.worker
-            if worker.status == "cancelled" and worker.error_code is not None:
+            # A worker cancelled at admission carries its refusal code; one a person
+            # stopped is replayed as it stands.
+            if worker.status == "cancelled" and worker.error_code not in (None, "stop_requested"):
                 raise FleetRefused("financial_admission_refused")
             if worker.status == "pending":
                 await self._dispatch(parent, worker, resolved, reviewed_result)
             return run, worker
         except OperationConflict:
             raise FleetRefused("operation_conflict") from None
-        except FleetConflict:
-            raise FleetRefused("admission_evidence_invalid") from None
+        except FleetConflict as error:
+            raise FleetRefused(
+                "worker_limit_reached"
+                if error.reason == "worker_limit"
+                else "admission_evidence_invalid"
+            ) from None
 
     async def read_result(
         self,

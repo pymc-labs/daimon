@@ -15,12 +15,13 @@ from daimon.testing.admin_resources import (
     verify_archive_readback,
     verify_cancel_readback,
 )
-from daimon.testing.ma_models import ma_agent, ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.ma_models import ma_agent
 from mux.contracts.ids import Revision, Scope
 from mux.contracts.receipts import CancelReceipt, Operation, SendReceipt
 from mux.contracts.resources import SessionSpec
 from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 NOW = datetime.now(UTC)
 SCOPE = Scope(

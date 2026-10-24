@@ -1011,3 +1011,26 @@ def test_a_daimon_rule_changes_the_tools_hash_and_clearing_it_restores_the_hash(
         daimon_rule_tools=frozenset({"hubspot_update_objects"}),
     )
     assert off.tools_sha256 == base.tools_sha256
+
+
+def _desired(system_override: str | None) -> SessionSnapshot:
+    return desired_snapshot(
+        _agent(),
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_science",
+        env_sha256="abc",
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id="memstore_1",
+        vault_id="vault_1",
+        system_override=system_override,
+    )
+
+
+def test_a_system_override_is_what_the_desired_session_hashes() -> None:
+    plain = _desired(None)
+    variant = _desired("be useful, on Teams")
+
+    assert plain.system_sha256 == hash_system("be useful"), "no override: the agent's own prompt"
+    assert variant.system_sha256 == hash_system("be useful, on Teams")
+    assert variant.skills_sha256 == plain.skills_sha256, "only the system axis moves"

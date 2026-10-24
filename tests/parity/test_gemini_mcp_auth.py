@@ -16,9 +16,6 @@ import httpx
 import pytest
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, parse_jsonrpc_response
 from daimon.testing.db import build_test_engine
-from daimon.testing.drivers.gemini.fake import MemoryStorage
-from daimon.testing.drivers.gemini.live_cert import LimitedTransport
-from daimon.testing.isolated_sdk import build_gemini_client
 from daimon.testing.qa_mcp_host import QA_SESSION_ID, build_host, cleanup, schema_exists, serve
 from google import genai
 from mux.contracts.actions import UserMessage, UserToolResult
@@ -26,12 +23,15 @@ from mux.contracts.events import NativePart, TextPart, ToolResultPayload, ToolUs
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, MCPConnection, Session, SessionSpec, ToolSpec
-from mux.drivers.gemini import GeminiManagedAgents, MCPSecretResolver
+from mux.drivers.gemini import NO_TOOLS_TOOL, GeminiManagedAgents, MCPSecretResolver
 from mux.drivers.gemini.flash import FlashAttempt, FlashTransport
 from mux.drivers.gemini.mcp_auth import authenticated_template
 from mux.drivers.gemini.transport import Object, SDKTransport, Transport
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore, SimulatedCrash
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.drivers.gemini.live_cert import LimitedTransport
+from mux.testing.isolated_sdk import build_gemini_client
 from pydantic import JsonValue, TypeAdapter
 
 SCOPE = Scope(tenant_id="qa", account_id="a", principal_id="p", authorization_id="auth")
@@ -125,7 +125,7 @@ class Wire:
                                 "type": "mcp_server_tool_call",
                                 "id": identity + ":call",
                                 "name": "describe_agent",
-                                "server_name": "daimon-mcp",
+                                "server_name": "daimon_mcp",
                                 "arguments": {},
                             },
                             {
@@ -244,7 +244,7 @@ async def test_authenticated_follow_up_refreshes_each_sdk_dispatch_without_persi
         assert isinstance(tools[-1], dict)
         assert tools[-1] == {
             "type": "mcp_server",
-            "name": "daimon-mcp",
+            "name": "daimon_mcp",
             "url": URL,
             "allowed_tools": [{"mode": "auto", "tools": ["describe_agent", "list_my_sessions"]}],
             "headers": {"Authorization": f"Bearer {SECRET}-{(n + 1) * 2}"},
@@ -535,14 +535,15 @@ async def test_exactly_one_server_not_one_bound_plus_anonymous(
 
 
 @pytest.mark.asyncio
-async def test_explicit_empty_tools_remain_valid_without_mcp(
+async def test_a_tool_free_agent_without_mcp_sends_only_the_no_tools_sentinel(
     sdk_wire: tuple[SDKTransport, Wire],
 ) -> None:
     sdk, wire = sdk_wire
     driver, _, _, session = await gemini_auth_session(sdk, None, authenticated=False, tools=())
     await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="empty")
     post = OBJECT.validate_json(wire.requests[0].content)
-    assert post["tools"] == []
+    # An empty agent list would mean Gemini's built-ins: only the inert sentinel.
+    assert post["tools"] == [NO_TOOLS_TOOL]
 
 
 @pytest.mark.asyncio
@@ -880,7 +881,7 @@ async def test_real_loopback_read_pair_uses_only_the_owned_bound_bearer_and_clea
                                 "type": "mcp_server_tool_call",
                                 "id": name,
                                 "name": name,
-                                "server_name": "daimon-mcp",
+                                "server_name": "daimon_mcp",
                                 "arguments": {},
                             },
                             {
@@ -1143,6 +1144,14 @@ async def test_private_gcs_mount_auth_is_fresh_exact_and_memory_only(
         assert f"Bearer offline-private-storage-{index}" in post.content.decode()
     assert "offline-private-storage" not in caplog.text
     assert "offline-private-storage" not in repr(wire.saved)
+    # The accepted interaction records a digest of exactly the header sent last,
+    # through the Flash wrapper too, so a resumed turn can clear its echo.
+    from mux.drivers.gemini.transport import mount_header_digest
+
+    accepted = f"interaction-{wire.counter}"
+    sent = f"Bearer offline-private-storage-{len(calls)}"
+    assert dispatch.mount_echo_digests(accepted) == {mount_header_digest(sent)}
+    assert "offline-private-storage" not in repr(dispatch.mount_echo_digests(accepted))
     # A later read must recognize the actual freshly dispatched token even if
     # the provider echoes it under another field, without a network transform.
     identity = f"interaction-{wire.counter}"

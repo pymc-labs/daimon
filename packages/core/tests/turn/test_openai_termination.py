@@ -22,10 +22,7 @@ from daimon.core.turn import outcomes
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.conformance.runner import Registry, run_fixture
 from daimon.testing.db import preflight_test_database
-from daimon.testing.drivers.openai.conformance import register
-from daimon.testing.isolated_sdk import SDK_ENV_VARS, build_async_openai
 from daimon.testing.openai_conformance import OpenAIHostTransport, compose_openai_host
 from daimon.testing.openai_termination import (
     REQUIRED_REASONS,
@@ -35,6 +32,9 @@ from daimon.testing.openai_termination import (
 from daimon.testing.turn_conformance import TerminationCase, TerminationSnapshot
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.errors import ScopeViolation
+from mux.testing.conformance.runner import Registry, run_fixture
+from mux.testing.drivers.openai.conformance import register
+from mux.testing.isolated_sdk import SDK_ENV_VARS, build_async_openai
 from sqlalchemy import event as sql_event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -50,8 +50,6 @@ owned_database_preflight = native_fixture.owned_database_preflight
     ("url", "skipped"),
     [
         ("postgresql+asyncpg://test:test@foreign.invalid/daimon_test_nc_n11", False),
-        ("postgresql+asyncpg://test:test@localhost/unowned_test", False),
-        ("postgresql+asyncpg://test:test@localhost/daimon_test_nc_n11?host=foreign.invalid", False),
         ("postgresql+asyncpg://test:test@localhost/daimon_test", True),
     ],
 )

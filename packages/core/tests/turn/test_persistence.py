@@ -19,8 +19,6 @@ from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import list_response, send_events_response
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
@@ -30,6 +28,8 @@ from mux.errors import OperationConflict, ScopeViolation
 from mux.state.lease import LeaseBusy, StaleFence
 from mux.state.memory import MemoryStateStore, SimulatedCrash
 from mux.state.store import StateStore, binding_slot
+from mux.testing.drivers.anthropic.ma import list_response, send_events_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from .conftest import make_agent_message, make_status_idle
@@ -535,7 +535,7 @@ async def test_cancel_ack_cannot_complete_the_journal_but_independent_stop_can(
 async def test_archive_claim_restores_receipt_without_repeating_actual_sdk_mutation(
     stores: Callable[[], StateStore],
 ) -> None:
-    from daimon.testing.ma import session_response
+    from mux.testing.drivers.anthropic.ma import session_response
 
     store = stores()
     await store.put_binding(BINDING, expected_generation=0)
@@ -609,7 +609,7 @@ async def test_main_confirmation_recovery_keeps_legacy_wire_and_the_mux_fence(
 ) -> None:
     import httpx
     from daimon.core.turn.termination import TerminationReason
-    from daimon.testing.ma import session_response
+    from mux.testing.drivers.anthropic.ma import session_response
 
     store = stores()
     await store.put_binding(BINDING, expected_generation=0)
@@ -714,7 +714,7 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
     from anthropic import APIConnectionError
     from daimon.core.errors import TurnError
     from daimon.core.turn.io import TrackedLegacyTurnIO, TurnConnectionLost
-    from daimon.testing.ma import session_response
+    from mux.testing.drivers.anthropic.ma import session_response
 
     store = MemoryStateStore()
     await store.put_binding(BINDING, expected_generation=0)
@@ -776,7 +776,7 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
 async def test_a_claim_keeps_the_default_retry_policy_for_reads_and_legacy_mutations() -> None:
     import httpx
     from daimon.core.turn.io import LegacyTurnIO
-    from daimon.testing.ma import session_response
+    from mux.testing.drivers.anthropic.ma import session_response
 
     store = MemoryStateStore()
     await store.put_binding(BINDING, expected_generation=0)

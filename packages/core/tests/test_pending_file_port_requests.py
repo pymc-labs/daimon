@@ -10,7 +10,7 @@ import httpx
 import pytest
 from anthropic import InternalServerError, NotFoundError
 from daimon.core import pending_file_sweeper
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

@@ -26,7 +26,7 @@ from daimon.core.mux_compat import (
 )
 from daimon.core.specs import load_environment_spec
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from rich.console import Console
 
 TENANT = UUID("00000000-0000-0000-0000-000000000007")

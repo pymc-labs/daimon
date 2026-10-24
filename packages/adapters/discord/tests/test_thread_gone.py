@@ -44,10 +44,10 @@ from daimon.core.stores.turn_outcomes import list_for_tenant as list_outcomes
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing import MARouter, build_fake_anthropic, json_body, ma_session
-from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.turn_fakes import deps_for
 from daimon.testing.turn_router import build_turn_router, turn_events
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, json_body
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -162,11 +162,11 @@ def _closed_for_sends(is_send: bool) -> Exception:
 
 async def _world(
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> _World:
     # One connection per query: the turn and a queued message talk to the database at once.
-    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant = await make_tenant(db_session, platform="discord", workspace_id=str(_GUILD_ID))
     await tenant_ledger.insert_entry(
         db_session,
@@ -414,12 +414,12 @@ async def test_thread_deleted_mid_turn_interrupts_and_posts_nothing_in_the_chann
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The #809 sequence: the thread starts answering 10003 while the turn runs."""
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
 
     async def break_when_running() -> None:
         await world.stream_opened.wait()
@@ -481,11 +481,11 @@ async def test_a_queued_follow_up_behind_a_gone_turn_never_starts(
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     follow_up = _queued_follow_up()
     other = _queued_follow_up(1002)
     other.author.id = 333  # another author's group, which the drain would run next
@@ -526,12 +526,12 @@ async def test_a_message_queued_after_the_stop_is_dropped_before_its_group_runs(
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The check is made before each group, so a group behind the first one stops too."""
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     first = _queued_follow_up(1001)
     second = _queued_follow_up(1002)
     second.author.id = 333
@@ -571,12 +571,12 @@ async def test_thread_delete_event_during_a_turn_interrupts_it_and_retires_sessi
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The gateway can say so before any write fails; the thread still answers writes here."""
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     payload = types.SimpleNamespace(thread_id=_THREAD_ID, parent_id=_PARENT_ID, guild_id=_GUILD_ID)
 
     async def delete_when_running() -> None:
@@ -616,9 +616,9 @@ async def test_thread_delete_event_during_a_turn_interrupts_it_and_retires_sessi
 
 async def test_thread_delete_event_with_no_turn_running_still_retires_the_sessions(
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
 ) -> None:
-    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     from daimon.core.ma_identity import derive_tenant_uuid
     from daimon.core.stores.thread_sessions import mark_turn_active
     from daimon.testing import make_account, make_thread_session
@@ -676,12 +676,12 @@ async def test_a_send_refused_as_archived_stops_the_turn_but_keeps_its_session(
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A send still 50083 after the unarchive-and-retry means closed: stop, keep the session."""
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     world.thread.edit = AsyncMock(side_effect=_http(50083))  # the unarchive fails too
 
     async def archive_when_running() -> None:
@@ -711,12 +711,12 @@ async def test_archived_edits_do_not_stop_a_turn_whose_answer_is_then_delivered(
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A thread can auto-archive during a slow turn; progress edits fail 50083, the turn goes on."""
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     archived_edits = iter([_http(50083), _http(50083)])
 
     def archived_then_open(is_send: bool) -> Exception | None:
@@ -750,12 +750,12 @@ async def test_an_unknown_webhook_does_not_stop_the_turn(
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """10015: the webhook can vanish while the thread lives; webhook recovery owns that."""
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     failures = iter([_http(10015, status=404, cls=discord.NotFound)])
 
     def unknown_webhook_once(is_send: bool) -> Exception | None:
@@ -784,12 +784,12 @@ async def test_a_message_queued_after_the_stop_gets_no_reaction_and_is_finished(
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Its claim committed, then the stop landed, then it reached the queue: the release finishes it."""
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     late = _queued_follow_up(1003)
     stops = world.bot._thread_stops  # pyright: ignore[reportPrivateUsage]
 
@@ -818,12 +818,12 @@ async def test_the_error_card_write_can_be_the_first_to_find_the_thread_gone(
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The turn fails for another reason, then the thread is deleted: the error says nothing."""
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
 
     async def fail_after_deletion(*_args: Any, **_kwargs: Any) -> None:
         world.break_thread(_gone)
@@ -844,7 +844,7 @@ async def test_the_error_card_write_can_be_the_first_to_find_the_thread_gone(
 
 async def test_a_failed_error_send_marks_the_thread_gone_and_never_raises(
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no card left to turn into the error, the thread send is the first write to see 10003."""
@@ -852,7 +852,7 @@ async def test_a_failed_error_send_marks_the_thread_gone_and_never_raises(
         _TurnFailureSurface,  # pyright: ignore[reportPrivateUsage]
     )
 
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     world.break_thread(_gone)
     surface = _TurnFailureSurface(thread=world.thread, end_card=None)
 
@@ -873,14 +873,14 @@ async def test_a_failed_error_send_marks_the_thread_gone_and_never_raises(
 
 async def test_an_error_for_a_thread_that_is_already_gone_is_not_posted(
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from daimon.adapters.discord.bot import (
         _TurnFailureSurface,  # pyright: ignore[reportPrivateUsage]
     )
 
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     world.bot._thread_stops.signal(  # pyright: ignore[reportPrivateUsage]
         _THREAD_ID, reason="gone", code=10003, phase="running"
     )
@@ -907,7 +907,7 @@ async def test_a_stop_during_send_initial_still_interrupts_the_session(
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The driver ends a Stop that lands while the question is being sent without an interrupt.
@@ -916,7 +916,7 @@ async def test_a_stop_during_send_initial_still_interrupts_the_session(
     session itself, before it retires the rows.
     """
     _arm(mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     stops = world.bot._thread_stops  # pyright: ignore[reportPrivateUsage]
     world.on_user_message.append(
         lambda: stops.signal(_THREAD_ID, reason="gone", code=10003, phase="running")
@@ -1052,12 +1052,12 @@ async def test_a_reaction_suspended_across_the_release_is_not_followed_by_a_remo
     mock_find_env: AsyncMock,
     mock_find_agent: AsyncMock,
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The hourglass call is still in flight when the thread is deleted and the slot released."""
     _ = (mock_resolve, mock_create_session, mock_find_env, mock_find_agent)
-    world = await _world(db_session, db_nullpool_engine, monkeypatch)
+    world = await _world(db_session, db_committing_engine, monkeypatch)
     bot = world.bot
     stops = bot._thread_stops  # pyright: ignore[reportPrivateUsage]
     message = _queued_follow_up(1004)

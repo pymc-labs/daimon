@@ -12,6 +12,7 @@ from daimon.core._models import (
     GitHubInstallationReconciliation,
 )
 from daimon.core.stores.domain import GitHubInstallationReconciliationRow
+from daimon.core.stores.github_app_installations import lock_for_reconciliation
 from daimon.core.stores.github_new_repo_notices import queue_new_repos
 from daimon.core.stores.github_removal_notices import (
     cancel_unconfirmed_removal,
@@ -35,6 +36,7 @@ async def enqueue(
     now: datetime,
 ) -> bool:
     """Record one delivery and coalesce it into the installation's refresh job."""
+    previous = await lock_for_reconciliation(session, installation_id=installation_id)
     receipt = (
         pg_insert(GitHubInstallationDelivery)
         .values(
@@ -82,9 +84,7 @@ async def enqueue(
     )
     await session.execute(stmt)
     if deleted:
-        # Lock the queue row before the cache row, matching finish()'s lock
-        # order so a deletion cannot deadlock an in-flight snapshot write.
-        previous = await session.get(GitHubAppInstallation, installation_id)
+        # Every writer locks the installation before its reconciliation row.
         if previous is not None:
             await queue_removal(
                 session,
@@ -183,29 +183,42 @@ async def claim_due(
             GitHubInstallationReconciliation.lease_expires_at <= now,
         ),
     )
-    result = await session.execute(
-        select(GitHubInstallationReconciliation)
-        .where(due)
-        .order_by(
-            GitHubInstallationReconciliation.available_at,
-            GitHubInstallationReconciliation.created_at,
+    candidate_ids = list(
+        await session.scalars(
+            select(GitHubInstallationReconciliation.installation_id)
+            .where(due)
+            .order_by(
+                GitHubInstallationReconciliation.available_at,
+                GitHubInstallationReconciliation.created_at,
+                GitHubInstallationReconciliation.installation_id,
+            )
+            .limit(50)
         )
-        .with_for_update(skip_locked=True)
-        .limit(1)
-        .execution_options(populate_existing=True)
     )
-    row = result.scalar_one_or_none()
-    if row is None:
-        return None
-    row.state = "running"
-    row.claimed_generation = row.generation
-    row.lease_owner = lease_owner
-    row.lease_expires_at = now + lease_for
-    row.attempts += 1
-    row.updated_at = now
-    await session.flush()
-    await session.refresh(row)
-    return GitHubInstallationReconciliationRow.model_validate(row)
+    for installation_id in candidate_ids:
+        # Roll back a skipped candidate's savepoint to release its installation
+        # lock before trying another ID. The worker holds one installation lock.
+        async with session.begin_nested() as savepoint:
+            await lock_for_reconciliation(session, installation_id=installation_id)
+            row = await session.scalar(
+                select(GitHubInstallationReconciliation)
+                .where(GitHubInstallationReconciliation.installation_id == installation_id, due)
+                .with_for_update(skip_locked=True)
+                .execution_options(populate_existing=True)
+            )
+            if row is None:
+                await savepoint.rollback()
+                continue
+            row.state = "running"
+            row.claimed_generation = row.generation
+            row.lease_owner = lease_owner
+            row.lease_expires_at = now + lease_for
+            row.attempts += 1
+            row.updated_at = now
+            await session.flush()
+            await session.refresh(row)
+            return GitHubInstallationReconciliationRow.model_validate(row)
+    return None
 
 
 async def renew_lease(
@@ -244,6 +257,7 @@ async def finish(
     ``account_login is None`` means GitHub confirmed the installation no longer
     exists. ``repos`` must be a complete successfully paginated list otherwise.
     """
+    previous = await lock_for_reconciliation(session, installation_id=job.installation_id)
     result = await session.execute(
         select(GitHubInstallationReconciliation)
         .where(
@@ -271,7 +285,6 @@ async def finish(
         return False
 
     if account_login is None:
-        previous = await session.get(GitHubAppInstallation, job.installation_id)
         if previous is not None:
             await queue_removal(
                 session,
@@ -292,7 +305,6 @@ async def finish(
         )
     else:
         await cancel_unconfirmed_removal(session, installation_id=job.installation_id)
-        previous = await session.get(GitHubAppInstallation, job.installation_id)
         if previous is not None and previous.app == "github_app":
             if repos is None and suspended_at is None:
                 raise ValueError("a live installation requires a complete repository snapshot")

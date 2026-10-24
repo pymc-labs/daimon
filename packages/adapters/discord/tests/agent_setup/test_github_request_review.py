@@ -11,6 +11,7 @@ import pytest
 from daimon.adapters.discord.agent_setup import github_requests as module
 from daimon.core.config import RecruitmentSettings
 from daimon.core.github_connect_cards import build_connect_card
+from daimon.core.stores.github_access import InstallationLimitError
 
 
 class _Sessions:
@@ -144,9 +145,11 @@ async def test_review_defers_before_fetch_member(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["hide", "approve"])
+@pytest.mark.parametrize(
+    ("action", "cap_error"), [("hide", False), ("approve", False), ("approve", True)]
+)
 async def test_uncached_member_decision_edits_requester_thread_card(
-    monkeypatch: pytest.MonkeyPatch, action: str
+    monkeypatch: pytest.MonkeyPatch, action: str, cap_error: bool
 ) -> None:
     request_id, tenant_id, account_id, agent_id = (uuid.uuid4() for _ in range(4))
     request = SimpleNamespace(
@@ -180,7 +183,19 @@ async def test_uncached_member_decision_edits_requester_thread_card(
     )
     monkeypatch.setattr(module, "is_member_guild_admin", MagicMock(return_value=True))
     monkeypatch.setattr(module, "dismiss_delivery", AsyncMock(return_value=True))
-    monkeypatch.setattr(module, "approve_connected_request", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        module,
+        "approve_connected_request",
+        AsyncMock(
+            side_effect=InstallationLimitError(
+                "Helper already uses repos from 12 GitHub accounts or orgs, "
+                "the most one agent can hold. Remove one first."
+            )
+            if cap_error
+            else None,
+            return_value=True,
+        ),
+    )
     monkeypatch.setattr(module, "update_requester_card", AsyncMock())
     monkeypatch.setattr(
         module,
@@ -206,11 +221,16 @@ async def test_uncached_member_decision_edits_requester_thread_card(
     interaction.response.defer = AsyncMock()
     interaction.response.edit_message = AsyncMock()
     interaction.edit_original_response = AsyncMock()
+    interaction.followup.send = AsyncMock()
     runtime = SimpleNamespace(sessionmaker=_Sessions(), anthropic=object())
     assert await module.handle_request_card(interaction, runtime)  # type: ignore[arg-type]
     interaction.response.defer.assert_awaited_once_with(thinking=False)
     interaction.response.edit_message.assert_not_awaited()
-    assert interaction.edit_original_response.await_args.kwargs["embed"] is not None
+    if cap_error:
+        assert "Remove one first." in interaction.followup.send.await_args.args[0]
+        interaction.edit_original_response.assert_not_awaited()
+    else:
+        assert interaction.edit_original_response.await_args.kwargs["embed"] is not None
 
 
 @pytest.mark.asyncio

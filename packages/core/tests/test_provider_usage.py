@@ -554,7 +554,7 @@ async def test_zero_first_verified_correction_still_pins_billing_context(session
 
 
 async def test_external_producer_transaction_and_host_recorder_share_lock_order(
-    sessions, db_nullpool_engine
+    sessions, db_committing_engine
 ):
     captured, apply = asyncio.Event(), asyncio.Event()
     competing_pid = asyncio.get_running_loop().create_future()
@@ -597,7 +597,7 @@ async def test_external_producer_transaction_and_host_recorder_share_lock_order(
     external = asyncio.create_task(external_composition())
     host = asyncio.create_task(host_recorder())
     pid = await competing_pid
-    probe_sessions = async_sessionmaker(db_nullpool_engine)
+    probe_sessions = async_sessionmaker(db_committing_engine)
 
     async def blocked():
         while True:

@@ -15,7 +15,7 @@ from daimon.adapters.slack import credential_submissions as credentials
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.testing.ma_models import ma_agent
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 
 @pytest.mark.parametrize("status", ["success", "retry", "exhausted"])
@@ -94,7 +94,10 @@ async def test_imported_skill_attachment_keeps_requests_retry_limit_and_notice(
                 await old.beta.agents.update(
                     "agent1",
                     version=fresh.version,
-                    skills=[*initial_payload, {"type": "custom", "skill_id": "existing"}],
+                    skills=[
+                        *initial_payload,
+                        {"type": "custom", "skill_id": "existing", "version": "9"},
+                    ],
                 )
             except ConflictError:
                 assert status == "exhausted"

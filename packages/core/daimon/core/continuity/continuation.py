@@ -32,6 +32,7 @@ from datetime import datetime
 from typing import Final, Literal, get_args
 
 from anthropic import AsyncAnthropic
+from daimon.core.anthropic_guard import AnthropicDisabled, require_anthropic_allowed
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_timer_seed,
@@ -440,16 +441,56 @@ async def decide_continuation(
             "call record_continuation before claiming it."
         )
 
-    try:
-        await get_setup_agent(
-            anthropic, tenant_id=request.tenant_id, ma_agent_id=request.target_ma_agent_id
-        )
-    except DaimonError:
-        # `get_setup_agent` already distinguishes "gone" from "not yours" and
-        # raises for both; either way this continuation has no destination.
-        return ContinuationDecision(
-            action="skip_target_changed", message=_render_target_changed(request.target_name)
-        )
+    if request.target_ma_agent_id.startswith("sh_agent_"):
+        from daimon.core.turn.runtimes import ensure_channel_runtime
+
+        if not ensure_channel_runtime("selfhosted.loop"):
+            return ContinuationDecision(
+                action="blocked_preparation_failed",
+                message="Self-hosted follow-up replies are not available yet. "
+                "Send a message in this conversation to continue.",
+            )
+        from daimon.core.mux_backend import resource_scope
+        from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+        from mux.contracts.ids import ResourceRef
+        from mux.errors import ProviderError
+
+        scope = resource_scope(tenant_id=str(request.tenant_id))
+        try:
+            target = await SelfHostedAgents(sessionmaker).retrieve(
+                scope,
+                ResourceRef(
+                    id=request.target_ma_agent_id,
+                    provider="selfhosted",
+                    kind="agent",
+                    tenant_id=scope.tenant_id,
+                    account_scope_id=scope.tenant_id,
+                ),
+            )
+        except ProviderError:
+            return ContinuationDecision(
+                action="skip_target_changed", message=_render_target_changed(request.target_name)
+            )
+        if target.lifecycle != "active":
+            return ContinuationDecision(
+                action="skip_target_changed", message=_render_target_changed(request.target_name)
+            )
+    else:
+        try:
+            require_anthropic_allowed()
+            await get_setup_agent(
+                anthropic, tenant_id=request.tenant_id, ma_agent_id=request.target_ma_agent_id
+            )
+        except AnthropicDisabled:
+            # A provider prohibition says nothing about whether the target exists.
+            # The dispatcher releases this claim instead of discarding the work.
+            raise
+        except DaimonError:
+            # `get_setup_agent` already distinguishes "gone" from "not yours" and
+            # raises for both; either way this continuation has no destination.
+            return ContinuationDecision(
+                action="skip_target_changed", message=_render_target_changed(request.target_name)
+            )
 
     # A timer is the agent's own appointment: the person talking in the
     # meantime is expected, not a newer request that replaces it.

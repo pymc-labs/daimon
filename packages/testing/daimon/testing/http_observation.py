@@ -16,9 +16,9 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import httpx
-from daimon.testing.isolated_sdk import build_async_anthropic
 from daimon.testing.outcome_oracle import CheckResult, OutcomeReport
 from daimon.testing.product_profiles import QAProductProfile, current_product_profile
+from mux.testing.isolated_sdk import build_async_anthropic
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import DotEnvSettingsSource
 from starlette.types import ASGIApp

@@ -20,9 +20,9 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_session, ma_session_agent
 from daimon.testing.watch_fixtures import install_poll_ports
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy import text
 
 pytestmark = pytest.mark.fresh_schema

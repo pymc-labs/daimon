@@ -13,7 +13,7 @@ from daimon.core.memory_personal_scan import (
     redact_path,
     scan_shared_memory,
 )
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     make_fake_memory_store_handler,

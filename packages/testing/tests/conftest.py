@@ -3,6 +3,8 @@ from datetime import UTC, datetime
 import pytest
 from daimon.testing.db import (  # noqa: F401
     db_clean,  # pyright: ignore[reportUnusedImport]
+    db_committing_engine,  # pyright: ignore[reportUnusedImport]
+    db_committing_pool,  # pyright: ignore[reportUnusedImport]
     db_engine,  # pyright: ignore[reportUnusedImport]
     db_nullpool_engine,  # pyright: ignore[reportUnusedImport]
     db_schema,  # pyright: ignore[reportUnusedImport]

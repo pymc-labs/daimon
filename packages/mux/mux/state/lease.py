@@ -160,3 +160,17 @@ def release(state: LeaseState | None, lease: Lease) -> LeaseState:
     if not _is_active(state.active, lease):
         raise StaleFence(lease.slot.describe(), lease.fence)
     return state.model_copy(update={"active": None})
+
+
+__all__ = [
+    "Lease",
+    "LeaseBusy",
+    "LeaseState",
+    "Slot",
+    "StaleFence",
+    "acquire",
+    "check",
+    "check_target",
+    "release",
+    "renew",
+]

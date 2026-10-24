@@ -31,6 +31,7 @@ from anthropic.types.beta.sessions import BetaManagedAgentsUserToolConfirmationE
 from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import StopReason
 from daimon.core.confirmation import (
     ApprovedConfirmation,
+    CardRefusal,
     ConfirmationHook,
     ToolRuleCardReference,
     no_confirmation_surface,
@@ -378,6 +379,9 @@ def tool_calls_for(state: TurnState, ids: Sequence[str]) -> list[ToolCall]:
                 server_name=block.mcp_server_name,
                 tool_name=block.name,
                 input=dict(block.input),
+                permission=block.evaluated_permission
+                if block.id.startswith("selfhosted:tool:")
+                else None,
             )
         )
     return calls
@@ -408,7 +412,7 @@ def build_decision_events(
 def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
     """What the model is told when `call` is refused without a person."""
     if verdict.reason == "denied_by_operator":
-        return f"Refused: the operator does not allow {call.key}. Do not retry it."
+        return f"Refused: an admin does not allow {call.key}. Do not retry it."
     if verdict.reason == "agent_rule_deny":
         return f"Refused: this agent's tool rule denies {call.key}. Do not retry it."
     if verdict.reason == "agent_rule_ask":
@@ -422,9 +426,17 @@ def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
             "requester approves it, and nobody is here to approve. Do not retry it in this run."
         )
     return (
-        f"Refused: {call.key} changes data outside this session and nobody is here to "
+        f"Refused: {call.key} changes data outside this conversation and nobody is here to "
         "approve it, so it did not run. Do not retry it in this run; report what you "
         "would have written instead."
+    )
+
+
+def _card_failed_message(call: ToolCall) -> str:
+    return (
+        f"The approval card for {call.key} could not be shown, so it did not run and the "
+        "person did not refuse it. Do not retry it. Tell the person in one line that the "
+        "approval card could not be shown, so nothing was changed, and they can ask again."
     )
 
 
@@ -519,6 +531,29 @@ def unattended_decider(
     return _decide
 
 
+CARD_TURN_MARGIN = timedelta(seconds=5)
+#: Too little time left to show a card someone could answer: refuse instead.
+NO_TIME_TO_ASK_MESSAGE = (
+    "There isn't enough time left to ask for approval here. Ask again to redo it."
+)
+
+
+def card_timeout(policy: ToolSafetyPolicy, *, now: datetime) -> timedelta:
+    """How long a card may wait: its policy timeout, never past the running turn's end.
+
+    A card shows its expiry, so it must never promise a time the turn can't keep.
+    """
+    from daimon.core.turn.ceiling import current_turn_deadline
+
+    timeout = timedelta(seconds=policy.confirmation_timeout_s)
+    deadline = current_turn_deadline.get()
+    if deadline is None:
+        return timeout
+    # A little before the turn's end, so the card expires (and says so) before the
+    # turn's own cancellation would retire it as stopped.
+    return max(timedelta(0), min(timeout, deadline - CARD_TURN_MARGIN - now))
+
+
 def interactive_decider(
     policy: ToolSafetyPolicy,
     *,
@@ -535,8 +570,9 @@ def interactive_decider(
     """Decider for chat: reads run, writes wait for `confirm`.
 
     `confirm` is the adapter's card hook; the default refuses, which is what a
-    surface without cards gets. A hook that raises is logged and counts as a
-    refusal — a write never runs because the card failed to post.
+    surface without cards gets. A hook that raises is logged and the write is
+    refused, with words saying the card could not be shown — a write never
+    runs because the card failed to post.
     """
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
@@ -573,12 +609,18 @@ def interactive_decider(
             return ToolConfirmationResult(allow=True)
         if verdict.outcome == "deny":
             return ToolConfirmationResult(allow=False, deny_message=refusal_message(call, verdict))
+        asked = now()
+        timeout = card_timeout(policy, now=asked)
+        if timeout < CARD_TURN_MARGIN:
+            # Never post a card that is already as good as expired.
+            log.info("tool_safety.no_time_to_ask", tool=call.key)
+            return ToolConfirmationResult(allow=False, deny_message=NO_TIME_TO_ASK_MESSAGE)
         try:
             prompt = prompt_for_tool_call(
                 call,
                 requester_platform_user_id=requester_platform_user_id,
-                now=now(),
-                timeout=timedelta(seconds=policy.confirmation_timeout_s),
+                now=asked,
+                timeout=timeout,
             )
             if policy.enabled and policy.agent_rules:
                 prompt = prompt.model_copy(update={"tool_rules_enabled": True})
@@ -596,7 +638,10 @@ def interactive_decider(
             # Named boundary: prompt validation and the adapter's card must
             # both succeed before the write may run.
             log.warning("tool_safety.confirm_failed", tool=call.key, error=str(err))
-            response = "denied"
+            if isinstance(err, CardRefusal):
+                # Worded for the person (e.g. another switch landed first): pass it on.
+                return ToolConfirmationResult(allow=False, deny_message=str(err))
+            return ToolConfirmationResult(allow=False, deny_message=_card_failed_message(call))
         answer = response.answer if isinstance(response, ApprovedConfirmation) else response
         log.info("tool_safety.answered", tool=call.key, answer=answer)
         if answer == "approved":
@@ -647,6 +692,7 @@ def chat_tool_confirmation(
     rule_card_for: RuleCardFor | None = None,
     annotations_for: AnnotationLookup | None = None,
     daimon_rules: bool = False,
+    provider_permissions: bool = False,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -655,7 +701,12 @@ def chat_tool_confirmation(
     nobody asked for just now (a wake continuing earlier work): it gets the
     unattended rules even though it renders into a thread.
     """
-    if not policy.enabled and not asks_before_publishing and not confirmed_tools:
+    if (
+        not policy.enabled
+        and not asks_before_publishing
+        and not confirmed_tools
+        and not provider_permissions
+    ):
         return RequireApproval()
     decide = (
         interactive_decider(
@@ -679,7 +730,7 @@ def chat_tool_confirmation(
             daimon_rules=daimon_rules,
         )
     )
-    if not policy.enabled:
+    if not policy.enabled and not provider_permissions:
         decide = _selected_only(
             decide,
             trusted_servers=trusted_servers,

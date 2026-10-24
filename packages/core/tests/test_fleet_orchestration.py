@@ -834,7 +834,10 @@ async def test_review_refusal_blocks_verified_result_from_being_reported():
 
 async def test_successful_review_returns_only_validated_primary_journal_output():
     owner, _, _ = reviewed_ports()
-    result = await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN)
+    result = dict(await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN))
+    if result.get("status") == "ready" or result.get("partial"):
+        assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
+        result.pop("cost_usd")
     assert result == {
         "run_id": str(RUN),
         "status": "ready",
@@ -912,7 +915,10 @@ async def test_four_worker_plan_collects_three_primaries_and_one_required_review
 
     owner.read_result.side_effect = read_result
     owner.validate_contract.side_effect = lambda contract, actual: actual.payload["content"]
-    result = await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN)
+    result = dict(await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN))
+    if result.get("status") == "ready" or result.get("partial"):
+        assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
+        result.pop("cost_usd")
     assert result == {
         "run_id": str(RUN),
         "status": "ready",
@@ -1215,3 +1221,146 @@ async def test_shared_fleet_control_requires_the_original_principal_or_tenant_ad
         owner.wait.assert_not_awaited()
         owner.read_result.assert_not_awaited()
         owner.validate_contract.assert_not_called()
+
+
+FAILED_WORKER = UUID(int=86)
+
+
+def failed_worker(**changes: Any) -> FleetWorker:
+    values: dict[str, Any] = dict(
+        id=FAILED_WORKER,
+        ordinal=1,
+        role="W3",
+        status="failed",
+        result=None,
+        error_code="dispatch_refused",
+    )
+    return worker(**(values | changes))
+
+
+async def test_collect_returns_verified_partial_results_beside_the_failed_worker():
+    # r5: W1/W2 succeeded and W3 failed; collect used to hide both answers.
+    owner = ports(worker(role="W1"), failed_worker())
+    result = dict(await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN))
+    if result.get("status") == "ready" or result.get("partial"):
+        assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
+        result.pop("cost_usd")
+    assert result == {
+        "run_id": str(RUN),
+        "status": "blocked",
+        "reason": "worker_failed",
+        "partial": True,
+        "results": [{"worker_id": str(WORKER), "role": "W1", "result": "validated journal output"}],
+        "failed": [
+            {
+                "worker_id": str(FAILED_WORKER),
+                "role": "W3",
+                "status": "failed",
+                "error_code": "dispatch_refused",
+            }
+        ],
+    }
+    assert "forged preview" not in str(result)
+    owner.validate_contract.assert_called_once_with(None, event())
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param(
+            lambda: (worker(result_contract={"review_required": True}), failed_worker()),
+            id="review-required",
+        ),
+        pytest.param(
+            lambda: (worker(), failed_worker(), worker(id=REVIEWER, ordinal=2, reviewer_of=WORKER)),
+            id="review-cohort",
+        ),
+        pytest.param(lambda: (failed_worker(),), id="nothing-succeeded"),
+    ],
+)
+async def test_partial_results_never_bypass_review_or_invent_success(rows):
+    owner = ports(*rows())
+    result = await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN)
+    assert result["status"] == "blocked" and "partial" not in result
+    owner.read_result.assert_not_awaited()
+
+
+async def test_partial_result_whose_journal_fails_verification_stays_blocked():
+    owner = ports(worker(), failed_worker())
+    owner.read_result.return_value = event().model_copy(update={"sequence": 99})
+    result = await FleetOrchestrator(owner).collect(permissions(), POLICY, run_id=RUN)
+    assert result == {"run_id": str(RUN), "status": "blocked", "reason": "worker_failed"}
+
+
+@pytest.mark.parametrize(
+    "rows,expected",
+    [
+        pytest.param((), "cancelled", id="zero-workers"),
+        pytest.param((worker(),), "completed", id="ready"),
+        pytest.param((worker(), failed_worker()), "failed", id="partial"),
+    ],
+)
+async def test_settle_ends_a_run_with_no_worker_left_to_wake_it(rows, expected):
+    owner = ports()
+    owner.read_run.return_value = (run(), rows)
+    owner.settle_run.side_effect = lambda _parent, current, status, **_: replace(
+        current, status=status
+    )
+    settled = await FleetOrchestrator(owner).settle(permissions(), POLICY, run_id=RUN)
+    assert settled is not None and settled.status == expected
+    owner.settle_run.assert_awaited_once()
+
+
+@pytest.mark.parametrize("status", ("pending", "starting", "running"))
+async def test_settle_leaves_a_run_with_an_active_worker_running(status):
+    owner = ports(worker(), failed_worker(status=status, error_code=None))
+    assert await FleetOrchestrator(owner).settle(permissions(), POLICY, run_id=RUN) is None
+    owner.settle_run.assert_not_awaited()
+    owner.wait.assert_not_awaited()
+
+
+async def test_settle_requires_the_controller():
+    owner = ports()
+    owner.read_run.return_value = (run(), ())
+    parent = permissions()
+    stranger = replace(parent, subject=replace(parent.subject, platform_user_id="stranger"))
+    with pytest.raises(FleetRefused, match="controller_required"):
+        await FleetOrchestrator(owner).settle(stranger, POLICY, run_id=RUN)
+    owner.settle_run.assert_not_awaited()
+
+
+async def test_settle_keeps_an_owed_wake_and_reports_no_move():
+    owner = ports(worker())
+    owner.settle_run.side_effect = FleetRefused("wake_pending")
+    wake = UUID(int=99)
+    settled = await FleetOrchestrator(owner).settle(
+        permissions(), POLICY, run_id=RUN, wake_id=wake, unless_waking=True
+    )
+    assert settled is None
+    assert owner.settle_run.await_args.kwargs == {"wake_id": wake, "unless_waking": True}
+
+
+@pytest.mark.parametrize("pending", [0, 1])
+async def test_defer_owes_the_root_one_wake_for_finished_workers(pending):
+    owner = ports(worker(), failed_worker())
+    owner.pending_wakes.return_value = pending
+    assert await FleetOrchestrator(owner).defer(permissions(), POLICY, run_id=RUN)
+    assert owner.wait.await_count == (0 if pending else 1)
+    if not pending:
+        _, _, cohort = owner.wait.await_args.args
+        assert {row.id for row in cohort} == {WORKER, FAILED_WORKER}
+
+
+@pytest.mark.parametrize("case", ["active", "ended", "empty", "wait_refused"])
+async def test_defer_reports_when_no_wake_can_be_owed(case):
+    rows = (worker(), failed_worker(status="running", error_code=None))
+    owner = ports(*rows) if case == "active" else ports(worker(), failed_worker())
+    owner.pending_wakes.return_value = 0
+    if case == "ended":
+        owner.read_run.return_value = (replace(run(), status="failed"), (worker(),))
+    if case == "empty":
+        owner.read_run.return_value = (run(), ())
+    if case == "wait_refused":
+        owner.wait.side_effect = FleetRefused("wait_unavailable")
+    assert not await FleetOrchestrator(owner).defer(permissions(), POLICY, run_id=RUN)
+    assert owner.wait.await_count == (case == "wait_refused")

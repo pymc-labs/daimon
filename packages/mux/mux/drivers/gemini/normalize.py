@@ -1,5 +1,6 @@
 """Saved steps are authoritative; streaming deltas are display previews only."""
 
+from collections.abc import Mapping
 from datetime import datetime
 
 from pydantic import JsonValue
@@ -87,13 +88,19 @@ def actions(raw: Object) -> tuple[RequiredAction, ...]:
     return tuple(pending)
 
 
+def declared_server(native: JsonValue, names: Mapping[str, str]) -> JsonValue:
+    return names.get(native, native) if isinstance(native, str) else native
+
+
 def saved_events(
     raw: Object,
     session: ResourceRef,
     *,
     root: str,
     now: datetime,
+    server_names: Mapping[str, str] | None = None,
 ) -> tuple[Event, ...]:
+    """`server_names` maps native mcp_server names back to the declared ones."""
     interaction = string(raw["id"])
     result: list[Event] = []
     steps = raw.get("steps", [])
@@ -140,7 +147,7 @@ def saved_events(
                     "executor": "host"
                     if kind == "function_call"
                     else ("mcp" if kind == "mcp_server_tool_call" else "agent"),
-                    "mcp_server": step.get("server_name"),
+                    "mcp_server": declared_server(step.get("server_name"), server_names or {}),
                 }
             case "function_result" | "code_execution_result" | "mcp_server_tool_result":
                 name = "agent.tool_result"

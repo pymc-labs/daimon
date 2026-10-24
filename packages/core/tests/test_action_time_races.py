@@ -18,13 +18,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from .test_session_preparation import _NOW, _admission, _agent, _deps, _register, _Transport
 
 
-async def setup(db_session, db_nullpool_engine):
+async def setup(db_session, db_committing_engine):
     from daimon.testing.factories import make_account, make_tenant
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     transport = _Transport()
     deps = _deps(factory, transport)
 
@@ -87,10 +87,10 @@ async def setup(db_session, db_nullpool_engine):
 
 @pytest.mark.parametrize("change", ["pin", "seal"])
 async def test_successor_policy_change_during_predecessor_fetch(
-    db_session, db_nullpool_engine, change
+    db_session, db_committing_engine, change
 ):
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     first = await bind(admitted())
     moved = _agent(model_id="claude-opus-4-6")
@@ -144,10 +144,10 @@ async def test_successor_policy_change_during_predecessor_fetch(
 
 @pytest.mark.parametrize("change", ["pin", "seal"])
 async def test_reuse_after_real_preparation_lock_wait(
-    db_session, db_nullpool_engine, monkeypatch, change
+    db_session, db_committing_engine, monkeypatch, change
 ):
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     await bind(admitted())
     from daimon.core import session_preparation
@@ -186,10 +186,10 @@ async def test_reuse_after_real_preparation_lock_wait(
 
 @pytest.mark.parametrize("change", ["pin", "seal"])
 async def test_recovery_adopt_rechecks_after_real_preparation_lock_wait(
-    db_session, db_nullpool_engine, monkeypatch, change
+    db_session, db_committing_engine, monkeypatch, change
 ):
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     first = await bind(admitted())
     moved = _agent(model_id="claude-opus-4-6")
@@ -234,10 +234,10 @@ async def test_recovery_adopt_rechecks_after_real_preparation_lock_wait(
 
 @pytest.mark.parametrize("change", ["pin", "seal"])
 async def test_recovery_create_rechecks_after_transcript_replay(
-    db_session, db_nullpool_engine, monkeypatch, change
+    db_session, db_committing_engine, monkeypatch, change
 ):
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     first = await bind(admitted())
     from daimon.core.turn import run
@@ -274,10 +274,10 @@ async def test_recovery_create_rechecks_after_transcript_replay(
 
 @pytest.mark.parametrize("change", ["pin", "seal"])
 async def test_create_rechecks_right_before_sessions_create(
-    db_session, db_nullpool_engine, monkeypatch, change
+    db_session, db_committing_engine, monkeypatch, change
 ):
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     from daimon.core.turn import prepare
 
@@ -296,13 +296,13 @@ async def test_create_rechecks_right_before_sessions_create(
 
 
 async def test_dm_source_sealed_during_replacement_is_not_a_preparation_failure(
-    db_session, db_nullpool_engine
+    db_session, db_committing_engine
 ):
     from daimon.core.turn.admission import DmSource
     from daimon.core.turn.errors import DmSourceSealedError
 
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
 
     def from_dm(agent=None):

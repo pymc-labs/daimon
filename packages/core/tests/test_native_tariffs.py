@@ -3,7 +3,7 @@
 import os
 import socket
 from dataclasses import FrozenInstanceError, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, tzinfo
 from decimal import Decimal, localcontext
 from pathlib import Path
 
@@ -185,3 +185,68 @@ def test_supplier_identity_comes_from_profiles_and_uses_utc_not_host_date(monkey
             key == (profile.provider, price.model) and price.provider == profile.provider
             for key, price in rows.items()
         )
+
+
+def _clock(monkeypatch: pytest.MonkeyPatch, day: date) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:  # pyright: ignore[reportIncompatibleMethodOverride]
+            assert tz is UTC
+            return datetime(day.year, day.month, day.day, tzinfo=UTC)
+
+    monkeypatch.setattr(pricing, "datetime", Clock)
+
+
+def test_argon_intro_tariff_prices_cached_input_at_five_percent_of_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clock(monkeypatch, date(2026, 11, 30))
+    price = pricing.provider_prices("gemini.inline_reuse")[("gemini", "gemini-4-argon")]
+    assert (price.input, price.output, price.cache_read, price.cache_write) == (
+        Decimal("2.00"),
+        Decimal("10.00"),
+        Decimal("0.10"),
+        None,
+    )
+    assert price.cache_read == price.input * Decimal("0.05")
+    assert (price.checked_on, price.valid_before) == (date(2026, 10, 22), date(2026, 12, 1))
+    # 100 inclusive input with 10 cached: 90 x $2 + 10 x $0.10 + 20 output x $10, per 1M.
+    value = usage(price, observed_at=datetime(2026, 11, 30, tzinfo=UTC))
+    assert pricing.provider_cost_of(value, price, infrastructure_usd=Decimal(0)) == Decimal(
+        ".000381"
+    )
+    all_cached = usage(
+        price, input_cached_tokens=100, observed_at=datetime(2026, 11, 30, tzinfo=UTC)
+    )
+    assert pricing.provider_cost_of(all_cached, price, infrastructure_usd=Decimal(0)) == Decimal(
+        ".00021"
+    )
+
+
+def test_argon_has_no_price_outside_its_intro_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clock(monkeypatch, date(2026, 11, 30))
+    price = pricing.provider_prices("gemini.inline_reuse")[("gemini", "gemini-4-argon")]
+    for observed in (datetime(2026, 10, 21, tzinfo=UTC), datetime(2026, 12, 1, tzinfo=UTC)):
+        value = usage(price, observed_at=observed)
+        assert pricing.minimum_cost_of(value, price) is None
+        assert pricing.provider_cost_of(value, price, infrastructure_usd=Decimal(0)) is None
+    # No post-intro row is invented: from 2026-12-01 Argon is simply unpriced.
+    _clock(monkeypatch, date(2026, 12, 1))
+    rows = pricing.provider_prices("gemini.inline_reuse")
+    assert ("gemini", "gemini-4-argon") not in rows
+    assert ("gemini", "gemini-3.8-flash") in rows
+
+
+def test_argon_expiry_is_reported_only_after_its_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    def expired():
+        return pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", "gemini-4-argon")
+
+    _clock(monkeypatch, date(2026, 11, 30))
+    assert expired() is None
+    _clock(monkeypatch, date(2026, 12, 1))
+    assert expired() == date(2026, 11, 30)
+    assert pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", "unknown") is None
+    assert (
+        pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", "gemini-3.5-flash-lite")
+        is None
+    )

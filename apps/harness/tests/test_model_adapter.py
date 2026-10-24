@@ -1,0 +1,801 @@
+"""Exercise the real Agents SDK loop with Azure HTTP mocked below the SDK."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import httpx
+import pytest
+from daimon_harness import model_adapter
+from daimon_harness.journal import Journal
+from daimon_harness.model_adapter import AzureModelAdapter
+from daimon_harness.runtime import TurnContext
+from mux.drivers.selfhosted.wire import TurnRequest
+from openai import AsyncAzureOpenAI
+
+from .conftest import turn
+from .live_probe import checked_client, luna_deployment, run_luna_probe
+
+
+async def test_managed_identity_without_api_key_uses_real_async_transport():
+    from azure.identity.aio import get_bearer_token_provider
+
+    from .identity_probe import SCOPE, TOKEN, managed_identity_endpoint
+
+    async with managed_identity_endpoint() as calls:
+        assert "AZURE_OPENAI_API_KEY" not in os.environ
+        adapter = AzureModelAdapter()
+        assert adapter.key is None and adapter.credential is not None
+        try:
+            provider = get_bearer_token_provider(adapter.credential, SCOPE)
+            assert await provider() == TOKEN
+            assert len(calls) == 1
+        finally:
+            await adapter.credential.close()
+
+
+async def test_sdk_tool_loop_meters_each_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "unit-test.openai.azure.com"
+        assert request.url.path.endswith("/responses")
+        body = json.loads(request.content)
+        requests.append(body)
+        committed = journal.events("session-1")
+        assert committed[-1].type == "model_request_started"
+        assert sum(event.type == "model_request_started" for event in committed) == len(requests)
+        assert body["store"] is False
+        assert "reasoning.encrypted_content" in body["include"]
+        if len(requests) == 1:
+            output = [
+                {
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "encrypted-reasoning",
+                },
+                {
+                    "id": "fc_1",
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "write",
+                    "arguments": '{"path":"from-sdk.txt","content":"sdk"}',
+                    "status": "completed",
+                },
+            ]
+        else:
+            assert any(item.get("type") == "function_call_output" for item in body["input"])
+            assert (
+                next(item for item in body["input"] if item.get("type") == "reasoning")[
+                    "encrypted_content"
+                ]
+                == "encrypted-reasoning"
+            )
+            output = [
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "saved", "annotations": []}],
+                }
+            ]
+        return httpx.Response(
+            200,
+            json={
+                "id": f"resp_{len(requests)}",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6-luna",
+                "status": "completed",
+                "output": output,
+                "usage": {
+                    "input_tokens": 12,
+                    "input_tokens_details": {"cached_tokens": 3},
+                    "output_tokens": 8,
+                    "output_tokens_details": {"reasoning_tokens": 2},
+                    "total_tokens": 20,
+                },
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint="https://unit-test.openai.azure.com",
+        api_key="test",
+        api_version="2025-04-01-preview",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        max_retries=0,
+    )
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", lambda **kwargs: client)
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://unit-test.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    monkeypatch.setenv("HARNESS_CONFIRM_TOOLS", "")
+    events: list[tuple[str, object]] = []
+    journal = Journal(tmp_path)
+    request = TurnRequest.model_validate(turn())
+    journal.claim(request)
+
+    async def emit(kind, data):
+        journal.append(request, kind, data)
+        events.append((kind, data))
+
+    async def collect(kind, data):
+        events.append((kind, data))
+
+    context = TurnContext(request, tmp_path, emit)
+    history = await AzureModelAdapter().run(context, [])
+    assert (tmp_path / "work/from-sdk.txt").read_text() == "sdk"
+    assert len(requests) == 2
+    usages = [data for kind, data in events if kind == "usage"]
+    starts = [data for kind, data in events if kind == "model_request_started"]
+    assert [data["request_id"] for data in starts] == [data["request_id"] for data in usages]
+    assert usages == [
+        {
+            "request_id": usages[i - 1]["request_id"],
+            "model": "gpt-6-luna",
+            "input_tokens": 12,
+            "cached_input_tokens": 3,
+            "output_tokens": 8,
+            "reasoning_tokens": 2,
+        }
+        for i in (1, 2)
+    ]
+    assert journal.pending_requests(request) == {}
+    journal.close()
+    assert len(history) == 5  # user, encrypted reasoning, call, result, assistant
+    assert [kind for kind, _ in events].count("tool_use") == 1
+    assert [kind for kind, _ in events].count("tool_result") == 1
+
+
+@pytest.mark.skipif(
+    not (
+        os.environ.get("AZURE_OPENAI_ENDPOINT")
+        and (os.environ.get("AZURE_OPENAI_API_KEY") or os.environ.get("AZURE_CLIENT_ID"))
+    ),
+    reason="requires explicit Azure OpenAI credentials",
+)
+async def test_live_azure_responses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    body = turn()
+    body["model"] = luna_deployment()
+
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", checked_client)
+    body["input"] = [{"type": "text", "text": "Reply with the word ready. Do not use tools."}]
+    events: list[tuple[str, object]] = []
+
+    async def collect(kind, data):
+        events.append((kind, data))
+
+    context = TurnContext(TurnRequest.model_validate(body), tmp_path, collect)
+    await run_luna_probe(AzureModelAdapter(), context)
+    assert sum(kind == "usage" for kind, _ in events) == 1
+    messages = [data for kind, data in events if kind == "agent_message"]
+    deltas = [data for kind, data in events if kind == "agent_message_delta"]
+    assert messages
+    assert len({data["message_id"] for data in messages}) == len(messages)
+    assert [data["message_id"] for data in deltas] == [data["message_id"] for data in messages]
+
+
+@pytest.mark.parametrize("failure", ["http", "missing_usage", "cancelled"])
+async def test_sdk_unmeasured_request_never_invents_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import asyncio
+
+    from daimon_harness.errors import HarnessError
+
+    started = asyncio.Event()
+    calls = 0
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        started.set()
+        if failure == "cancelled":
+            await asyncio.Event().wait()
+        if failure == "http":
+            return httpx.Response(
+                500,
+                headers={"x-request-id": "failed-request"},
+                json={"error": {"message": "private-error", "type": "server_error"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "missing-usage-request",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6-luna",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "msg",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint="https://unit-test.openai.azure.com",
+        api_key="test",
+        api_version="2025-04-01-preview",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        max_retries=0,
+    )
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", lambda **kwargs: client)
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://unit-test.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def collect(kind, data):
+        events.append((kind, data))
+
+    context = TurnContext(TurnRequest.model_validate(turn()), tmp_path, collect)
+    task = asyncio.create_task(AzureModelAdapter().run(context, []))
+    await asyncio.wait_for(started.wait(), 5)
+    if failure == "cancelled":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(HarnessError):
+            await task
+    assert calls == 1
+    assert not any(kind == "usage" for kind, _ in events)
+    error = next(data for kind, data in events if kind == "error")
+    assert error["kind"] == "usage_unavailable"
+    start = next(data for kind, data in events if kind == "model_request_started")
+    assert start["request_id"] == error["request_id"]
+    assert error["request_id"]
+    assert "private-error" not in str(events)
+
+
+@pytest.mark.parametrize("after_tool", [False, True])
+async def test_sdk_context_overflow_truncates_history_and_inventories_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_tool: bool
+) -> None:
+    requests: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if after_tool and len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "tool",
+                    "object": "response",
+                    "created_at": 1,
+                    "model": "gpt-6-luna",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "reasoning",
+                            "id": "reasoning-for-write",
+                            "summary": [],
+                            "encrypted_content": "opaque-required-reasoning",
+                        },
+                        {
+                            "type": "function_call",
+                            "id": "f",
+                            "call_id": "write",
+                            "name": "write",
+                            "status": "completed",
+                            "arguments": '{"path":"once.txt","content":"once"}',
+                        },
+                    ],
+                    "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                    "parallel_tool_calls": False,
+                    "tool_choice": "auto",
+                    "tools": [],
+                },
+            )
+        if len(requests) == 1 + int(after_tool):
+            assert "old-history-marker" in str(body["input"])
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "too long",
+                        "code": "context_length_exceeded",
+                        "type": "invalid_request_error",
+                    }
+                },
+            )
+        assert "old-history-marker" not in str(body["input"])
+        if after_tool:
+            retained = body["input"]
+            reasoning = next(item for item in retained if item.get("type") == "reasoning")
+            assert reasoning["id"] == "reasoning-for-write"
+            assert reasoning["encrypted_content"] == "opaque-required-reasoning"
+            call = next(item for item in retained if item.get("type") == "function_call")
+            result = next(item for item in retained if item.get("type") == "function_call_output")
+            assert call["call_id"] == result["call_id"] == "write"
+            assert retained.index(reasoning) < retained.index(call) < retained.index(result)
+
+        return httpx.Response(
+            200,
+            json={
+                "id": "retry",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6-luna",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "m",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+                    }
+                ],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint="https://unit-test.openai.azure.com",
+        api_key="test",
+        api_version="2025-04-01-preview",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", lambda **kwargs: client)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def emit(kind, data):
+        events.append((kind, data))
+
+    runtime = TurnContext(TurnRequest.model_validate(turn()), tmp_path, emit)
+    history = await AzureModelAdapter().run(
+        runtime, [{"role": "user", "content": "old-history-marker"}]
+    )
+    assert len(requests) == 2 + int(after_tool)
+    if after_tool:
+        assert runtime.tool_calls == 1
+        assert "function_call_output" in str(requests[-1]["input"])
+        assert (runtime.work / "once.txt").read_text() == "once"
+    assert "old-history-marker" not in str(history)
+    starts = [data["request_id"] for kind, data in events if kind == "model_request_started"]
+    unknown = [
+        data["request_id"]
+        for kind, data in events
+        if kind == "error" and data["kind"] == "usage_unavailable"
+    ]
+    measured = [data["request_id"] for kind, data in events if kind == "usage"]
+    assert len(starts) == 2 + int(after_tool)
+    assert len(set(starts)) == len(starts)
+    assert set(starts) == set(unknown + measured)
+    assert any(kind == "error" and data["kind"] == "context_truncated" for kind, data in events)
+
+
+async def test_denied_call_retains_reasoning_and_paired_output_in_next_turn(tmp_path, monkeypatch):
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        assert "bash" not in [tool["name"] for tool in body["tools"]]
+        if len(requests) == 1:
+            output = [
+                {
+                    "type": "reasoning",
+                    "id": "reasoning-1",
+                    "summary": [],
+                    "encrypted_content": "opaque-reasoning",
+                },
+                {
+                    "type": "function_call",
+                    "id": "f",
+                    "call_id": "denied-call",
+                    "name": "bash",
+                    "status": "completed",
+                    "arguments": '{"command":"touch forbidden"}',
+                },
+            ]
+        else:
+            calls = [item for item in body["input"] if item.get("type") == "function_call"]
+            results = [item for item in body["input"] if item.get("type") == "function_call_output"]
+            assert len(calls) == len(results) == 1
+            assert calls[0]["call_id"] == results[0]["call_id"] == "denied-call"
+            assert "denied by policy" in results[0]["output"]
+            assert any(item.get("type") == "reasoning" for item in body["input"])
+            output = [
+                {
+                    "type": "message",
+                    "id": f"msg-{len(requests)}",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                }
+            ]
+        return httpx.Response(
+            200,
+            json={
+                "id": f"response-{len(requests)}",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6-luna",
+                "status": "completed",
+                "output": output,
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    def client_factory(**kwargs):
+        return AsyncAzureOpenAI(
+            **kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        )
+
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", client_factory)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://unit-test.openai.azure.com")
+    request = TurnRequest.model_validate(turn())
+    request.tool_policy = {"bash": "deny"}
+    events = []
+
+    async def emit(kind, data):
+        events.append((kind, data))
+
+    runtime = TurnContext(request, tmp_path, emit)
+    history = await AzureModelAdapter().run(runtime, [])
+    second = TurnContext(request.model_copy(update={"turn_id": "second"}), tmp_path, emit)
+    await AzureModelAdapter().run(second, history)
+    assert len(requests) == 3
+    assert not (runtime.work / "forbidden").exists()
+    result = next(data for kind, data in events if kind == "tool_result")
+    assert result["call_id"] == "denied-call" and result["is_error"] is True
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        ("incomplete", "max_output_tokens"),
+        ("incomplete", "content_filter"),
+        ("incomplete", None),
+        ("failed", "server_error"),
+        ("cancelled", None),
+        ("in_progress", None),
+        ("queued", None),
+        (None, None),
+    ],
+)
+@pytest.mark.parametrize("tool_call", [False, True])
+async def test_noncompleted_response_preserves_usage_and_ends_errored(
+    tmp_path, monkeypatch, status, reason, tool_call
+):
+    import asyncio
+
+    from daimon_harness.service import Supervisor
+
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        output = (
+            [
+                {
+                    "id": "fc",
+                    "type": "function_call",
+                    "call_id": "unsafe",
+                    "name": "write",
+                    "arguments": '{"path":"must-not-execute","content":"bad"}',
+                    "status": "incomplete",
+                }
+            ]
+            if tool_call
+            else [
+                {
+                    "id": "msg",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "incomplete",
+                    "content": [{"type": "output_text", "text": "partial", "annotations": []}],
+                }
+            ]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": "truncated-response",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6-luna",
+                "status": status,
+                "incomplete_details": {"reason": reason}
+                if status == "incomplete" and reason
+                else None,
+                "error": {"code": reason, "message": "provider failed"}
+                if status == "failed"
+                else None,
+                "output": [] if status == "failed" and not tool_call else output,
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 8,
+                    "total_tokens": 20,
+                    "input_tokens_details": {"cached_tokens": 3},
+                    "output_tokens_details": {"reasoning_tokens": 2},
+                },
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint="https://unit-test.openai.azure.com",
+        api_key="test",
+        api_version="2025-04-01-preview",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", lambda **kwargs: client)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://unit-test.openai.azure.com")
+    supervisor = Supervisor(tmp_path, AzureModelAdapter())
+    request = TurnRequest.model_validate(turn())
+    try:
+        await supervisor.submit(request)
+        await asyncio.wait_for(supervisor.tasks[request.turn_id], 5)
+        events = supervisor.journal.events(request.session_id)
+        ended = events[-1]
+        assert ended.type == "turn_ended"
+        assert ended.data["outcome"] == "errored"
+        if status == "incomplete":
+            assert ended.data["error"]["kind"] == "model_incomplete"
+            assert ended.data["error"]["message"] == "Model response incomplete: " + (
+                reason or "unknown"
+            )
+        else:
+            assert ended.data["error"]["kind"] == "model_failed"
+            provider_error = "server_error: provider failed" if status == "failed" else "unknown"
+            assert ended.data["error"]["message"] == (
+                f"Model response {status or 'unknown'}: {provider_error}"
+            )
+        starts = [event for event in events if event.type == "model_request_started"]
+        usages = [event for event in events if event.type == "usage"]
+        assert len(calls) == len(starts) == len(usages) == 1
+        assert starts[0].data["request_id"] == usages[0].data["request_id"]
+        assert usages[0].data["input_tokens"] == 12 and usages[0].data["output_tokens"] == 8
+        assert (
+            usages[0].data["cached_input_tokens"] == 3 and usages[0].data["reasoning_tokens"] == 2
+        )
+        assert not supervisor.journal.pending_requests(request)
+        assert not list(tmp_path.rglob("must-not-execute"))
+        assert not any(event.type == "tool_use" for event in events)
+        if not tool_call and status != "failed":
+            assert any(event.type == "agent_message" for event in events)
+    finally:
+        await supervisor.close()
+
+
+@pytest.mark.parametrize("tool_name", ["write", "bash"])
+@pytest.mark.parametrize("spawned", [False, True])
+async def test_sdk_cancel_joins_tool_workers_before_terminal_and_session_reuse(
+    tmp_path, monkeypatch, tool_name, spawned
+):
+    import asyncio
+
+    from daimon_harness.journal import ConflictError
+    from daimon_harness.service import Supervisor
+
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content))
+        value = "old" if len(calls) == 1 else "new"
+        output = (
+            [
+                {
+                    "type": "function_call",
+                    "id": f"f{len(calls)}",
+                    "call_id": f"c{len(calls)}",
+                    "name": tool_name,
+                    "status": "completed",
+                    "arguments": json.dumps(
+                        {"path": "victim.txt", "content": value}
+                        if tool_name == "write"
+                        else {"command": f"sleep 0.1; printf {value} > victim.txt"}
+                    ),
+                }
+            ]
+            if len(calls) < 3
+            else [
+                {
+                    "id": "done",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                }
+            ]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": f"response{len(calls)}",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6-luna",
+                "status": "completed",
+                "output": output,
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
+
+    def azure_client(**kwargs):
+        return AsyncAzureOpenAI(
+            azure_endpoint="https://unit-test.openai.azure.com",
+            api_key="test",
+            api_version="2025-04-01-preview",
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        )
+
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", azure_client)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test")
+    started, release = asyncio.Event(), asyncio.Event()
+    create = asyncio.create_subprocess_exec
+    children = []
+    held = False
+
+    async def delayed_spawn(*args, **kwargs):
+        nonlocal held
+        if held:
+            return await create(*args, **kwargs)
+        held = True
+        if spawned:
+            child = await create(*args, **kwargs)
+            children.append(child)
+        started.set()
+        await release.wait()
+        if not spawned:
+            child = await create(*args, **kwargs)
+            children.append(child)
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    supervisor = Supervisor(tmp_path, AzureModelAdapter())
+    first = TurnRequest.model_validate(turn())
+    second = TurnRequest.model_validate(turn(turn_id="second", key="second"))
+    try:
+        await supervisor.submit(first)
+        await asyncio.wait_for(started.wait(), 5)
+        context = supervisor.contexts[first.turn_id]
+        assert context.workers
+        supervisor.tasks[first.turn_id].cancel()
+        await asyncio.sleep(0.05)
+        assert not supervisor.journal.ended(first.turn_id)
+        with pytest.raises(ConflictError, match="active turn"):
+            await supervisor.submit(second)
+        # Repeated cancellation cannot cut cleanup short.
+        supervisor.tasks[first.turn_id].cancel()
+        release.set()
+        await asyncio.wait_for(supervisor.tasks[first.turn_id], 5)
+        assert not context.workers and not context.process_groups
+        assert all(child.returncode is not None for child in children)
+        events = supervisor.journal.events(first.session_id)
+        assert events[-1].type == "turn_ended" and events[-1].data["outcome"] == "interrupted"
+        terminal_seq = events[-1].seq
+        await supervisor.submit(second)
+        await asyncio.wait_for(supervisor.tasks[second.turn_id], 5)
+        assert (context.work / "victim.txt").read_text() == "new"
+        assert not any(
+            event.turn_id == first.turn_id
+            for event in supervisor.journal.events(first.session_id, terminal_seq)
+        )
+        with pytest.raises(ConflictError, match="already ended"):
+            supervisor.journal.append(
+                first, "tool_result", {"call_id": "late", "output": "late", "is_error": False}
+            )
+        assert supervisor.journal.events(first.session_id)[-1].turn_id == second.turn_id
+    finally:
+        release.set()
+        await supervisor.close()
+
+
+async def test_live_probe_refuses_any_non_luna_deployment(tmp_path, monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "disallowed-deployment")
+    with pytest.raises(pytest.skip.Exception, match="gpt-6-luna"):
+        await test_live_azure_responses(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def probe_environment(monkeypatch):
+    # Hosted CI injects Azure metadata even when no model credentials are set.
+    # Probe tests own their provider configuration; retain the production guard.
+    for name in list(os.environ):
+        if name.startswith(("AZURE_", "IDENTITY_")):
+            monkeypatch.delenv(name)
+
+
+@pytest.mark.parametrize("adapter_name", ["agents_sdk", "codex"])
+async def test_explicit_openai_probe_gate_refuses_other_models(
+    tmp_path, monkeypatch, adapter_name, probe_environment
+):
+    from daimon_harness.codex_adapter import CodexModelAdapter
+    from daimon_harness.errors import HarnessError
+
+    monkeypatch.setenv("HARNESS_LIVE_PROBE", "openai")
+    monkeypatch.setenv("HARNESS_RUNTIME_MODE", "probe")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-probe-key")
+    adapter = CodexModelAdapter() if adapter_name == "codex" else AzureModelAdapter()
+    assert adapter.endpoint == "https://api.openai.com/v1"
+    body = turn()
+    body["model"] = "disallowed-deployment"
+
+    async def never_emit(kind, data):
+        raise AssertionError("model guard must precede I/O")
+
+    context = TurnContext(TurnRequest.model_validate(body), tmp_path, never_emit)
+    with pytest.raises(HarnessError, match="gpt-6-luna"):
+        await adapter.run(context, [])
+
+
+def test_openai_key_does_not_select_probe_provider(monkeypatch, probe_environment):
+    monkeypatch.delenv("HARNESS_LIVE_PROBE", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("IDENTITY_ENDPOINT", raising=False)
+    monkeypatch.delenv("IDENTITY_HEADER", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-key-unused-in-production")
+    with pytest.raises(RuntimeError, match="managed identity"):
+        AzureModelAdapter()
+
+
+@pytest.mark.parametrize("adapter_name", ["codex", "agents_sdk"])
+@pytest.mark.parametrize(
+    "azure_env",
+    [
+        None,
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "AZURE_RUNNER_METADATA",
+        "IDENTITY_RUNNER_METADATA",
+        "AZURE_FEDERATED_TOKEN_FILE",
+        "IDENTITY_ENDPOINT",
+        "IDENTITY_HEADER",
+    ],
+)
+def test_openai_probe_refused_in_production_or_with_azure(
+    monkeypatch, adapter_name, azure_env, probe_environment
+):
+    from daimon_harness.codex_adapter import CodexModelAdapter
+
+    monkeypatch.setenv("HARNESS_LIVE_PROBE", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-probe-key")
+    monkeypatch.delenv("HARNESS_RUNTIME_MODE", raising=False)
+    if azure_env:
+        monkeypatch.setenv("HARNESS_RUNTIME_MODE", "probe")
+        monkeypatch.setenv(azure_env, "synthetic-azure-config")
+    adapter = CodexModelAdapter if adapter_name == "codex" else AzureModelAdapter
+    with pytest.raises(
+        RuntimeError, match="production mode|Azure configuration|file-based credentials"
+    ):
+        adapter()

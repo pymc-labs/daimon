@@ -74,6 +74,7 @@ from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.state import (
     McpServerFailure,
     TextBlock,
@@ -83,8 +84,8 @@ from daimon.core.turn.state import (
 )
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing import ma_model_usage
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -221,6 +222,7 @@ def _make_lifecycle(
     ma_agent_id: str | None = None,
     intent_id: uuid.UUID | None = None,
     requester_is_admin: bool = True,
+    requester_foreign: bool = False,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -250,6 +252,7 @@ def _make_lifecycle(
         cancel=cancel,
         author_id="U_AUTHOR",
         requester_is_admin=requester_is_admin,
+        requester_foreign=requester_foreign,
         agent_name=agent_name,
         model_id=model_id,
         register=register,
@@ -414,6 +417,26 @@ async def test_second_event_within_debounce_no_update(fake_slack_web_client: Any
         "second render tick within debounce must not post a new message"
     )
     assert _update_count(fake_slack_web_client) == 0, "no chat.update within the 5s debounce window"
+
+
+async def test_status_lines_show_as_a_running_log_on_the_card(
+    fake_slack_web_client: Any,
+) -> None:
+    """Each whole agent message joins the card's quoted log; the card keeps the last three."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+
+    for text in (
+        "🔍 **Looking up:** priors",
+        "📚 **Found:** 14 patterns",
+        "✍️ Drafting",
+        "Here you go.",
+    ):
+        await lc.on_sse_event(_message_event(text))
+    await lc.on_render(_running_tool_turn())
+
+    post = fake_slack_web_client.mock.requests[("POST", _POST_URL)][-1].kwargs["json"]
+    quote = next(b for b in post["blocks"] if b.get("expand"))["text"]["text"]
+    assert quote == "> 📚 **Found:** 14 patterns\n> ✍️ Drafting\n> Here you go."
 
 
 async def test_render_tick_within_debounce_skips_building_the_card(
@@ -1083,6 +1106,7 @@ async def test_terminal_success_empty_content_shows_turn_cancelled(
     [
         TerminationReason.CONNECTION_LOST,
         TerminationReason.UPSTREAM,
+        TerminationReason.REFUSED,
         TerminationReason.INTERRUPTED,
         TerminationReason.INTERRUPT_TIMEOUT,
         TerminationReason.REQUIRES_ACTION,
@@ -1213,6 +1237,25 @@ async def test_terminal_notice_shows_the_ref_to_admins_only(
     assert ("Ref UNDRID" in fallback) is admin
     if not admin:
         assert "Ref" not in rendered + fallback
+
+
+async def test_a_balance_notice_for_an_external_member_names_no_command_or_admin(
+    fake_slack_web_client: Any,
+) -> None:
+    """Someone from another workspace is sent to the people at the host workspace."""
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, requester_is_admin=False, requester_foreign=True
+    )
+    await lc.post_initial()
+
+    await lc.on_terminal_failure(
+        TurnState(termination=TerminationReason.ADMISSION_BALANCE_DEPLETED), RuntimeError("x")
+    )
+
+    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "workspace that added Daimon" in rendered
+    for word in ("/billing", "/agent-setup", "an admin"):
+        assert word not in rendered
 
 
 async def test_a_lifecycle_defaults_to_no_ref_when_admin_status_is_unknown(
@@ -2125,3 +2168,22 @@ async def test_watch_revocation_between_chunks_rechecks_each_slack_write(fake_sl
         )
     assert count() - before == 1
     assert guard.failed
+
+
+async def test_nothing_posted_names_another_app(fake_slack_web_client: Any) -> None:
+    inner, *_ = _make_lifecycle(fake_slack_web_client)
+    lc = OtherAppsScrubbedLifecycle(inner, "slack")
+    await lc.post_initial()
+    await lc.on_sse_event(_message_event("Looking in Discord and Microsoft Teams"))
+    await lc.on_render(_running_tool_turn("discord_search_messages"))
+    inner._last_flush = 0.0  # pyright: ignore[reportPrivateUsage]
+    await lc.on_render(_running_tool_turn("discord_search_messages"))
+    live = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "Looking in other apps" in live
+    assert "Discord" not in live and "Teams" not in live
+
+    reply = "Use Slack, not Discord or Microsoft Teams. See https://discord.gg/abc."
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=reply)]))
+    final = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "Use Slack, not another app. See another app." in final
+    assert "Discord" not in final and "Teams" not in final

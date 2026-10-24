@@ -75,9 +75,11 @@ def test_post_delete_container_checklist_has_dim_rows() -> None:
     joined = _joined_text(container)
     assert "-# ✓" in joined, f"Post-delete checklist rows must use '-# ✓' prefix; got {joined!r}"
     assert "2 routine" in joined, "2 routines purged should appear"
-    assert "1 linked principal" in joined, "1 principal purged should appear"
-    assert "1 principal link" in joined, "1 principal link removed should appear"
-    assert "Account row removed" in joined, "account-row removal should appear"
+    assert "1 linked account" in joined, "1 principal purged should appear"
+    assert "1 link(s) between your accounts removed" in joined, (
+        "1 principal link removed should appear"
+    )
+    assert "Account removed" in joined, "account-row removal should appear"
 
 
 def test_post_delete_container_no_pii_beyond_header() -> None:
@@ -100,7 +102,7 @@ def test_post_delete_container_reports_session_transcripts_deleted() -> None:
     )
     container = build_post_delete_container(result)
     joined = _joined_text(container)
-    assert "3 session transcript(s) deleted" in joined, (
+    assert "3 conversation transcript(s) deleted" in joined, (
         f"When sessions.deleted > 0, container must report the count; got {joined!r}"
     )
 
@@ -165,7 +167,7 @@ def test_post_delete_container_user_skills_row_renders_when_nonzero() -> None:
     result = _make_result(user_skills=3)
     container = build_post_delete_container(result)
     joined = _joined_text(container)
-    assert "3 synced skill ledger row(s) removed" in joined, (
+    assert "3 synced skill(s) forgotten" in joined, (
         "When result.db.user_skills > 0, post-delete container must show the user_skills row"
     )
 

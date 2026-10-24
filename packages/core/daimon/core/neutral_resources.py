@@ -12,11 +12,11 @@ import io
 import json
 import uuid
 import zipfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from urllib.parse import urlsplit
@@ -55,7 +55,7 @@ from daimon.core.stores.neutral_catalog import (
     PostgresNeutralCatalog,
     SkillVersion,
 )
-from mux.contracts._base import Contract, FrozenMap
+from mux.contracts import Contract, FrozenMap
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision, Scope, SkillRef
@@ -75,6 +75,7 @@ from mux.contracts.resources import (
 )
 from mux.errors import InvalidConfig, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles import (
+    CONVERSATION_ONLY,
     MANAGED_AGENTS,
     get_profile,
     native_agent_tools,
@@ -84,10 +85,11 @@ from mux.profiles import (
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
-from pydantic import Field, JsonValue, TypeAdapter, model_validator
+from pydantic import Field, JsonValue, TypeAdapter, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.fleet import FleetRun, FleetWorker
     from daimon.core.turn.admission import AdmissionGrant
     from daimon.core.turn.persistence import TurnPersistence
 
@@ -854,7 +856,9 @@ WorkerField = Literal[
     "native_budget_usd",
     "declared_drops",
 ]
-WorkerReason = DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale"]
+WorkerReason = (
+    DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale", "exhausted"]
+)
 
 
 class WorkerSpecRefused(ValueError):
@@ -952,12 +956,32 @@ class WorkerLimits(Contract):
             raise WorkerSpecRefused("native_budget_usd", "not_subset")
         if self.max_turns != 1:
             raise WorkerSpecRefused("max_turns", "not_subset")
-        if not 0 < (self.deadline - now).total_seconds() <= 120:
+        if not 0 < (self.deadline - now).total_seconds() <= NATIVE_DISPATCH_MAX_SECONDS:
             raise WorkerSpecRefused("deadline", "not_subset")
+
+
+#: A soft native budget (e.g. Astra's OpenAI spend cap) is checked by the provider
+#: after the fact, so its attempt stays time-bounded: one worker's default runtime.
+NATIVE_DISPATCH_MAX_SECONDS = 600
 
 
 class AgentFleetGrant(Contract):
     """Finite admin ceilings; an owner assigns the persisted setting epoch."""
+
+    # Missing on legacy grants means the root's own agent only. The runtime
+    # adds that agent implicitly for every explicit selection as well.
+    worker_agents: Literal["any"] | tuple[uuid.UUID, ...] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @field_validator("worker_agents")
+    @classmethod
+    def _worker_agents(
+        cls, value: Literal["any"] | tuple[uuid.UUID, ...] | None
+    ) -> Literal["any"] | tuple[uuid.UUID, ...] | None:
+        if isinstance(value, tuple) and (not value or len(set(value)) != len(value)):
+            raise ValueError("worker agents must be a nonempty list of unique logical agent ids")
+        return value
 
     epoch: int = Field(default=0, ge=0, strict=True)
     max_workers: int = Field(gt=0, strict=True)
@@ -1034,6 +1058,8 @@ class WorkerPermissions:
     seal_ids: frozenset[str] = frozenset()
     memory_read_only: bool = True
     agent_id: uuid.UUID | None = None
+    # The grant's per-worker runtime; the run's own deadline is in `limits`.
+    max_worker_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1050,6 +1076,257 @@ class ResolvedWorkerSpec:
     @property
     def declared_drops(self) -> tuple[DeclaredDrop, ...]:
         return self.spec.declared_drops
+
+
+def task_worker_spec(
+    parent: WorkerPermissions, *, role: str, task: str, model: str | None = None
+) -> AgentSpec:
+    """A plain-language worker: one granted model, with the task as its instructions.
+
+    The worker carries no tools or skills. A worker on another model declares the
+    loss of the root's model controls (e.g. effort), which that model may not accept;
+    a worker on another profile (another provider, or an OpenAI worker under a GPT
+    root's persistent workspace) also declares the root capabilities it cannot
+    represent, so its workspace is never carried. The resolver still checks every
+    ceiling.
+    """
+    from mux.profiles import backend_selection, worker_selection
+
+    root = parent.spec.model
+    if model is None or model == root.id:
+        choice = ModelRef(provider=root.provider, id=root.id)
+    else:
+        matches = [granted for granted in parent.models if granted.id == model]
+        if len(matches) != 1:
+            raise WorkerSpecRefused("backend", "not_subset")
+        choice = matches[0]
+    if not task.strip():
+        raise WorkerSpecRefused("system", "unbound")
+    drops: set[DeclaredDrop] = {"skills", "tools", *parent.spec.declared_drops}
+    granted = next(
+        (
+            grant.profile
+            for grant in parent.backend_grants
+            if grant.backend == choice.provider and grant.model in (None, choice.id)
+        ),
+        worker_selection(choice.provider).profile,
+    )
+    if choice.provider != root.provider or granted != backend_selection(root.provider).profile:
+        drops |= {"mcp", "memory", "sandbox"}
+    if choice.id != root.id and parent.spec.extensions:
+        drops.add("model_controls")
+    return AgentSpec(name=role, model=choice, system=task, declared_drops=tuple(drops))
+
+
+def worker_runtime_ceiling(
+    parent: WorkerPermissions, provider: Provider, backend: BackendConfig | None = None
+) -> int | None:
+    """The shortest runtime the grant or a granted profile for this provider allows, if any."""
+    from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_RUNTIME_S
+
+    profiles = (
+        {backend.profile}
+        if backend is not None and backend.profile is not None
+        else {grant.profile for grant in parent.backend_grants if grant.backend == provider}
+    )
+    ceilings = (
+        parent.max_worker_seconds,
+        WORKER_MAX_RUNTIME_S if INLINE_REUSE.profile_id in profiles else None,
+        # Every worker keeps the root's native budget, whose dispatch is time-bounded:
+        # shorten its deadline rather than refuse it under a longer custom grant.
+        NATIVE_DISPATCH_MAX_SECONDS if parent.limits.native_budget_usd is not None else None,
+    )
+    return min((ceiling for ceiling in ceilings if ceiling is not None), default=None)
+
+
+#: Tokens added to a bounded Gemini worker's input cap for the turn's own wrapping.
+GEMINI_INPUT_HEADROOM_TOKENS = 4096
+#: The smallest output envelope worth dispatching; a budget that buys less refuses.
+GEMINI_MIN_OUTPUT_TOKENS = 1024
+#: The bounded worker path's own output ceiling (worker_token_limits_supported).
+GEMINI_MAX_OUTPUT_TOKENS = 65_536
+
+
+def gemini_worker_cost_usd(model: str, max_input_tokens: int, max_output_tokens: int) -> Decimal:
+    """Worst-case provider cost of one bounded Gemini worker turn at its current tariff."""
+    from daimon.core import pricing
+    from mux.profiles.gemini import INLINE_REUSE
+
+    price = pricing.provider_prices(INLINE_REUSE.profile_id).get((INLINE_REUSE.provider, model))
+    if price is None:
+        raise WorkerSpecRefused("budget", "unsupported")
+    return (max_input_tokens * price.input + max_output_tokens * price.output) / Decimal(10**6)
+
+
+def require_gemini_worker_envelope(
+    model: str,
+    max_input_tokens: int,
+    max_output_tokens: int | None,
+    budget_usd: Decimal,
+    *,
+    markup: Decimal = Decimal(1),
+    hold_usd: Decimal | None = None,
+) -> None:
+    """Refuse a bounded Gemini worker envelope its money cannot cover.
+
+    Caller-supplied limits get the same bound as a filled envelope: both token
+    caps are set, input stays within the priced tier, output within
+    GEMINI_MAX_OUTPUT_TOKENS, and the worst case at the model's own tariff,
+    max_input * input_rate + max_output * output_rate, is at most min(budget /
+    markup, hold_usd).
+    """
+    from daimon.core import pricing
+    from mux.profiles.gemini import INLINE_REUSE
+
+    if max_output_tokens is None:
+        raise WorkerSpecRefused("max_output_tokens", "unsupported")
+    if max_output_tokens > GEMINI_MAX_OUTPUT_TOKENS:
+        raise WorkerSpecRefused("max_output_tokens", "unsupported")
+    price = pricing.provider_prices(INLINE_REUSE.profile_id).get((INLINE_REUSE.provider, model))
+    if price is None or markup <= 0:
+        raise WorkerSpecRefused("budget", "unsupported")
+    ceiling = price.max_priced_input_tokens
+    if ceiling is not None and max_input_tokens > ceiling:
+        raise WorkerSpecRefused("max_input_tokens", "unsupported")
+    limit = budget_usd / markup if hold_usd is None else min(budget_usd / markup, hold_usd)
+    if gemini_worker_cost_usd(model, max_input_tokens, max_output_tokens) > limit:
+        raise WorkerSpecRefused("budget", "exhausted")
+
+
+def bounded_gemini_worker_tokens(
+    system: str,
+    budget_usd: Decimal,
+    *,
+    model: str,
+    markup: Decimal = Decimal(1),
+    hold_usd: Decimal | None = None,
+    extra_input: str = "",
+) -> dict[str, int]:
+    """Token limits that keep a plain-language Gemini worker on the bounded path.
+
+    max_input_tokens = UTF-8 bytes of the worker's instructions and of `extra_input`
+    (its trigger message, which embeds a reviewed result for a reviewer) + headroom:
+    a token never covers less than one byte, so the real prompt always fits, and the
+    driver still counts it exactly before sending. With limit = min(budget / markup,
+    hold_usd), max_output_tokens = what the rest of the limit buys at the output
+    tariff, at most GEMINI_MAX_OUTPUT_TOKENS: (limit - max_input * input_rate) /
+    output_rate. So the worst-case provider cost, max_input * input_rate +
+    max_output * output_rate, never exceeds the worker's budget or the deployment's
+    per-turn hold.
+    """
+    from daimon.core import pricing
+    from mux.profiles.gemini import INLINE_REUSE
+
+    price = pricing.provider_prices(INLINE_REUSE.profile_id).get((INLINE_REUSE.provider, model))
+    if price is None or markup <= 0:
+        raise WorkerSpecRefused("budget", "unsupported")
+    max_input = len(system.encode()) + len(extra_input.encode()) + GEMINI_INPUT_HEADROOM_TOKENS
+    if price.max_priced_input_tokens is not None and max_input > price.max_priced_input_tokens:
+        raise WorkerSpecRefused("max_input_tokens", "unsupported")
+    per_token = Decimal(10**6)
+    limit = budget_usd / markup if hold_usd is None else min(budget_usd / markup, hold_usd)
+    room = limit - max_input * price.input / per_token
+    max_output = min(
+        GEMINI_MAX_OUTPUT_TOKENS,
+        int((room * per_token / price.output).to_integral_value(rounding=ROUND_DOWN)),
+    )
+    if max_output < GEMINI_MIN_OUTPUT_TOKENS:
+        raise WorkerSpecRefused("budget", "exhausted")
+    return {"max_input_tokens": max_input, "max_output_tokens": max_output}
+
+
+def planned_providers(parent: WorkerPermissions, models: Sequence[str]) -> list[Provider]:
+    """The provider of each planned worker's model; every model must be granted."""
+    granted: dict[str, Provider] = {
+        model.id: model.provider for model in (*parent.models, parent.spec.model)
+    }
+    try:
+        return [granted[model] for model in models]
+    except KeyError:
+        raise WorkerSpecRefused("backend", "not_subset") from None
+
+
+def default_worker_limits(
+    ceiling: WorkerLimits,
+    run: FleetRun | None,
+    workers: tuple[FleetWorker, ...],
+    *,
+    provider: Provider,
+    budget_usd: Decimal | None = None,
+    deadline: datetime | None = None,
+    max_turns: int | None = None,
+    max_input_tokens: int | None = None,
+    max_output_tokens: int | None = None,
+    planned_workers: int | None = None,
+    now: datetime | None = None,
+    max_runtime_s: int | None = None,
+    planned_on_provider: int | None = None,
+) -> WorkerLimits:
+    """Fill omitted worker limits from the frozen root, so a model need not guess them.
+
+    The deadline defaults to (and is never later than) the root's frozen deadline, and
+    to `now + max_runtime_s` when the grant or the selected profile caps a worker's
+    runtime (10 min by default); a later supplied deadline is shortened the same way. The
+    budget defaults to an even share, per remaining worker slot, of what the run and
+    the provider line have left. Slots bound how many workers can be admitted, so
+    parallel spawns reading the same snapshot never add up past either cap. A root that
+    says how many workers it plans shares among those not yet admitted instead (still
+    at most the free slots); spawning more at once than planned can only be refused
+    by admission, never exceed a cap. When the root also says how many planned workers
+    use this provider, the provider line is shared among just those. Supplied
+    budgets and every ceiling are still checked by the resolver and financial admission.
+    """
+    latest = ceiling.deadline
+    if max_runtime_s is not None:
+        if now is None:
+            raise WorkerSpecRefused("deadline", "unbound")
+        latest = min(latest, now + timedelta(seconds=max_runtime_s))
+    if budget_usd is None:
+        if run is None:
+            raise WorkerSpecRefused("budget", "unbound")
+        from daimon.core.fleet import holds_slot
+
+        # Spawns refused at admission free their slot and hold no money.
+        workers = tuple(worker for worker in workers if holds_slot(worker))
+        slots = run.max_workers - len(workers)
+        if slots <= 0:
+            raise WorkerSpecRefused("budget", "exhausted")
+        free = slots
+        if planned_workers is not None:
+            slots = min(free, max(planned_workers - len(workers), 1))
+        provider_slots = slots
+        if planned_on_provider is not None:
+            on_provider = sum(1 for w in workers if w.backend == provider)
+            provider_slots = min(free, max(planned_on_provider - on_provider, 1))
+
+        def held(provider_only: bool) -> Decimal:
+            return sum(
+                (
+                    max(w.budget_usd, w.reserved_usd)
+                    for w in workers
+                    if not provider_only or w.backend == provider
+                ),
+                Decimal(0),
+            )
+
+        share = min(
+            (run.total_budget_usd - held(False)) / slots,
+            ceiling.for_provider(provider).budget_usd,
+        )
+        if ceiling.provider_limits_usd is not None:
+            line = ceiling.provider_limits_usd.get(provider, Decimal(0))
+            share = min(share, (line - held(True)) / provider_slots)
+        budget_usd = max(share, Decimal(0)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        if budget_usd <= 0:
+            # Refuse before admission, so an exhausted run never spends a worker slot.
+            raise WorkerSpecRefused("budget", "exhausted")
+    return WorkerLimits(
+        budget_usd=budget_usd,
+        deadline=latest if deadline is None else min(deadline, latest),
+        max_turns=1 if max_turns is None else max_turns,
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+    )
 
 
 def _worker_subset(
@@ -1208,6 +1485,154 @@ def _worker_environment(requested: EnvironmentSpec | None, granted: EnvironmentS
         raise WorkerSpecRefused("sandbox", "not_subset")
 
 
+def _with_root_model(
+    grant: AgentFleetGrant,
+    root: ModelRef,
+    *,
+    policy: TenantAccessPolicy,
+    fleet: FleetFacts,
+) -> tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]]:
+    """The root's own model is implicitly granted; every other ceiling still applies.
+
+    A granted backend for the root's provider carries it as is. Otherwise only the
+    provider's default per-caller selection is added, and only when tenant policy
+    already enables it. Provider budget lines, worker counts and deadlines are unchanged.
+    """
+    from daimon.core.channel_backend import check_backend
+    from mux.profiles import worker_selection
+
+    backends, models = grant.backends, grant.models
+    model = ModelRef(provider=root.provider, id=root.id)
+    if model in models:
+        return backends, models
+    if any(
+        backend.backend == model.provider and backend.model in (None, model.id)
+        for backend in backends
+    ):
+        return backends, (*models, model)
+    try:
+        selection = worker_selection(model.provider)
+        if selection.thread_mode != "per_caller" or selection.model not in (None, model.id):
+            return backends, models
+        check_backend(
+            ConfigRevision.create(fleet.root.channel, 1, selection),
+            enabled_backends=policy.enabled_backends,
+        )
+    except (DaimonError, InvalidConfig):
+        return backends, models
+    return (*backends, selection), (*models, model)
+
+
+def _root_ceiling(
+    source: BackendAgent, *, account_id: str
+) -> tuple[AgentSpec, tuple[ResourceBinding, ...]]:
+    """The captured source's worker ceiling and the resources it carries, memory included."""
+    from daimon.core.memory_resource import memory_mount
+    from daimon.core.turn.runtime_manifest import worker_source_ceiling
+
+    actual = source.source
+    if actual is None or source.effective_spec is None:
+        raise WorkerSpecRefused("origin", "unbound")
+    try:
+        ceiling = worker_source_ceiling(source)
+    except ValueError:
+        raise WorkerSpecRefused("tools", "unsupported") from None
+    # The complete capture remains the input to the existing obligation classifier.
+    assert ceiling.effective_spec is not None
+    resources = ceiling.resource_requirements
+    read_only = source.memory_read_only is not False
+    if source.memory_store_id is not None:
+        mount = cast(JsonValue, memory_mount(source.memory_store_id, read_only=read_only))
+        resources += (
+            ResourceBinding(
+                id=source.memory_store_id,
+                kind="native",
+                resource=actual.ref.model_copy(
+                    update={
+                        "kind": "memory_store",
+                        "id": source.memory_store_id,
+                        "account_id": account_id,
+                    }
+                ),
+                native=ExtensionConfig(
+                    namespace=f"{MANAGED_AGENTS.provider}.session_resource_create",
+                    version=1,
+                    value={"resource": mount},
+                ),
+            ),
+        )
+    return ceiling.effective_spec, resources
+
+
+#: Why an agent's own setup keeps it from running a fleet, in plain words.
+FLEET_ROOT_OBSTACLES: Mapping[str, str] = {
+    "credentials": "it uses a connected tool or repository with its own login",
+    "mcp": "it uses a connected tool that fleet workers can't reach",
+    "files": "it has stored secrets or files that fleet workers can't receive",
+    "repository": "it uses a repository with its own login",
+    "tools": "it has tools that ask before running, or that fleet workers can't use",
+    # Only an existing store: before it exists, workers run without memory instead.
+    "memory": "its memory can't be shared with fleet workers",
+    # Default-fleet turns that ran with fleet off instead of failing.
+    "held": "this conversation includes another organisation, so fleets are off here",
+    "shared_thread": "this is a shared thread, and fleets run only in your own thread",
+    "unavailable": "this conversation couldn't start one. Ask again in a new thread",
+}
+FLEET_ROOT_OBSTACLE_DEFAULT = "its setup includes something fleet workers can't carry yet"
+
+
+def fleet_root_obstacle_text(obstacle: str) -> str:
+    """The sentence a person sees when an agent can't run a fleet."""
+    reason = FLEET_ROOT_OBSTACLES.get(obstacle, FLEET_ROOT_OBSTACLE_DEFAULT)
+    return f"This agent can't run a fleet yet: {reason}."
+
+
+def fleet_root_obstacle(source: BackendAgent) -> str | None:
+    """What in an agent's own setup keeps its source from becoming fleet worker authority.
+
+    A projected capture's ceiling and resources, classified the way freezing the
+    root does. It checks a subset of what the freeze checks (no grant, origin or
+    backend facts), so a None here can still be refused at the turn; a value is
+    a definite obstacle. Returns an obligation name (see FLEET_ROOT_OBSTACLES).
+    """
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    if source.resource_scope is None or source.environment is None:
+        return None
+    try:
+        spec, resources = _root_ceiling(source, account_id=source.resource_scope.account_id)
+    except WorkerSpecRefused as error:
+        return error.field
+    if any(tool.permission != "auto" for tool in spec.tools or ()):
+        return "tools"
+    missing = classify_source_obligations(
+        source,
+        spec,
+        environment=source.environment.spec,
+        resources=resources,
+        worker_ceiling=True,
+    )
+    if source.memory_store_id is None:
+        # An agent gets its memory store on its first session; that is no obstacle.
+        missing = missing - {"memory"}
+    for name in ("credentials", "mcp", "repository", "files", "tools"):
+        if name in missing:
+            return name
+    return sorted(missing)[0] if missing else None
+
+
+def _is_current_default(grant: AgentFleetGrant, policy: TenantAccessPolicy) -> bool:
+    from daimon.core.fleet_configuration import default_fleet_grant
+    from daimon.core.stores.domain import TenantBackendPolicy
+
+    default = default_fleet_grant(
+        TenantBackendPolicy(
+            tenant_id=uuid.UUID(int=0), revision="", enabled_backends=policy.enabled_backends
+        )
+    )
+    return default is not None and grant == default
+
+
 def fleet_root_permissions(
     source: BackendAgent,
     admission: AdmissionGrant,
@@ -1217,9 +1642,14 @@ def fleet_root_permissions(
     policy: TenantAccessPolicy,
     now: datetime,
     seal_ids: frozenset[str] = frozenset(),
+    own_backends: tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]] | None = None,
 ) -> WorkerPermissions:
-    """Compose captured source; caller joins origin/binding and rechecks grant epoch."""
-    from daimon.core.memory_resource import memory_mount
+    """Compose captured source; caller joins origin/binding and rechecks grant epoch.
+
+    The root gets the grant's model choices plus its own model. `own_backends`
+    replaces those choices for an agent that runs as a worker: its own config
+    decides its model, not the grant's model list.
+    """
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
     if now.utcoffset() is None:
@@ -1228,7 +1658,9 @@ def fleet_root_permissions(
         grant = AgentFleetGrant.model_validate(grant.model_dump())
     except ValueError:
         raise WorkerSpecRefused("budget", "unsupported") from None
-    if grant.epoch <= 0 or grant.expires_at <= now:
+    if grant.expires_at <= now or (grant.epoch == 0 and not _is_current_default(grant, policy)):
+        # Stored grants have epoch >= 1; epoch 0 is only ever the computed default,
+        # and only as the tenant's current policy derives it.
         raise WorkerSpecRefused("origin", "stale")
     actual, effective, environment = source.source, source.effective_spec, source.environment
     if (
@@ -1245,40 +1677,17 @@ def fleet_root_permissions(
         != (fleet.scope.tenant_id, fleet.scope.account_id)
     ):
         raise WorkerSpecRefused("origin", "unbound")
-    from daimon.core.turn.runtime_manifest import worker_source_ceiling
-
-    try:
-        ceiling = worker_source_ceiling(source)
-    except ValueError:
-        raise WorkerSpecRefused("tools", "unsupported") from None
-    # The complete capture remains the input to the existing obligation classifier.
-    assert ceiling.effective_spec is not None
-    spec = ceiling.effective_spec
-    resources = ceiling.resource_requirements
+    spec, resources = _root_ceiling(source, account_id=fleet.scope.account_id)
     read_only = source.memory_read_only is not False
-    if source.memory_store_id is not None:
-        mount = cast(JsonValue, memory_mount(source.memory_store_id, read_only=read_only))
-        resources += (
-            ResourceBinding(
-                id=source.memory_store_id,
-                kind="native",
-                resource=actual.ref.model_copy(
-                    update={
-                        "kind": "memory_store",
-                        "id": source.memory_store_id,
-                        "account_id": fleet.scope.account_id,
-                    }
-                ),
-                native=ExtensionConfig(
-                    namespace=f"{MANAGED_AGENTS.provider}.session_resource_create",
-                    version=1,
-                    value={"resource": mount},
-                ),
-            ),
-        )
-    duration = min(grant.max_run_seconds, grant.max_worker_seconds, TURN_CEILING_S)
+    # The run gets its own time; each worker is capped at spawn (`worker_runtime_ceiling`).
+    duration = min(grant.max_run_seconds, TURN_CEILING_S)
     deadline = min(grant.expires_at, now + timedelta(seconds=duration))
     limits = grant.limits.model_copy(update={"deadline": deadline})
+    backend_grants, models = (
+        _with_root_model(grant, spec.model, policy=policy, fleet=fleet)
+        if own_backends is None
+        else own_backends
+    )
     return freeze_root_permissions(
         WorkerPermissions(
             fleet=fleet,
@@ -1286,8 +1695,8 @@ def fleet_root_permissions(
             agent=admission.agent,
             spec=spec,
             base_system=spec.system or "",
-            backend_grants=grant.backends,
-            models=grant.models,
+            backend_grants=backend_grants,
+            models=models,
             limits=limits,
             resources=resources,
             environment=environment.spec,
@@ -1296,12 +1705,186 @@ def fleet_root_permissions(
             seal_ids=seal_ids,
             memory_read_only=read_only,
             agent_id=source.agent_id,
+            max_worker_seconds=grant.max_worker_seconds,
         ),
         source,
         admission=admission,
         policy=policy,
         now=now,
     )
+
+
+def worker_agent_allowed(
+    grant: AgentFleetGrant, root_agent_id: uuid.UUID | None, agent_id: uuid.UUID
+) -> bool:
+    """Whether the grant lets this run's workers run as `agent_id`.
+
+    Field absent (stored and legacy grants): the root's own agent only. "any": any
+    agent the requester may use in the run's place (authorize decides that per
+    spawn). A list: only those logical agent ids. The root's own agent is always
+    allowed.
+    """
+    if agent_id == root_agent_id:
+        return True
+    allowed = grant.worker_agents
+    return allowed == "any" or (isinstance(allowed, tuple) and agent_id in allowed)
+
+
+def worker_agents_line(grant: AgentFleetGrant, names: Mapping[uuid.UUID, str]) -> str:
+    """The preview sentence for which agents a grant's workers may run as."""
+    allowed = grant.worker_agents
+    if allowed == "any":
+        return "Workers can be any agent you can use here."
+    if allowed is None:
+        return "Workers run as this agent only."
+    listed = ", ".join(
+        names.get(agent_id, "an agent no longer on this server") for agent_id in allowed
+    )
+    return f"Workers can be this agent or: {listed}."
+
+
+def agent_worker_backend(
+    spec: AgentSpec, backend: Provider | None, model: str | None
+) -> tuple[ResolvedBackend, ModelRef]:
+    """The backend and model an agent runs on as a worker: its own agent config.
+
+    `backend`/`model` are the agent's current backend setting (#1309). No setting,
+    or Managed Agents, means the agent's own native model.
+    """
+    from mux.profiles import MANAGED_AGENTS, backend_selection, worker_selection
+
+    if backend is None or backend == MANAGED_AGENTS.provider:
+        selection = backend_selection(MANAGED_AGENTS.provider)
+        return selection, ModelRef(provider=spec.model.provider, id=spec.model.id)
+    try:
+        selection = worker_selection(backend)
+    except InvalidConfig:
+        raise WorkerSpecRefused("backend", "unsupported") from None
+    chosen = model or selection.model
+    if chosen is None:
+        raise WorkerSpecRefused("backend", "unbound")
+    if selection.model not in (None, chosen):
+        selection = selection.model_copy(update={"model": chosen})
+    return selection, ModelRef(provider=backend, id=chosen)
+
+
+#: Losses an agent worker on another provider may declare for itself when that
+#: provider's worker profile can't carry them: each only takes capability away.
+AGENT_WORKER_AUTO_DROPS: frozenset[str] = frozenset(
+    {"tools", "skills", "mcp", "memory", "sandbox", "model_controls"}
+)
+
+
+def agent_worker_patch(
+    spec: AgentSpec,
+    task: str | None,
+    model: ModelRef | None = None,
+    drops: Iterable[DeclaredDrop] = (),
+) -> AgentPatch | None:
+    """The sparse change a worker running AS an agent makes to that agent's own spec.
+
+    The task is appended to the agent's own instructions, never replacing them.
+    `model` is the agent's configured model when it differs from its native one;
+    a model on another provider declares the same losses a task worker does. The
+    agent's tools are its own: one that asks before running cannot be asked by a
+    worker, so that agent is refused as a worker on every provider (its authority,
+    agent_worker_permissions, refuses before any loss is declared), never dropped
+    silently. `drops`
+    adds declared losses: the ones the agent's owner accepted for its backend, and
+    any the root declares; a loss only ever takes capability away.
+    """
+    update: dict[str, object] = {}
+    if task is not None and task.strip():
+        update["system"] = (spec.system or "") + "\n\nYour task: " + task.strip()
+    declared: set[DeclaredDrop] = {*spec.declared_drops, *drops}
+    if model is not None and model != spec.model:
+        update["model"] = model
+        if model.provider != spec.model.provider:
+            declared |= {"mcp", "memory", "sandbox"}
+        if spec.extensions:
+            declared.add("model_controls")
+    if declared != set(spec.declared_drops):
+        update["declared_drops"] = tuple(sorted(declared))
+    return AgentPatch.model_validate(update) if update else None
+
+
+def agent_worker_permissions(
+    root: WorkerPermissions,
+    source: BackendAgent,
+    admission: AdmissionGrant,
+    grant: AgentFleetGrant,
+    *,
+    policy: TenantAccessPolicy,
+    now: datetime,
+    backend: tuple[ResolvedBackend, ModelRef] | None = None,
+) -> WorkerPermissions:
+    """The authority a worker runs under when it runs AS another on-server agent.
+
+    The agent's own captured source is the ceiling (its prompt, tools, skills),
+    inside the root's run: the same fleet facts, subject and finite run limits,
+    so money, the run binding and the wake stay the root's. Its model is its own
+    config's (`agent_worker_backend`; default: its native model), never the
+    grant's model list, and it comes first in `models`. When that model is on
+    another backend, the native one is kept only so the ceiling itself resolves;
+    spawn pins the configured model. Tenant backend policy still applies. SPAWN_WORKER is
+    then asked for this agent, which requires the requester may start a turn with
+    and run it in the run's place, as the agent-visibility rule says everywhere.
+    """
+    if not worker_agent_allowed(grant, root.agent_id, source.agent_id):
+        raise WorkerSpecRefused("scope", "not_subset")
+    if (
+        admission.subject != root.subject
+        or admission.run_place != root.fleet.place
+        or admission.thread_id != root.fleet.root.thread_id
+    ):
+        raise WorkerSpecRefused("origin", "unbound")
+    worker_root = fleet_root_permissions(
+        source,
+        admission,
+        grant,
+        fleet=root.fleet,
+        policy=policy,
+        now=now,
+        seal_ids=root.seal_ids,
+        own_backends=_agent_worker_backends(source, backend, policy=policy, fleet=root.fleet),
+    )
+    # The run's own finite limits (deadline, budget, provider lines) bind every worker.
+    return replace(worker_root, limits=root.limits)
+
+
+def _agent_worker_backends(
+    source: BackendAgent,
+    backend: tuple[ResolvedBackend, ModelRef] | None,
+    *,
+    policy: TenantAccessPolicy,
+    fleet: FleetFacts,
+) -> tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]]:
+    """The agent's own backend and model, refused only by tenant policy or its profile.
+
+    `unbound`: the tenant hasn't enabled that backend. `unsupported`: the profile
+    won't run that model as a fleet worker (e.g. a channel-only model).
+    """
+    from daimon.core.channel_backend import backend_is_enabled, check_backend
+    from mux.profiles import MANAGED_AGENTS, backend_selection
+
+    spec = source.effective_spec
+    if spec is None:
+        raise WorkerSpecRefused("origin", "unbound")
+    selection, model = backend if backend is not None else agent_worker_backend(spec, None, None)
+    if not backend_is_enabled(model.provider, policy.enabled_backends):
+        raise WorkerSpecRefused("backend", "unbound")
+    try:
+        check_backend(
+            ConfigRevision.create(fleet.root.channel, 1, selection),
+            enabled_backends=policy.enabled_backends,
+            worker=True,
+        )
+    except (DaimonError, InvalidConfig):
+        raise WorkerSpecRefused("backend", "unsupported") from None
+    native = ModelRef(provider=spec.model.provider, id=spec.model.id)
+    if model == native:
+        return (selection,), (model,)
+    return (selection, backend_selection(MANAGED_AGENTS.provider)), (model, native)
 
 
 def freeze_root_permissions(
@@ -1358,6 +1941,7 @@ def freeze_root_permissions(
             check_backend(
                 ConfigRevision.create(fleet.root.channel, 1, backend),
                 enabled_backends=policy.enabled_backends,
+                worker=True,
             )
     except (DaimonError, InvalidConfig):
         raise WorkerSpecRefused("backend", "unsupported") from None
@@ -1391,6 +1975,51 @@ def freeze_root_permissions(
     )
 
 
+_MONEY_FIELDS = ("budget_usd", "native_budget_usd")
+
+
+def _canonical_money(limits: dict[str, object]) -> dict[str, object]:
+    """One spelling per amount, so an equal Decimal never changes a worker's digest.
+
+    `Decimal("0.6700") == Decimal("0.67")`, but their JSON strings differ and the
+    digest hashes strings. Every amount is written in its shortest exact form
+    ("2.00" -> "2"), so a worker admitted under the old spelling and run under the
+    new one fails its intent check once, at the deploy that ships this.
+    """
+
+    def canonical(value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        try:
+            amount = Decimal(value)
+        except ArithmeticError:
+            return value
+        if not amount.is_finite():
+            return value
+        # Exact, whatever the ambient context: normalize() would round to its precision.
+        text = format(amount, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return "0" if text in ("-0", "", "0") else text
+
+    result = dict(limits)
+    for field in _MONEY_FIELDS:
+        if field in result:
+            result[field] = canonical(result[field])
+    providers = result.get("provider_limits_usd")
+    if isinstance(providers, dict):
+        result["provider_limits_usd"] = {
+            key: canonical(value) for key, value in cast(dict[str, object], providers).items()
+        }
+    return result
+
+
+def _sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def resolve_worker_spec(
     parent: WorkerPermissions,
     spec: AgentSpec | Agent,
@@ -1403,6 +2032,7 @@ def resolve_worker_spec(
     environment: EnvironmentSpec | None = None,
     limits: WorkerLimits | None = None,
     captured_source: BackendAgent | None = None,
+    digest_phase: Literal["spawn", "run_worker"] | None = None,
 ) -> ResolvedWorkerSpec:
     """Resolve existing spec shapes against authentic, finite parent authority.
 
@@ -1582,12 +2212,18 @@ def resolve_worker_spec(
         check_backend(
             ConfigRevision.create(fleet.root.channel, 1, selected),
             enabled_backends=policy.enabled_backends,
+            worker=True,
         )
     except DaimonError:
         raise WorkerSpecRefused("backend", "unsupported") from None
     profile = get_profile(selected.profile)
     resolved = resolved.model_copy(
         update={
+            # An OpenAI agent has no description (its driver refuses one). It is a
+            # label for people, not a capability, so an OpenAI worker goes without it.
+            "description": None
+            if profile.provider == CONVERSATION_ONLY.provider
+            else resolved.description,
             "skills": () if "skills" in drops else resolved.skills,
             "mcp_servers": () if "mcp" in drops or "tools" in drops else resolved.mcp_servers,
             "tools": tuple(
@@ -1665,7 +2301,7 @@ def resolve_worker_spec(
             and resource.resource.kind == "memory_store"
         )
     )
-    from mux.drivers.anthropic.sessions_lifecycle import MemoryMount, SessionResourceConfig
+    from mux.drivers.anthropic import MemoryMount, SessionResourceConfig
 
     for resource in resources:
         if resource.native is None:
@@ -1793,7 +2429,7 @@ def resolve_worker_spec(
         "backend": selected.model_dump(mode="json"),
         "resources": [resource.model_dump(mode="json") for resource in resources],
         "environment": environment.model_dump(mode="json") if environment is not None else None,
-        "limits": cap.model_dump(mode="json"),
+        "limits": _canonical_money(cap.model_dump(mode="json")),
         "origin": str(fleet.origin_id),
         "run": str(fleet.run_id),
         "place": asdict(fleet.place),
@@ -1807,10 +2443,28 @@ def resolve_worker_spec(
         "memory_read_only": True,
     }
     if captured_source is not None:
-        body["capture"] = TypeAdapter(object).dump_python(dict(captured_source), mode="json")
-    digest = hashlib.sha256(
-        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+        # The source's facts, not how a provider may represent it: `representations`
+        # is preparation evidence that depends on which backend revision the
+        # capture ran under (a Gemini worker's revision selects the code-default
+        # agent template and adds its representation; the spawn's root revision
+        # does not). Hashed, it made run_worker's re-capture read as changed intent.
+        capture = {key: value for key, value in dict(captured_source).items()}
+        capture.pop("representations", None)
+        body["capture"] = TypeAdapter(object).dump_python(capture, mode="json")
+    digest = _sha256(body)
+    if digest_phase is not None:
+        # Which part moved when a spawn and its run_worker disagree: ids and
+        # digests only, never content.
+        _log.info(
+            "fleet.worker_spec_digest",
+            phase=digest_phase,
+            run_id=str(fleet.run_id),
+            origin_id=str(fleet.origin_id),
+            model=resolved.model.id,
+            digest=digest[:12],
+            parts={key: _sha256(value)[:8] for key, value in sorted(body.items())},
+            system_chars=len(resolved.system or ""),
+        )
     child_scope = fleet.scope.model_copy(
         update={"authorization_id": f"worker:{fleet.origin_id}:{digest}"}
     )

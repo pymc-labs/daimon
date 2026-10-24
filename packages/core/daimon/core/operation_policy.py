@@ -1,8 +1,10 @@
 """Pure operation policy for shared-agent changes.
 
 Spec edits (including skill add/remove) refuse defaults-managed targets even
-for admins, then allow admins. Attachment writes allow admins first, then
-refuse managed targets. Other callers cannot make these shared-agent changes.
+for admins, then allow admins and the agent's owner. Attachment writes allow
+admins first, then refuse managed targets, then allow the owner, except repo
+and skill-repo binds, which spend the workspace's GitHub installation. Other
+callers cannot make these shared-agent changes.
 
 New MCP connections are attachment writes: a private token or OAuth grant
 still adds servers and tools to the shared agent spec. Only key_add and
@@ -60,6 +62,12 @@ _ATTACHMENT_OPERATIONS: frozenset[OperationKind] = frozenset(
 
 _POSTED_TOKEN_OPERATIONS: frozenset[OperationKind] = frozenset({"key_add", "keys_import"})
 
+#: Operations that bind the workspace's GitHub installation, not the owner's own
+#: credential: an agent's owner may not make them, only an admin.
+_OWNER_INELIGIBLE: frozenset[OperationKind] = frozenset(
+    {"repo_bind", "skill_repo_connect", "github_connect", "github_grant"}
+)
+
 
 class TargetFacts(BaseModel):
     """The facts about a target agent that the policy table reads.
@@ -73,6 +81,9 @@ class TargetFacts(BaseModel):
 
     is_daimon_managed: bool
     is_reachable_in_tenant: bool
+    # The caller is the agent's recorded owner. Never counts for an operation
+    # that spends someone else's credential (`_OWNER_INELIGIBLE`).
+    owned_by_caller: bool = False
 
 
 def _family(operation: OperationKind) -> OperationFamily:
@@ -109,6 +120,7 @@ def _decide_operation(
         reach=AgentReach(
             managed=target.is_daimon_managed,
             reachable=target.is_reachable_in_tenant,
+            owned=target.owned_by_caller and operation not in _OWNER_INELIGIBLE,
         ),
     )
     if decision:
@@ -128,16 +140,19 @@ def decide_operation(
 def needs_reachability_read(
     operation: OperationKind, *, is_admin: bool, is_daimon_managed: bool
 ) -> bool:
-    """True only when `decide_operation` cannot answer without the reachability fact.
+    """True only when `decide_operation` cannot answer without reading the target's facts.
 
-    Exists so the I/O-avoidance property — an admin or a posted-token write
-    never pays for a reachability read, and a managed-agent target never
-    needs one either, since both families settle the outcome before
-    reachability is consulted — is provable in one unit test rather than
-    re-derived at each of the three call sites that gate a live DB read on
-    it.
+    The fact that can change an answer is whether the caller owns the agent
+    (`TargetFacts.owned_by_caller`; reachability no longer does). An admin, a
+    posted-token write, a managed target and an operation the owner may not
+    make settle without it, so they never pay for the read. Derived from the
+    table itself, so it can't drift from `decide_operation`.
     """
-    return False
+    unowned = TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
+    owned = unowned.model_copy(update={"owned_by_caller": True})
+    return _decide_operation(operation, is_admin=is_admin, target=unowned) != _decide_operation(
+        operation, is_admin=is_admin, target=owned
+    )
 
 
 __all__ = [

@@ -16,7 +16,7 @@ from daimon.core.stores.routines import (
 )
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import make_stub_anthropic, stub_anthropic  # noqa: F401
+from mux.testing.drivers.anthropic.ma import make_stub_anthropic, stub_anthropic  # noqa: F401
 from sqlalchemy.ext.asyncio import AsyncSession
 
 

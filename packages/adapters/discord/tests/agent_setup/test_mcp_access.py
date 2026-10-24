@@ -39,15 +39,16 @@ from daimon.core.specs import AgentSpec
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
-from daimon.testing import FIXED_TS, ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     build_stub_anthropic,
     not_found_response,
 )
-from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma_models import FIXED_TS
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PUBLIC_URL = "https://mcp.example.com"

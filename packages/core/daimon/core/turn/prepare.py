@@ -20,6 +20,7 @@ every adapter test patches.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import functools
 import time
@@ -46,10 +47,13 @@ from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_hold import hold_key
+from daimon.core.memory_resource import memory_scope
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, retrieve_agent, sdk_agent
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
+from daimon.core.platform_system import system_for_platform
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
 from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
@@ -82,6 +86,7 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     read_session_seals,
     record_session_seals,
+    thread_ids_for_sessions,
 )
 from daimon.core.turn.admission import Admission, reauthorize, restrict_inherited_memory
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
@@ -97,8 +102,8 @@ from daimon.core.usage_recording import record_turn_usage
 from mux.contracts.actions import UserMessage
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.ports import ManagedAgents
-from mux.contracts.resources import Agent, AgentSpec, SessionSpec
-from mux.drivers.anthropic.sessions_lifecycle import SessionCreateRequest, SessionReads
+from mux.contracts.resources import Agent, AgentPatch, AgentSpec, SessionSpec
+from mux.drivers.anthropic import SessionCreateRequest, SessionReads
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
 from pydantic import JsonValue
@@ -205,6 +210,9 @@ class PreparedTurn:
     session_account_id: uuid.UUID
     _record: UsageRecorder | ObservationRecorder
     continuity: ContinuityOutcome = CONTINUED
+    _finalize: Callable[[], Awaitable[None]] | None = field(
+        default=None, kw_only=True, compare=False, repr=False
+    )
     # Populated only by a provider-native preparation hook. Anthropic's
     # existing field values and preparation remain unchanged.
     backend: ManagedAgents | None = None
@@ -249,6 +257,9 @@ class ProviderPreparationRequest:
     before_native: Callable[[], Awaitable[None]] | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
+    # The tenant's hosted OpenAI environment, created or reused for this turn by
+    # `openai_environment.tenant_environment`; the code-default GPT row uses it.
+    openai_environment_id: str | None = field(default=None, kw_only=True, compare=False, repr=False)
 
     async def capture_root(
         self, parent: WorkerPermissions, *, deadline: dt.datetime | None = None
@@ -302,7 +313,6 @@ class ProviderPreparationRequest:
         from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
         from daimon.core.stores.access_policy import load_access_policy
         from mux.contracts.config import BackendConfig
-        from mux.contracts.resources import AgentPatch, AgentSpec
 
         bound = min(self.deadline, parent.limits.deadline, worker.limits.deadline)
         async with asyncio.timeout(remaining_s(bound, now=self.now(), refuse_expired=True)):
@@ -313,11 +323,8 @@ class ProviderPreparationRequest:
             definition = (
                 source.source if worker.source_agent else AgentSpec.model_validate(worker.spec)
             )
-            overrides = (
-                AgentPatch.model_validate(worker.spec.model_dump(mode="json"))
-                if worker.source_agent
-                else None
-            )
+            # The digest check below proves the result is still the admitted worker.
+            overrides = clone_overrides(worker.spec) if worker.source_agent else None
             async with self.deps.sessionmaker.begin() as db:
 
                 async def validate_origin(*_args: object) -> None:
@@ -367,6 +374,15 @@ class ProviderPreparationRequest:
                 scope=worker.permissions.fleet.scope,
                 deadline=bound,
             )
+
+
+def clone_overrides(spec: AgentSpec) -> AgentPatch:
+    """The sparse patch that re-derives an admitted clone worker from its pinned source.
+
+    Its native controls (extensions) come from that source, never from an override,
+    and an AgentPatch keys them by namespace, so the spec's list form is left out.
+    """
+    return AgentPatch.model_validate(spec.model_dump(mode="json", exclude={"extensions"}))
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
@@ -469,6 +485,7 @@ async def create_ma_session(
     extra_resources: tuple[Resource, ...] = (),
     predecessor_session_id: str | None = None,
     preparation: ProviderPreparationRequest | None = None,
+    platform: str,
 ) -> CreatedSession:
     """Create a brand-new MA session and snapshot the configuration it froze.
 
@@ -488,6 +505,10 @@ async def create_ma_session(
     (`reauthorize`): a pin added during a transfer or lock wait refuses the
     turn before any session exists, and a seal added since is stamped on the
     session and mounts memory read-only.
+
+    `platform` picks the system prompt the session runs (`system_for_platform`),
+    derived here from the executing agent's own system, so a fleet worker keeps
+    its composed instructions.
     """
     if _admitted_profile(admission) != "anthropic.managed_agents":
         raise AdmissionDenied(reason="backend_unsupported")
@@ -578,10 +599,23 @@ async def create_ma_session(
                 retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
             )
 
+    # False only when a prepared create returned a session recorded by an earlier
+    # attempt under the same operation key (`persistence.mutate` replays it); a row
+    # may already name that one.
+    allocated_here = True
+
     async def allocate(
         call: Callable[[], Awaitable[BetaManagedAgentsSession]], wire: SessionCreateRequest
     ) -> BetaManagedAgentsSession:
         assert preparation is not None and persistence is not None
+        nonlocal allocated_here
+        allocated_here = False
+
+        async def create_upstream(_key: str) -> BetaManagedAgentsSession:
+            nonlocal allocated_here
+            allocated_here = True
+            return await call()
+
         return await persistence.mutate(
             None,
             "session_create",
@@ -599,7 +633,7 @@ async def create_ma_session(
                 ),
                 "create": wire.model_dump(mode="json"),
             },
-            lambda _key: call(),
+            create_upstream,
             BetaManagedAgentsSession,
             lambda _: "processed",
             guard=fence,
@@ -652,6 +686,11 @@ async def create_ma_session(
             confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
             daimon_rule_tools=admission.daimon_rule_tools,
             slack_turn_context_id=admission.slack_turn_context_id,
+            # A held turn mounts its own channel-bound Daimon credential; a shared
+            # thread has no caller account and so no credential to hold.
+            hold=None if admission.shared_owner is not None else admission.hold,
+            # Held memory is the place's, shared thread or not.
+            memory_hold=admission.hold,
             private_dm_id=admission.private_dm_id,
             budget_channel_id=admission.budget_channel_id,
             origin_channel_id=admission.origin_channel_id,
@@ -664,6 +703,7 @@ async def create_ma_session(
             model_override=None
             if preparation is not None and preparation.worker is not None
             else admission.model_override,
+            system_override=system_for_platform(admission.agent.system, platform),
             resource_source=preparation.source
             if preparation is not None and preparation.worker is not None
             else None,
@@ -705,59 +745,107 @@ async def create_ma_session(
                 platform_skill_ids=admission.platform_skill_ids - {refused},
             )
 
-    async with deps.sessionmaker() as session:
-        personal_memory_store_id = await get_personal_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=admission.account_id
+    # `create_session` archives its own session on any failure up to its return.
+    # From here until `CreatedSession` is returned no row names the session and
+    # no caller holds its id, so a cancel (Stop, the ceiling) or a database error
+    # in the personal-memory lookup below would leave it live upstream for good.
+    try:
+        async with deps.sessionmaker() as session:
+            personal_memory_store_id = await get_personal_memory_store_id(
+                session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=admission.account_id
+            )
+        has_repo = any(
+            isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
+            for resource in ma_session.resources
         )
-    has_repo = any(
-        isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
-        for resource in ma_session.resources
-    )
-    # App tokens sit in the vault even when no working repo is mounted; record an
-    # issue time only when this session was actually delivered some.
-    (
-        has_app_tokens,
-        token_repo_urls,
-        token_scopes,
-        token_issued_at_by_installation,
-    ) = _delivered_app_snapshot_state(delivered_app_access)
-    snapshot = snapshot_from_created_session(
-        ma_session,
-        env_sha256=env_sha256,
-        # Left to the builder: it reads the id off the session's own `.env`
-        # file resource, which is the same object `upload_env_and_mount`
-        # uploaded a moment ago.
-        env_file_id=None,
-        # `resolve_clone_token` minted the repo credential inside the
-        # `create_session` call above, so "now" is when it was issued.
-        repo_token_issued_at=int(time.time()) if has_repo or has_app_tokens else None,
-        vault_id=(
-            ma_session.vault_ids[-1]
-            if github_mode == "app" and ma_session.vault_ids
-            else next(iter(ma_session.vault_ids), None)
-        ),
-        sent_skills=session_skills(admission.agent, admission.channel_skills),
-        github_mode=github_mode,
-        personal_memory_store_ids=(
-            () if personal_memory_store_id is None else (personal_memory_store_id,)
-        ),
-    ).model_copy(
-        update={
-            "token_repo_urls": token_repo_urls,
-            "token_scopes": token_scopes,
-            "token_issued_at_by_installation": token_issued_at_by_installation,
-            "unavailable_repos": tuple(
-                (url, dt.datetime.now(dt.UTC)) for url in excluded_repo_urls
+        # App tokens sit in the vault even when no working repo is mounted; record an
+        # issue time only when this session was actually delivered some.
+        (
+            has_app_tokens,
+            token_repo_urls,
+            token_scopes,
+            token_issued_at_by_installation,
+        ) = _delivered_app_snapshot_state(delivered_app_access)
+        snapshot = snapshot_from_created_session(
+            ma_session,
+            env_sha256=env_sha256,
+            # Left to the builder: it reads the id off the session's own `.env`
+            # file resource, which is the same object `upload_env_and_mount`
+            # uploaded a moment ago.
+            env_file_id=None,
+            # `resolve_clone_token` minted the repo credential inside the
+            # `create_session` call above, so "now" is when it was issued.
+            repo_token_issued_at=int(time.time()) if has_repo or has_app_tokens else None,
+            vault_id=(
+                ma_session.vault_ids[-1]
+                if github_mode == "app" and ma_session.vault_ids
+                else next(iter(ma_session.vault_ids), None)
             ),
-            "unavailable_notice_pending": excluded_repo_urls,
-        }
-    )
-    return CreatedSession(
-        ma_session_id=ma_session.id,
-        snapshot=snapshot,
-        admission=admission,
-        seal_ids=frozenset(seal),
-    )
+            sent_skills=session_skills(admission.agent, admission.channel_skills),
+            sent_system=system_for_platform(admission.agent.system, platform),
+            github_mode=github_mode,
+            personal_memory_store_ids=(
+                () if personal_memory_store_id is None else (personal_memory_store_id,)
+            ),
+            mcp_hold=None if admission.shared_owner is not None else hold_key(admission.hold),
+            memory_scope=memory_scope(admission.hold),
+        ).model_copy(
+            update={
+                "token_repo_urls": token_repo_urls,
+                "token_scopes": token_scopes,
+                "token_issued_at_by_installation": token_issued_at_by_installation,
+                "unavailable_repos": tuple(
+                    (url, dt.datetime.now(dt.UTC)) for url in excluded_repo_urls
+                ),
+                "unavailable_notice_pending": excluded_repo_urls,
+            }
+        )
+        return CreatedSession(
+            ma_session_id=ma_session.id,
+            snapshot=snapshot,
+            admission=admission,
+            seal_ids=frozenset(seal),
+        )
+    except BaseException:
+        from daimon.core.turn.run import (
+            _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
+        )
+        from mux.drivers.anthropic import single_attempt_mutation
+
+        try:
+            named = False
+            if not allocated_here:
+                # A replayed session may belong to a row an earlier attempt
+                # committed; archive it only if the read shows none does.
+                async with deps.sessionmaker() as db:
+                    named = bool(
+                        await thread_ids_for_sessions(
+                            db, tenant_id=tenant_id, ma_session_ids=[ma_session.id]
+                        )
+                    )
+            if named:
+                log.info("turn.create_cleanup_skipped_named_session", session_id=ma_session.id)
+            else:
+                with single_attempt_mutation():
+                    await _archive_orphaned_session(
+                        deps.anthropic,
+                        session_id=ma_session.id,
+                        scope=preparation.scope
+                        if preparation is not None
+                        else admitted_session_scope(
+                            admission, tenant_id=tenant_id, session_id=ma_session.id
+                        ),
+                    )
+        except Exception as cleanup_error:
+            # The row read or binding validation failed before any archive was
+            # sent: leave the session alone. The error being unwound is the one
+            # the caller must see.
+            log.warning(
+                "turn.recovery_orphan_archive_failed",
+                session_id=ma_session.id,
+                error=str(cleanup_error)[:200],
+            )
+        raise
 
 
 async def insert_mapping(
@@ -849,6 +937,7 @@ async def create_fresh_session(
         tenant_id=tenant_id,
         extra_resources=extra_resources,
         predecessor_session_id=predecessor_session_id,
+        platform=platform,
         **({"preparation": preparation} if preparation is not None else {}),
     )
     async with deps.sessionmaker() as session:
@@ -1337,12 +1426,23 @@ async def bind_session_impl(
         result = await run_controlled_preparation(request, preparing)
         try:
             if deps.fleet_enabled and worker is None:
+                from daimon.core.fleet_configuration import is_default_fleet
                 from daimon.core.turn.runtime_manifest import (
                     capture_preparation_source,
-                    read_agent_fleet_grant,
+                    read_agent_fleet_grant_or_off,
                 )
+                from daimon.core.turn_origin import current_origin_id
 
-                if await read_agent_fleet_grant(deps, result.admission, now=now()) is not None:
+                fleet_grant = await read_agent_fleet_grant_or_off(deps, result.admission, now=now())
+                if (
+                    fleet_grant is not None
+                    and is_default_fleet(fleet_grant)
+                    and (current_origin_id.get() is None or result.admission.hold is not None)
+                ):
+                    # No root can be frozen here (no origin, or a held turn), so under
+                    # the default skip the capture and its API call altogether.
+                    fleet_grant = None
+                if fleet_grant is not None:
                     root_scope = admitted_session_scope(
                         result.admission,
                         tenant_id=tenant_id,
@@ -1350,9 +1450,22 @@ async def bind_session_impl(
                         prepared=result._scope,  # pyright: ignore[reportPrivateUsage]
                     )
                     root_request = replace(request, admission=result.admission, scope=root_scope)
-                    source = await capture_preparation_source(root_request)
+                    try:
+                        source = await capture_preparation_source(root_request)
+                    except Exception as error:
+                        # The default fleet never fails a chat turn: without a captured
+                        # source the root freeze skips fleet and the tools say why.
+                        if not is_default_fleet(fleet_grant):
+                            raise
+                        log.warning(
+                            "fleet.default_capture_skipped",
+                            cause=type(error).__name__,
+                            error_type=type(error).__name__,
+                        )
+                        source = None
                     remaining_s(effective_deadline, now=now(), refuse_expired=True)
-                    result = replace(result, _source=source, _preparation=root_request)
+                    if source is not None:
+                        result = replace(result, _source=source, _preparation=root_request)
             if worker is not None:
                 remaining_s(effective_deadline, now=now(), refuse_expired=True)
             if _on_prepared is not None:
@@ -1428,11 +1541,7 @@ async def bind_session_impl(
         async def _native_worker() -> PreparedTurn:
             from daimon.core.turn.persistence import current_persistence
             from daimon.core.turn.runtime_manifest import capture_preparation_source, prepare_source
-            from mux.drivers.anthropic.resources.agents import (
-                agent_payload,
-                agent_record,
-                native_tools_match,
-            )
+            from mux.drivers.anthropic import agent_payload, agent_record, native_tools_match
 
             persistence = current_persistence.get()
             if (
@@ -1496,6 +1605,15 @@ async def bind_session_impl(
                 guard=before_native,
                 retry_failed=False,
             )
+
+            async def archive_allocated() -> None:
+                # Never leave the allocated native agent behind (one orphan per attempt).
+                from daimon.core.mux_compat import archive_agent
+                from mux.drivers.anthropic import single_attempt_mutation
+
+                with contextlib.suppress(Exception), single_attempt_mutation():
+                    await archive_agent(deps.anthropic, allocated.ref.id, scope=scope)
+
             observed = agent_record(
                 await retrieve_agent(deps.anthropic, allocated.ref.id, scope=scope),
                 allocated.ref.account_scope_id,
@@ -1506,11 +1624,27 @@ async def bind_session_impl(
                 {name: expected.get(name) or [] for name in ("tools", "skills", "mcp_servers")}
             )
             expected.setdefault("multiagent", None)
-            actual = agent_payload(observed.spec)
-            if isinstance(expected.get("model"), str) and actual.get("model") == {
-                "id": worker.spec.model.id,
-                "speed": None,
-            }:
+            try:
+                actual = agent_payload(observed.spec)
+            except ValueError as error:
+                # The echo carries a native field the strict schema doesn't model (SMOKE
+                # d75 J4): it can't be proved to match, so it is refused like any other
+                # mismatch, never surfaced as a bug of ours. Field paths only, no values.
+                log.warning(
+                    "fleet.worker_readback_unrepresented",
+                    fields=_validation_paths(error),
+                )
+                await archive_allocated()
+                raise AdmissionDenied(reason="backend_unsupported") from None
+            echoed = actual.get("model")
+            if (
+                isinstance(expected.get("model"), str)
+                and isinstance(echoed, dict)
+                and cast(dict[str, object], echoed).get("id") == worker.spec.model.id
+            ):
+                # The spec declares no model controls (a task worker drops them), so
+                # whatever speed/effort the provider echoes are its own defaults:
+                # only the model itself must match (SMOKE-1 J3 Opus).
                 actual["model"] = worker.spec.model.id
             if (
                 observed.ref != allocated.ref
@@ -1522,6 +1656,7 @@ async def bind_session_impl(
                 )
                 or await recapture() != selected.source
             ):
+                await archive_allocated()
                 raise AdmissionDenied(reason="backend_unsupported")
             executing = replace(
                 admission,
@@ -1531,27 +1666,36 @@ async def bind_session_impl(
                 origin_channel_id=worker.permissions.fleet.root.channel.channel_id,
                 origin_thread_id=thread_id,
             )
-            created = await create_ma_session(
-                deps,
-                executing,
-                tenant_id=tenant_id,
-                preparation=replace(selected, admission=executing),
-            )
+            try:
+                created = await create_ma_session(
+                    deps,
+                    executing,
+                    tenant_id=tenant_id,
+                    preparation=replace(selected, admission=executing),
+                    platform=platform,
+                )
+            except (AdmissionDenied, ScopeViolation):
+                # A definite refusal only: an unknown outcome (a lost ACK, a transport
+                # error) is retried and must find this same agent.
+                await archive_allocated()
+                raise
             try:
                 if await recapture() != selected.source:
                     raise AdmissionDenied(reason="backend_unsupported")
                 remaining_s(effective_deadline, now=now(), refuse_expired=True)
 
-            except BaseException:
+            except BaseException as error:
                 from daimon.core.turn.run import (
                     _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
                 )
-                from mux.drivers.anthropic.transport import single_attempt_mutation
+                from mux.drivers.anthropic import single_attempt_mutation
 
                 with single_attempt_mutation():
                     await _archive_orphaned_session(
                         deps.anthropic, session_id=created.ma_session_id, scope=scope
                     )
+                if isinstance(error, (AdmissionDenied, ScopeViolation)):
+                    await archive_allocated()
                 raise
 
             async with deps.sessionmaker.begin() as db:
@@ -1630,6 +1774,7 @@ async def bind_session_impl(
             public_url=deps.public_url,
             platform=platform,
             channel_id=admission.budget_channel_id,
+            turn_path=deps.turn_path,
         )
 
         # `SessionOps` is built here rather than at import time so that
@@ -1691,3 +1836,23 @@ async def bind_session_impl(
             deadline=effective_deadline.isoformat(),
         )
         raise ceiling_error() from err
+
+
+def _validation_paths(error: BaseException) -> list[str]:
+    """A validation error's locations and types, never its input values."""
+    from pydantic import ValidationError
+
+    if not isinstance(error, ValidationError):
+        return [type(error).__name__]
+
+    def safe(part: object) -> str:
+        # Schema field names and indexes only; anything else is shown as "?".
+        text = str(part)
+        return text if len(text) <= 40 and text.replace("_", "").isalnum() else "?"
+
+    return sorted(
+        {
+            ":".join(safe(part) for part in item["loc"]) + ":" + item["type"]
+            for item in error.errors(include_url=False, include_input=False)
+        }
+    )[:10]

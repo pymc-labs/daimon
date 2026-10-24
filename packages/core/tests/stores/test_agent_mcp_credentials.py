@@ -25,7 +25,12 @@ from daimon.core.mcp_vault import chat_mcp_credential
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores.domain import AgentMcpCredentialRow
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, not_found_response
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    list_response,
+    not_found_response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

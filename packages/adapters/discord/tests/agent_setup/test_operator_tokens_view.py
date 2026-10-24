@@ -25,8 +25,8 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import list_mcp_tokens
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -184,6 +184,6 @@ async def test_the_panel_never_mints_the_deployment_promo_scope(
     view = await _view(db_session_factory)
     admin = _interaction(admin=True)
     await _modal(view, ["promo:create"]).on_submit(admin)
-    assert "mint-operator-token" in admin.followup.send.call_args.args[0]
+    assert "can't be granted from here" in admin.followup.send.call_args.args[0]
     async with db_session_factory() as session:
         assert await list_mcp_tokens(session, now=dt.datetime.now(dt.UTC)) == []

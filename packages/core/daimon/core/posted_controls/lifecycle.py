@@ -10,7 +10,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Final, Protocol
 
 import structlog
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt, PendingConfirmations
@@ -134,7 +134,7 @@ async def check_confirmation_admin(
     """
     if not prompt.admin or clicker is None or clicker != prompt.requester_platform_user_id:
         return None
-    refusal = "This change needs a current workspace admin."
+    refusal = "This change needs a current admin."
     if check is None:
         return refusal
     try:
@@ -172,6 +172,38 @@ def settle_admin_confirmation(
     return None
 
 
+#: A card still open after this long pings its requester once in the thread.
+REMIND_AFTER_S: Final[float] = 600.0
+#: A reminder is worth sending only with at least this much time left to click.
+REMIND_MIN_LEFT_S: Final[float] = 60.0
+STILL_WAITING_MESSAGE: Final[str] = "This is still waiting for your click."
+
+
+async def _remind_once(
+    future: asyncio.Future[ConfirmationAnswer],
+    expires_at: datetime,
+    remind: Callable[[], Awaitable[None]] | None,
+) -> None:
+    """Wait up to REMIND_AFTER_S; a card still open with a minute or more left pings once.
+
+    The ping is bounded by the card's remaining time, so a slow platform post can
+    never hold the card past its expiry.
+    """
+    timeout_s = (expires_at - datetime.now(UTC)).total_seconds()
+    if remind is None or timeout_s - REMIND_AFTER_S < REMIND_MIN_LEFT_S:
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(future), timeout=REMIND_AFTER_S)
+    except TimeoutError:
+        left = (expires_at - datetime.now(UTC)).total_seconds()
+        if future.done() or left < REMIND_MIN_LEFT_S:
+            return
+        try:
+            await asyncio.wait_for(remind(), timeout=left)
+        except Exception as error:  # A missed reminder never ends the wait.
+            _log.warning("confirmation.remind_failed", error_type=type(error).__name__)
+
+
 class PostedConfirmations[Card: PromptCard]:
     """Token cards share post cleanup, click settlement, expiry and retirement."""
 
@@ -187,6 +219,7 @@ class PostedConfirmations[Card: PromptCard]:
         post: Callable[[str], Awaitable[Card]],
         retire: Callable[[Card, ConfirmationCardState], Awaitable[None]],
         post_errors: tuple[type[BaseException], ...],
+        remind: Callable[[], Awaitable[None]] | None = None,
     ) -> ConfirmationAnswer:
         token, future = self.pending.open()
         try:
@@ -197,6 +230,8 @@ class PostedConfirmations[Card: PromptCard]:
         self.cards[token] = posted
         timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
         try:
+            await _remind_once(future, prompt.expires_at, remind)
+            timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
             answer = await self.pending.wait(token, future, timeout_s=timeout_s)
         except BaseException:
             self.cards.pop(token, None)
@@ -277,10 +312,13 @@ async def wait_local_confirmation(
     *,
     stop: Callable[[], None],
     retire: Callable[[ConfirmationCardState], Awaitable[None]],
+    remind: Callable[[], Awaitable[None]] | None = None,
 ) -> ConfirmationAnswer:
     """Discord cancels its future and stops its view before a retire edit."""
     timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
     try:
+        await _remind_once(future, prompt.expires_at, remind)
+        timeout_s = max(0.0, (prompt.expires_at - datetime.now(UTC)).total_seconds())
         answer = await asyncio.wait_for(asyncio.shield(future), timeout=timeout_s)
     except TimeoutError:
         answer = "expired"

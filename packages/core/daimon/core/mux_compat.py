@@ -41,20 +41,19 @@ from mux.contracts.resources import (
     SkillUpload,
     SkillUploadFile,
 )
-from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
-from mux.drivers.anthropic.resources._secrets import CredentialFileUpload
-from mux.drivers.anthropic.resources.agents import (
+from mux.drivers.anthropic import (
+    CredentialFileUpload,
+    EnvironmentConfig,
+    EnvironmentReads,
+    NativeArtifacts,
+    NativeMemoryStores,
+    ResourceAuthorization,
+    ResourceWalk,
+    StoreCreate,
     agent_record,
+    environment_record,
 )
-from mux.drivers.anthropic.resources.agents import (
-    update_agent_ignored as native_update_agent_ignored,
-)
-from mux.drivers.anthropic.resources.artifacts import Artifacts as NativeArtifacts
-from mux.drivers.anthropic.resources.environments import EnvironmentReads, environment_record
-from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
-from mux.drivers.anthropic.resources.memory_stores import StoreCreate
-from mux.drivers.anthropic.resources.walk import ResourceWalk
-from mux.drivers.anthropic.schemas import EnvironmentConfig
+from mux.drivers.anthropic import update_agent_ignored as native_update_agent_ignored
 from mux.errors import ProviderError
 
 if TYPE_CHECKING:
@@ -64,7 +63,7 @@ if TYPE_CHECKING:
     )
     from mux.contracts.resources import Skill, SkillVersion
     from mux.drivers.anthropic import AnthropicManagedAgents
-    from mux.drivers.anthropic.resources.vaults import Vaults as NativeVaults
+    from mux.drivers.anthropic import Vaults as NativeVaults
 
 
 async def legacy_call[T](call: Awaitable[T]) -> T:
@@ -239,7 +238,7 @@ def sdk_agent(record: Agent) -> BetaManagedAgentsAgent:
     if record.native is not None:
         return BetaManagedAgentsAgent.model_construct(_fields_set=None, **_mapping(record.native))
     spec = record.spec
-    from mux.drivers.anthropic.resources.agents import agent_payload
+    from mux.drivers.anthropic import agent_payload
 
     payload = agent_payload(spec)
     if isinstance(payload["model"], str):
@@ -260,7 +259,7 @@ def sdk_agent(record: Agent) -> BetaManagedAgentsAgent:
 def sdk_environment(record: Environment) -> BetaEnvironment:
     if record.native is not None:
         return BetaEnvironment.model_construct(_fields_set=None, **_mapping(record.native))
-    from mux.drivers.anthropic.resources.environments import environment_payload
+    from mux.drivers.anthropic import environment_payload
 
     payload = environment_payload(record.spec)
     if record.spec.packages is not None:
@@ -561,7 +560,7 @@ async def download_skill_version(
 async def list_native_skill_versions(
     client: AsyncAnthropic, skill_id: str, *, scope: Scope
 ) -> AsyncIterator[VersionListResponse]:
-    from mux.drivers.anthropic.resources.skills import NativeSkillVersions
+    from mux.drivers.anthropic import NativeSkillVersions
 
     backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
     port = backend.extension(NativeSkillVersions, namespace="anthropic.skills_versions", version=1)
@@ -572,7 +571,7 @@ async def list_native_skill_versions(
 async def download_skill_version_id(
     client: AsyncAnthropic, skill_id: str, version_id: str, *, scope: Scope
 ) -> bytes:
-    from mux.drivers.anthropic.resources.skills import NativeSkillVersions
+    from mux.drivers.anthropic import NativeSkillVersions
 
     backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
     port = backend.extension(NativeSkillVersions, namespace="anthropic.skills_versions", version=1)
@@ -639,7 +638,7 @@ def _vault_port(
     vault_id: str | None = None,
     secrets: Mapping[str, str] | None = None,
 ) -> tuple[AnthropicManagedAgents, NativeVaults]:
-    from mux.drivers.anthropic.resources.vaults import Vaults
+    from mux.drivers.anthropic import Vaults
 
     backend = managed_agents(
         client,
@@ -711,7 +710,7 @@ async def create_credential(
     from anthropic.types.beta.vaults.beta_managed_agents_credential import (
         BetaManagedAgentsCredential,
     )
-    from mux.drivers.anthropic.credential_schemas import CredentialCreate
+    from mux.drivers.anthropic import CredentialCreate
 
     refs, secrets = _credential_refs(payload)
     try:
@@ -735,7 +734,7 @@ async def store_credential(
     client: AsyncAnthropic, vault_id: str, payload: Mapping[str, object], *, scope: Scope
 ) -> None:
     """Keep the original write paths that discarded the SDK create response."""
-    from mux.drivers.anthropic.credential_schemas import CredentialCreate
+    from mux.drivers.anthropic import CredentialCreate
 
     refs, secrets = _credential_refs(payload)
     try:
@@ -763,7 +762,7 @@ async def update_credential(
     from anthropic.types.beta.vaults.beta_managed_agents_credential import (
         BetaManagedAgentsCredential,
     )
-    from mux.drivers.anthropic.credential_schemas import CredentialUpdate
+    from mux.drivers.anthropic import CredentialUpdate
 
     refs, secrets = _credential_refs(payload)
     try:

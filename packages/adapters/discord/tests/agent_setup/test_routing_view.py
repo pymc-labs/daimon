@@ -30,13 +30,15 @@ from daimon.core.answering_map import AnsweringMap, ChannelAnswer, SetupThreadRe
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent, paginate
-from daimon.core.routing_facts import PRECEDENCE_LINE
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
+
+PRECEDENCE_LINE = "A channel's own choice beats the server default."
+
 
 _SET_AT = dt.datetime(2026, 2, 1, tzinfo=dt.UTC)
 
@@ -176,7 +178,7 @@ def test_routing_orders_channels_then_server_default_then_deployment_default() -
     assert text.index("#data") < text.index("#growth") < text.index("Server default"), (
         "channels come before the server default"
     )
-    assert text.index("Server default") < text.index("Deployment default"), (
+    assert text.index("Server default") < text.index("Daimon-wide default"), (
         "the server default comes before the deployment fall-through"
     )
     assert "-# set by <@77>" in text, "the server default carries its audit line"
@@ -223,7 +225,7 @@ def test_deployment_default_is_plain_when_no_server_default_shadows_it() -> None
 
 def test_setup_conversations_are_listed_separately_and_bounded() -> None:
     links = [
-        f"[Managing bot-{index}](https://discord.com/channels/2001/{index})" for index in range(8)
+        f"[Setting up bot-{index}](https://discord.com/channels/2001/{index})" for index in range(8)
     ]
     container = build_routing_container(
         paginate(
@@ -274,8 +276,8 @@ def test_setup_conversation_links_are_jump_links_into_the_guild() -> None:
     )
     links = setup_conversation_links(answering_map, guild_id=2001)
     assert links == [
-        "[Managing churn-explorer](https://discord.com/channels/2001/55)",
-        "[Managing agents](https://discord.com/channels/2001/56)",
+        "[Setting up churn-explorer](https://discord.com/channels/2001/55)",
+        "[Setting up agents](https://discord.com/channels/2001/56)",
     ], "each live setup thread gets a jump link, named by its target when it has one"
 
 
@@ -399,7 +401,7 @@ def test_routing_offers_no_setup_button(account_id: uuid.UUID) -> None:
         state, runtime=_make_runtime(), allowed_user_id=42, lines=[], server_default=None
     )
     labels = {node.label for node in _walk(view) if isinstance(node, discord.ui.Button)}
-    assert not any(label is not None and "Manage" in label for label in labels), (
+    assert not any(label is not None and "Set up" in label for label in labels), (
         "Who answers where carries no setup button"
     )
 

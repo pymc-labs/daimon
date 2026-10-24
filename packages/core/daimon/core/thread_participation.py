@@ -2,11 +2,9 @@
 
 Platform-agnostic and free of I/O. Three pieces:
 
-- `resolve_participation`: the scope cascade. Deployment default, then
-  workspace, channel, thread; the most specific explicit value wins, except
-  that `DISABLED` at any tier is final for every tier below it. That is the
-  difference between `OFF` (nobody asked yet, but a thread may be turned on)
-  and `DISABLED` (an admin or operator has said no, and asking does nothing).
+- `resolve_participation`: the scope cascade (`daimon.core.scope_cascade`).
+  Deployment default, then workspace, channel, thread; the most specific
+  explicit value wins, except that `DISABLED` at any tier is final below it.
 - `decide_pre_classifier`: the gates that cost nothing, applied to a snapshot
   the adapter gathered. `Respond` here means "spend a classifier call".
 - The classifier prompt and verdict parser; `decide_post_classifier` maps the
@@ -21,49 +19,27 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 from xml.sax.saxutils import escape, quoteattr
 
+from daimon.core.scope_cascade import (
+    CascadeMode,
+    CascadeScope,
+    CascadeTier,
+    ResolvedCascade,
+    resolve_cascade,
+)
+from daimon.core.scope_cascade import (
+    scope_label as scope_label,
+)
+from daimon.core.scope_cascade import (
+    tier_word as tier_word,
+)
 
-class ParticipationMode(StrEnum):
-    ON = "on"
-    OFF = "off"
-    DISABLED = "disabled"
-
-
-class ParticipationScope(StrEnum):
-    WORKSPACE = "workspace"
-    CHANNEL = "channel"
-    THREAD = "thread"
-
-
-ParticipationTier = Literal["deployment", "workspace", "channel", "thread"]
-
-
-@dataclass(frozen=True)
-class ResolvedParticipation:
-    mode: ParticipationMode
-    tier: ParticipationTier
-    """The tier whose value is in effect: the one to change to get a different answer."""
-
-
-def resolve_participation(
-    *,
-    deployment: ParticipationMode,
-    workspace: ParticipationMode | None,
-    channel: ParticipationMode | None,
-    thread: ParticipationMode | None,
-) -> ResolvedParticipation:
-    """Walk the cascade broadest first: `DISABLED` stops the walk, else the last set value wins."""
-    effective = ResolvedParticipation(deployment, "deployment")
-    tiers: tuple[tuple[ParticipationMode | None, ParticipationTier], ...] = (
-        (workspace, "workspace"),
-        (channel, "channel"),
-        (thread, "thread"),
-    )
-    for value, tier in tiers:
-        if effective.mode is ParticipationMode.DISABLED:
-            break
-        if value is not None:
-            effective = ResolvedParticipation(value, tier)
-    return effective
+# The cascade is shared with progress plans (`daimon.core.scope_cascade`); these
+# names are what the participation code and its callers have always used.
+ParticipationMode = CascadeMode
+ParticipationScope = CascadeScope
+ParticipationTier = CascadeTier
+ResolvedParticipation = ResolvedCascade
+resolve_participation = resolve_cascade
 
 
 class SkipReason(StrEnum):
@@ -209,36 +185,29 @@ def decide_post_classifier(verdict: ClassifierVerdict) -> ParticipationDecision:
 # --- Notes returned by the participation tool ---------------------------------
 
 
-def scope_label(scope: ParticipationScope, scope_id: str | None) -> str:
-    return (
-        "the whole workspace"
-        if scope is ParticipationScope.WORKSPACE
-        else f"{scope.value} {scope_id}"
-    )
-
-
 def build_participation_explanation(
-    effective: ResolvedParticipation, *, thread_id: str | None
+    effective: ResolvedParticipation, *, thread_id: str | None, platform: str | None = None
 ) -> str:
     """One sentence naming the winning tier, so "why are you (not) replying here" is answerable.
 
     Lives in core beside `build_participation_note` because it is the same
     pure cascade-to-prose mapping; the participation tool only renders it.
     """
+    tier = tier_word(effective.tier, platform)
     where = f"thread {thread_id}" if thread_id is not None else "here"
     if effective.mode is ParticipationMode.ON:
         return (
-            f"I follow {where}: the {effective.tier} tier is set to on, so I may reply "
+            f"I follow {where}: the {tier} setting is on, so I may reply "
             "to messages that call for it without being addressed first."
         )
     if effective.mode is ParticipationMode.DISABLED:
         return (
-            f"I only reply in {where} when @mentioned: the {effective.tier} tier is "
-            "disabled, and no narrower scope can turn it back on."
+            f"I only reply in {where} when @mentioned: the {tier} setting is "
+            "disabled, and no narrower setting can turn it back on."
         )
     return (
-        f"I only reply in {where} when @mentioned: the {effective.tier} tier is the "
-        "narrowest one with a setting, and it is off."
+        f"I only reply in {where} when @mentioned: the {tier} setting is the "
+        "narrowest one with a value, and it is off."
     )
 
 
@@ -248,6 +217,7 @@ def build_participation_note(
     scope_id: str | None,
     requested: ParticipationMode | None,
     effective: ResolvedParticipation,
+    platform: str | None = None,
 ) -> str:
     """One sentence stating what was written and what is now in effect at that scope.
 
@@ -255,7 +225,7 @@ def build_participation_note(
     the cascade's actual answer: a thread turned `on` under a `disabled` channel
     stays silent, and the note says so.
     """
-    where = scope_label(scope, scope_id)
+    where = scope_label(scope, scope_id, platform)
     wrote = (
         f"{where} now inherits its setting"
         if requested is None
@@ -264,8 +234,9 @@ def build_participation_note(
     if effective.mode is ParticipationMode.ON:
         return f"{wrote}; I will reply in threads there when a message calls for it."
     if effective.mode is ParticipationMode.DISABLED:
+        tier = tier_word(effective.tier, platform)
         return (
-            f"{wrote}, but participation is disabled at the {effective.tier} level, "
+            f"{wrote}, but participation is disabled at the {tier} level, "
             "so I only reply when @mentioned and this cannot be turned on below that level."
         )
     return f"{wrote}; I only reply there when @mentioned."

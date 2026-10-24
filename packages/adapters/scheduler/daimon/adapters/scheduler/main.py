@@ -30,6 +30,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import anthropic
 import httpx
@@ -49,6 +50,7 @@ from daimon.core.authz import (
     build_subject,
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
+from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_channel
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import DirectMessagePolicy, Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -99,8 +101,10 @@ from daimon.core.routine_delivery import (
     render_routine_controls,
 )
 from daimon.core.routine_files import collect_routine_files
+from daimon.core.routine_hold import routine_hold
 from daimon.core.routine_sandbox import RoutineSandbox, pin_of
 from daimon.core.rule_views import (
+    is_routine_parent_unknown,
     keeps_routine_inside,
     routine_destination_channel,
     routine_destination_place,
@@ -476,6 +480,53 @@ async def _build_fire(
             ):
                 await _refuse(s, row, "routine DMs are disabled or the owner is not allowed")
                 return
+            # Headless routines have no self-hosted runtime yet. Refuse before
+            # resolving agents, environments, defaults or credentials at Anthropic.
+            target = delivery_target(row, platform=platform)
+            if is_routine_parent_unknown(row):
+                await record_result(
+                    s, row.id, tail=None, error="routine_destination_parent_unknown"
+                )
+                return
+            parent_channel = routine_destination_channel(row)
+            if row.destination_kind == "thread" and parent_channel is not None:
+                thread_id = (
+                    target.thread_ts
+                    if platform == "slack" and target is not None
+                    else row.destination_id
+                )
+                if (
+                    await effective_thread_backend(
+                        s,
+                        tenant_id=row.tenant_id,
+                        platform=platform,
+                        channel_id=parent_channel,
+                        thread_id=thread_id,
+                        caller_id=row.created_by_user_id,
+                    )
+                    == "selfhosted"
+                ):
+                    await record_result(
+                        s, row.id, tail=None, error="selfhosted_routines_unsupported"
+                    )
+                    return
+            channels = {
+                channel
+                for channel in (
+                    row.channel_id,
+                    routine_destination_channel(row),
+                    target.channel_id if target is not None else None,
+                )
+                if channel is not None
+            }
+            for routine_channel in channels:
+                if await is_selfhosted_channel(
+                    s, tenant_id=row.tenant_id, platform=platform, channel_id=routine_channel
+                ):
+                    await record_result(
+                        s, row.id, tail=None, error="selfhosted_routines_unsupported"
+                    )
+                    return
             principal = await get_or_create_platform_principal(
                 s,
                 tenant_id=row.tenant_id,
@@ -583,6 +634,12 @@ async def _build_fire(
                 )
                 await _refuse(s, row, policy_error)
                 return
+
+        # A destination in a channel shared with another organisation is read by
+        # people from it, so the fire runs held to that channel (its own memory,
+        # the held credential). It never runs unheld.
+        async with sm() as hold_s:
+            fire_hold = await routine_hold(hold_s, row, platform=platform)
 
         # Admission gate: per-tenant balance — independent of Stripe config.
         # Keys on row.tenant_id (NOT NULL). Mirror run_one_tick's cap_exceeded skip.
@@ -735,6 +792,8 @@ async def _build_fire(
             )
         final_state: list[TurnState] = []
         output_sessions: list[str] = []
+        # Passed only when held, so an ordinary fire's call stays what it was.
+        held_fire: dict[str, Any] = {} if fire_hold is None else {"hold": fire_hold}
 
         result = await run_turn(
             privacy=privacy,
@@ -767,6 +826,8 @@ async def _build_fire(
             # Built-in sandbox tools only for a routine an admin opted in, and
             # only while its agent version and environment are the ones approved.
             sandbox=_routine_sandbox(sm, row),
+            platform=platform,
+            **held_fire,
         )
 
         if row.destination_kind is None:
@@ -915,6 +976,7 @@ async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
     from daimon.core.mcp_auth import (
         CHAT_TOKEN_LABEL_PREFIX,
         EPHEMERAL_TOKEN_RETENTION,
+        HELD_CHAT_TOKEN_LABEL_PREFIX,
         PANEL_TOKEN_LABEL,
     )
     from daimon.core.stores.mcp_tokens import prune_expired_ephemeral_tokens
@@ -924,7 +986,7 @@ async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
             await prune_expired_ephemeral_tokens(
                 session,
                 expires_before=datetime.now(UTC) - EPHEMERAL_TOKEN_RETENTION,
-                chat_label_prefix=CHAT_TOKEN_LABEL_PREFIX,
+                chat_label_prefixes=(CHAT_TOKEN_LABEL_PREFIX, HELD_CHAT_TOKEN_LABEL_PREFIX),
                 panel_label=PANEL_TOKEN_LABEL,
             )
     except SQLAlchemyError:

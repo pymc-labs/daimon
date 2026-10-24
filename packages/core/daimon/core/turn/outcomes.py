@@ -90,6 +90,8 @@ class TurnObservation:
     session_id: str | None = None
     backend_profile: str | None = field(default=None, kw_only=True)
     """Admitted profile displayed only for explicitly configured neutral turns."""
+    progress_plans: bool = field(default=False, kw_only=True)
+    """Progress plans resolved on for this turn: its card draws the agent's plan."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     _started: float = field(default_factory=time.monotonic)

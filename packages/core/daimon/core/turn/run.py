@@ -81,8 +81,10 @@ from daimon.core.turn.lifecycle import (
     TurnLifecycle,
     acknowledge,
 )
+from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.output import OutputAuthorization, output_authorization
+from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
 from daimon.core.turn.posture import (
     Billed,
     BillingPosture,
@@ -101,6 +103,7 @@ from daimon.core.turn.prepare import (
     stamp_session_seal,
 )
 from daimon.core.turn.privacy import TurnPrivacy
+from daimon.core.turn.progress_plans import progress_plans_prefix
 from daimon.core.turn.provider_actions import (
     ProviderActionApproval,
     ProviderActionHook,
@@ -125,9 +128,10 @@ from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import SUPPORTED
-from mux.drivers.anthropic.sessions_lifecycle import SESSION_READS_NAMESPACE, SessionReads
+from mux.drivers.anthropic import SESSION_READS_NAMESPACE, SessionReads
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import MANAGED_AGENTS, get_profile
+from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
 from sqlalchemy.exc import SQLAlchemyError
 
 
@@ -238,6 +242,23 @@ def _turn_port_kwargs(
 
 
 log = structlog.get_logger(__name__)
+#: How long a turn waits for its end-of-turn finalizer (credential revocation)
+#: before returning; a slower finalizer keeps running in the background.
+_FINALIZE_TIMEOUT_S = 15.0
+
+#: Finalizers still running past their wait: strong references so they are
+#: never garbage collected mid-revocation; each removes itself when done.
+_PENDING_FINALIZERS: set[asyncio.Future[None]] = set()
+
+
+def _finalizer_done(task: asyncio.Future[None]) -> None:
+    _PENDING_FINALIZERS.discard(task)
+    if task.cancelled():
+        log.warning("turn.finalize_cancelled")
+        return
+    error = task.exception()
+    if error is not None:
+        log.warning("turn.finalize_failed", error=type(error).__name__)
 
 
 async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: UsageRecorder) -> None:
@@ -526,7 +547,9 @@ async def _archive_orphaned_session(
     Shielded from caller cancellation so it can wait for the request up to a
     fixed deadline. If that deadline expires, the request continues in the
     background and its result is logged when it finishes. A failure is
-    swallowed: the error being unwound is the one the caller must see.
+    swallowed: the error being unwound is the one the caller must see. A
+    profile with no native archive (Gemini inline reuse) has nothing to clean
+    up, so its refusal is a skip, never a failure.
     """
     archive_task = asyncio.create_task(
         archive()
@@ -540,7 +563,9 @@ async def _archive_orphaned_session(
         if task.cancelled():
             return
         err = task.exception()
-        if err is not None:
+        if _no_archive(err):
+            log.info("turn.recovery_orphan_archive_skipped", session_id=session_id)
+        elif err is not None:
             log.warning(
                 "turn.recovery_orphan_archive_failed",
                 session_id=session_id,
@@ -577,11 +602,18 @@ async def _archive_orphaned_session(
             log.info("turn.recovery_orphan_archived", session_id=session_id)
             return
     except Exception as err:
+        if _no_archive(err):
+            log.info("turn.recovery_orphan_archive_skipped", session_id=session_id)
+            return
         log.warning(
             "turn.recovery_orphan_archive_failed",
             session_id=session_id,
             error=str(err)[:200],
         )
+
+
+def _no_archive(err: BaseException | None) -> bool:
+    return isinstance(err, UnsupportedCapability) and "session_archive" in err.missing
 
 
 async def _replace_dead_session(
@@ -676,7 +708,7 @@ async def _replace_dead_session_locked(
                     )
                 )
             ):
-                raise SessionRetired("This session was replaced. Continue in its successor.")
+                raise SessionRetired("This conversation moved. Continue in the new one.")
 
             if live is not None and live.id != dead_mapping_id:
                 # The lock wait above can be long: decide again before adopting
@@ -695,7 +727,9 @@ async def _replace_dead_session_locked(
                         retry_after=datetime.now(UTC) + timedelta(seconds=1),
                     )
                 if live.ma_agent_id is not None and live.ma_agent_id != admission.agent.id:
-                    raise SessionRetired("This session belongs to the handoff successor.")
+                    raise SessionRetired(
+                        "This conversation moved to another agent. Continue there."
+                    )
                 admission = current
                 await stamp_session_seal(
                     deps,
@@ -755,7 +789,11 @@ async def _replace_dead_session_locked(
             # leaving a live, unlinked replacement the next mention would continue
             # on without the lost-workspace framing.
             created = await create_ma_session(
-                deps, admission, tenant_id=tenant_id, predecessor_session_id=dead_session_id
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                predecessor_session_id=dead_session_id,
+                platform=platform,
             )
             fresh = await insert_mapping(
                 db,
@@ -908,9 +946,25 @@ async def run_prepared_turn(
     except BaseException as exc:
         observation.finish(error=exc)
         raise
+    finally:
+        finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
+        if finalize is not None:
+            # Credential revocation must survive a second cancel of this task:
+            # the shielded call keeps running even if this wait is cancelled.
+            pending = asyncio.ensure_future(finalize())
+            _PENDING_FINALIZERS.add(pending)
+            pending.add_done_callback(_finalizer_done)
+            try:
+                await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
+            except TimeoutError:
+                log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
     return result
+
+
+#: Origins whose lifecycle draws the turn in a chat for a person to read.
+_CHAT_RENDERED_ORIGINS: frozenset[TurnContext] = frozenset({"chat", "handoff"})
 
 
 async def run_prepared_turn_impl(
@@ -1003,6 +1057,8 @@ async def run_prepared_turn_impl(
         fallback_channel_id=thread_id,
     )
     privacy.check()
+    if origin in _CHAT_RENDERED_ORIGINS:
+        lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)
 
     if watch_row is not None and (watch_row.reason != "watch_fired" or attended is not False):
         raise ValueError("Watch turns must be explicitly unattended")
@@ -1022,12 +1078,24 @@ async def run_prepared_turn_impl(
     active_record_cell: list[UsageRecorder | ObservationRecorder] = [prepared._record]  # pyright: ignore[reportPrivateUsage]
 
     active_admission_cell: list[Admission] = [prepared.admission]
+    # The mux persistence of the attempt now running; while it waits for a
+    # thread lease held by another turn, this turn runs nothing on its mapping.
+    active_persistence_cell: list[TurnPersistence | None] = [None]
 
     # A replacement session's first user message opens with daimon's framing
     # for the work it inherited (`daimon.core.handoff_context`). Empty for
     # every ordinary turn, which then sends byte-identical bytes to before.
     context = context_prompt(origin, system=prepared.admission.agent.system)
-    prefix = context + prepared.continuity.user_prefix
+    plans = await progress_plans_prefix(
+        deps.sessionmaker,
+        deployment=deps.progress_plans,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=prepared.admission.origin_channel_id,
+        thread_id=thread_id,
+        chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
+    )
+    prefix = context + plans + prepared.continuity.user_prefix
     if prepared.admission.model_fell_back:
         prefix += MODEL_FALLBACK_NOTICE
 
@@ -1064,6 +1132,7 @@ async def run_prepared_turn_impl(
         mapping_id: uuid.UUID | None,
         session_ref: ResourceRef | None = None,
         *,
+        attempt_cancel: asyncio.Event = cancel,
         confirmation: ToolConfirmation,
         backend: ManagedAgents | None = None,
         scope: Scope | None = None,
@@ -1241,7 +1310,12 @@ async def run_prepared_turn_impl(
                     session_ref=session_ref,
                     scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
                     fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
+                    lease_wait=LeaseWait(
+                        timeout_s=remaining_s(effective_deadline, now=now()),
+                        cancel=attempt_cancel,
+                    ),
                 )
+                active_persistence_cell[0] = persistence
                 with persistence.activate():
                     yield posture
         finally:
@@ -1337,6 +1411,10 @@ async def run_prepared_turn_impl(
         else:
             tool_confirmation = chat_tool_confirmation(
                 deps.tool_safety,
+                provider_permissions=(
+                    prepared.admission.backend_revision is not None
+                    and prepared.admission.backend_revision.profile == SELFHOSTED_LOOP.profile_id
+                ),
                 requester_platform_user_id=external_user_id,
                 confirm=confirm_write,
                 trusted_servers=trusted_servers_for(deps.public_url),
@@ -1436,55 +1514,62 @@ async def run_prepared_turn_impl(
         first_attempt = _DeferredFailureLifecycle(
             inner=lifecycle, may_render=delivery.check if delivery is not None else None
         )
-        async with persisted(
-            prepared.admission,
-            ma_session_id,
-            mapping_id,
-            prepared.session_ref,
-            confirmation=tool_confirmation,
-            backend=prepared.backend,
-            scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
-        ) as attempt_confirmation:
-            with output_authorization(delivery):
-                try:
-                    state = await run_turn(
-                        privacy=privacy,
-                        **_turn_port_kwargs(
-                            deps,
-                            prepared.admission,
-                            ma_session_id,
-                            tenant_id=tenant_id,
-                            provider_backend=prepared.backend,
-                            provider_session=prepared.session_ref,
-                            provider_runtime=prepared.runtime,
-                            provider_scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
-                        ),
-                        anthropic=deps.anthropic,
-                        session_id=ma_session_id,
-                        user_message=_with_prefix(prefix, user_message),
-                        lifecycle=first_attempt,
-                        cancel=cancel,
-                        render_interval_s=render_interval_s,
-                        billing=prepared_billing(prepared, tenant_id=tenant_id),
-                        tool_confirmation=attempt_confirmation,
-                        **action_kwargs,
-                        image_blocks=image_blocks,
-                        system_blocks=prepared.continuity.system_blocks,
-                        before_send=checked_send
-                        if before_send is not None
-                        or root_intent is not None
-                        or worker_finished is not None
-                        else decide_before_send(deps, prepared.admission),
-                        send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
-                    )
-                    if delivery is not None:
-                        await first_attempt.flush_held_failure()
-                finally:
-                    if delivery is not None:
-                        delivery.close()
+        superseded: BindingSuperseded | None = None
+        try:
+            async with persisted(
+                prepared.admission,
+                ma_session_id,
+                mapping_id,
+                prepared.session_ref,
+                confirmation=tool_confirmation,
+                backend=prepared.backend,
+                scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+            ) as attempt_confirmation:
+                with output_authorization(delivery):
+                    try:
+                        state = await run_turn(
+                            privacy=privacy,
+                            **_turn_port_kwargs(
+                                deps,
+                                prepared.admission,
+                                ma_session_id,
+                                tenant_id=tenant_id,
+                                provider_backend=prepared.backend,
+                                provider_session=prepared.session_ref,
+                                provider_runtime=prepared.runtime,
+                                provider_scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+                            ),
+                            anthropic=deps.anthropic,
+                            session_id=ma_session_id,
+                            user_message=_with_prefix(prefix, user_message),
+                            lifecycle=first_attempt,
+                            cancel=cancel,
+                            render_interval_s=render_interval_s,
+                            billing=prepared_billing(prepared, tenant_id=tenant_id),
+                            tool_confirmation=attempt_confirmation,
+                            **action_kwargs,
+                            image_blocks=image_blocks,
+                            system_blocks=prepared.continuity.system_blocks,
+                            before_send=checked_send
+                            if before_send is not None
+                            or root_intent is not None
+                            or worker_finished is not None
+                            else decide_before_send(deps, prepared.admission),
+                            send_guard=lambda: session_mutation_fence(
+                                deps.sessionmaker, ma_session_id
+                            ),
+                        )
+                        if delivery is not None:
+                            await first_attempt.flush_held_failure()
+                    finally:
+                        if delivery is not None:
+                            delivery.close()
+        except BindingSuperseded as error:
+            superseded = error
+            state = TurnState(error=TurnError(kind="upstream", message=str(error)))
 
         if not (
-            _is_dead_session(state)
+            (superseded is not None or _is_dead_session(state))
             and before_send is None
             and worker_finished is None
             and watch_row is None
@@ -1494,6 +1579,8 @@ async def run_prepared_turn_impl(
                 or prepared.admission.backend_revision.profile == "anthropic.managed_agents"
             )
         ):
+            if superseded is not None:
+                raise superseded
             await first_attempt.flush_held_failure()
             return RunOutcome(
                 state=state,
@@ -1604,7 +1691,7 @@ async def run_prepared_turn_impl(
             # died. What goes instead is this loss's own framing -- daimon's
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
-            reseeded_message = _with_prefix(loss_user_prefix, await reseed_user_message())
+            reseeded_message = _with_prefix(plans + loss_user_prefix, await reseed_user_message())
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
             # Mirror a LATE cancel on the ORIGINAL event into
@@ -1618,6 +1705,7 @@ async def run_prepared_turn_impl(
                     recovery.admission or prepared.admission,
                     new_session_id,
                     new_mapping_id,
+                    attempt_cancel=fresh_cancel,
                     confirmation=tool_confirmation,
                 ) as recovery_confirmation:
                     recovered_state = await run_turn(
@@ -1687,7 +1775,11 @@ async def run_prepared_turn_impl(
                 deadline=effective_deadline.isoformat(),
             )
 
-            if active_mapping_id is not None:
+            persistence = active_persistence_cell[0]
+            queued = persistence is not None and not persistence.lease_acquired
+            if active_mapping_id is not None and not queued:
+                # A turn still queued behind another never ran on this mapping,
+                # and its holder is using it: only a turn that ran retires it.
                 async with deps.sessionmaker() as session:
                     await mark_dead(session, id=active_mapping_id)
                     await session.commit()
@@ -1708,13 +1800,26 @@ async def run_prepared_turn_impl(
                 continuity=continuity_cell[0],
             )
 
-    outcome = await _run_within_ceiling()
+    from daimon.core.turn.ceiling import current_turn_deadline
+
+    # Set for the whole turn, so anything inside it (a card posted mid-turn, in this
+    # task or one it starts) reads the deadline and never promises a time past it.
+    deadline_token = current_turn_deadline.set(effective_deadline)
+    try:
+        outcome = await _run_within_ceiling()
+    finally:
+        current_turn_deadline.reset(deadline_token)
     # Turn end: anything this session billed nowhere -- calls MA made while no
     # worker was streaming it (an earlier turn whose worker died), while no
     # stream generation was attached, or before a ceiling cut the turn off.
     active_admission = active_admission_cell[0]
     revision = active_admission.backend_revision
-    if revision is None or revision.profile == "anthropic.managed_agents":
+    persistence = active_persistence_cell[0]
+    # A turn that queued for the lease and ended (Stop, ceiling) without taking
+    # it is not the session's holder: usage the holder's stream has yet to
+    # record is the holder's, and recording it here would charge this user.
+    queued_only = persistence is not None and not persistence.lease_acquired
+    if not queued_only and (revision is None or revision.profile == "anthropic.managed_agents"):
         await _settle(
             deps,
             session_id=active_session_id_cell[0],

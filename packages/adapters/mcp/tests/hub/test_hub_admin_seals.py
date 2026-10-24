@@ -32,10 +32,11 @@ from daimon.core.session_seal import origin_stamp
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role, RoutineDestinationKind, RoutineRow
-from daimon.testing import ma_agent, ma_session
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_turn_parity import _TOKEN, _call_tool, _runtime  # pyright: ignore[reportPrivateUsage]

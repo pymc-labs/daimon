@@ -1,8 +1,8 @@
 """SlackApp Socket Mode listener skeleton.
 
 Ack-first entry point with dedup gate, per-event token resolution,
-Slack Connect cross-tenant rejection, uninstall teardown routing, and
-SIGTERM drain.  Turn orchestration is delegated here.
+Slack Connect requester handling (members of another workspace run held),
+uninstall teardown routing, and SIGTERM drain.  Turn orchestration is delegated here.
 fills in ``_orchestrate``.
 
 Error boundary: ``_handle_app_mention`` is the named listener boundary.
@@ -17,7 +17,7 @@ import functools
 import json
 import time
 import uuid
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
@@ -25,7 +25,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_admin_status, resolve_requester
+from daimon.adapters.slack.admin import resolve_requester
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
@@ -105,10 +105,18 @@ from daimon.adapters.slack.direct_messages import (
     is_direct_message_event,
 )
 from daimon.adapters.slack.errors import (
-    NOT_SET_UP_NOTICE,
-    SETUP_OUT_OF_DATE_NOTICE,
     generate_request_id,
+    not_set_up_notice,
     render_error_payload,
+    setup_out_of_date_notice,
+)
+from daimon.adapters.slack.external_access import (
+    TRY_AGAIN_NOTICE,
+    external_action_allowed,
+    external_submission_allowed,
+    host_only_notice,
+    refusal_view,
+    refuse_external_click,
 )
 from daimon.adapters.slack.feedback import (
     FEEDBACK_DETAILS_ACTION_ID,
@@ -121,8 +129,8 @@ from daimon.adapters.slack.feedback import (
 from daimon.adapters.slack.gating import (
     is_external_interactive,
     is_plain_text_mention_event,
-    is_slack_connect_external,
     mentions_bot,
+    payload_proves_host,
 )
 from daimon.adapters.slack.github_connect import (
     ACTION_CANCEL,
@@ -136,7 +144,6 @@ from daimon.adapters.slack.here import handle_here_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.names import remember_payload_names
 from daimon.adapters.slack.output_delivery import NoticeKeys, deliver_session_outputs
 from daimon.adapters.slack.privacy_panel.actions import (
@@ -149,6 +156,7 @@ from daimon.adapters.slack.privacy_panel.submit import (
 )
 from daimon.adapters.slack.provider_actions import ACTION_PREFIX as PROVIDER_ACTION_PREFIX
 from daimon.adapters.slack.provider_actions import SlackProviderActions, provider_action_options
+from daimon.adapters.slack.requester_org import decide_requester_org
 from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
 from daimon.adapters.slack.routines_panel.actions import (
     handle_routine_action,
@@ -167,6 +175,11 @@ from daimon.adapters.slack.runtime import (
     responder_handle,
 )
 from daimon.adapters.slack.setup_conversations import handle_setup_lifecycle
+from daimon.adapters.slack.shared_channel import (
+    ENVELOPE_EXT_SHARED_KEY,
+    SharedChannelProbe,
+    handle_shared_channel_event,
+)
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
     SUPPORT_CALLBACK_ID,
@@ -196,6 +209,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.continuity.continuation import (
     check_wake_responder,
     continuation_attended,
@@ -221,20 +235,18 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.output_delivery import NoticedFiles
+from daimon.core.platform_words import words_for
 from daimon.core.routine_delivery import run_delivery_poller
-from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
-from daimon.core.stores.slack_connect_prompts import mark_connect_prompted, was_connect_prompted
 from daimon.core.stores.slack_event_dedup import insert_if_new
 from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,
     delete_slack_turn_context,
 )
-from daimon.core.stores.slack_user_tokens import get_slack_user_token
 from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
 from daimon.core.stores.thread_agent_bindings import get_binding as get_setup_binding
 from daimon.core.stores.thread_sessions import (
@@ -260,7 +272,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
-from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
     holding,
@@ -291,7 +303,9 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
-TENANT_CAP_NOTICE = "This workspace has too many chats in flight right now — try again in a moment."
+TENANT_CAP_NOTICE = (
+    f"This {words_for('slack').space} has too many chats at once right now — try again in a moment."
+)
 
 # Grace window for graceful shutdown drain. Must be strictly less
 # than the deployment's 60s kill timeout to leave headroom for client.close()
@@ -306,8 +320,9 @@ _ORPHAN_RECOVERY_MAX_RETRY_DELAY_S: float = 30.0
 # Marks a request queued behind the thread's active turn.
 _PENDING_REACTION = "hourglass_flowing_sand"
 
-_CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
-_CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
+_CANCEL_NOT_AUTHOR = "Only the person who asked, or a workspace admin, can stop this reply."
+_CANCEL_ROLE_UNKNOWN = "I couldn't check your role just now. Try again in a moment."
+_CANCEL_TURN_ENDED = "This reply has already finished — there is nothing left to cancel."
 
 
 def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
@@ -318,6 +333,20 @@ def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
     exc = task.exception()
     if exc is not None:
         log.error("bg_task_failed", task_name=task.get_name(), exc_info=exc)
+
+
+#: How long a positive host-member verdict is reused.
+_HOST_MEMBER_TTL_S = 600.0
+#: The longest a membership lookup may hold an acknowledgement or a 3-second trigger id.
+_HOST_CHECK_TIMEOUT_S = 1.5
+
+type HostCheck = Literal["member", "not_member", "unavailable"]
+
+
+def _payload_team_id(payload: dict[str, Any]) -> str:
+    """The workspace an interactive payload is addressed to (the host)."""
+    team: dict[str, Any] = payload.get("team") or {}
+    return str(team.get("id") or "")
 
 
 def _author_id(event: dict[str, Any]) -> str:
@@ -420,6 +449,12 @@ class SlackApp:
         # Bot user id per workspace, resolved lazily via auth.test. The id is
         # immutable for a given app+workspace, so the cache never invalidates.
         self._bot_user_ids: dict[str, str] = {}
+        # The host workspace's name per team, from auth.test, for copy shown to external members.
+        self._workspace_names: dict[str, str] = {}
+        self._shared_channels = SharedChannelProbe()
+        # Host-member verdicts (positive only) per (team, user), with their expiry.
+        self._host_members: dict[tuple[str, str], float] = {}
+        self._host_member_clock: Callable[[], float] = time.monotonic
         # Tool-write confirmation cards awaiting a click (in-process, like the
         # cancel registry above).
         self._confirmations = SlackConfirmationCards()
@@ -629,6 +664,39 @@ class SlackApp:
         if self._output_sweeps.get(session_id) is task:
             del self._output_sweeps[session_id]
 
+    def _schedule_output_sweep(
+        self,
+        outcome: RunOutcome,
+        web_client: AsyncWebClient,
+        *,
+        channel: str,
+        thread_id: str,
+        team_id: str,
+        selfhosted: bool,
+        requester_user_id: str,
+    ) -> None:
+        """Serialize the optional Anthropic file sweep after a tool turn."""
+
+        if selfhosted or not any(
+            isinstance(block, ToolUseBlock) for block in outcome.state.content
+        ):
+            return
+        # Read the chain link synchronously, before spawning, so it cannot be lost.
+        previous = self._output_sweeps.get(outcome.ma_session_id)
+        task = self._spawn(
+            self._sweep_session_outputs(
+                previous,
+                web_client,
+                session_id=outcome.ma_session_id,
+                channel_id=channel,
+                thread_ts=thread_id,
+                team_id=team_id,
+                requester_user_id=requester_user_id,
+            )
+        )
+        self._output_sweeps[outcome.ma_session_id] = task
+        task.add_done_callback(functools.partial(self._forget_output_sweep, outcome.ma_session_id))
+
     async def _sweep_session_outputs(
         self,
         previous: asyncio.Task[None] | None,
@@ -717,6 +785,26 @@ class SlackApp:
         if req.type == "interactive" and payload.get("type") == "view_submission":
             view_vs: dict[str, Any] = payload.get("view") or {}
             cb_id: str = str(view_vs.get("callback_id") or "")
+            submitter = (
+                "member"
+                if external_submission_allowed(cb_id)
+                else await self._submitter_check(payload)
+            )
+            if submitter != "member":
+                # Only the feedback form opened from their own answer is open to
+                # a member of another workspace, or to anyone whose workspace the
+                # payload and users.info cannot place; everything else is the host's.
+                log.info("slack.on_request.external_submission_refused", callback_id=cb_id)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(
+                        envelope_id=req.envelope_id,
+                        payload=refusal_view(
+                            self._workspace_names.get(_payload_team_id(payload)),
+                            text=TRY_AGAIN_NOTICE if submitter == "unavailable" else None,
+                        ),
+                    )
+                )
+                return
             if cb_id == "privacy_delete":
                 decision = evaluate_delete_submission(
                     payload, delete_enabled=self.runtime.settings.privacy.delete_enabled
@@ -1131,7 +1219,11 @@ class SlackApp:
         remember_payload_names(self.runtime.sessionmaker, req.type, payload)
 
         if req.type == "events_api":
-            event = event_for_ack
+            event: dict[str, Any] = event_for_ack
+            if payload.get("is_ext_shared_channel") is True:
+                # The envelope's own word that the channel is shared with another
+                # organisation travels with the event to the turn.
+                event = {**event, ENVELOPE_EXT_SHARED_KEY: True}
             team_id_raw = payload.get("team_id") or event.get("team")
             team_id: str = str(team_id_raw) if team_id_raw is not None else ""
             etype: str | None = event.get("type")
@@ -1160,6 +1252,14 @@ class SlackApp:
                 )
                 self._mention_tasks.add(task)
                 task.add_done_callback(self._mention_tasks.discard)
+            elif etype in {"channel_shared", "channel_unshared"}:
+                self._spawn(
+                    handle_shared_channel_event(
+                        self.runtime.sessionmaker, self._shared_channels, event, team_id=team_id
+                    )
+                )
+            elif etype == "member_joined_channel":
+                self._on_member_joined_channel(event, team_id=team_id)
             elif etype in {
                 "channel_archive",
                 "channel_unarchive",
@@ -1180,93 +1280,58 @@ class SlackApp:
             # Log req.type for unknown commands so the envelope type can be
             # confirmed from staging logs.
             cmd: str = str(payload.get("command") or "")
+            runtime = self.runtime
+            handler: Callable[[], Coroutine[Any, Any, None]] | None = None
             if cmd == "/dm-me":
-                self._spawn(handle_dm_command(self.runtime, payload))
+                handler = lambda: handle_dm_command(runtime, payload)  # noqa: E731
             elif cmd == "/help":
-                self._spawn(handle_help_command(self.runtime, payload))
+                # The help text is open to everyone: it reveals nothing of the host's.
+                self._spawn(handle_help_command(runtime, payload))
             elif cmd == "/here":
-                self._spawn(handle_here_command(self.runtime, payload))
+                handler = lambda: handle_here_command(runtime, payload)  # noqa: E731
             elif cmd == "/routines":
-                self._spawn(handle_routines_command(self.runtime, payload))
+                handler = lambda: handle_routines_command(runtime, payload)  # noqa: E731
             elif cmd == "/billing":
-                self._spawn(handle_billing_command(self.runtime, payload))
+                handler = lambda: handle_billing_command(runtime, payload)  # noqa: E731
             elif cmd == "/privacy":
-                self._spawn(handle_privacy_command(self.runtime, payload))
+                handler = lambda: handle_privacy_command(runtime, payload)  # noqa: E731
             elif cmd == "/github" and str(payload.get("text") or "").strip().startswith("connect"):
-                self._spawn(handle_github_command(self.runtime, payload))
+                handler = lambda: handle_github_command(runtime, payload)  # noqa: E731
             elif cmd in ("/agent-setup", "/github"):
-                self._spawn(handle_agent_setup_command(self.runtime, payload))
+                handler = lambda: handle_agent_setup_command(runtime, payload)  # noqa: E731
             elif cmd == "/memory":
-                self._spawn(handle_memory_command(self.runtime, payload))
+                handler = lambda: handle_memory_command(runtime, payload)  # noqa: E731
             else:
                 log.info(
                     "slack.on_request.unknown_command",
                     command=cmd,
                     req_type=req.type,
                 )
+            if handler is not None:
+                # Slash payloads carry no sender workspace, so every command but
+                # /help needs a users.info-verified host member.
+                self._spawn(self._gated_slash(payload, handler))
         elif req.type == "interactive":
             if payload.get("type") == "block_actions":
-                # Reject block actions from an external
-                # Slack Connect workspace before any handler resolves reads
-                # against the host tenant.
-                if is_external_interactive(payload):
-                    log.info("slack.on_request.external_block_action_rejected")
-                    return
                 actions: list[dict[str, Any]] = payload.get("actions") or []
                 action_id: str = str(actions[0].get("action_id") or "") if actions else ""
-                if action_id == "cancel_turn":
-                    # Existing cancel path — KEEP unchanged.
-                    self._spawn(self._handle_block_action(payload))
-                elif (
-                    action_id.startswith("routine_action:")
-                    or action_id == "routines_refresh"
-                    or action_id == "routines_create"
-                ):
-                    self._spawn(handle_routine_action(self.runtime, payload))
-                elif action_id == "billing_topup":
-                    self._spawn(handle_topup_select(self.runtime, payload))
-                elif action_id == REDEEM_OPEN_ACTION_ID:
-                    self._spawn(handle_redeem_open(self.runtime, payload))
-                elif action_id in PANEL_ACTION_IDS:
-                    self._spawn(handle_panel_action(self.runtime, payload))
-                elif action_id in (
-                    "privacy_delete_open",
-                    "privacy_export",
-                    "privacy_slack_disconnect",
-                ):
-                    self._spawn(handle_privacy_block_action(self.runtime, payload))
-                elif action_id.startswith("agent_setup__"):
-                    self._spawn(handle_agent_setup_action(self.runtime, payload))
-                elif action_id.startswith("github_new_repo__"):
-                    from daimon.adapters.slack.agent_setup.github_new_repo import handle_action
-
-                    self._spawn(handle_action(self.runtime, payload))
-                elif action_id.startswith("github_link__"):
-                    from daimon.adapters.slack.agent_setup.github_link import handle_action
-
-                    self._spawn(handle_action(self.runtime, payload))
-                elif action_id.startswith("github_request__"):
-                    from daimon.adapters.slack.agent_setup.github_requests import handle_action
-
-                    self._spawn(handle_action(self.runtime, payload))
-                elif action_id == SLACK_CREDENTIAL_ACTION_ID:
-                    self._spawn(handle_credential_request_click(self.runtime, payload))
-                elif action_id == ACTION_UPDATE:
-                    self._spawn(handle_github_update_click(self.runtime, payload))
-                elif action_id == ACTION_CANCEL:
-                    self._spawn(handle_github_cancel_click(self.runtime, payload))
-                elif action_id.startswith("feedback_vote:"):
-                    self._spawn(handle_feedback_vote(self.runtime, payload))
-                elif action_id == FEEDBACK_DETAILS_ACTION_ID:
-                    self._spawn(handle_feedback_details_click(self.runtime, payload))
-                elif action_id == ASK_HUMAN_ACTION_ID:
-                    self._spawn(handle_ask_human_click(self.runtime, payload))
-                elif action_id.startswith(PROVIDER_ACTION_PREFIX):
-                    self._spawn(self._provider_actions.handle_click(payload))
-                elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
-                    self._spawn(self._confirmations.handle_click(payload))
-                elif action_id == HAND_OVER_ACTION_ID:
-                    self._spawn(handle_hand_over_click(self.runtime, payload))
+                # A member of another workspace (Slack Connect) reaches only the
+                # allowlisted controls; everything else is the host's. A click
+                # whose payload does not prove host membership is checked with
+                # users.info first; a failed or unplaceable lookup counts as external.
+                if action_id == "cancel_turn" or external_action_allowed(action_id):
+                    # Own-turn controls: each handler binds the click to the
+                    # clicker's own turn, so no membership check is needed here.
+                    self._route_block_action(payload, action_id)
+                elif is_external_interactive(payload):
+                    log.info("slack.on_request.external_block_action_refused")
+                    self._spawn(self._refuse_external_click(payload))
+                elif payload_proves_host(payload):
+                    self._route_block_action(payload, action_id)
+                else:
+                    # Slack did not say whose workspace the clicker is in:
+                    # users.info decides before anything runs.
+                    self._spawn(self._verify_then_route_block_action(payload, action_id))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs.
@@ -1320,13 +1385,14 @@ class SlackApp:
         )
 
     async def _handle_block_action(self, payload: dict[str, Any]) -> None:
-        """Author-gated cancel handler for block_actions interactive payloads.
+        """Author- or admin-gated cancel handler for block_actions interactive payloads.
 
         Looks up the action's per-turn key first, which is registered before
         the initial post response returns; then falls back to status_ts for
         recovered and legacy cards. If the clicker is the turn's original
-        author, sets the cancel Event so the driver cancel-race loop picks it
-        up. A refused click — non-author, or no matching registry entry — is
+        author or a current host-workspace admin, sets the cancel Event so the
+        driver cancel-race loop picks it up. A refused click — anyone else, an
+        admin check Slack could not answer, or no matching registry entry — is
         answered with an ephemeral, because a button that does nothing is
         indistinguishable from a dead bot. The missing-entry case is the same
         symptom as a turn orphaned by a deploy, so the notice is what lets the
@@ -1352,9 +1418,208 @@ class SlackApp:
             return
         cancel, author_id = entry
         if clicker != author_id:
-            await self._refuse_cancel(payload, clicker=clicker, text=_CANCEL_NOT_AUTHOR)
-            return
+            admin = await self._clicker_is_admin(team_id, clicker)
+            if admin is not True:
+                text = _CANCEL_NOT_AUTHOR if admin is False else _CANCEL_ROLE_UNKNOWN
+                await self._refuse_cancel(payload, clicker=clicker, text=text)
+                return
+        log.info(
+            "turn.stop_pressed",
+            platform="slack",
+            team_id=team_id,
+            status_ts=status_ts,
+            requester_id=author_id,
+            pressed_by=clicker,
+            by_admin=clicker != author_id,
+        )
         cancel.set()
+
+    async def _clicker_is_admin(self, team_id: str, clicker: str) -> bool | None:
+        """The clicker's live host-workspace admin status; None when Slack could not say."""
+        if not (team_id and clicker):
+            return False
+        try:
+            client = await resolve_web_client(self.runtime, team_id=team_id)
+            if client is None:
+                return None
+            requester = await resolve_requester(client, user_id=clicker, host_team_id=team_id)
+        except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
+            log.warning("slack.cancel_admin_check_failed", team_id=team_id, exc_info=exc)
+            return None
+        return None if requester is None else requester.is_admin
+
+    def _on_member_joined_channel(self, event: dict[str, Any], *, team_id: str) -> None:
+        """Hook for a member joining a channel: nothing yet.
+
+        The bot's own join of a shared channel is where the first-answer notice
+        for people from the other organisation will attach.
+        """
+
+    def _route_block_action(self, payload: dict[str, Any], action_id: str) -> None:
+        """Hand a verified block action to its handler."""
+        if action_id == "cancel_turn":
+            # Existing cancel path — KEEP unchanged.
+            self._spawn(self._handle_block_action(payload))
+        elif (
+            action_id.startswith("routine_action:")
+            or action_id == "routines_refresh"
+            or action_id == "routines_create"
+        ):
+            self._spawn(handle_routine_action(self.runtime, payload))
+        elif action_id == "billing_topup":
+            self._spawn(handle_topup_select(self.runtime, payload))
+        elif action_id == REDEEM_OPEN_ACTION_ID:
+            self._spawn(handle_redeem_open(self.runtime, payload))
+        elif action_id in PANEL_ACTION_IDS:
+            self._spawn(handle_panel_action(self.runtime, payload))
+        elif action_id in (
+            "privacy_delete_open",
+            "privacy_export",
+            "privacy_slack_disconnect",
+        ):
+            self._spawn(handle_privacy_block_action(self.runtime, payload))
+        elif action_id.startswith("agent_setup__"):
+            self._spawn(handle_agent_setup_action(self.runtime, payload))
+        elif action_id.startswith("github_new_repo__"):
+            from daimon.adapters.slack.agent_setup.github_new_repo import handle_action
+
+            self._spawn(handle_action(self.runtime, payload))
+        elif action_id.startswith("github_link__"):
+            from daimon.adapters.slack.agent_setup.github_link import handle_action
+
+            self._spawn(handle_action(self.runtime, payload))
+        elif action_id.startswith("github_request__"):
+            from daimon.adapters.slack.agent_setup.github_requests import handle_action
+
+            self._spawn(handle_action(self.runtime, payload))
+        elif action_id == SLACK_CREDENTIAL_ACTION_ID:
+            self._spawn(handle_credential_request_click(self.runtime, payload))
+        elif action_id == ACTION_UPDATE:
+            self._spawn(handle_github_update_click(self.runtime, payload))
+        elif action_id == ACTION_CANCEL:
+            self._spawn(handle_github_cancel_click(self.runtime, payload))
+        elif action_id.startswith("feedback_vote:"):
+            self._spawn(handle_feedback_vote(self.runtime, payload))
+        elif action_id == FEEDBACK_DETAILS_ACTION_ID:
+            self._spawn(handle_feedback_details_click(self.runtime, payload))
+        elif action_id == ASK_HUMAN_ACTION_ID:
+            self._spawn(handle_ask_human_click(self.runtime, payload))
+        elif action_id.startswith(PROVIDER_ACTION_PREFIX):
+            self._spawn(self._provider_actions.handle_click(payload))
+        elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
+            self._spawn(self._confirmations.handle_click(payload))
+        elif action_id == HAND_OVER_ACTION_ID:
+            self._spawn(handle_hand_over_click(self.runtime, payload))
+
+    async def _lookup_host_member(self, team_id: str, user_id: str) -> bool:
+        """Ask users.info whether `user_id` is a host member; cache a positive answer only."""
+        try:
+            client = await resolve_web_client(self.runtime, team_id=team_id)
+            if client is None:
+                return False
+            requester = await resolve_requester(client, user_id=user_id, host_team_id=team_id)
+        except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
+            log.warning("slack.host_member_check_failed", team_id=team_id, exc_info=exc)
+            return False
+        member = requester is not None and requester.is_host_member
+        if member:
+            self._host_members[(team_id, user_id)] = self._host_member_clock() + _HOST_MEMBER_TTL_S
+        return member
+
+    async def _host_check(self, team_id: str, user_id: str) -> HostCheck:
+        """Whether users.info places `user_id` in the host workspace, within a short budget.
+
+        A recent positive answer is reused (negatives and failures never are). The
+        lookup is bounded so an acknowledgement or a 3-second trigger id is never
+        spent waiting on Slack: on timeout the answer is "unavailable", nothing runs,
+        and the lookup keeps going in the background so a retry finds its result.
+        """
+        if not (team_id and user_id):
+            return "not_member"
+        expires = self._host_members.get((team_id, user_id))
+        if expires is not None and self._host_member_clock() < expires:
+            return "member"
+        lookup = self._spawn_value(self._lookup_host_member(team_id, user_id))
+        try:
+            member = await asyncio.wait_for(asyncio.shield(lookup), timeout=_HOST_CHECK_TIMEOUT_S)
+        except TimeoutError:
+            log.warning("slack.host_member_check_timed_out", team_id=team_id)
+            return "unavailable"
+        return "member" if member else "not_member"
+
+    def _spawn_value(self, coro: Coroutine[Any, Any, bool]) -> asyncio.Task[bool]:
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(cast("asyncio.Task[None]", task))
+        task.add_done_callback(self._bg_tasks.discard)  # pyright: ignore[reportArgumentType]
+        return task
+
+    async def _submitter_check(self, payload: dict[str, Any]) -> HostCheck:
+        """A submission's sender: the payload's proof, else users.info."""
+        if is_external_interactive(payload):
+            return "not_member"
+        if payload_proves_host(payload):
+            return "member"
+        user: dict[str, Any] = payload.get("user") or {}
+        return await self._host_check(_payload_team_id(payload), str(user.get("id") or ""))
+
+    async def _verify_then_route_block_action(
+        self, payload: dict[str, Any], action_id: str
+    ) -> None:
+        user: dict[str, Any] = payload.get("user") or {}
+        check = await self._host_check(_payload_team_id(payload), str(user.get("id") or ""))
+        if check == "member":
+            self._route_block_action(payload, action_id)
+            return
+        log.info("slack.on_request.unverified_block_action_refused", check=check)
+        await self._refuse_external_click(
+            payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
+        )
+
+    async def _gated_slash(
+        self,
+        payload: dict[str, Any],
+        handler: Callable[[], Coroutine[Any, Any, None]],
+    ) -> None:
+        """Run a slash command for a verified host member; anyone else gets a one-line refusal."""
+        team_id = str(payload.get("team_id") or "")
+        user_id = str(payload.get("user_id") or "")
+        check = await self._host_check(team_id, user_id)
+        if check == "member":
+            await handler()
+            return
+        log.info(
+            "slack.on_request.unverified_slash_refused", command=payload.get("command"), check=check
+        )
+        text = (
+            TRY_AGAIN_NOTICE
+            if check == "unavailable"
+            else host_only_notice(self._workspace_names.get(team_id))
+        )
+        try:
+            client = await resolve_web_client(self.runtime, team_id=team_id)
+            if client is not None:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                    channel=str(payload.get("channel_id") or ""), user=user_id, text=text
+                )
+        except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
+            log.warning("slack.slash_refusal_notice_failed", team_id=team_id, exc_info=exc)
+
+    async def _refuse_external_click(
+        self, payload: dict[str, Any], *, text: str | None = None
+    ) -> None:
+        """Say a control is for the host workspace's people, as an ephemeral to the clicker."""
+        team_id = _payload_team_id(payload)
+        try:
+            client = await resolve_web_client(self.runtime, team_id=team_id)
+            if client is None:
+                return
+            if team_id not in self._workspace_names:
+                await self._bot_user_id(team_id, client)
+            await refuse_external_click(
+                client, payload, workspace_name=self._workspace_names.get(team_id), text=text
+            )
+        except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
+            log.warning("slack.external_refusal_notice_failed", team_id=team_id, exc_info=exc)
 
     async def _refuse_cancel(self, payload: dict[str, Any], *, clicker: str, text: str) -> None:
         """Best-effort ephemeral explaining a refused Cancel click.
@@ -1538,22 +1803,9 @@ class SlackApp:
                     event_ts=event_ts,
                 )
 
-            # (5) SLACK CONNECT GATE — reject external-workspace senders.
-            if is_slack_connect_external(event, team_id=team_id):
-                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                    channel=channel,
-                    user=event.get("user") or "",
-                    # Without thread_ts an in-thread mention's rejection lands at
-                    # channel root while the sender watches the thread. Only the real
-                    # thread_ts — never a ts fallback, which would tuck the notice
-                    # into a thread that does not exist yet. None is dropped by the SDK.
-                    thread_ts=event.get("thread_ts"),
-                    text=(
-                        "Sorry, I can only respond to members of this workspace. "
-                        "Please ask a workspace member to mention me instead."
-                    ),
-                )
-                return
+            # (5) A sender from another workspace (Slack Connect) is not turned
+            # away here: their organisation is decided from users.info in the
+            # turn body, and they run as a plain user held to this channel.
 
             # (6) TENANT RESOLVE — derived above, before the may-post check.
 
@@ -1595,6 +1847,19 @@ class SlackApp:
                         **render_error_payload(exc, request_id=request_id),
                     )
 
+    async def _channel_shared(
+        self, client: AsyncWebClient, *, team_id: str, channel: str, envelope_flag: bool = False
+    ) -> bool | None:
+        """Whether Slack says `channel` is shared with another organisation; None if unknown.
+
+        A direct message is never a shared channel, so it is not asked.
+        """
+        if channel.startswith("D"):
+            return None
+        return await self._shared_channels.is_shared(
+            client, team_id=team_id, channel_id=channel, envelope_flag=envelope_flag
+        )
+
     async def _bot_user_id(self, team_id: str, client: AsyncWebClient) -> str:
         """This app's bot user in `team_id`, resolved via auth.test once per workspace.
 
@@ -1606,66 +1871,11 @@ class SlackApp:
             return bot_user_id
         auth_resp = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
         bot_user_id = str(auth_resp.get("user_id") or "")
+        if workspace_name := str(auth_resp.get("team") or ""):
+            self._workspace_names[team_id] = workspace_name
         if bot_user_id:
             self._bot_user_ids[team_id] = bot_user_id
         return bot_user_id
-
-    async def _maybe_post_connect_nudge(
-        self,
-        web_client: AsyncWebClient,
-        *,
-        team_id: str,
-        slack_user_id: str,
-        channel: str,
-        thread_ts: str,
-    ) -> None:
-        """Once-ever ephemeral tip: connect your account for user-token reads.
-
-        Raises on Slack/DB failure — the caller wraps in contextlib.suppress so
-        the nudge can never fail the turn. Marked prompted only AFTER a
-        successful post so a failed post retries on the next mention.
-        """
-        slack_settings = self.runtime.settings.slack
-        app_root_url = self.runtime.settings.mcp.app_root_url
-        if slack_settings is None or app_root_url is None or not slack_user_id:
-            return
-        async with self.runtime.sessionmaker() as s:
-            if (
-                await get_slack_user_token(s, team_id=team_id, slack_user_id=slack_user_id)
-                is not None
-            ):
-                return
-            if await was_connect_prompted(s, team_id=team_id, slack_user_id=slack_user_id):
-                return
-        connect_url = build_slack_connect_url(
-            app_root_url=app_root_url,
-            signing_secret=slack_settings.signing_secret.get_secret_value(),
-            team_id=team_id,
-            slack_user_id=slack_user_id,
-            now=time.time(),
-        )
-        await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel,
-            user=slack_user_id,
-            thread_ts=thread_ts,
-            text=(
-                "👋 Tip: connect your Slack account and "
-                f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))} "
-                "can read any channel "
-                "or DM *you* can see — no invites needed — plus search your messages "
-                "(in a DM with "
-                f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))}).\n"
-                f"Connect: {connect_url}\n"
-                "_The link is personal and expires in about an hour. If your "
-                "workspace requires admin approval for app permissions, an admin "
-                "may need to approve first. Disconnect any time via `/privacy`._"
-            ),
-        )
-        async with self.runtime.sessionmaker() as s:
-            await mark_connect_prompted(
-                s, team_id=team_id, slack_user_id=slack_user_id, now=datetime.now(tz=UTC)
-            )
-            await s.commit()
 
     def _history_page_limit(self) -> int:
         slack_settings = self.runtime.settings.slack
@@ -1819,16 +2029,6 @@ class SlackApp:
                         channel=channel,
                         timestamp=event_ts,
                         name="eyes",
-                    )
-                with contextlib.suppress(
-                    SlackApiError, SQLAlchemyError, aiohttp.ClientError, asyncio.TimeoutError
-                ):
-                    await self._maybe_post_connect_nudge(
-                        web_client,
-                        team_id=team_id,
-                        slack_user_id=str(event.get("user") or ""),
-                        channel=channel,
-                        thread_ts=thread_id,
                     )
                 await self._run_thread_turn(
                     event,
@@ -2033,6 +2233,38 @@ class SlackApp:
         content_override: str | None = None,
         files: list[SlackFile] | None = None,
     ) -> None:
+        async with guard_selfhosted_channel(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="slack",
+            channel_id=channel,
+            thread_id=thread_id,
+            caller_id=str(event.get("user") or ""),
+            force=False,
+        ):
+            return await self._run_thread_turn_observed_guarded(
+                event,
+                channel=channel,
+                web_client=web_client,
+                tenant_id=tenant_id,
+                thread_id=thread_id,
+                team_id=team_id,
+                content_override=content_override,
+                files=files,
+            )
+
+    async def _run_thread_turn_observed_guarded(
+        self,
+        event: dict[str, Any],
+        *,
+        channel: str,
+        web_client: AsyncWebClient,
+        tenant_id: uuid.UUID,
+        thread_id: str,
+        team_id: str,
+        content_override: str | None = None,
+        files: list[SlackFile] | None = None,
+    ) -> None:
         """Turn body: admission → card+Cancel → bind_session → marker → context → turn → watermark.
 
         Immediately after admission, the lifecycle is constructed and its
@@ -2068,16 +2300,26 @@ class SlackApp:
         # the local values the context builders also consume — a second lookup
         # would violate the one-call-per-turn constraint.
         author_id = str(event.get("user") or "")
-        requester = await resolve_requester(web_client, user_id=author_id)
+        requester = await resolve_requester(web_client, user_id=author_id, host_team_id=team_id)
         if requester is None:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                 channel=channel,
                 thread_ts=thread_id,
-                text="I couldn't verify your workspace role. Please retry; no turn was started.",
+                text="I couldn't verify your workspace role, so I didn't reply. Please retry.",
             )
             return
-        is_admin = requester.is_admin
+        # users.info places the requester; the event's own team fields can only
+        # add `OTHER`. A member of another workspace runs as a plain user held
+        # to this channel, never as an admin, whatever their own workspace says.
+        standing = decide_requester_org(requester, event=event)
+        is_admin = standing.is_admin
         author_name = requester.display_name
+        channel_shared = await self._channel_shared(
+            web_client,
+            team_id=team_id,
+            channel=channel,
+            envelope_flag=bool(event.get(ENVELOPE_EXT_SHARED_KEY)),
+        )
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
@@ -2085,6 +2327,9 @@ class SlackApp:
             admission = await admit(
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,
+                requester_org=standing.org,
+                requester_home_id=standing.home_id,
+                channel_shared=channel_shared,
                 platform="slack",
                 external_user_id=author_id,
                 channel_id=channel,
@@ -2102,7 +2347,7 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=NOT_SET_UP_NOTICE,
+                text=not_set_up_notice(foreign=standing.foreign),
             )
             return
         except MAResolverMissError as err:
@@ -2115,7 +2360,7 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=SETUP_OUT_OF_DATE_NOTICE,
+                text=setup_out_of_date_notice(foreign=standing.foreign),
             )
             return
         except AdmissionDenied as err:
@@ -2153,6 +2398,14 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
+            elif err.reason == "client_requester":
+                log.info(
+                    "turn.skipped.client_requester",
+                    tenant_id=str(tenant_id),
+                    user_id=str(event.get("user") or ""),
+                    team_id=team_id,
+                    channel_id=channel,
+                )
             elif err.reason == "balance_depleted":
                 log.info(
                     "turn.skipped.over_balance",
@@ -2182,7 +2435,13 @@ class SlackApp:
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel,
                     thread_ts=thread_id,
-                    text=admission_refusal_message(err.reason, self.runtime.settings),
+                    text=admission_refusal_message(
+                        err.reason,
+                        self.runtime.settings,
+                        foreign=standing.foreign,
+                        cause=err.cause,
+                        provider=err.provider,
+                    ),
                 )
             return
 
@@ -2241,6 +2500,7 @@ class SlackApp:
             cancel=cancel_event,
             author_id=str(event.get("user") or ""),
             requester_is_admin=is_admin,
+            requester_foreign=standing.foreign,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
             trigger_ts=str(event.get("ts") or "") or None,
@@ -2338,7 +2598,7 @@ class SlackApp:
                     stopped=slot == "cancelled",
                     text={
                         "balance_depleted": admission_refusal_message(
-                            "balance_depleted", self.runtime.settings
+                            "balance_depleted", self.runtime.settings, foreign=standing.foreign
                         ),
                         "queue_full": TENANT_CAP_NOTICE,
                     }.get(slot, QUEUE_TIMED_OUT_TEXT),
@@ -2429,24 +2689,38 @@ class SlackApp:
                 # failing the whole explanation.
                 owner_name = "the previous agent"
                 try:
-                    owner_agent = await retrieve_agent(
-                        self.runtime.anthropic,
-                        error.source_agent_id,
-                        scope=resource_scope(tenant_id=str(tenant_id)),
-                    )
-                    owner_name = owner_agent.name
+                    if (
+                        admission.backend_revision is None
+                        or admission.backend_revision.backend != "selfhosted"
+                    ):
+                        owner_agent = await retrieve_agent(
+                            self.runtime.anthropic,
+                            error.source_agent_id,
+                            scope=resource_scope(tenant_id=str(tenant_id)),
+                        )
+                        owner_name = owner_agent.name
                 except (anthropic.APIStatusError, ScopeViolation):
                     pass
                 explanation = render_responder_changed_without_handoff(
                     new_responder=admission.agent.name,
                     owner=owner_name,
                     channel=f"<#{channel}>",
-                    offer_button=True,
+                    offer_button=not (
+                        admission.backend_revision is not None
+                        and admission.backend_revision.backend == "selfhosted"
+                    ),
                 )
-                hand_over = build_hand_over_blocks(
-                    text=explanation,
-                    agent_id=admission.agent.id,
-                    agent_name=admission.agent.name,
+                hand_over = (
+                    []
+                    if (
+                        admission.backend_revision is not None
+                        and admission.backend_revision.backend == "selfhosted"
+                    )
+                    else build_hand_over_blocks(
+                        text=explanation,
+                        agent_id=admission.agent.id,
+                        agent_name=admission.agent.name,
+                    )
                 )
                 if lifecycle.status_ts is not None:
                     await web_client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
@@ -2700,9 +2974,7 @@ class SlackApp:
                         now=datetime.now(UTC),
                     )
                 if recovery_origin is None:
-                    raise UserFacingError(
-                        "This turn's setup context expired. Please retry your message."
-                    )
+                    raise UserFacingError("This setup expired. Please retry your message.")
                 return (
                     render_turn_origin(
                         recovery_origin,
@@ -2729,6 +3001,7 @@ class SlackApp:
                     cancel=cancel,
                     author_id=str(event.get("user") or ""),
                     requester_is_admin=is_admin,
+                    requester_foreign=standing.foreign,
                     notify_on_completion=self.runtime.settings.completion_pings.get(
                         tenant_id, False
                     )
@@ -2808,6 +3081,8 @@ class SlackApp:
                     configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
                     configuration_target_name=admission.config.configuration_target_name,
                     role=Role.ADMIN if is_admin else Role.USER,
+                    sender_foreign=admission.hold is not None and admission.hold.client,
+                    shared_channel=admission.shared_channel,
                 ) as origin:
                     outcome = await run_prepared_turn(
                         self.runtime.turn_deps,
@@ -2835,6 +3110,7 @@ class SlackApp:
                         deadline=turn_deadline_at,
                         confirm_write=self._confirmations.hook(
                             web_client,
+                            team_id=team_id,
                             runtime=self.runtime,
                             tenant_id=tenant_id,
                             account_id=admission.account_id,
@@ -2954,31 +3230,17 @@ class SlackApp:
                 team_id=team_id,
             )
 
-            # Detached output sweep. `outcome.ma_session_id` is the post-recovery
-            # session id, so outputs stranded in a dead session are not
-            # recoverable. A detached sweep is not counted by drain_and_close's
-            # `_processing` poll, so SIGTERM can kill one mid-flight —
-            # post-then-delete makes that self-healing (redelivered on the next
-            # turn's sweep, or double-posted inside the already-accepted
-            # post-then-delete crash window).
-            if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-                return
-            # Read the chain link synchronously, before spawning, so it cannot be lost.
-            previous = self._output_sweeps.get(outcome.ma_session_id)
-            task = self._spawn(
-                self._sweep_session_outputs(
-                    previous,
-                    web_client,
-                    session_id=outcome.ma_session_id,
-                    channel_id=channel,
-                    thread_ts=thread_id,
-                    team_id=team_id,
-                    requester_user_id=author_id,
-                )
-            )
-            self._output_sweeps[outcome.ma_session_id] = task
-            task.add_done_callback(
-                functools.partial(self._forget_output_sweep, outcome.ma_session_id)
+            self._schedule_output_sweep(
+                outcome,
+                web_client,
+                channel=channel,
+                thread_id=thread_id,
+                team_id=team_id,
+                requester_user_id=author_id,
+                selfhosted=(
+                    admission.backend_revision is not None
+                    and admission.backend_revision.backend == "selfhosted"
+                ),
             )
         finally:
             # Bookkeeping only -- see the comment above the try. Deregister
@@ -3098,15 +3360,33 @@ class SlackApp:
             )
             account = None
         # The follow-up runs as the requester, so it carries their role as it
-        # stands NOW, read from Slack the way a mention reads it. A failed
-        # lookup runs the turn as USER -- never more than the requester holds.
-        admin_status = await resolve_admin_status(
-            web_client, user_id=row.requester_external_user_id
+        # stands NOW, read from Slack the way a mention reads it: a verified
+        # member of this workspace runs as themselves, anyone else from another
+        # workspace runs as a plain user held to the channel. A failed lookup is
+        # denied: a release would retry without bound while Slack stays down (a
+        # release refunds the attempt count and a wake has no expiry), so the
+        # row settles as denied instead.
+        requester = await resolve_requester(
+            web_client, user_id=row.requester_external_user_id, host_team_id=team_id
         )
-        role = Role.ADMIN if admin_status is True else Role.USER
+        if requester is None:
+            log.info(
+                "slack.continuation.requester_lookup_failed",
+                team_id=team_id,
+                thread_id=thread_id,
+            )
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        standing = decide_requester_org(requester)
+        role = Role.ADMIN if standing.is_admin else Role.USER
+        in_dm = thread_id.startswith(DM_SCOPE_PREFIX)
         follow_admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
+            requester_org=standing.org,
+            requester_home_id=standing.home_id,
+            channel_shared=None
+            if in_dm
+            else await self._channel_shared(web_client, team_id=team_id, channel=channel),
             platform="slack",
             external_user_id=row.requester_external_user_id,
             channel_id=channel,
@@ -3115,7 +3395,7 @@ class SlackApp:
             now=datetime.now(UTC),
             # A continuation owed to a private DM conversation is a DM turn:
             # outside every pin, with the DM memory rule.
-            is_dm=thread_id.startswith(DM_SCOPE_PREFIX),
+            is_dm=in_dm,
         )
         # A wake runs only as the agent it was queued for; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
@@ -3182,6 +3462,7 @@ class SlackApp:
             cancel=follow_cancel,
             author_id=row.requester_external_user_id,
             requester_is_admin=role is Role.ADMIN,
+            requester_foreign=standing.foreign,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
             agent_name=follow_admission.agent.name,
@@ -3251,9 +3532,7 @@ class SlackApp:
                     now=datetime.now(UTC),
                 )
             if recovery_origin is None:
-                raise UserFacingError(
-                    "This turn's setup context expired. Please retry your message."
-                )
+                raise UserFacingError("This setup expired. Please retry your message.")
             return (
                 render_turn_origin(
                     recovery_origin,
@@ -3279,6 +3558,7 @@ class SlackApp:
                 cancel=cancel,
                 author_id=row.requester_external_user_id,
                 requester_is_admin=role is Role.ADMIN,
+                requester_foreign=standing.foreign,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 agent_name=follow_admission.agent.name,
@@ -3330,6 +3610,8 @@ class SlackApp:
                 ),
                 configuration_target_name=(follow_admission.config.configuration_target_name),
                 role=role,
+                sender_foreign=follow_admission.hold is not None and follow_admission.hold.client,
+                shared_channel=follow_admission.shared_channel,
                 is_setup=follow_admission.config.thread_binding_kind == "setup",
             ) as follow_origin:
                 await run_prepared_turn(
@@ -3360,6 +3642,7 @@ class SlackApp:
                     deadline=follow_deadline,
                     confirm_write=self._confirmations.hook(
                         web_client,
+                        team_id=team_id,
                         runtime=self.runtime,
                         tenant_id=tenant_id,
                         account_id=follow_admission.account_id,

@@ -23,12 +23,12 @@ from daimon.core.config import load_turn_settings
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.privacy import TurnPrivacy
-from daimon.testing.ma import send_events_response
-from daimon.testing.ma_models import ma_model_usage
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic.normalize import EventNormalizer, object_json
+from mux.testing.drivers.anthropic.ma import send_events_response
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle
 

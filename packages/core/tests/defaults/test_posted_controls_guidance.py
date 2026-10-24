@@ -265,3 +265,13 @@ def test_workspace_setup_says_a_setup_target_refusal_does_not_block_configuratio
     assert "Configure it by name" in section, (
         "workspace-setup must name the way through: configure the agent by name"
     )
+
+
+def test_workspace_setup_takes_platform_words_from_the_turn_controls() -> None:
+    """The skill is read on every platform, so it names no one platform's command or admin."""
+    body = _workspace_setup_body()
+
+    for platform_specific in ("/agent-setup", "Manage Server", "workspace admin on Slack"):
+        assert platform_specific not in body, f"{platform_specific!r} belongs in words, not here"
+    for key in ("words.admin", "words.setup", "words.space"):
+        assert key in body, f"the skill must point at {key} in <turn_controls>"

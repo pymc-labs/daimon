@@ -188,6 +188,11 @@ def register_notebook_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         publishes only once the requester approves the call on a card.
         """
         auth = await _auth(ctx)
+        if auth.hold is not None and (permanent or editable):
+            raise ToolError(
+                "this conversation is held to its channel, so it publishes scratch, read-only "
+                "notebooks only. Tell the caller. Do not retry."
+            )
         await require_publishable(
             runtime,
             auth,

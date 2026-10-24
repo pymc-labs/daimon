@@ -49,11 +49,11 @@ async def _submit(
 
 
 async def test_a_double_submit_on_one_message_records_one_row(
-    db_session: AsyncSession, db_nullpool_engine: AsyncEngine
+    db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     # Separate connections per session: the shared-connection test factory
     # would serialize the two transactions and hide the race.
-    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_RACE")
     await db_session.commit()
 
@@ -67,11 +67,11 @@ async def test_a_double_submit_on_one_message_records_one_row(
 
 
 async def test_concurrent_requests_cannot_overspend_the_allowance(
-    db_session: AsyncSession, db_nullpool_engine: AsyncEngine
+    db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     # Separate connections per session: the shared-connection test factory
     # would serialize the two transactions and hide the race.
-    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_RACE")
     await db_session.commit()
 

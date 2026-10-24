@@ -11,10 +11,10 @@ import httpx
 import pytest
 import typer
 from daimon.adapters.cli.commands.openai import openai_smoke_command
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.resources import SkillUpload, SkillUploadFile
 from mux.drivers.openai.skills import bundle_digest
 from mux.drivers.openai.transport import SDKTransport
+from mux.testing.isolated_sdk import build_async_openai
 
 SKILL_CONTENT = b"""---
 name: daimon-smoke

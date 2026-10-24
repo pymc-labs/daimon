@@ -16,6 +16,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import (
@@ -24,6 +25,7 @@ from daimon.core.permissions import (
     channel_rule,
     memory_writable,
 )
+from daimon.core.platform_words import PlatformWords, words_for
 from daimon.core.roster import load_roster
 from daimon.core.rule_views import load_rule_viewer
 from daimon.core.scope import (
@@ -44,6 +46,7 @@ from daimon.core.stores.identity import (
     get_teams_principal_for_account,
 )
 from daimon.core.stores.platform_names import get_user_names
+from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from daimon.core.stores.thread_agent_bindings import get_binding
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -85,6 +88,8 @@ class HereCard(BaseModel):
     agent_can_read_here: bool | None = None
     category_channels_bot_can_view: tuple[str, ...] = ()
     credentials: tuple[CredentialStatus, ...] = ()
+    #: The asker is from another organisation (Teams): no private chat to send `setup` in.
+    foreign: bool = False
     text: str
 
 
@@ -101,10 +106,40 @@ class HereCardPresentation(BaseModel):
     extras: tuple[str, ...] = ()
 
 
+def _setup_words(words: PlatformWords, *, foreign: bool = False) -> str:
+    """The setup command as plain text, with where to send it when it works only in a chat.
+
+    A `foreign` asker has no chat to send it in, so it is the bare command."""
+    command = words.command("setup")
+    if command is None:
+        return "setup"
+    if command.reach == "chat" and not foreign:
+        return f"{command.word}, in a {words.private_chat} with Daimon"
+    return command.word
+
+
+def _who(words: PlatformWords, *, foreign: bool) -> str:
+    """Who can change settings: an admin, or for a `foreign` asker, someone in the
+    organisation that added Daimon."""
+    who = words.host_admin if foreign else "an admin"
+    return who[:1].upper() + who[1:]
+
+
+def _no_view_fix(platform: Platform, *, foreign: bool = False) -> str:
+    """What fixes a channel the bot can't see, in the platform's words."""
+    if platform == "slack":
+        return "Invite it with /invite."
+    if platform == "teams":
+        return f"{_who(words_for('teams'), foreign=foreign)} can add Daimon to this channel."
+    return f"{words_for('discord').admin.capitalize()} can let Daimon's role see it."
+
+
 def render_here_card(card: HereCard) -> HereCardPresentation:
     """Choose the approved card copy from existing facts, in priority order."""
     name = " ".join((card.agent_name or "").split())[:100]
-    setup = "setup" if card.platform == "teams" else "/agent-setup"
+    words = words_for("discord" if card.platform == "cli" else card.platform)
+    setup = _setup_words(words, foreign=card.foreign)
+    who = _who(words, foreign=card.foreign)
     if card.bot_can_view is False:
         state, title, colour, subline = (
             "no_view",
@@ -112,30 +147,28 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
             if card.platform == "slack"
             else "Daimon can't see this channel",
             "#ED4245",
-            "Invite it with /invite."
-            if card.platform == "slack"
-            else "A server admin can let Daimon's role see it.",
+            _no_view_fix(card.platform, foreign=card.foreign),
         )
     elif card.effective_writers == "none":
         state, title, colour, subline = (
             "no_replies",
             "Replies are off here",
             "#ED4245",
-            f"An admin can turn them on in {setup}.",
+            f"{who} can turn them on in {setup}.",
         )
     elif card.agent_name is None:
         state, title, colour, subline = (
             "no_agent",
             "No agent answers here",
             "#95A5A6",
-            f"An admin can pick one in {setup}.",
+            f"{who} can pick one in {setup}.",
         )
     elif card.agent_can_answer_here is False:
         state, title, colour, subline = (
             "blocked",
             f"{name} can't answer here",
             "#F0B429",
-            f"An admin can change where it answers in {setup}.",
+            f"{who} can change where it answers in {setup}.",
         )
     elif card.tier == "thread":
         state, title, colour, subline = (
@@ -174,6 +207,13 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
         publishing=publishing,
         extras=extras,
     )
+
+
+def for_foreign_sender(card: HereCard) -> HereCard:
+    """`card` for someone from another organisation: no 1:1 chat to send `setup` in,
+    in its structured facts and in its text."""
+    foreign = card.model_copy(update={"foreign": True})
+    return foreign.model_copy(update={"text": render_here_card_text(foreign)})
 
 
 def render_here_card_text(card: HereCard) -> str:
@@ -319,7 +359,7 @@ def assemble_here_card(
             credentials.append(
                 CredentialStatus(
                     name=server.name,
-                    kind="MCP server",
+                    kind="connection",
                     configured=True,
                     usable_in_session=None,
                 )
@@ -328,7 +368,7 @@ def assemble_here_card(
                 credentials.append(
                     CredentialStatus(
                         name=server.name,
-                        kind="MCP token",
+                        kind="connection token",
                         configured=True,
                         usable_in_session=None,
                     )
@@ -474,8 +514,16 @@ async def load_here_card(
     mcp_urls: set[str] = set()
     grants: tuple[McpOAuthGrantRow, ...] = ()
     if roster.answering is not None:
-        ma_agent = await get_setup_agent(
-            anthropic, tenant_id=tenant_id, ma_agent_id=roster.answering.ma_agent_id
+        ma_agent = (
+            next(
+                agent
+                for agent in await list_live_agent_facts(session, tenant_id=tenant_id)
+                if agent.id == roster.answering.ma_agent_id
+            )
+            if anthropic_disabled()
+            else await get_setup_agent(
+                anthropic, tenant_id=tenant_id, ma_agent_id=roster.answering.ma_agent_id
+            )
         )
         details = await load_agent_details(
             session,

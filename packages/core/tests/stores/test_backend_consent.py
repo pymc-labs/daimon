@@ -418,9 +418,7 @@ async def test_interleaved_identical_config_claims_keep_one_immutable_associatio
         assert winner in (one, two)
 
 
-@pytest.mark.parametrize(
-    "invalid", ["credentials", "instructions", "source_definition", "unknown", "duplicate"]
-)
+@pytest.mark.parametrize("invalid", ["instructions", "source_definition", "unknown", "duplicate"])
 def test_the_persisted_consent_uses_the_existing_closed_agent_spec_domain(invalid):
     body = consent()
     body["declared_drops"] = [invalid] if invalid != "duplicate" else ["memory", "memory"]
@@ -440,6 +438,28 @@ def test_the_persisted_consent_uses_the_existing_closed_agent_spec_domain(invali
             digest="preview",
             drop_consent=body,
         )
+
+
+def test_a_saved_consent_may_declare_the_saved_keys_lost():
+    """`credentials` is a declarable loss: the target runs without the saved keys."""
+    body = consent()
+    body["declared_drops"] = ["credentials", "memory"]
+    preview = CompatibilityPreview(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        target_backend="openai",
+        setting_revision=0,
+        policy_revision="policy",
+        unsupported_skills=(),
+        unsupported_mcps=(),
+        unsupported_capabilities=(),
+        shared_thread_limits=(),
+        cost_line="offline",
+        allowed=True,
+        digest="preview",
+        drop_consent=body,
+    )
+    assert preview.declared_drops == ("credentials", "memory")
 
 
 @pytest.mark.fresh_schema

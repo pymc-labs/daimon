@@ -42,6 +42,7 @@ from .conftest import (
     make_channel_activity,
     make_invoke,
     make_message_activity,
+    notice_text,
     post_activity,
     running_service,
 )
@@ -369,7 +370,7 @@ async def test_ask_a_human_is_refused_to_someone_who_could_not_ask_there(
     async with _running(db_session_factory, teams_api_fake) as service:
         opened = await post_activity(service, _ask("open"))
         sent = await post_activity(service, _ask("send", message="m-7", note="help"))
-    assert opened["task"]["value"] == sent["task"]["value"] == NOT_ALLOWED
+    assert notice_text(opened) == sent["task"]["value"] == NOT_ALLOWED
     assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == []
 
 

@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daimon.adapters.slack.here import (  # pyright: ignore[reportPrivateUsage]
-    _setter_display_name,
-    _visible_channel_ids,
+    _setter_display_name,  # pyright: ignore[reportPrivateUsage]
+    _visible_channel_ids,  # pyright: ignore[reportPrivateUsage]
     build_here_attachment,
     handle_here_command,
 )
@@ -15,6 +15,7 @@ from daimon.core.access_policy import ChannelRule
 from daimon.core.errors import DaimonError
 from daimon.core.here_card import CredentialStatus, HereCard, render_here_card_text
 from slack_sdk.errors import SlackApiError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 async def test_member_sees_public_bot_channels_and_shared_private_channels() -> None:
@@ -169,7 +170,9 @@ def test_slack_unknown_publishing_and_history_drop_their_lines() -> None:
     assert "No access to earlier messages" not in str(blocks)
 
 
-async def test_here_posts_ephemeral_card() -> None:
+async def test_here_posts_ephemeral_card(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     client = MagicMock()
     client.conversations_info = AsyncMock(return_value={"channel": {"is_private": False}})
     client.users_conversations = AsyncMock(return_value={"channels": []})
@@ -180,8 +183,7 @@ async def test_here_posts_ephemeral_card() -> None:
     runtime.settings.github.app_id = None
     runtime.settings.github.app_private_key = None
     runtime.settings.mcp.public_url = None
-    runtime.sessionmaker.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
-    runtime.sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    runtime.sessionmaker = db_session_factory
     with (
         patch("daimon.adapters.slack.here.resolve_web_client", new=AsyncMock(return_value=client)),
         patch("daimon.adapters.slack.here.resolve_is_admin", new=AsyncMock(return_value=False)),
@@ -195,6 +197,7 @@ async def test_here_posts_ephemeral_card() -> None:
     ):
         await handle_here_command(runtime, {"team_id": "T1", "channel_id": "C1", "user_id": "U1"})
     assert load.await_count == 1
+    assert load.await_args is not None
     assert load.await_args.kwargs["bot_can_view"] is False
     assert load.await_args.kwargs["thread_id"] is None
     assert load.await_args.kwargs["channel_level_only"] is True
@@ -209,7 +212,9 @@ async def test_here_posts_ephemeral_card() -> None:
     )
 
 
-async def test_private_channel_without_bot_membership_returns_card_by_response_url() -> None:
+async def test_private_channel_without_bot_membership_returns_card_by_response_url(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     client = MagicMock()
     client.conversations_info = AsyncMock(
         side_effect=SlackApiError("not found", MagicMock(data={"error": "channel_not_found"}))
@@ -222,8 +227,7 @@ async def test_private_channel_without_bot_membership_returns_card_by_response_u
     runtime.settings.github.app_id = None
     runtime.settings.github.app_private_key = None
     runtime.settings.mcp.public_url = None
-    runtime.sessionmaker.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
-    runtime.sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    runtime.sessionmaker = db_session_factory
     webhook = MagicMock()
     webhook.send_dict = AsyncMock()
     with (
@@ -247,6 +251,7 @@ async def test_private_channel_without_bot_membership_returns_card_by_response_u
                 "response_url": "https://example.test/reply",
             },
         )
+    assert load.await_args is not None
     assert load.await_args.kwargs["bot_can_view"] is False
     webhook.send_dict.assert_awaited_once_with(
         {
@@ -260,7 +265,9 @@ async def test_private_channel_without_bot_membership_returns_card_by_response_u
     client.chat_postEphemeral.assert_not_awaited()
 
 
-async def test_daemon_error_uses_error_card() -> None:
+async def test_daemon_error_uses_error_card(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     client = MagicMock()
     client.conversations_info = AsyncMock(return_value={"channel": {"is_member": True}})
     client.users_conversations = AsyncMock(return_value={"channels": []})
@@ -270,8 +277,7 @@ async def test_daemon_error_uses_error_card() -> None:
     runtime.settings.github.app_id = None
     runtime.settings.github.app_private_key = None
     runtime.settings.mcp.public_url = None
-    runtime.sessionmaker.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
-    runtime.sessionmaker.return_value.__aexit__ = AsyncMock(return_value=None)
+    runtime.sessionmaker = db_session_factory
     with (
         patch("daimon.adapters.slack.here.resolve_web_client", new=AsyncMock(return_value=client)),
         patch("daimon.adapters.slack.here.resolve_is_admin", new=AsyncMock(return_value=False)),
@@ -286,4 +292,5 @@ async def test_daemon_error_uses_error_card() -> None:
     ):
         await handle_here_command(runtime, {"team_id": "T1", "channel_id": "C1", "user_id": "U1"})
     error.assert_awaited_once()
+    assert error.await_args is not None
     assert isinstance(error.await_args.args[1], DaimonError)

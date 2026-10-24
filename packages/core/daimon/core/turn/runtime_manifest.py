@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
@@ -103,19 +106,72 @@ log = structlog.get_logger(__name__)
 async def read_agent_fleet_grant(
     deps: TurnDeps, admission: Admission, *, now: datetime
 ) -> AgentFleetGrant | None:
-    """Read the current grant for the actual admitted source, without name lookup."""
+    """The fleet the actual admitted source may use now, without name lookup.
+
+    Its own grant when it has one; otherwise the computed default, unless fleet
+    was turned off for it or the turn's platform doesn't run fleets yet
+    (`FLEET_LIFECYCLE_PLATFORMS`). `FLEET__ENABLED=false` stops all of them.
+    """
     from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS
     from daimon.core.ma_identity import derive_agent_uuid
 
     if not deps.fleet_enabled:
         return None
     if admission.grant is None:
         raise WorkerSpecRefused("origin", "unbound")
-    return await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
+    setting = await AgentBackendService(deps.sessionmaker, enabled=True).fleet_setting(
         admission.grant.tenant_id,
         derive_agent_uuid(tenant_id=admission.grant.tenant_id, ma_agent_id=admission.agent.id),
         now=now,
     )
+    if setting.kind == "default" and admission.grant.platform not in FLEET_LIFECYCLE_PLATFORMS:
+        # The default fleet only where the adapter settles and delivers workers.
+        return None
+    return setting.grant
+
+
+async def default_fleet_unavailable_here(
+    deps: TurnDeps,
+    *,
+    tenant_id: UUID,
+    agent_id: UUID,
+    platform: str | None,
+    now: datetime,
+) -> bool:
+    """Whether this agent has only the default fleet and this platform doesn't run it.
+
+    A custom grant is a different story (its root may just have gone stale), so it is
+    never reported as "not available here".
+    """
+    from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS
+
+    if platform in FLEET_LIFECYCLE_PLATFORMS:
+        return False
+    setting = await AgentBackendService(deps.sessionmaker, enabled=True).fleet_setting(
+        tenant_id, agent_id, now=now
+    )
+    return setting.kind == "default"
+
+
+async def read_agent_fleet_grant_or_off(
+    deps: TurnDeps, admission: Admission, *, now: datetime
+) -> AgentFleetGrant | None:
+    """`read_agent_fleet_grant` for a chat turn: a failed read is fleet off, not a failed turn.
+
+    Refusals (an unbound origin, an invalid stored grant) still raise. Anything else
+    (the database, a timeout) is logged and read as no fleet: nothing is retained.
+    """
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    try:
+        return await read_agent_fleet_grant(deps, admission, now=now)
+    except (WorkerSpecRefused, AgentBackendRefused):
+        raise
+    except Exception as error:  # a fleet read never fails a chat turn
+        log.error("fleet.read_failed", error_type=type(error).__name__)
+        return None
 
 
 class _FrozenRoot(BaseModel):
@@ -195,8 +251,9 @@ async def _root_context(
         if (
             parent.agent_id is None
             or len(parent.source_agents) != 1
+            # Epoch 0 is the computed default; the digest check below binds it.
             or root.grant_epoch is None
-            or root.grant_epoch <= 0
+            or root.grant_epoch < 0
             or not root.grant_digest
         ):
             raise WorkerSpecRefused("origin", "stale")
@@ -317,13 +374,16 @@ async def _root_context(
         )
         assert agent_id is not None
         try:
-            value = await AgentBackendService(deps.sessionmaker, enabled=True).read_fleet_grant(
+            setting = await AgentBackendService(deps.sessionmaker, enabled=True).fleet_setting(
                 UUID(scope.tenant_id), agent_id, now=now
             )
         except AgentBackendRefused:
             raise WorkerSpecRefused("origin", "unsupported") from None
+        value = setting.grant
         if parent is None:
-            if value is not None or origin.is_setup:
+            # A turn under the default fleet may run without a root (it answers with
+            # fleet off); a custom grant's turn always retains one.
+            if setting.kind == "custom" or origin.is_setup:
                 raise WorkerSpecRefused("origin", "unbound")
         else:
             assert root is not None
@@ -368,14 +428,21 @@ async def prepare_controlled_root(
         (request.deps.turn_path or load_turn_settings().path) != "mux"
         or grant is None
         or request.admission.shared_owner is not None
+        or request.admission.hold is not None
         or request.session_account_id != request.admission.account_id
-        or get_profile(profile).support.get("session_spend_control") != "native"
         or not any(
             backend.profile == profile and selected.id == model
             for backend, selected in value.choices
         )
     ):
         raise WorkerSpecRefused("native_budget_usd", "unsupported")
+    # A provider without a native session cap (OpenAI on our project) gets the same
+    # host-side controls and cash hold, and no native budget it can't honour.
+    native_budget = (
+        value.native_root_budget_usd
+        if get_profile(profile).support.get("session_spend_control") == "native"
+        else None
+    )
     slot = Slot(
         thread=ThreadRef(
             channel=ChannelRef(
@@ -392,7 +459,7 @@ async def prepare_controlled_root(
         raise WorkerSpecRefused("native_budget_usd", "unsupported")
     binding = await store.get_binding(slot)
     if binding is not None and intent_id is None:
-        return replace(request, native_budget_usd=value.native_root_budget_usd)
+        return replace(request, native_budget_usd=native_budget)
     if binding is not None or origin_id is None or intent_id is None:
         raise WorkerSpecRefused("origin", "unbound")
     deadline = min(request.deadline, value.expires_at)
@@ -402,7 +469,10 @@ async def prepare_controlled_root(
         "grant_digest": request_digest(value.model_dump(mode="json")),
         "deadline": deadline.isoformat(),
         "max_inputs": min(3, value.max_root_turns),
-        "native_budget_usd": str(value.native_root_budget_usd),
+        # Without a native cap the grant's figure only sizes the cash hold: say so.
+        ("native_budget_usd" if native_budget is not None else "hold_budget_usd"): str(
+            value.native_root_budget_usd
+        ),
         "cash_budget_usd": str(value.root_cash_budget_usd),
         "profile": profile,
         "model": model,
@@ -452,7 +522,7 @@ async def prepare_controlled_root(
         deps=replace(request.deps, state_store=store),
         deadline=deadline,
         root_controls=controls,
-        native_budget_usd=value.native_root_budget_usd,
+        native_budget_usd=native_budget,
         before_native=guard,
     )
 
@@ -520,10 +590,13 @@ def root_claim_check(
     async def check(db: AsyncSession, scope: Scope, key: str, fence: Lease | None) -> bool:
         if fence is None:
             raise WorkerSpecRefused("origin", "unbound")
+        # The guard reads the current grant on its own sessions: run it before taking the
+        # tenant fleet lock, which every fleet admission and budget read in the tenant
+        # waits on for as long as this send claim holds it (SMOKE J4).
+        await guard()
         root = await require_root_funding(
             db, scope, fence.slot, origin_id=origin_id, controls=controls, markup=deps.markup
         )
-        await guard()
         if datetime.fromisoformat(str(controls["deadline"])) <= await mux_state.database_clock(db):
             raise WorkerSpecRefused("origin", "stale")
         if count:
@@ -595,6 +668,24 @@ async def _reserve_root(
     return record
 
 
+#: Why the latest turns couldn't retain a fleet root, by origin. In-process and
+#: bounded: another replica, or a restart, falls back to the generic refusal.
+_ROOT_REFUSALS: OrderedDict[UUID, str] = OrderedDict()
+_ROOT_REFUSALS_MAX = 1024
+
+
+def _remember_root_refusal(origin_id: UUID, obstacle: str) -> None:
+    _ROOT_REFUSALS[origin_id] = obstacle
+    _ROOT_REFUSALS.move_to_end(origin_id)
+    while len(_ROOT_REFUSALS) > _ROOT_REFUSALS_MAX:
+        _ROOT_REFUSALS.popitem(last=False)
+
+
+def root_refusal(origin_id: UUID) -> str | None:
+    """The obstacle that kept this origin's turn from retaining a fleet root, if known."""
+    return _ROOT_REFUSALS.get(origin_id)
+
+
 async def freeze_prepared_root(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -602,8 +693,76 @@ async def freeze_prepared_root(
     intent_id: UUID,
     now: Callable[[], datetime],
 ) -> None:
-    """Retain the exact host-owned root under its input's existing mutation fence."""
-    from uuid import uuid4
+    """Retain the exact host-owned root under its input's existing mutation fence.
+
+    Under an agent's own grant a refusal fails the turn, as it always has. Under
+    the computed default (every agent, nothing configured), a turn that can't
+    become a fleet root is an ordinary turn: it answers with fleet off and the
+    fleet tools say why. The default never makes a chat turn fail.
+    """
+    from daimon.core.fleet_configuration import is_default_fleet
+    from daimon.core.neutral_resources import fleet_root_obstacle
+    from daimon.core.turn_origin import current_origin_id
+
+    try:
+        value = await read_agent_fleet_grant(deps, prepared.admission, now=now())
+    except Exception as error:
+        from daimon.core.channel_backend import AgentBackendRefused
+
+        if isinstance(error, (WorkerSpecRefused, AgentBackendRefused)):
+            raise
+        # The grant can't be read: retain nothing; the turn answers with fleet off.
+        log.error("fleet.read_failed", error_type=type(error).__name__, at="freeze")
+        if (origin_id := current_origin_id.get()) is not None:
+            _remember_root_refusal(origin_id, "unavailable")
+        return
+    if value is None:
+        if prepared._source is not None or prepared._preparation is not None:  # pyright: ignore[reportPrivateUsage]
+            raise WorkerSpecRefused("origin", "stale")
+        return
+    if not is_default_fleet(value):
+        await _freeze_root(deps, prepared, value, intent_id=intent_id, now=now)
+        return
+    try:
+        await _freeze_root(deps, prepared, value, intent_id=intent_id, now=now)
+    except Exception as error:
+        # Any failure (a refusal, a conflict, the database) only turns fleet off for this
+        # turn. Cancellation is a BaseException and still propagates.
+        source = prepared._source  # pyright: ignore[reportPrivateUsage]
+        if prepared.admission.hold is not None:
+            obstacle = "held"
+        elif prepared.admission.shared_owner is not None:
+            obstacle = "shared_thread"
+        else:
+            obstacle = (fleet_root_obstacle(source) if source is not None else None) or (
+                "unavailable"
+            )
+        from daimon.core.turn.persistence import BindingSuperseded
+        from mux.state.lease import StaleFence
+
+        # A lost fence or binding means another writer moved on: worth an error line.
+        (log.error if isinstance(error, (StaleFence, BindingSuperseded)) else log.warning)(
+            "fleet.default_root_skipped",
+            # One stable field to group by: the setup obstacle, else the error's class.
+            cause=obstacle if obstacle != "unavailable" else type(error).__name__,
+            error_type=type(error).__name__,
+            field=getattr(error, "field", None),
+            reason=getattr(error, "reason", None),
+            obstacle=obstacle,
+        )
+        if (origin_id := current_origin_id.get()) is not None:
+            _remember_root_refusal(origin_id, obstacle)
+
+
+async def _freeze_root(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    value: AgentFleetGrant,
+    *,
+    intent_id: UUID,
+    now: Callable[[], datetime],
+) -> None:
+    from uuid import uuid5
 
     from daimon.core.authz import FleetFacts
     from daimon.core.mux_compat import source_environment_record
@@ -615,11 +774,6 @@ async def freeze_prepared_root(
     from daimon.core.turn_origin import current_origin_id
     from mux.state.operations import request_digest
 
-    value = await read_agent_fleet_grant(deps, prepared.admission, now=now())
-    if value is None:
-        if prepared._source is not None or prepared._preparation is not None:  # pyright: ignore[reportPrivateUsage]
-            raise WorkerSpecRefused("origin", "stale")
-        return
     persistence, origin_id = current_persistence.get(), current_origin_id.get()
     grant, source = prepared.admission.grant, prepared._source  # pyright: ignore[reportPrivateUsage]
     if not (persistence and origin_id and grant and source):
@@ -628,6 +782,7 @@ async def freeze_prepared_root(
     if (
         not deps.fleet_enabled
         or prepared.admission.shared_owner is not None
+        or prepared.admission.hold is not None
         or binding.native_refs.get("session") != prepared.ma_session_id
         or prepared.admission.account_id != UUID(scope.account_id)
         or source.resource_scope != scope
@@ -674,6 +829,7 @@ async def freeze_prepared_root(
             admission.memory_read_only != prepared.admission.memory_read_only
             or admission.asks_before_publishing != prepared.admission.asks_before_publishing
             or admission.origin_seal_ids != prepared.admission.origin_seal_ids
+            or admission.hold != prepared.admission.hold
         ):
             raise WorkerSpecRefused("origin", "stale")
     default_revision = None
@@ -685,24 +841,50 @@ async def freeze_prepared_root(
         policy = await load_access_policy(db, tenant_id=grant.tenant_id)
     if deps.fleet_root_grants is not None:
         raise WorkerSpecRefused("origin", "unsupported")
-    permissions = fleet_root_permissions(
-        source,
-        grant,
-        value,
-        fleet=FleetFacts(
-            scope=scope,
-            root=binding.thread,
-            origin_id=origin_id,
-            account_id=prepared.admission.account_id,
-            run_id=uuid4(),
-            place=grant.run_place,
-            enabled=True,
-            active=True,
-        ),
-        policy=policy,
-        now=now(),
-        seal_ids=prepared.admission.origin_seal_ids,
-    )
+    try:
+        permissions = fleet_root_permissions(
+            source,
+            grant,
+            value,
+            fleet=FleetFacts(
+                scope=scope,
+                root=binding.thread,
+                origin_id=origin_id,
+                account_id=prepared.admission.account_id,
+                # A placeholder, replaced by the run's id; derived, so a root draws no
+                # random id (shared legacy/mux goldens replay the same id sequence).
+                run_id=uuid5(origin_id, "fleet-root-placeholder"),
+                place=grant.run_place,
+                enabled=True,
+                active=True,
+            ),
+            policy=policy,
+            now=now(),
+            seal_ids=prepared.admission.origin_seal_ids,
+        )
+    except WorkerSpecRefused as error:
+        # Only when the agent's own setup can't become worker authority (e.g. a
+        # connected tool with its own login, or its very first turn, before its
+        # memory store exists) does the turn run with fleet off: nothing is
+        # retained and the fleet tools say why. Any other refusal (policy, grant,
+        # backend, budget, identity) still fails the turn as before.
+        from daimon.core.neutral_resources import fleet_root_obstacle
+
+        obstacle = fleet_root_obstacle(source)
+        if obstacle is None and error.field == "memory" and source.memory_store_id is None:
+            obstacle = "memory"
+        if obstacle is None:
+            raise
+        log.warning(
+            "fleet.root_freeze_refused",
+            cause=obstacle,
+            field=error.field,
+            reason=error.reason,
+            obstacle=obstacle,
+            origin_id=str(origin_id),
+        )
+        _remember_root_refusal(origin_id, obstacle)
+        return
     permissions = replace(
         permissions,
         limits=permissions.limits.model_copy(
@@ -827,6 +1009,7 @@ async def resume_prepared_root(
     )
     for failed, reason in (
         (prepared.admission.shared_owner is not None, "shared_owner"),
+        (prepared.admission.hold is not None, "held_turn"),
         (expected_scope != persistence.scope, "prepared_scope"),
         (source.resource_scope != persistence.scope, "source_scope"),
         (row.tenant_id != UUID(persistence.scope.tenant_id), "tenant"),
@@ -1320,6 +1503,24 @@ class SourceCapabilities(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class _TemplateInputs:
+    """Capture inputs a template row implies: only Daimon MCP, from the live catalogue."""
+
+    source_pin: str
+    model: ModelRef
+    mcp_tools: tuple[str, ...] = ()
+    skills: tuple[SourceSkillMapping, ...] = ()
+    environment: EnvironmentSpec | None = None
+
+
+def _grant_models(row: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """The models a template row's configuration grant names; none for a malformed grant."""
+    grant = row.get("configuration_grant")
+    models = grant.get("models") if isinstance(grant, dict) else None
+    return tuple(m for m in models if isinstance(m, str)) if isinstance(models, list) else ()
+
+
 def configuration_matches(
     revision: ConfigRevision, *, digest: str | None, grant: ConfigurationGrant | None
 ) -> bool:
@@ -1356,7 +1557,12 @@ async def capture_preparation_source(
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
     from daimon.core.sessions import project_session_resources
+    from mux.errors import ScopeViolation
 
+    if request.admission.hold is not None:
+        # The source records the agent-wide memory store; a held turn mounts its
+        # channel's store only, so it never has a source to capture.
+        raise ScopeViolation("source-preparation", "a held turn never captures a fleet source")
     if fresh:
         from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 
@@ -1403,6 +1609,7 @@ async def capture_preparation_source(
         agent_github_app=request.deps.agent_github_app,
         hide_personal_for=request.admission.shared_owner,
         slack_turn_context_id=request.admission.slack_turn_context_id,
+        hold=None if request.admission.shared_owner is not None else request.admission.hold,
         private_dm_id=request.admission.private_dm_id,
         origin_seal_ids=request.admission.origin_seal_ids,
     )
@@ -1428,8 +1635,9 @@ async def _capture_source_capabilities(
     from daimon.core.skills.ingest import retained_archive_files
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
+    from daimon.core.turn.runtime_defaults import default_rows
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
-    from mux.drivers.anthropic.schemas import (
+    from mux.drivers.anthropic import (
         AGENT_TOOLS_NAMESPACE,
         AgentToolsConfig,
         MCPToolset,
@@ -1441,19 +1649,32 @@ async def _capture_source_capabilities(
 
     source = source.model_copy(update={"representations": ()})
     path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if path is None:
-        return source
-    try:
-        with Path(path).open("rb") as stream:
-            raw = stream.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            raise ValueError("manifest too large")
-        rows = _ROWS.validate_json(raw)
-    except (OSError, ValueError):
-        # This optional capability evidence cannot break an ordinary source
-        # capture. A full deployment still refuses without the representation,
-        # and its closed runtime-manifest loader independently rejects bad input.
-        return source
+    rows: list[dict[str, JsonValue]] = []
+    if path is not None:
+        try:
+            with Path(path).open("rb") as stream:
+                raw = stream.read(_MAX_BYTES + 1)
+            if len(raw) > _MAX_BYTES:
+                raise ValueError("manifest too large")
+            rows = _ROWS.validate_json(raw)
+        except (OSError, ValueError):
+            # This optional capability evidence cannot break an ordinary source
+            # capture. A full deployment still refuses without the representation,
+            # and its closed runtime-manifest loader independently rejects bad input.
+            return source
+    # A code-default agent template counts only where the operator configured no
+    # row for this tenant's profile at all, matching selection's last resort.
+    tenant = str(source.tenant_id)
+    operator_profiles = {str(row.get("profile")) for row in rows if row.get("tenant_id") == tenant}
+    rows = [
+        *rows,
+        *(
+            row
+            for row in default_rows(tenant)
+            if row.get("root_materialization") is True
+            and str(row.get("profile")) not in operator_profiles
+        ),
+    ]
     revision = request.admission.backend_revision
     if (
         request.worker is not None
@@ -1483,15 +1704,47 @@ async def _capture_source_capabilities(
             and source.source is not None
             and row.get("source_agent_version") == source.source.revision.local
         ]
-        if not selected:
+        templates = [
+            (row, model)
+            for row in rows
+            if row.get("root_materialization") is True
+            and row.get("template_capabilities") == "mcp"
+            and row.get("tenant_id") == str(source.tenant_id)
+            and row.get("platform") in (request.platform, _WILDCARD)
+            and row.get("channel_id") in (request.admission.origin_channel_id, _WILDCARD)
+            and row.get("account_id") in (request.scope.account_id, _WILDCARD)
+            and (
+                capability_preview
+                or revision is not None
+                and row.get("profile") == revision.profile
+            )
+            for model in _grant_models(row)
+            if capability_preview or revision is not None and model == revision.model
+        ]
+        if not selected and not templates:
             return source
         spec, scope = source.effective_spec, source.resource_scope
         if spec is None or scope is None or scope != request.scope:
             raise ValueError("missing captured source")
         pin = source_preservation_pin(source)
         represented: list[SourceRepresentation] = []
+        candidates: list[tuple[dict[str, JsonValue], SourceCapabilities | _TemplateInputs]] = []
         for row in selected:
-            inputs = SourceCapabilities.model_validate(row["source_capabilities"])
+            candidates.append((row, SourceCapabilities.model_validate(row["source_capabilities"])))
+        for row, model in templates:
+            candidates.append(
+                (
+                    row,
+                    _TemplateInputs(
+                        source_pin=pin,
+                        model=ModelRef(
+                            provider=get_profile(str(row.get("profile"))).provider, id=model
+                        ),
+                    ),
+                )
+            )
+        for row, inputs in candidates:
+            template = isinstance(inputs, _TemplateInputs)
             profile_id = row.get("profile")
             if not isinstance(profile_id, str):
                 raise ValueError("missing representation profile")
@@ -1500,8 +1753,10 @@ async def _capture_source_capabilities(
                 inputs.source_pin != pin
                 or profile.provider != inputs.model.provider
                 or profile.skill_digest not in ("version", "content")
-                or row.get("platform") != request.platform
-                or row.get("channel_id") != request.admission.origin_channel_id
+                or not template
+                and row.get("platform") != request.platform
+                or not template
+                and row.get("channel_id") != request.admission.origin_channel_id
                 and row.get("channel_id")
                 != (
                     request.admission.backend_revision.channel.channel_id
@@ -1539,6 +1794,7 @@ async def _capture_source_capabilities(
                     now=now,
                     ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
                     chat_execution=True,
+                    surface="provider_turn",
                 )
             try:
                 await validate_agent_mcp_token(
@@ -1570,6 +1826,13 @@ async def _capture_source_capabilities(
                 if frozenset(allowed) != catalogue:
                     raise ValueError("source MCP allowlist differs from complete server catalogue")
                 catalogue = frozenset(cast(list[str], allowed))
+            if template:
+                # A template carries no operator list: the live catalogue is the source's.
+                inputs = _TemplateInputs(
+                    source_pin=inputs.source_pin,
+                    model=inputs.model,
+                    mcp_tools=tuple(sorted(catalogue)),
+                )
             if frozenset(inputs.mcp_tools) != catalogue:
                 raise ValueError("MCP representation must preserve the exact source catalogue")
             tools = tuple(spec.tools or ())
@@ -1596,6 +1859,16 @@ async def _capture_source_capabilities(
                 for tool in tools
             ):
                 raise ValueError("source has no enabled daimon-mcp toolset")
+            # No OpenAI/Gemini turn has a confirmation card, pinned or template:
+            # every confirmation-gated or publishing tool stays unavailable (and
+            # the server refuses it for their provider-turn credentials too).
+            from daimon.core.tool_safety import confirmation_gated_tools
+
+            gated = confirmation_gated_tools()
+            permissions = {
+                name: "ask" if name in gated else permission
+                for name, permission in permissions.items()
+            }
             if not any(permission == "auto" for permission in permissions.values()):
                 raise ValueError("source has no automatically executable MCP tools")
             # URL fetching has no native hosted-Agents tool. Keep the exact
@@ -1607,18 +1880,36 @@ async def _capture_source_capabilities(
                 and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
                 else ()
             )
-            mapped_tools = represented_execution_tools(
-                profile,
-                tuple(
-                    tool
-                    for tool in tools
-                    if tool.kind != "mcp_toolset"
-                    and not (
-                        unavailable_builtin_tools
-                        and tool.kind == "builtin"
-                        and tool.name == "web_fetch"
-                    )
-                ),
+            # A template represents only Daimon MCP: the source's own tools and
+            # custom skills are whole losses its consent must name.
+            template_losses = (
+                (
+                    *(
+                        ("skills",)
+                        if any(s.source in (None, "custom") for s in spec.skills or ())
+                        else ()
+                    ),
+                    *(("tools",) if any(t.kind != "mcp_toolset" for t in tools) else ()),
+                )
+                if template
+                else ()
+            )
+            mapped_tools = (
+                ()
+                if template
+                else represented_execution_tools(
+                    profile,
+                    tuple(
+                        tool
+                        for tool in tools
+                        if tool.kind != "mcp_toolset"
+                        and not (
+                            unavailable_builtin_tools
+                            and tool.kind == "builtin"
+                            and tool.name == "web_fetch"
+                        )
+                    ),
+                )
             )
             if any(
                 tool.kind == "mcp_toolset"
@@ -1677,7 +1968,9 @@ async def _capture_source_capabilities(
             )
             # The provider's built-in skills (docx, pptx, ...) have no bytes to
             # carry and run only there: another backend goes without them.
-            portable = tuple(s for s in spec.skills or () if s.source in (None, "custom"))
+            portable = tuple(
+                s for s in spec.skills or () if s.source in (None, "custom") and not template
+            )
             if {item.source.id for item in inputs.skills} != {s.id for s in portable}:
                 raise ValueError("skill representation is incomplete")
             unresolved = tuple(s for s in portable if s.version in (None, "latest"))
@@ -1763,16 +2056,47 @@ async def _capture_source_capabilities(
                     unavailable_mcp_tools=unavailable_mcp_tools,
                     unavailable_builtin_tools=unavailable_builtin_tools,
                     environment=inputs.environment,
+                    unavailable_capabilities=template_losses,
                 )
             )
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
             raise ValueError("ambiguous source representation")
         return source.model_copy(update={"representations": tuple(represented)})
-    except (OSError, ValueError, DaimonError, MuxError, AnthropicError, SQLAlchemyError):
+    except (OSError, ValueError, DaimonError, MuxError, AnthropicError, SQLAlchemyError) as error:
         # Representations are optional capture evidence, never a new failure
         # mode for native callers or worker ceilings. Full deployments require
         # this evidence independently and refuse before any provider exposure.
+        # Said once here, though: without it the agent silently loses its MCP
+        # on the new provider (J2's Argon preview). Only our own fixed
+        # sentences are logged, never a provider's or a validator's text.
+        log.warning(
+            "source_capture.representation_skipped",
+            error=type(error).__name__,
+            reason=_own_sentence(error),
+            tenant_id=str(source.tenant_id),
+            agent_id=str(source.agent_id),
+            profile=revision.profile if revision is not None else None,
+            model=revision.model if revision is not None else None,
+            capability_preview=capability_preview,
+        )
         return source
+
+
+def _own_sentence(error: BaseException) -> str | None:
+    """The fixed sentence of a ValueError raised by the capture itself, else None.
+
+    Anything raised deeper (a catalogue read, a validator) may carry content.
+    """
+    frame = error.__traceback__
+    while frame is not None and frame.tb_next is not None:
+        frame = frame.tb_next
+    if (
+        type(error) is not ValueError
+        or frame is None
+        or frame.tb_frame.f_code is not _capture_source_capabilities.__code__
+    ):
+        return None
+    return str(error)
 
 
 def source_instructions_preserved(required: str | None, system: str | None) -> bool:
@@ -1812,7 +2136,7 @@ def _source_extension_obligation(
     if extension.version != 1:
         return "source_definition"
     if extension.namespace == "anthropic.model_config":
-        from mux.drivers.anthropic.schemas import AgentModelConfig
+        from mux.drivers.anthropic import AgentModelConfig
 
         try:
             native = AgentModelConfig.model_validate(dict(extension.value))
@@ -1881,27 +2205,112 @@ def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> f
 
 
 def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
-    """Exclude validated native-only capabilities and their paired resources."""
+    """Exclude validated native-only capabilities and their paired resources.
+
+    Nothing with its own login enters a worker ceiling: the agent can still run a
+    fleet, its workers run without it, and no credential ever reaches a worker. Each
+    loss is declared (`mcp`, `files`, `repository`, `memory`):
+    - a connector with its own login (an MCP server carrying a credential, or one a
+      projected credential pairs with), with its toolset and binding;
+    - a stored connector login the projector can't pair with one server
+      (`agent-mcp:<id>`): fail safe, workers then run without any external connector;
+    - stored secrets the session would write to a file (`.env`);
+    - repositories cloned with a login;
+    - memory, while the agent's memory store doesn't exist yet (its first turn).
+    """
     spec = source.effective_spec
     if spec is None:
         return source
     normalized, excluded = worker_spec_ceiling(spec)
-    resources = tuple(
-        binding
-        for binding in source.resource_requirements
-        if not ((paired := _mcp_credential_servers(source, binding)) and paired <= excluded)
+    logins = login_mcp_servers(source)
+    stored_logins = any(
+        _stored_connector_login(binding) for binding in source.resource_requirements
     )
+    if stored_logins:
+        logins |= {server.name for server in spec.mcp_servers or ()}
+    drops: set[str] = set()
+    if logins - excluded:
+        drops.add("mcp")
+        normalized = normalized.model_copy(
+            update={
+                "mcp_servers": tuple(
+                    server for server in normalized.mcp_servers or () if server.name not in logins
+                ),
+                "tools": tuple(
+                    tool
+                    for tool in normalized.tools or ()
+                    if not (tool.kind == "mcp_toolset" and tool.name in logins)
+                )
+                if normalized.tools is not None
+                else None,
+            }
+        )
+    excluded |= logins
+    credentials = {
+        server.credential_ref
+        for server in spec.mcp_servers or ()
+        if server.name in logins and server.credential_ref is not None
+    }
+    resources: list[ResourceBinding] = []
+    for binding in source.resource_requirements:
+        paired = _mcp_credential_servers(source, binding)
+        if (paired and paired <= excluded) or (
+            binding.kind == "credential" and binding.credential_ref in credentials
+        ):
+            continue
+        if _stored_connector_login(binding):
+            continue
+        if binding.kind == "credential" and binding.target_path is not None:
+            drops.add("files")
+            continue
+        resources.append(binding)
+    repositories = tuple(repo for repo in source.repository_sources if repo.credential_ref is None)
+    if len(repositories) != len(source.repository_sources):
+        drops.add("repository")
+    if source.memory_store_id is None and source.memory_required is not False:
+        # The agent's memory store is created by its first session, so on its very
+        # first turn there is none to mount: its workers run without memory.
+        drops.add("memory")
+    if drops:
+        normalized = normalized.model_copy(
+            update={"declared_drops": tuple(sorted({*normalized.declared_drops, *drops}))}
+        )
     return source.model_copy(
         update={
             "effective_spec": normalized,
-            "resource_requirements": resources,
+            "resource_requirements": tuple(resources),
+            "repository_sources": repositories,
         }
     )
 
 
+def _stored_connector_login(binding: ResourceBinding) -> bool:
+    """A projected stored MCP login (`agent-mcp:<id>`), which names no server."""
+    return (
+        binding.kind == "credential"
+        and binding.credential_ref is not None
+        and binding.id == binding.credential_ref
+        and binding.credential_ref.startswith("agent-mcp:")
+        and binding.native is None
+        and binding.resource is None
+        and binding.target_path is None
+    )
+
+
+def login_mcp_servers(source: BackendAgent) -> frozenset[str]:
+    """The agent's connectors that carry their own paired login; workers run without them."""
+    spec = source.effective_spec
+    if spec is None:
+        return frozenset()
+    names = {server.name for server in spec.mcp_servers or () if server.credential_ref}
+    for binding in source.resource_requirements:
+        names |= _mcp_credential_servers(source, binding)
+    return frozenset(names)
+
+
 def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
     """Normalize native toolsets without changing unrelated field presence."""
-    from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
+    from mux.drivers.anthropic import AGENT_TOOLS_NAMESPACE, agent_tools
 
     updates: dict[str, object] = {}
     excluded: set[str] = set()
@@ -1936,11 +2345,13 @@ def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
     if not controls:
         return target
     extension = controls[0]
-    if target.model.provider == ceiling.model.provider:
+    if (target.model.provider, target.model.id) == (ceiling.model.provider, ceiling.model.id):
         retained = target.model_copy(update={"extensions": controls})
         if _source_extension_obligation(extension, native_target=retained) is not None:
             raise ValueError("native worker model does not represent the granted controls")
         return retained
+    # Another model, even of the same provider, may not accept the root's controls
+    # (e.g. its effort level); the worker runs at its model's defaults, declared.
     if "model_controls" not in target.declared_drops:
         raise ValueError("native model controls require an explicit declared loss")
     return target.model_copy(update={"extensions": None})
@@ -1957,11 +2368,19 @@ def classify_source_obligations(
     retained_agent: ResourceRef | None = None,
 ) -> frozenset[str]:
     """One source-preservation rule for pre-allocation normalization and preparation."""
+    ceiling_drops: set[str] = set()
     if worker_ceiling:
+        before: set[str] = (
+            set(source.effective_spec.declared_drops) if source.effective_spec else set()
+        )
         try:
             source = worker_source_ceiling(source)
         except ValueError:
             return frozenset({"source_definition", "tools"})
+        if source.effective_spec is not None:
+            # What the ceiling left out (logins, stored secrets, logged-in repos) is
+            # only discharged when the target declares the same loss.
+            ceiling_drops = set(source.effective_spec.declared_drops) - before
     spec = source.effective_spec
     if spec is None:
         return frozenset({"source_definition"})
@@ -1990,14 +2409,15 @@ def classify_source_obligations(
         and environment == source.environment.spec
         and resources == source.resource_requirements
     )
-    missing: set[str] = set()
+    missing: set[str] = ceiling_drops - set(drops)
     if represented is not None:
         missing.update(set(represented.unavailable_mcp_tools) - set(drops))
         missing.update(set(represented.unavailable_builtin_tools) - set(drops))
+        missing.update(set(represented.unavailable_capabilities) - set(drops))
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())
-    from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
+    from mux.drivers.anthropic import AGENT_TOOLS_NAMESPACE, agent_tools
 
     for extension in spec.extensions or ():
         if extension.version != 1:
@@ -2018,6 +2438,11 @@ def classify_source_obligations(
                         missing.add("tools")
         else:
             foreign_target = target is not None and target.model.provider != spec.model.provider
+            # A fleet worker on another model may declare the loss of the root's
+            # controls exactly as a foreign-provider worker does.
+            foreign_target = foreign_target or (
+                worker_ceiling and target is not None and target.model.id != spec.model.id
+            )
             obligation = _source_extension_obligation(
                 extension,
                 native_target=target if not foreign_target else None,
@@ -2075,8 +2500,10 @@ def classify_source_obligations(
                 missing.add("credentials")
             elif "mcp" not in drops:
                 missing.add("mcp")
-    if not native_retained and any(
-        repository.credential_ref for repository in source.repository_sources
+    if (
+        not native_retained
+        and "credentials" not in drops
+        and any(repository.credential_ref for repository in source.repository_sources)
     ):
         missing.add("credentials")
     for resource in source.resource_requirements:
@@ -2114,7 +2541,12 @@ def classify_source_obligations(
         ):
             continue
         # No installed materializer proves credentials or opaque private resources.
-        missing.add("credentials" if resource.kind == "credential" else "source_definition")
+        # A declared `credentials` drop discharges a bare credential: the target runs
+        # without it, and nothing carries it there.
+        if resource.kind != "credential":
+            missing.add("source_definition")
+        elif "credentials" not in drops:
+            missing.add("credentials")
     if (
         (source.memory_required is not False or source.memory_store_id is not None)
         and "memory" not in drops
@@ -2150,7 +2582,7 @@ def classify_source_obligations(
         if not retained:
             missing.add("memory")
     if source.environment is not None and source.environment.spec.native_config is not None:
-        from mux.drivers.anthropic.schemas import EnvironmentConfig
+        from mux.drivers.anthropic import EnvironmentConfig
 
         try:
             EnvironmentConfig.model_validate(dict(source.environment.spec.native_config.value))
@@ -2482,8 +2914,12 @@ async def read_preparation_counterpart(
         if source is None or revision is None:
             raise AdmissionDenied(reason="backend_unsupported")
         target = selected.target_spec
-        from daimon.core.turn.runtimes import ScopedTurnRuntimes
+        from daimon.core.turn.runtimes import ScopedTurnRuntimes, prepare_channel_runtime
 
+        # Provider setup this turn's runtime needs first (e.g. the tenant's GPT
+        # environment, created once). Only a real turn's preparation reaches here.
+        timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+        selected = await asyncio.wait_for(prepare_channel_runtime(selected), timeout=timeout)
         if isinstance(selected.deps.turn_runtimes, ScopedTurnRuntimes):
             selected.deps.turn_runtimes.bind_preparation(selected)
         runtime = selected.deps.turn_runtimes.get(revision.profile)
@@ -2513,6 +2949,10 @@ async def read_preparation_counterpart(
                 runtime.materialize_worker(selected), timeout=timeout
             )
             selected = replace(selected, counterpart=allocated)
+        elif worker is None and runtime.materialize_root is not None:
+            timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+            allocated = await asyncio.wait_for(runtime.materialize_root(selected), timeout=timeout)
+            selected = replace(selected, counterpart=allocated)
         timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         counterpart = await asyncio.wait_for(
             runtime.read_agent_counterpart(selected), timeout=timeout
@@ -2532,6 +2972,12 @@ async def read_preparation_counterpart(
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
         return replace(selected, counterpart=counterpart, verified_counterpart=counterpart)
+    except AdmissionDenied as error:
+        # A refusal that names its own cause (e.g. GPT still being set up for this
+        # tenant) reaches the person as itself; anything else stays "unsupported".
+        if error.reason != "backend_unsupported":
+            raise
+        raise AdmissionDenied(reason="backend_unsupported") from error
     except (UnsupportedCapability, TimeoutError, TurnError, AgentBackendRefused) as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception:
@@ -2567,18 +3013,47 @@ class CounterpartPlan(Protocol):
     def counterpart_catalog_id(self) -> str | None: ...
     @property
     def counterpart_catalog_revision(self) -> int | None: ...
+    @property
+    def root_materialization(self) -> bool: ...
     @classmethod
     def model_validate(cls, obj: object) -> Self: ...
+
+
+def template_source(data: object) -> object:
+    """Map a worker template's `"*"` source pins to "no pin"; refuse them on any other row."""
+    if not isinstance(data, dict):
+        return data
+    row = cast(dict[str, object], data)
+    fields = [name for name in ("source_agent_id", "source_agent_version") if row.get(name) == "*"]
+    if not fields:
+        return row
+    if row.get("worker_materialization") is not True:
+        raise ValueError("only a worker template row may name any source agent")
+    return {**row, **dict.fromkeys(fields)}
 
 
 def validate_counterpart_pins(
     plan: CounterpartPlan, *, worker_materialization: bool = False
 ) -> None:
     """Legacy rows have no counterpart; partial source/catalog pins never authorize one."""
-    if worker_materialization:
+    if plan.root_materialization:
+        # A tenant-wide agent template: identity comes from the admitted agent,
+        # never from the row, so the row may pin none of it.
         if (
-            plan.source_agent_id is None
-            or plan.source_agent_version is None
+            worker_materialization
+            or plan.source_agent_id is not None
+            or plan.source_agent_version is not None
+            or plan.counterpart_catalog_id is not None
+            or plan.counterpart_catalog_revision is not None
+            or plan.agent_id is not None
+        ):
+            raise ValueError("root materialization takes its identity from the admitted agent")
+        return
+    if worker_materialization:
+        # A worker template names no source (both pins absent): it serves any
+        # granted agent of its tenant, at that agent's live version.
+        if (
+            (plan.source_agent_id is None) != (plan.source_agent_version is None)
             or plan.counterpart_catalog_id is not None
             or plan.counterpart_catalog_revision is not None
             or plan.agent_id is not None
@@ -2609,6 +3084,54 @@ def _matching_rows(
     """`profile` and `tenant_id` are always exact. The other scope fields are
     exact-matched first; `allow_wildcard` additionally accepts `_WILDCARD` rows
     on those fields only — the caller tries exact-only before falling back."""
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    if request.admission.backend_revision_origin != "agent":
+        kind: TurnKind = "channel"
+        source_agent_id, source_agent_version = None, None
+    else:
+        agent = request.admission.agent
+        kind = "worker" if request.worker is not None else "root"
+        source_agent_id = str(derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=agent.id))
+        source_agent_version = agent.version
+    return _rows_for(
+        rows,
+        revision,
+        tenant_id=request.scope.tenant_id,
+        account_id=request.scope.account_id,
+        allow_wildcard=allow_wildcard,
+        kind=kind,
+        source_agent_id=source_agent_id,
+        source_agent_version=source_agent_version,
+    )
+
+
+type TurnKind = Literal["channel", "root", "worker"]
+
+
+def _same_agent(pinned: object, actual: str | None) -> bool:
+    """Source pins are UUIDs: compare them as UUIDs, not by spelling."""
+    try:
+        return actual is not None and UUID(str(pinned)) == UUID(actual)
+    except ValueError:
+        return False
+
+
+def _pinned_source(row: dict[str, JsonValue]) -> bool:
+    return row.get("source_agent_id") not in (None, _WILDCARD)
+
+
+def _rows_for(
+    rows: list[dict[str, JsonValue]],
+    revision: ConfigRevision,
+    *,
+    tenant_id: str,
+    account_id: str,
+    allow_wildcard: bool,
+    kind: TurnKind,
+    source_agent_id: str | None,
+    source_agent_version: int | None,
+) -> list[dict[str, JsonValue]]:
 
     def field_matches(row: dict[str, JsonValue], field: str, actual: object) -> bool:
         value = row.get(field)
@@ -2616,16 +3139,142 @@ def _matching_rows(
             return True
         return allow_wildcard and value == _WILDCARD
 
+    def origin_eligible(row: dict[str, JsonValue]) -> bool:
+        # A channel's turn runs a fixed plan with no source. An agent's root turn
+        # runs a root template or a row pinned to its source; a worker runs a
+        # worker row or a fixed counterpart pinned to its source. Root and worker
+        # templates never compete, so both coexist in one tenant.
+        root = row.get("root_materialization") is True
+        worker = row.get("worker_materialization") is True
+        pinned = _pinned_source(row)
+        if kind == "channel":
+            return not (root or worker or pinned)
+        if pinned and (
+            not _same_agent(row.get("source_agent_id"), source_agent_id)
+            or (
+                source_agent_version is not None
+                and row.get("source_agent_version") != source_agent_version
+            )
+        ):
+            # Another agent's (or version's) pinned row: fall through to the template.
+            return False
+        if kind == "root":
+            return root or (pinned and not worker)
+        return worker or (pinned and not root)
+
     return [
         row
         for row in rows
-        if row.get("profile") == revision.profile
-        and row.get("tenant_id") == request.scope.tenant_id
+        if origin_eligible(row)
+        and row.get("profile") == revision.profile
+        and row.get("tenant_id") == tenant_id
         and field_matches(row, "platform", revision.channel.platform)
         and field_matches(row, "channel_id", revision.channel.channel_id)
-        and field_matches(row, "account_id", request.scope.account_id)
+        and field_matches(row, "account_id", account_id)
         and manifest_configuration_matches(row, revision)
     ]
+
+
+def manifest_hold_usd(
+    revision: ConfigRevision,
+    *,
+    tenant_id: str,
+    account_id: str,
+    source_agent_id: str | None = None,
+    source_agent_version: int | None = None,
+) -> Decimal | None:
+    """The per-turn hold of the row `select_runtime_manifest` would select, if any.
+
+    Exact rows first, then the most specific wildcard row, as selection does: a
+    channel's own row wins over a tenant-wide "*" row. None when no manifest is
+    installed or readable, no single row is selected, or it names no valid hold.
+    """
+    from daimon.core.turn.runtime_defaults import default_rows
+
+    try:
+        rows = _configured_rows()
+    except AdmissionDenied:
+        return None
+    try:
+        # The rows a fleet worker's selection would see; without its source agent,
+        # only rows that pin none.
+        def worker_rows(
+            allow_wildcard: bool, rows: list[dict[str, JsonValue]] = rows
+        ) -> list[dict[str, JsonValue]]:
+            return _rows_for(
+                rows,
+                revision,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                allow_wildcard=allow_wildcard,
+                kind="worker",
+                source_agent_id=source_agent_id,
+                source_agent_version=source_agent_version,
+            )
+
+        selected = (
+            worker_rows(False)
+            or _most_specific(worker_rows(True))
+            # Selection's code-default fallback; the hold agrees with the row it picks.
+            or (
+                []
+                if _operator_configured(rows, tenant_id, revision)
+                else _most_specific(worker_rows(True, default_rows(tenant_id)))
+            )
+        )
+        if len(selected) != 1:
+            return None
+        hold = Decimal(str(selected[0]["hold_usd"]))
+    except (OSError, ValidationError, KeyError, ArithmeticError, ValueError):
+        return None
+    return hold if hold.is_finite() and hold > 0 else None
+
+
+def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
+    """The one matching row strictly narrower than every other, else all of them.
+
+    A row is narrower when the scope fields it names exactly are a strict
+    superset of another's: a channel's own row with `"*"` accounts beats a
+    deployment-wide default. Rows naming different fields (a channel's row
+    and an account's row) are incomparable and all remain, so they refuse
+    as ambiguous instead of one silently shadowing the other's credentials.
+    """
+
+    def exact(row: dict[str, JsonValue]) -> frozenset[str]:
+        return frozenset(field for field in _WILDCARDABLE_FIELDS if row.get(field) != _WILDCARD)
+
+    for candidate in rows:
+        if all(exact(other) < exact(candidate) for other in rows if other is not candidate):
+            return [candidate]
+    return rows
+
+
+def _operator_configured(
+    rows: list[dict[str, JsonValue]], tenant_id: str, revision: ConfigRevision
+) -> bool:
+    """Whether the operator's manifest has any row for this tenant's profile."""
+    return any(
+        row.get("tenant_id") == tenant_id and row.get("profile") == revision.profile for row in rows
+    )
+
+
+def _configured_rows() -> list[dict[str, JsonValue]]:
+    """The operator manifest's rows; none when no manifest is configured.
+
+    A configured manifest that can't be read refuses (`AdmissionDenied`) rather than
+    falling back to the code defaults, so a broken operator file never widens access.
+    """
+    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    if not manifest_path:
+        return []
+    try:
+        with Path(manifest_path).open("rb") as manifest:
+            raw = manifest.read(_MAX_BYTES + 1)
+        if len(raw) > _MAX_BYTES:
+            raise AdmissionDenied(reason="backend_unsupported")
+        return _ROWS.validate_json(raw)
+    except (OSError, ValidationError):
+        raise AdmissionDenied(reason="backend_unsupported") from None
 
 
 def select_runtime_manifest[Plan: CounterpartPlan](
@@ -2636,27 +3285,47 @@ def select_runtime_manifest[Plan: CounterpartPlan](
     A deployment-wide default is one row with `_WILDCARD` ("*") on `platform`,
     `channel_id` and/or `account_id` — never on `tenant_id` or `profile`. An
     exact match always wins over a wildcard row (computed first, tried first);
-    wildcard rows are only consulted when no exact row matches, and the
-    existing "exactly one candidate or refuse" rule is unchanged for each pass.
+    wildcard rows are only consulted when no exact row matches. Among those,
+    a row whose exactly named scope fields strictly include every other
+    candidate's wins (a channel's own row, even with `"*"` accounts, beats a
+    deployment-wide default); otherwise the existing "exactly one candidate
+    or refuse" rule refuses them as ambiguous.
     The resolved plan always carries the request's real platform/channel_id/
     account_id — a wildcard row is a template, never a literal "*" identity.
     """
 
+    from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
+    from daimon.core.turn.runtime_defaults import default_rows
+
     revision = request.admission.backend_revision
     if revision is None:
         raise AdmissionDenied(reason="backend_unsupported")
-    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not manifest_path:
-        raise AdmissionDenied(reason="backend_unsupported")
     try:
-        with Path(manifest_path).open("rb") as manifest:
-            raw = manifest.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            raise AdmissionDenied(reason="backend_unsupported")
-        rows = _ROWS.validate_json(raw)
+        rows = _configured_rows()
         selected = _matching_rows(rows, revision, request, allow_wildcard=False)
         if not selected:
-            selected = _matching_rows(rows, revision, request, allow_wildcard=True)
+            selected = _most_specific(_matching_rows(rows, revision, request, allow_wildcard=True))
+        if not selected and not _operator_configured(rows, request.scope.tenant_id, revision):
+            # The operator configured nothing for this tenant's profile: the
+            # deployment's code defaults serve it. Where the operator configured
+            # the profile, its rows alone decide, so a narrower scope never widens.
+            provider = get_profile(revision.profile).provider
+            if provider in DEFAULT_KEY_ENV and not provider_key_present(provider):
+                # The operator's step, named only in the log: set DEFAULT_KEY_ENV[provider].
+                log.warning(
+                    "provider_runtime.not_configured",
+                    provider=provider,
+                    key_env=DEFAULT_KEY_ENV[provider],
+                )
+                raise AdmissionDenied(
+                    reason="backend_unsupported",
+                    cause="provider_not_configured",
+                    provider=provider,
+                )
+            defaults = default_rows(request.scope.tenant_id, request)
+            selected = _most_specific(
+                _matching_rows(defaults, revision, request, allow_wildcard=True)
+            )
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")
         resolved = dict(selected[0])
@@ -2670,6 +3339,55 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         return plan_type.model_validate(resolved)
     except (OSError, ValidationError):
         raise AdmissionDenied(reason="backend_unsupported") from None
+
+
+def manifest_has_row(request: ProviderPreparationRequest) -> bool:
+    """Whether the operator's runtime file has any row for this tenant's profile.
+
+    The same rule selection uses before it consults the code defaults
+    (`_operator_configured`): where the operator configured the profile at all,
+    its rows alone decide, so nothing is provisioned for a turn the defaults will
+    never serve. This reads only the file, never the code defaults. A configured
+    file that can't be read counts as having a row: never provision around a
+    configuration the operator meant to install.
+    """
+    revision = request.admission.backend_revision
+    if revision is None:
+        return False
+    try:
+        rows = _configured_rows()
+    except AdmissionDenied:
+        return True
+    return _operator_configured(rows, request.scope.tenant_id, revision)
+
+
+def _worker_template(plan: CounterpartPlan) -> bool:
+    """A worker row that names no source: identity comes from the request's admitted agent."""
+    return plan.worker_materialization and plan.source_agent_id is None
+
+
+def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
+    """The one catalog entry a template row's counterpart lives at for this agent version.
+
+    Keyed by the admitted agent's scoped identity, its MA version, the admitted
+    profile and model and the consented target spec, so an agent edit, a model
+    change or a different derivation gets a new entry, and an entry can never
+    serve another agent, version, model or spec.
+    """
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    revision, target = request.admission.backend_revision, request.target_spec
+    if revision is None or revision.model is None or target is None:
+        raise AdmissionDenied(reason="backend_unsupported")
+    agent_id = derive_agent_uuid(
+        tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+    )
+    # The consented target's digest: a different derived target never reuses an entry.
+    spec = request_digest(target.model_dump(mode="json"))[:16]
+    return (
+        f"root:{agent_id}:{request.admission.agent.version}:{revision.profile}"
+        f":{revision.model}:{spec}"
+    )
 
 
 def validate_counterpart_request(
@@ -2686,6 +3404,28 @@ def validate_counterpart_request(
     except ValueError:
         raise AdmissionDenied(reason="backend_unsupported") from None
     revision, scope = request.admission.backend_revision, request.scope
+    if plan.root_materialization:
+        if (
+            worker_materialization
+            or request.worker is not None
+            or request.admission.backend_revision_origin != "agent"
+            or revision is None
+            or not request.deps.channel_backends
+            or not request.deps.agent_backends
+            or request.deps.turn_path != "mux"
+            or scope.tenant_id != str(request.tenant_id)
+            or scope.account_id != str(request.admission.account_id)
+            or scope.account_id != str(request.session_account_id)
+            or (plan.tenant_id, plan.account_id) != (scope.tenant_id, scope.account_id)
+            or (revision.channel.tenant_id, revision.channel.platform, revision.channel.channel_id)
+            != (plan.tenant_id, plan.platform, plan.channel_id)
+            or request.platform != plan.platform
+            or revision.profile != plan.profile
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        if select_runtime_manifest(request, type(plan)) != plan:
+            raise AdmissionDenied(reason="backend_unsupported")
+        return revision
     if (
         request.admission.backend_revision_origin != "agent"
         or revision is None
@@ -2699,9 +3439,16 @@ def validate_counterpart_request(
         != (plan.tenant_id, plan.platform, plan.channel_id)
         or request.platform != plan.platform
         or revision.profile != plan.profile
-        or plan.source_agent_id
-        != derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
-        or plan.source_agent_version != request.admission.agent.version
+        or (
+            not _worker_template(plan)
+            and (
+                plan.source_agent_id
+                != derive_agent_uuid(
+                    tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+                )
+                or plan.source_agent_version != request.admission.agent.version
+            )
+        )
         or (worker_materialization and (request.worker is None or request.before_native is None))
         or (
             not worker_materialization
@@ -2716,6 +3463,67 @@ def validate_counterpart_request(
     if select_runtime_manifest(request, type(plan)) != plan:
         raise AdmissionDenied(reason="backend_unsupported")
     return revision
+
+
+async def materialize_root_counterpart(
+    plan: CounterpartPlan,
+    request: ProviderPreparationRequest,
+    *,
+    resources: NeutralResourceHost,
+) -> AgentRevision:
+    """Publish this agent version's counterpart from its consented target, once.
+
+    Runs after source preparation proved the drop consent, so the target is the
+    exact spec the admin confirmed. A concurrent first turn loses the catalog
+    compare-and-set and reads the winner's entry; the native key is the catalog
+    id, so native creation is idempotent too. `read_counterpart` then verifies
+    the entry like any operator-installed counterpart.
+    """
+    from daimon.core.skills.ingest import SkillIngestError
+    from daimon.core.stores.neutral_catalog import CatalogConflict
+    from sqlalchemy import text
+
+    validate_counterpart_request(plan, request)
+    source, target = request.source, request.target_spec
+    if (
+        not plan.root_materialization
+        or request.worker is not None
+        or target is None
+        or source is None
+        or source.source is None
+        or source.resource_scope != request.scope
+        or resources.scope != request.scope
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
+    catalog_id = root_counterpart_catalog_id(request)
+    try:
+        return await resources.entry(catalog_id)
+    except SkillIngestError:
+        pass
+    # Concurrent first turns publish one native agent: the loser waits, then reads
+    # the winner's entry. Catalog entries (and so this key) are per caller account.
+    body = json.dumps([request.scope.tenant_id, request.scope.account_id, plan.project, catalog_id])
+    key = int.from_bytes(hashlib.sha256(body.encode()).digest()[:8], signed=True)
+    async with request.deps.sessionmaker() as session, session.begin():
+        await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+        try:
+            return await resources.entry(catalog_id)
+        except SkillIngestError:
+            pass
+        existing = await resources.catalog.get_agent(resources.scope, catalog_id)
+        if existing is not None:
+            # An archived entry is never republished over; this agent version stays refused.
+            log.warning(
+                "turn.root_counterpart_archived",
+                catalog_id=catalog_id,
+                lifecycle=existing.agent.lifecycle,
+                tenant_id=request.scope.tenant_id,
+            )
+            raise AdmissionDenied(reason="backend_unsupported")
+        try:
+            return await resources.publish(catalog_id, target, expected_revision=0, key=catalog_id)
+        except CatalogConflict:
+            return await resources.entry(catalog_id)
 
 
 async def materialize_counterpart(
@@ -2804,10 +3612,26 @@ async def read_counterpart(
         raise AdmissionDenied(reason="backend_unsupported")
     if persistence is not None:
         persistence.check_session(scope, None)
-    catalog_id = acknowledged.catalog_id if acknowledged else cast(str, plan.counterpart_catalog_id)
+    root = plan.root_materialization
+    catalog_id = (
+        acknowledged.catalog_id
+        if acknowledged
+        else root_counterpart_catalog_id(request)
+        if root
+        else cast(str, plan.counterpart_catalog_id)
+    )
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    # Templates (root or worker) bind to the request's own admitted source agent:
+    # the agent this turn runs AS, which for a worker need not be the root.
+    expected_source = (
+        derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
+        if root or _worker_template(plan)
+        else plan.source_agent_id
+    )
     if (
         source.tenant_id != request.tenant_id
-        or source.agent_id != plan.source_agent_id
+        or source.agent_id != expected_source
         or resources.scope != scope
         or resources.workspace != plan.project
         or resources.backend.capabilities().profile_id != plan.profile
@@ -2819,6 +3643,7 @@ async def read_counterpart(
             (acknowledged is not None and row != acknowledged)
             or (
                 not worker_materialization
+                and not root
                 and (
                     row.local_revision != plan.counterpart_catalog_revision
                     or row.agent.ref.id != plan.agent_id

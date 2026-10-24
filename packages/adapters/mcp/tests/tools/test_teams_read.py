@@ -664,6 +664,8 @@ async def test_reads_naming_no_origin_are_refused_while_a_group_chat_turn_runs(
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         expires_at=now + timedelta(minutes=10),
         now=now,
         chat_session_id="test-session",

@@ -1,9 +1,11 @@
 """Owned PostgreSQL product admission/exposure, with mock tariffs and no SDK I/O."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -17,7 +19,7 @@ from daimon.core.channel_budget import (
     produce_fleet_budget,
     watch_fleet_budget,
 )
-from daimon.core.fleet import FleetConflict, worker_slot
+from daimon.core.fleet import FleetConflict, holds_slot, worker_slot
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions, resolve_worker_spec
 from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.stores import (
@@ -124,7 +126,7 @@ async def sm(db_preflight, db_engine, db_clean):
     return async_sessionmaker(db_engine, expire_on_commit=False)
 
 
-async def setup(sm, *, provider="gemini", funds="10", cap="3", parent=None):
+async def setup(sm, *, provider="gemini", funds="10", cap="3", parent=None, max_workers=8):
     parent = parent or root(provider)
     async with sm() as db, db.begin():
         tenant = await make_tenant(db, id=UUID(parent.fleet.scope.tenant_id))
@@ -163,7 +165,7 @@ async def setup(sm, *, provider="gemini", funds="10", cap="3", parent=None):
             operation_key="owned-spawn",
             total_budget_usd=Decimal(cap),
             deadline_at=parent.limits.deadline,
-            max_workers=8,
+            max_workers=max_workers,
             created_by="host",
         )
     parent = replace(parent, fleet=replace(parent.fleet, run_id=run.id))
@@ -794,7 +796,8 @@ async def test_real_reservation_is_idempotent_and_unknown_consumes_bound_after_r
         audits = await security_audit.list_events(db, tenant_id=run.tenant_id)
         ledger = await tenant_ledger.list_for_tenant(db, tenant_id=run.tenant_id)
     assert len(audits) == 1
-    assert [entry.reason for entry in ledger] == (
+    # list_for_tenant has no order; compare the reasons as a multiset.
+    assert sorted(entry.reason for entry in ledger) == (
         ["trial_credit", "turn_debit"] if provider == "anthropic" else ["trial_credit"]
     )
 
@@ -1692,6 +1695,10 @@ async def test_run_watch_survives_ended_cohort_and_cancels_a_later_workers_usage
 async def test_run_watch_timeout_still_cancels_every_registered_worker_and_retains_holds(
     sm, monkeypatch
 ):
+    from daimon.core import channel_budget as _cb
+
+    # The fail-closed limits themselves, without the 30 s read-failure window.
+    monkeypatch.setattr(_cb, "BUDGET_READ_FAILURE_WINDOW_S", 0.0)
     from daimon.core import channel_budget
 
     parent, _ = await setup(sm)
@@ -2103,6 +2110,15 @@ async def test_run_watch_keeps_counted_first_input_live_until_owner_finished(sm,
         await asyncio.gather(task, return_exceptions=True)
 
 
+# The watch wraps each whole poll (checkout, SET LOCAL, lock wait, read) in its read timeout,
+# and its lock wait is 75% of it, so 25% is the headroom for checkout and round trips.
+# BUDGET_READ_TIMEOUT_LIMIT polls over it in a row fail closed. A loaded CI runner went over
+# 25ms (at 0.1s) and 100ms (at 0.4s); 1s leaves 250ms. The lock tests measure the busy
+# limit on a virtual clock; in the back-to-back test the watch queues behind 30ms holds,
+# so it gets the lock well inside its 0.75s wait and the 1s busy limit is never reached.
+READ_TIMEOUT_S = 1.0
+
+
 async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, monkeypatch):
     # Staging r13/r14 (2026-10-18): one budget read exceeded the 2s timeout while
     # sibling admissions held the run lock, and every registered worker was cancelled.
@@ -2120,7 +2136,7 @@ async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, mo
         nonlocal calls
         calls += 1
         if calls == 1:
-            await asyncio.sleep(1)
+            await asyncio.sleep(3600)  # a read that never returns; only the read timeout ends it
         result = await original(*args, **kwargs)
         if calls >= 3:
             finished.set()
@@ -2137,12 +2153,117 @@ async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, mo
                 cancelled=cancelled,
                 finished=finished,
                 poll_interval=0.01,
-                read_timeout=0.1,
+                read_timeout=READ_TIMEOUT_S,
             ),
-            3,
+            10,
         )
     assert calls >= 3 and not cancelled[a.id].is_set()
     assert (await read(sm, parent, a)).worker_exposure_usd == 1
+
+
+class _VirtualClock:
+    """A clock only the test advances, so the busy-window limit never races the wall clock."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _VirtualTimeLoop:
+    """The running loop with ``time()`` read from a ``_VirtualClock``; all else is delegated."""
+
+    def __init__(self, loop, clock: _VirtualClock) -> None:
+        self._loop, self._clock = loop, clock
+
+    def time(self) -> float:
+        return self._clock.now
+
+    def __getattr__(self, name):
+        return getattr(self._loop, name)
+
+
+class _VirtualTimeAsyncio:
+    """Stands in for ``asyncio`` inside ``channel_budget`` so the watch reads virtual time.
+
+    Only ``get_running_loop().time()`` is virtual. Timeouts, sleeps, events and the
+    database's own ``lock_timeout`` stay real, so a poll still waits for the lock.
+    """
+
+    def __init__(self, clock: _VirtualClock) -> None:
+        self._clock = clock
+
+    def get_running_loop(self) -> _VirtualTimeLoop:
+        return _VirtualTimeLoop(asyncio.get_running_loop(), self._clock)
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+
+class _WatchProbe:
+    """Counts the watch's polls so a test waits for events instead of sleeping.
+
+    ``polls`` rises when a poll opens its transaction, so ``polls >= n + 1`` means poll
+    ``n`` has finished. ``reads`` rises when a poll got the lock and read the budget.
+    """
+
+    def __init__(self, sm, monkeypatch, clock: _VirtualClock) -> None:
+        from daimon.core import channel_budget
+
+        self.polls = 0
+        self.reads = 0
+        self.watch: asyncio.Task | None = None
+        original = channel_budget.produce_fleet_budget
+
+        async def counted(*args, **kwargs):
+            self.reads += 1
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(channel_budget, "produce_fleet_budget", counted)
+        monkeypatch.setattr(channel_budget, "asyncio", _VirtualTimeAsyncio(clock))
+        self.sessionmaker = _CountingSessions(sm, self)
+
+    def watching(self, watch: asyncio.Task) -> asyncio.Task:
+        """Register the watch task so a wait ends the moment the watch does."""
+        self.watch = watch
+        return watch
+
+    async def until(self, condition, what: str, *, within: float = 30.0) -> None:
+        """Wait for ``condition``; fail naming ``what`` if the watch ends first or time runs out."""
+        async with asyncio.timeout(within):
+            while not condition():
+                if self.watch is not None and self.watch.done():
+                    outcome = (
+                        repr(self.watch.exception())
+                        if not self.watch.cancelled() and self.watch.exception()
+                        else f"result {self.watch.result()!r}"
+                        if not self.watch.cancelled()
+                        else "cancelled"
+                    )
+                    raise AssertionError(
+                        f"the watch ended before {what} (polls={self.polls}, "
+                        f"reads={self.reads}): {outcome}"
+                    )
+                await asyncio.sleep(0.005)
+
+    async def polls_since(self, start: int, count: int) -> None:
+        """Wait until ``count`` polls have finished after the poll counter read ``start``."""
+        await self.until(
+            lambda: self.polls >= start + count + 1,
+            f"{count} busy poll(s) finished after poll {start}",
+        )
+
+
+class _CountingSessions:
+    """The sessionmaker surface the watch uses, counting each poll's transaction."""
+
+    def __init__(self, sm, probe: _WatchProbe) -> None:
+        self._sm, self._probe = sm, probe
+
+    def begin(self):
+        self._probe.polls += 1
+        return self._sm.begin()
 
 
 async def _hold_tenant_lock(sm, parent, holding, release):
@@ -2157,10 +2278,29 @@ async def _hold_tenant_lock(sm, parent, holding, release):
         await release.wait()
 
 
+@asynccontextmanager
+async def _tenant_lock_held(sm, parent):
+    """Hold the tenant fleet lock, like admissions mid-dispatch, and always release it.
+
+    A holder left running would keep one of the shared engine's two pooled connections
+    and starve the next test.
+    """
+    holding, release = asyncio.Event(), asyncio.Event()
+    holder = asyncio.create_task(_hold_tenant_lock(sm, parent, holding, release))
+    try:
+        await asyncio.wait_for(holding.wait(), 10)
+        yield
+    finally:
+        release.set()
+        await holder
+
+
 async def test_run_watch_skips_while_admissions_hold_the_tenant_lock(sm, monkeypatch):
     # Staging r19 (2026-10-18): budget reads queued behind admissions holding the
     # tenant fleet lock, timed out, and every in-flight dispatch was cancelled.
-    # The old blocking read would fail closed after ~3 x read_timeout = 0.3s.
+    # The old blocking read would fail closed after BUDGET_READ_TIMEOUT_LIMIT consecutive
+    # slow reads, so the first hold outlasts more polls than that. The busy limit is
+    # measured on a virtual clock, so each hold stays under it exactly.
     from daimon.core import channel_budget
 
     parent, _ = await setup(sm)
@@ -2168,68 +2308,170 @@ async def test_run_watch_skips_while_admissions_hold_the_tenant_lock(sm, monkeyp
     assert (await reserve(sm, parent, a)).admitted
     cancelled = {a.id: asyncio.Event()}
     finished = asyncio.Event()
-    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", 1.0)
-    watch = asyncio.create_task(
-        watch_fleet_budget(
-            sessionmaker=sm,
-            parent=parent,
-            prices=tariffs(parent),
-            markup=Decimal(1),
-            cancelled=cancelled,
-            finished=finished,
-            poll_interval=0.01,
-            read_timeout=0.1,
+    clock = _VirtualClock()
+    probe = _WatchProbe(sm, monkeypatch, clock)
+    limit = 1.0
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", limit)
+    busy_polls = channel_budget.BUDGET_READ_TIMEOUT_LIMIT + 1
+    watch = probe.watching(
+        asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=probe.sessionmaker,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                poll_interval=0.01,
+                read_timeout=READ_TIMEOUT_S,
+                # Every poll takes the lock, so each busy poll is a contended one.
+                locked_refresh_s=0,
+            )
         )
     )
     try:
-        for _ in range(2):  # hold, release, hold again: the busy window resets on success
-            holding, release = asyncio.Event(), asyncio.Event()
-            holder = asyncio.create_task(_hold_tenant_lock(sm, parent, holding, release))
-            await holding.wait()
-            await asyncio.sleep(0.6)  # longer than the old 0.3s fail-closed path
-            assert not cancelled[a.id].is_set() and not watch.done()
-            release.set()
-            await holder
-            await asyncio.sleep(0.1)
+        # Hold, release, hold again: the busy window resets on success. Each hold lasts 0.9 of
+        # the limit, so the second one only stays under it if the first window was reset.
+        for polls_before_advance in (busy_polls, 1):
+            async with _tenant_lock_held(sm, parent):
+                await probe.polls_since(probe.polls, polls_before_advance)
+                assert not cancelled[a.id].is_set() and not watch.done()
+                clock.advance(0.9 * limit)
+                await probe.polls_since(probe.polls, 1)
+                assert not cancelled[a.id].is_set() and not watch.done()
+            reads = probe.reads
+            await probe.until(
+                lambda reads=reads: probe.reads > reads, "a successful read after release"
+            )
         finished.set()
-        assert await asyncio.wait_for(watch, 2) == "finished"
+        assert await asyncio.wait_for(watch, 5) == "finished"
         assert not cancelled[a.id].is_set()
     finally:
         finished.set()
-        if not watch.done():
-            watch.cancel()
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
     assert (await read(sm, parent, a)).worker_exposure_usd == 1
 
 
-async def test_run_watch_fails_closed_when_the_tenant_lock_stays_busy(sm, monkeypatch):
+async def test_an_overrun_between_locked_refreshes_is_cancelled_from_the_snapshot(sm, monkeypatch):
+    """With the locked refresh every BUDGET_LOCKED_REFRESH_S, an overrun in between is
+    still cancelled at poll speed, from the lock-free snapshot."""
+    parent, run = await setup(sm)
+    worker = await add(sm, parent, budget=".01")
+    assert (await reserve(sm, parent, worker)).admitted
+    cancelled = {worker.id: asyncio.Event()}
+    finished = asyncio.Event()
+    probe = _WatchProbe(sm, monkeypatch, _VirtualClock())
+    watch = probe.watching(
+        asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=probe.sessionmaker,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                poll_interval=0.01,
+                read_timeout=READ_TIMEOUT_S,
+            )
+        )
+    )
+    try:
+        await probe.until(lambda: probe.reads >= 1, "the first locked refresh")
+        reads = probe.reads
+        await usage(sm, parent, run, worker, inputs=10_000, outputs=None)
+        await asyncio.wait_for(cancelled[worker.id].wait(), 5)
+        # The virtual clock never reached the next locked refresh: the snapshot decided.
+        assert probe.reads == reads
+    finally:
+        finished.set()
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
+
+
+async def test_run_watch_takes_the_tenant_lock_only_every_locked_refresh(sm, monkeypatch):
+    """SMOKE J4: each run's watch took the tenant fleet lock four times a second and held it
+    for its whole producer read, so the tenant's admissions kept waiting on it. Between
+    locked refreshes the watch decides from the lock-free snapshot."""
     from daimon.core import channel_budget
 
     parent, _ = await setup(sm)
     a = await add(sm, parent)
     assert (await reserve(sm, parent, a)).admitted
     cancelled = {a.id: asyncio.Event()}
-    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", 0.3)
-    holding, release = asyncio.Event(), asyncio.Event()
-    holder = asyncio.create_task(_hold_tenant_lock(sm, parent, holding, release))
-    await holding.wait()
-    try:
-        result = await asyncio.wait_for(
+    finished = asyncio.Event()
+    clock = _VirtualClock()
+    probe = _WatchProbe(sm, monkeypatch, clock)
+    watch = probe.watching(
+        asyncio.create_task(
             watch_fleet_budget(
-                sessionmaker=sm,
+                sessionmaker=probe.sessionmaker,
                 parent=parent,
                 prices=tariffs(parent),
                 markup=Decimal(1),
                 cancelled=cancelled,
-                finished=asyncio.Event(),
+                finished=finished,
                 poll_interval=0.01,
-                read_timeout=5,
-            ),
-            8,
+                read_timeout=READ_TIMEOUT_S,
+            )
         )
-        assert result == "usage_unavailable" and cancelled[a.id].is_set()
+    )
+    try:
+        await probe.until(lambda: probe.reads >= 1, "the first locked refresh")
+        reads = probe.reads
+        await probe.polls_since(probe.polls, 5)
+        assert probe.reads == reads
+        clock.advance(channel_budget.BUDGET_LOCKED_REFRESH_S)
+        await probe.until(lambda: probe.reads > reads, "the next locked refresh")
+        finished.set()
+        assert await asyncio.wait_for(watch, 5) == "finished"
+        assert not cancelled[a.id].is_set()
     finally:
-        release.set()
-        await holder
+        finished.set()
+        watch.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
+
+
+async def test_run_watch_fails_closed_when_the_tenant_lock_stays_busy(sm, monkeypatch):
+    from daimon.core import channel_budget as _cb
+
+    # The fail-closed limits themselves, without the 30 s read-failure window.
+    monkeypatch.setattr(_cb, "BUDGET_READ_FAILURE_WINDOW_S", 0.0)
+    from daimon.core import channel_budget
+
+    parent, _ = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    cancelled = {a.id: asyncio.Event()}
+    clock = _VirtualClock()
+    probe = _WatchProbe(sm, monkeypatch, clock)
+    limit = 1.0
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", limit)
+    async with _tenant_lock_held(sm, parent):
+        watch = probe.watching(
+            asyncio.create_task(
+                watch_fleet_budget(
+                    sessionmaker=probe.sessionmaker,
+                    parent=parent,
+                    prices=tariffs(parent),
+                    markup=Decimal(1),
+                    cancelled=cancelled,
+                    finished=asyncio.Event(),
+                    poll_interval=0.01,
+                    read_timeout=READ_TIMEOUT_S,
+                )
+            )
+        )
+        try:
+            # Busy is judged by how long, not how often: no virtual time has passed.
+            await probe.polls_since(0, 2)
+            assert not cancelled[a.id].is_set() and not watch.done()
+            clock.advance(limit + 0.1)
+            result = await asyncio.wait_for(watch, 10)
+            assert result == "usage_unavailable" and cancelled[a.id].is_set()
+        finally:
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
     assert (await read(sm, parent, a)).worker_exposure_usd == 1
 
 
@@ -2274,7 +2516,7 @@ async def test_run_watch_is_not_starved_by_back_to_back_short_lock_holds(sm, mon
             cancelled=cancelled,
             finished=finished,
             poll_interval=0.05,
-            read_timeout=0.4,
+            read_timeout=READ_TIMEOUT_S,
         )
     )
     try:
@@ -2285,3 +2527,393 @@ async def test_run_watch_is_not_starved_by_back_to_back_short_lock_holds(sm, mon
         await asyncio.gather(*hammers)
         finished.set()
         assert await asyncio.wait_for(watch, 3) == "finished"
+
+
+async def test_fleet_r8_slow_admissions_holding_the_lock_in_turn_do_not_cancel_the_run(
+    sm, db_nullpool_engine, monkeypatch
+):
+    """Fleet r8: admissions each held the tenant lock longer than the watch waits.
+
+    Their holds changed hands, so the run was making progress; the watch still
+    cancelled every worker after 10 s of busy polls. Each hold here outlasts the
+    watch's lock wait but not the per-holder limit, so only a stuck holder may fail it.
+    """
+    from daimon.core import channel_budget
+    from sqlalchemy import text
+
+    parent, _ = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    cancelled = {a.id: asyncio.Event()}
+    finished = asyncio.Event()
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", 1.5)
+    stop = asyncio.Event()
+    # Admissions use their own connections, as other requests in the host do.
+    admissions_sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+
+    async def admission():
+        while not stop.is_set():
+            async with admissions_sm.begin() as db:
+                await db.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"fleet:{parent.fleet.scope.tenant_id}"},
+                )
+                # Longer than the watch's lock wait (0.75 * READ_TIMEOUT_S).
+                await asyncio.sleep(0.8)
+
+    admissions = [asyncio.create_task(admission()) for _ in range(3)]
+    watch = asyncio.create_task(
+        watch_fleet_budget(
+            sessionmaker=sm,
+            parent=parent,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            cancelled=cancelled,
+            finished=finished,
+            poll_interval=0.05,
+            read_timeout=READ_TIMEOUT_S,
+        )
+    )
+    try:
+        await asyncio.sleep(4.0)
+        assert not cancelled[a.id].is_set() and not watch.done()
+    finally:
+        stop.set()
+        await asyncio.gather(*admissions)
+        finished.set()
+        assert await asyncio.wait_for(watch, 5) == "finished"
+    assert not cancelled[a.id].is_set()
+
+
+async def test_run_watch_contended_by_changing_holders_still_fails_closed_at_its_limit(
+    sm, monkeypatch
+):
+    from daimon.core import channel_budget as _cb
+
+    # The fail-closed limits themselves, without the 30 s read-failure window.
+    monkeypatch.setattr(_cb, "BUDGET_READ_FAILURE_WINDOW_S", 0.0)
+    from daimon.core import channel_budget
+
+    parent, _ = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    cancelled = {a.id: asyncio.Event()}
+    clock = _VirtualClock()
+    probe = _WatchProbe(sm, monkeypatch, clock)
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", 1.0)
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_CONTENDED_LIMIT_S", 3.0)
+    holders = iter(range(10_000))
+
+    async def changing(session, key):
+        n = next(holders)
+        return {"pid": n, "xact_start": str(n), "state": "active", "wait": "", "query": ""}
+
+    monkeypatch.setattr(channel_budget, "_lock_holder", changing)
+    async with _tenant_lock_held(sm, parent):
+        watch = probe.watching(
+            asyncio.create_task(
+                watch_fleet_budget(
+                    sessionmaker=probe.sessionmaker,
+                    parent=parent,
+                    prices=tariffs(parent),
+                    markup=Decimal(1),
+                    cancelled=cancelled,
+                    finished=asyncio.Event(),
+                    poll_interval=0.01,
+                    read_timeout=READ_TIMEOUT_S,
+                )
+            )
+        )
+        try:
+            # Busy for 2.7 s with a new holder each poll: past the stuck limit, not stuck.
+            for _ in range(3):
+                await probe.polls_since(probe.polls, 1)
+                clock.advance(0.9)
+            await probe.polls_since(probe.polls, 1)
+            assert not cancelled[a.id].is_set() and not watch.done()
+            clock.advance(0.5)
+            result = await asyncio.wait_for(watch, 10)
+            assert result == "usage_unavailable" and cancelled[a.id].is_set()
+        finally:
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
+
+
+async def test_a_busy_lock_never_blinds_the_watch_to_an_overrun(sm, monkeypatch):
+    """#1302 review: while admissions hold the lock, the watch is the only overrun guard.
+
+    Busy polls decide from a lock-free snapshot, so an over-budget run is cancelled
+    without waiting for the lock or any busy limit.
+    """
+    from daimon.core import channel_budget
+    from daimon.core._models import FleetRun as RunRow
+    from sqlalchemy import update
+
+    parent, run = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    cancelled = {a.id: asyncio.Event()}
+    finished = asyncio.Event()
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", 1000.0)
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_CONTENDED_LIMIT_S", 1000.0)
+    async with _tenant_lock_held(sm, parent):
+        watch = asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=sm,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                poll_interval=0.05,
+                read_timeout=READ_TIMEOUT_S,
+            )
+        )
+        try:
+            await asyncio.sleep(0.5)
+            assert not cancelled[a.id].is_set()
+            # The run's cap drops below what it holds: an overrun the watch must catch.
+            async with sm.begin() as db:
+                await db.execute(
+                    update(RunRow)
+                    .where(RunRow.id == run.id)
+                    .values(total_budget_usd=Decimal("0.5"))
+                )
+            await asyncio.wait_for(cancelled[a.id].wait(), 5)
+            assert not watch.done()
+        finally:
+            finished.set()
+            await asyncio.wait_for(watch, 5)
+
+
+async def test_snapshot_read_takes_no_lock_and_writes_nothing(sm):
+    from daimon.core._models import FleetWorker as WorkerRow
+    from daimon.core.channel_budget import read_fleet_budget_snapshot
+    from sqlalchemy import select, text
+
+    parent, run = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    async with sm() as db:
+        before = (await db.execute(select(WorkerRow.version).where(WorkerRow.id == a.id))).scalar()
+    holder = await sm().__aenter__()
+    try:
+        await holder.begin()
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"fleet:{parent.fleet.scope.tenant_id}"},
+        )
+        await holder.execute(select(WorkerRow).where(WorkerRow.id == a.id).with_for_update())
+        usages = await asyncio.wait_for(
+            read_fleet_budget_snapshot(
+                sm, parent=parent, prices=tariffs(parent), markup=Decimal(1)
+            ),
+            5,
+        )
+        assert usages[a.id].admitted and usages[a.id].worker.reserved_usd == 1
+    finally:
+        await holder.rollback()
+        await holder.close()
+    async with sm() as db:
+        after = (await db.execute(select(WorkerRow.version).where(WorkerRow.id == a.id))).scalar()
+    assert after == before
+
+
+async def test_busy_lock_names_its_actual_holder(sm):
+    from daimon.core.channel_budget import _lock_holder  # pyright: ignore[reportPrivateUsage]
+    from sqlalchemy import text
+
+    parent, _ = await setup(sm)
+    key = f"fleet:{parent.fleet.scope.tenant_id}"
+    async with sm.begin() as holder:
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": key}
+        )
+        pid = (await holder.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+        async with sm.begin() as watcher:
+            seen = await _lock_holder(watcher, key)
+            assert seen is not None and seen["pid"] == pid
+            assert seen["state"] == "idle in transaction" and seen["xact_start"]
+            assert await _lock_holder(watcher, "fleet:" + str(uuid4())) is None
+
+
+async def _parallel_default_spawns(sm, parent, run, hints):
+    """Each spawn reads the same empty snapshot, as parallel fleet_spawn calls do."""
+    from daimon.core.neutral_resources import default_worker_limits
+
+    shares = [
+        default_worker_limits(
+            parent.limits, run, (), provider=parent.spec.model.provider, planned_workers=hint
+        ).budget_usd
+        for hint in hints
+    ]
+    workers = [
+        await add(sm, parent, ordinal=ordinal, budget=str(share.normalize()))
+        for ordinal, share in enumerate(shares)
+    ]
+    return await asyncio.gather(*(reserve(sm, parent, worker) for worker in workers))
+
+
+@pytest.mark.parametrize("hints", [(2, 2, 2, 2), (2, 4, 2, 4)])
+async def test_under_planned_parallel_spawns_never_burn_slots(sm, hints):
+    """More spawns at once than planned are refused at admission, and free their slot."""
+    parent, run = await setup(sm, cap="1", max_workers=4)
+    results = await _parallel_default_spawns(sm, parent, run, hints)
+    admitted = [result for result in results if result.admitted]
+    refused = [result for result in results if not result.admitted]
+    assert refused and all(result.worker.status == "cancelled" for result in refused)
+    assert sum(result.worker.budget_usd for result in admitted) <= run.total_budget_usd
+    # Every refused spawn left its slot: the run can still fill all 4 with live workers.
+    for ordinal in range(len(hints), len(hints) + len(refused)):
+        await add(sm, parent, ordinal=ordinal, budget="0.01")
+    with pytest.raises(FleetConflict, match="allows 4 workers"):
+        await add(sm, parent, ordinal=len(hints) + len(refused), budget="0.01")
+    async with sm() as db, db.begin():
+        _, workers = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
+    assert sum(1 for worker in workers if holds_slot(worker)) == run.max_workers
+
+
+async def test_admission_refusals_stay_bounded_by_twice_max_workers(sm):
+    parent, run = await setup(sm, cap="1", max_workers=2)
+    for ordinal in range(4):
+        worker = await add(sm, parent, ordinal=ordinal, budget="2")
+        assert not (await reserve(sm, parent, worker)).admitted
+    with pytest.raises(FleetConflict, match="allows 2 workers"):
+        await add(sm, parent, ordinal=4, budget="0.01")
+
+
+def test_worker_cancels_say_why_once():
+    """Fleet r11: an out-of-memory restart interrupted every worker with no cause logged."""
+    from daimon.core.channel_budget import cancel_workers
+    from structlog.testing import capture_logs
+
+    run_id, a, b = uuid4(), uuid4(), uuid4()
+    events = {a: asyncio.Event(), b: asyncio.Event()}
+    events[b].set()
+    with capture_logs() as logs:
+        cancel_workers(events, "shutdown", run_id=run_id)
+        cancel_workers(events, "watch_ended", run_id=run_id)
+    assert all(event.is_set() for event in events.values())
+    (entry,) = [log for log in logs if log["event"] == "fleet.worker_cancel"]
+    assert entry["reason"] == "shutdown" and entry["run_id"] == str(run_id)
+    # Only the worker this call actually cancelled is named.
+    assert entry["worker_ids"] == [str(a)]
+
+
+async def test_host_shutdown_names_itself_as_the_cancel_reason(sm):
+    """The r11 repro: the host's lifespan ends mid-dispatch; workers must not just vanish."""
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from structlog.testing import capture_logs
+
+    ports = HostFleetPorts(sm, prices={}, markup=Decimal(1))
+    run_id, worker_id = uuid4(), uuid4()
+    cancel, finished = asyncio.Event(), asyncio.Event()
+
+    async def watching():
+        await finished.wait()
+
+    task = asyncio.create_task(watching())
+    ports._watches[run_id] = ({worker_id: cancel}, finished, task)  # pyright: ignore[reportPrivateUsage]
+    with capture_logs() as logs:
+        await ports.close()
+    assert cancel.is_set() and finished.is_set() and task.done()
+    (entry,) = [log for log in logs if log["event"] == "fleet.worker_cancel"]
+    assert (entry["reason"], entry["run_id"], entry["worker_ids"]) == (
+        "shutdown",
+        str(run_id),
+        [str(worker_id)],
+    )
+
+
+async def test_watch_logs_why_it_releases_a_terminal_worker(sm):
+    from daimon.core import channel_budget
+    from structlog.testing import capture_logs
+
+    parent, run = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    async with sm.begin() as db:
+        await fleet.finish(
+            db,
+            tenant_id=run.tenant_id,
+            worker_id=a.id,
+            expected_version=(await read(sm, parent, a)).worker.version,
+            status="cancelled",
+            error_code="stopped",
+        )
+    cancelled = {a.id: asyncio.Event()}
+    finished = asyncio.Event()
+    with capture_logs() as logs:
+        watch = asyncio.create_task(
+            channel_budget.watch_fleet_budget(
+                sessionmaker=sm,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                poll_interval=0.01,
+                read_timeout=READ_TIMEOUT_S,
+            )
+        )
+        await asyncio.wait_for(cancelled[a.id].wait(), 5)
+        finished.set()
+        assert await asyncio.wait_for(watch, 5) == "finished"
+    assert any(
+        log["event"] == "fleet.worker_cancel" and log["reason"] == "terminal" for log in logs
+    )
+
+
+async def test_a_runs_cost_is_its_own_workers_observed_usage_before_any_debit(sm):
+    """J3's cost line: read fresh from this run's rows, priced usage counts at once."""
+    from daimon.core.channel_budget import read_fleet_run_cost
+
+    parent, run = await setup(sm)
+    worker = await add(sm, parent, budget="2")
+    assert (await reserve(sm, parent, worker)).admitted
+    assert await read_fleet_run_cost(
+        sm, parent=parent, prices=tariffs(parent), markup=Decimal(1)
+    ) == Decimal(0)
+    await usage(sm, parent, run, worker, inputs=600_000, outputs=0)
+    cost = await read_fleet_run_cost(sm, parent=parent, prices=tariffs(parent), markup=Decimal(1))
+    assert cost == Decimal("1.2"), "the measured usage, not the stored run figure"
+    # Another run's spend is never this run's.
+    other_parent, other = await next_run(sm, parent, run)
+    stranger = await add(sm, other_parent, budget="2")
+    assert (await reserve(sm, other_parent, stranger)).admitted
+    await usage(sm, other_parent, other, stranger, inputs=600_000, outputs=0)
+    assert await read_fleet_run_cost(
+        sm, parent=parent, prices=tariffs(parent), markup=Decimal(1)
+    ) == Decimal("1.2")
+
+
+async def test_a_slow_or_failed_cost_read_says_not_available_never_zero(monkeypatch):
+    import asyncio
+
+    from daimon.core import channel_budget, fleet_orchestration
+    from daimon.core.fleet_orchestration import (
+        FleetOrchestrator,
+        HostFleetPorts,
+        fleet_cost_sentence,
+    )
+
+    async def stuck(*_a, **_k):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(channel_budget, "read_fleet_run_cost", stuck)
+    monkeypatch.setattr(fleet_orchestration, "RUN_COST_TIMEOUT_S", 0.05)
+    ports = object.__new__(HostFleetPorts)
+    ports.sessions, ports.prices, ports.markup = None, {}, Decimal(1)
+    parent = root()
+    assert await ports.run_cost(parent, parent.fleet.run_id) is None, "bounded, then None"
+
+    class Failing:
+        async def run_cost(self, *_a):
+            raise RuntimeError("pool exhausted")
+
+    run = SimpleNamespace(id=parent.fleet.run_id, observed_usd=Decimal(0))
+    orchestrator = FleetOrchestrator(Failing())  # pyright: ignore[reportArgumentType]
+    assert await orchestrator.run_cost(parent, run) is None  # pyright: ignore[reportArgumentType]
+    assert fleet_cost_sentence(None) == "This cost isn't available yet."
+    assert fleet_cost_sentence(Decimal("0.001911")) == "This cost less than $0.01."
+    assert fleet_cost_sentence(Decimal("0.425")) == "This cost $0.43."

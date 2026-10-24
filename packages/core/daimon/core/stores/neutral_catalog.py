@@ -19,11 +19,13 @@ from typing import Any
 
 from daimon.core._models import (
     Account,
+    ChannelSkill,
     NeutralAgentRevision,
     NeutralSkillVersion,
+    SelfHostedAgentRecord,
 )
 from daimon.core.skills.ingest import SkillBundle, SkillPreview, bundle_from_upload
-from mux.contracts.ids import Provider, Scope
+from mux.contracts.ids import Provider, Scope, SkillRef
 from mux.contracts.resources import Agent
 from mux.errors import ScopeViolation
 from mux.profiles import neutral_catalog_profile_for
@@ -66,7 +68,10 @@ class PostgresNeutralCatalog:
         provider: Provider,
         account_scope_id: str,
     ) -> None:
-        if neutral_catalog_profile_for(provider) is None or not account_scope_id.strip():
+        # Selfhosted retains local bundles without advertising native catalog APIs.
+        if (
+            provider != "selfhosted" and neutral_catalog_profile_for(provider) is None
+        ) or not account_scope_id.strip():
             raise ValueError("an alternate provider and a nonblank workspace are required")
         self._sessions = sessions
         self._provider = provider
@@ -269,6 +274,109 @@ class PostgresNeutralCatalog:
                 )
             )
             return None if row is None else self._skill(row)
+
+    async def get_agent_skill(
+        self, scope: Scope, agent: Agent, ref: SkillRef
+    ) -> SkillVersion | None:
+        """Load only an exact pin on the admitted agent through its stored uploader."""
+        key = self._key(scope)
+        if (
+            self._provider != "selfhosted"
+            or self._workspace != scope.tenant_id
+            or agent.ref.provider != self._provider
+            or agent.ref.kind != "agent"
+            or agent.ref.tenant_id != scope.tenant_id
+            or agent.ref.account_scope_id != self._workspace
+        ):
+            raise ScopeViolation(agent.ref.id, "agent differs from the admitted skill catalog")
+        async with self._sessions() as session:
+            await self._authorize(session, scope)
+            attached = await session.scalar(
+                select(SelfHostedAgentRecord).where(
+                    SelfHostedAgentRecord.tenant_id == key["tenant_id"],
+                    SelfHostedAgentRecord.id == agent.ref.id,
+                    SelfHostedAgentRecord.archived_at.is_(None),
+                )
+            )
+            if attached is None or attached.revision != agent.revision.local:
+                raise ScopeViolation(agent.ref.id, "agent attachment revision changed")
+            if ref not in (agent.spec.skills or ()) or ref.model_dump(mode="json") not in (
+                attached.spec.get("skills") or []
+            ):
+                return None
+            owner = next(
+                (
+                    item
+                    for item in attached.skill_attachments
+                    if (item["skill_id"], item["version"]) == (ref.id, ref.version)
+                ),
+                None,
+            )
+            if owner is None:
+                return None
+            row = await session.scalar(
+                select(NeutralSkillVersion).where(
+                    NeutralSkillVersion.tenant_id == key["tenant_id"],
+                    NeutralSkillVersion.provider == self._provider,
+                    NeutralSkillVersion.account_scope_id == self._workspace,
+                    NeutralSkillVersion.account_id == uuid.UUID(owner["account_id"]),
+                    NeutralSkillVersion.principal_id == owner["principal_id"],
+                    NeutralSkillVersion.skill_id == ref.id,
+                    NeutralSkillVersion.version == ref.version,
+                )
+            )
+            return None if row is None else self._skill(row)
+
+    async def get_channel_skill(
+        self,
+        scope: Scope,
+        skill_id: str,
+        version: str,
+        *,
+        platform: str,
+        channel_id: str,
+        agent_names: tuple[str, ...],
+    ) -> SkillVersion | None:
+        """Read an exact persisted channel grant for an admitted channel member.
+
+        Unlike personal catalog reads, this can cross uploader accounts inside
+        the tenant/workspace. The channel rule must still pin this version and
+        permit the answering agent. Admission owns the caller's channel access.
+        Conflicting retained copies are ambiguous and fail closed.
+        """
+        key = self._key(scope)
+        async with self._sessions() as session:
+            await self._authorize(session, scope)
+            grant = await session.scalar(
+                select(ChannelSkill).where(
+                    ChannelSkill.tenant_id == key["tenant_id"],
+                    ChannelSkill.platform == platform,
+                    ChannelSkill.channel_id == channel_id,
+                    ChannelSkill.skill_id == skill_id,
+                    ChannelSkill.version == version,
+                )
+            )
+            if grant is None or (
+                grant.owner_agent_name is not None and grant.owner_agent_name not in agent_names
+            ):
+                return None
+            rows = tuple(
+                await session.scalars(
+                    select(NeutralSkillVersion).where(
+                        NeutralSkillVersion.tenant_id == key["tenant_id"],
+                        NeutralSkillVersion.provider == self._provider,
+                        NeutralSkillVersion.account_scope_id == self._workspace,
+                        NeutralSkillVersion.skill_id == skill_id,
+                        NeutralSkillVersion.version == version,
+                    )
+                )
+            )
+            if not rows:
+                return None
+            versions = tuple(self._skill(row) for row in rows)
+            if any(row.bundle != versions[0].bundle for row in versions[1:]):
+                raise ScopeViolation(skill_id, "channel skill has ambiguous retained content")
+            return versions[0]
 
     async def list_skills(self, scope: Scope) -> tuple[SkillVersion, ...]:
         self._key(scope)

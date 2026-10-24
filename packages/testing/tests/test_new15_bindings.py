@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
+import threading
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -49,20 +49,21 @@ from daimon.testing.admission_evidence import AdmissionEffects
 from daimon.testing.channel_accounting import ControlledTurnPricing
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.discord_surface import DiscordSurfaceHarness
-from daimon.testing.drivers.gemini.fake import MemoryStorage
-from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
-from daimon.testing.ma import json_body
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.new15_bindings import New15Bindings, New15Run
 from daimon.testing.outcome_oracle import LogObservation, VisibleText
 from daimon.testing.turn_router import build_turn_router
 from mux.contracts.ids import ChannelRef, ModelRef, Provider, ResourceRef, Revision, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
+from mux.drivers.gemini import NO_TOOLS_TOOL
 from mux.drivers.gemini.flash import FlashAttempt
 from mux.drivers.gemini.transport import SDKTransport as GeminiSDK
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import SDKTransport as OpenAISDK
+from mux.testing.drivers.anthropic.ma import json_body
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.isolated_sdk import build_async_openai, build_gemini_client
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 from structlog.typing import EventDict
@@ -262,7 +263,8 @@ class GeminiWire:
         assert request.method in {"POST", "GET"}
         if request.method == "POST":
             body = json_body(request)
-            assert body["tools"] == []
+            # An agent request: the inert no-tools sentinel, never [] (built-ins).
+            assert body["tools"] == [NO_TOOLS_TOOL]
             assert body["agent_config"]["model"] == "gemini-3.8-flash"
         # Gemini workspaces expire seven days after creation: stamp it now.
         stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -322,6 +324,11 @@ async def admin(
         yield bound
     finally:
         await bound.close()
+
+
+def loop_clock() -> float:
+    """The running loop's clock: every capture timestamp uses this one timeline."""
+    return asyncio.get_running_loop().time()
 
 
 async def setup_join(
@@ -516,6 +523,7 @@ async def setup_join(
             session_id=prepared.ma_session_id,
             root_turn_id="first-offline-invocation",
             model_id=model,
+            clock=loop_clock,
         )
 
     # Independent SDK gateway for the denied attempt: no provider root/session.
@@ -523,6 +531,7 @@ async def setup_join(
         evidence_id="new15:second-platform-only",
         session_id="platform-only",
         root_turn_id="platform-only",
+        clock=loop_clock,
     )
     gateways.append(denial_surface)
     state = denial_surface.client._connection  # pyright: ignore[reportPrivateUsage]
@@ -554,10 +563,16 @@ async def setup_join(
         SimpleNamespace(
             user=object(),
             _ingress_clock=None,
-            runtime=SimpleNamespace(turn_deps=deps, settings=SimpleNamespace(discord=None)),
+            runtime=SimpleNamespace(
+                turn_deps=deps,
+                sessionmaker=deps.sessionmaker,
+                settings=SimpleNamespace(discord=None),
+            ),
             _wait_for_orphan_recovery=AsyncMock(),
         ),
     )
+
+    bot._orchestrate_observed_guarded = MethodType(DaimonBot._orchestrate_observed_guarded, bot)  # pyright: ignore[reportPrivateUsage]
 
     async def denial(text: str, observer: AdmissionObserver) -> None:
         assert text == "QA budget 2: reply with only TINY-AGAIN. No tools."
@@ -603,14 +618,69 @@ async def capture_run(
     monkeypatch: pytest.MonkeyPatch,
     *,
     missing_usage: bool = False,
+    after_denial: Callable[[DiscordSurfaceHarness], None] | None = None,
 ) -> New15Run:
     join, sdk, wire, surface = await setup_join(
         admin, root, monkeypatch, missing_usage=missing_usage
     )
 
     def stamp(_logger: object, _method: str, entry: EventDict) -> EventDict:
-        entry["captured_s"] = time.monotonic()
+        entry["captured_s"] = loop_clock()
         return entry
+
+    # The authored 20 s observation window elapses on the event loop's own
+    # clock, which is advanced in small steps with a real slice of I/O between
+    # steps. Timers the system under test armed (asyncio.sleep, call_later) fire
+    # in order at their due loop times, and every capture timestamp reads that
+    # same clock, so the window is covered by the timeline the evidence cites,
+    # not by wall time. Work that can only run in wall time (threads,
+    # subprocesses) cannot be advanced, so a new one fails the run.
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    skew = 0.0
+    before: set[asyncio.Task[Any]] = set()
+    threads_before: set[threading.Thread] = set()
+    denial = join.invoke_denial
+
+    async def tracked_denial(text: str, observer: AdmissionObserver) -> object:
+        # Taken as the denial starts: anything older than this is not "spawned
+        # by the denial", but its timers still run on the loop clock.
+        before.update(asyncio.all_tasks())
+        threads_before.update(threading.enumerate())
+        result = await denial(text, observer)
+        if after_denial is not None:
+            after_denial(surface)
+        return result
+
+    async def virtual_sleep(seconds: float) -> None:
+        nonlocal skew
+        advanced = 0.0
+        while advanced < seconds:
+            await asyncio.sleep(0.001)  # real time for ready callbacks and I/O
+            step = min(0.25, seconds - advanced)
+            skew += step
+            advanced += step
+        await asyncio.sleep(0.001)  # timers due exactly at the window's end
+        me = asyncio.current_task()
+        spawned = {t for t in asyncio.all_tasks() - before if t is not me}
+        if spawned:
+            _, pending = await asyncio.wait(spawned, timeout=2)
+            if pending:
+                raise AssertionError(
+                    "the denial left work running past the observation window: "
+                    + ", ".join(sorted(repr(t.get_coro()) for t in pending))
+                )
+        threads = [
+            t
+            for t in threading.enumerate()
+            if t.is_alive() and t not in threads_before and not t.name.startswith("asyncio_")
+        ]
+        if threads:
+            raise AssertionError(f"the denial started threads that cannot be advanced: {threads}")
+
+    join.invoke_denial = tracked_denial
+    join.clock = loop_clock
+    join.sleep = virtual_sleep
 
     try:
         with capture_logs(processors=[stamp]) as logs:
@@ -655,7 +725,9 @@ async def capture_run(
                 )
 
             join.effects = second_effects
-            run = await join.run(SOURCE, evidence_id=f"new15:{admin.backend}")
+            with monkeypatch.context() as clock_patch:
+                clock_patch.setattr(loop, "time", lambda: real_time() + skew)
+                run = await join.run(SOURCE, evidence_id=f"new15:{admin.backend}")
         assert not admin.trace.violations and not admin.trace.replies
         # Main #824: exactly one bounded catch-up on this fresh Anthropic
         # session; foreign backends must never enter Anthropic billing recovery.
@@ -882,6 +954,70 @@ async def test_frozen_new15_real_metered_then_budget_denial(
             indent=2,
         )
     )
+
+
+@pytest.mark.parametrize("deferral", ["sleeping_task", "call_later"])
+async def test_a_second_answer_deferred_inside_the_window_is_observed(
+    admin: AdminBindings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    deferral: str,
+) -> None:
+    """A system that answers 10 s after refusing must not pass the 20 s window.
+
+    The post comes from a timer the denial armed: an `asyncio.sleep` in a spawned
+    task, or a bare `loop.call_later`. Both fire on the loop clock that the
+    window advances, so the late `TINY-AGAIN` is captured and `text_absent` fails.
+    """
+    posted: list[asyncio.Task[object]] = []
+
+    def defer(surface: DiscordSurfaceHarness) -> None:
+        loop = asyncio.get_running_loop()
+
+        async def answer() -> None:
+            await surface.thread.send("TINY-AGAIN")
+
+        if deferral == "call_later":
+            loop.call_later(10, lambda: posted.append(loop.create_task(answer())))
+        else:
+
+            async def later() -> None:
+                await asyncio.sleep(10)
+                await answer()
+
+            posted.append(loop.create_task(later()))
+
+    run = await capture_run(admin, tmp_path, monkeypatch, after_denial=defer)
+    assert run.admission is not None
+    late = [n for n in run.admission.effects.notices if "TINY-AGAIN" in n.text]
+    assert len(late) == 1 and 9 < late[0].observed_s - run.admission.started_s < 15
+    assert run.admission.observed_s - run.admission.started_s >= 20
+    assert run.outcome.status == "FAIL"
+    assert any(
+        c.kind == "text_absent" and c.turn == 2 and c.status == "FAIL" for c in run.outcome.checks
+    )
+
+
+async def test_work_still_running_after_the_window_fails_the_capture(
+    admin: AdminBindings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-dispatch due after the 20 s window surfaces instead of vanishing."""
+    stragglers: list[asyncio.Task[None]] = []
+
+    def straggle(surface: DiscordSurfaceHarness) -> None:
+        async def later() -> None:
+            await asyncio.sleep(30)
+            await surface.thread.send("TINY-AGAIN")
+
+        stragglers.append(asyncio.get_running_loop().create_task(later()))
+
+    try:
+        with pytest.raises(AssertionError, match="past the observation window"):
+            await capture_run(admin, tmp_path, monkeypatch, after_denial=straggle)
+    finally:
+        for task in stragglers:
+            task.cancel()
+        await asyncio.gather(*stragglers, return_exceptions=True)
 
 
 async def test_actual_sdk_missing_usage_never_invents_exhaustion(

@@ -57,7 +57,7 @@
 
 manifestVersion: "1.30"
 id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
-version: "0.6.1"                       # bump on every change, then re-upload
+version: "0.6.2"                       # bump on every change, then re-upload
 supportsChannelFeatures: tier1          # private and shared channels (see above)
 developer:
   name: daimon
@@ -86,23 +86,23 @@ bots:
           - personal
         commands:
           - title: help
-            description: List the commands.
+            description: This list
           - title: new
-            description: Start a fresh conversation.
+            description: Start a fresh conversation
           - title: setup
-            description: See your agents and who answers where.
+            description: Your agents and where they answer
           - title: here
-            description: Who answers here and what it can read.
+            description: Who answers here and what it can use
           - title: routines
-            description: Show and manage scheduled routines.
+            description: Scheduled jobs
           - title: memory
-            description: Show what the agent remembers.
+            description: What the agent remembers
           - title: privacy
-            description: See, export or delete your data.
+            description: See, export or delete your data
           - title: billing
-            description: Usage this month and top-ups.
+            description: Your usage and credit
           - title: support                 # answered only when human support is configured
-            description: Ask a person.
+            description: Ask a person
           - title: Explore a dataset
             description: Load a file, check it and report what it shows.
             type: prompt
@@ -128,17 +128,17 @@ bots:
           - slash
         commands:                       # answered for the sender only
           - title: help
-            description: List the commands.
+            description: This list
           - title: here
-            description: Who answers here and what it can read.
+            description: Who answers here and what it can use
           - title: memory
-            description: Show what the agent remembers.
+            description: What the agent remembers
           - title: routines
-            description: Show and manage scheduled routines.
+            description: Scheduled jobs
           - title: billing
-            description: Usage this month and top-ups.
+            description: Your usage and credit
           - title: privacy
-            description: See, export or delete your data.
+            description: See, export or delete your data
       - scopes:
           - team
         triggers:

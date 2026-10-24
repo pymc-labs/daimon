@@ -9,6 +9,7 @@ from daimon.adapters.discord.embed import (
     EmbedEvent,
     EmbedState,
     TurnPhase,
+    embed_fields,
     to_embed_data,
     update,
     update_activity,
@@ -97,10 +98,10 @@ class TestUpdate:
         result = update(with_draft, EmbedEvent(kind="message", label=""))
         assert result.text_preview == "earlier reasoning", "empty message must not clear the draft"
 
-    def test_message_event_clips_draft_at_300_chars(self) -> None:
+    def test_message_event_clips_draft_at_120_chars(self) -> None:
         result = update(_make_state(), EmbedEvent(kind="message", label="x" * 400))
         assert result.text_preview is not None
-        assert len(result.text_preview) == 301, "300 chars + ellipsis"
+        assert len(result.text_preview) == 121, "120 chars + ellipsis"
         assert result.text_preview.endswith("…")
 
     def test_done_event_transitions_to_done(self) -> None:
@@ -119,7 +120,7 @@ class TestUpdateActivity:
             _make_state(), TurnState(content=[_call("bash", "complete"), _call("read")])
         )
         assert result.phase == TurnPhase.TOOL_RUNNING, "a pending call means the turn is working"
-        assert result.tool_lines == ("✔️ Ran a command", "🔍 Reading a file"), (
+        assert result.tool_lines == ("☑️ Ran a command", "🔍 Reading a file"), (
             "tool lines come from the turn state"
         )
 
@@ -158,13 +159,47 @@ class TestToEmbedData:
     def test_in_progress_is_one_description_with_headline_tools_and_draft(self) -> None:
         state = dataclasses.replace(
             _make_state(phase=TurnPhase.TOOL_RUNNING, started_at=100.0),
-            tool_lines=("✔️ Ran a command", "🔍 Reading a file"),
+            tool_lines=("☑️ Ran a command", "🔍 Reading a file"),
             text_preview="Checking *the* logs",
         )
         data = to_embed_data(state, now=165.0)
         assert data.title == "Working on it…"
         assert data.description == "> Checking \\*the\\* logs"
-        assert data.details == "`✔️ Ran a command`\n`🔍 Reading a file`"
+        assert data.details == "`☑️ Ran a command`\n`🔍 Reading a file`"
+
+    def test_in_progress_quotes_the_last_three_draft_lines_oldest_first(self) -> None:
+        state = _make_state(phase=TurnPhase.THINKING)
+        for line in ("one", "two", "three", "four"):
+            state = update(state, EmbedEvent(kind="message", label=line))
+        assert to_embed_data(state, now=1.0).description == "> two\n> three\n> four"
+
+    def test_three_worst_case_escaped_lines_fit_an_embed_description(self) -> None:
+        state = _make_state(phase=TurnPhase.THINKING)
+        for _ in range(3):
+            state = update(state, EmbedEvent(kind="message", label="*" * 400))
+            state = update(state, EmbedEvent(kind="message", label="`" * 400))
+        description = to_embed_data(state, now=1.0).description
+        assert len(description) <= 4096
+
+    def test_the_drafts_lead_then_the_plan_and_details_fields_in_code(self) -> None:
+        state = dataclasses.replace(
+            update(_make_state(phase=TurnPhase.THINKING), EmbedEvent(kind="message", label="one")),
+            plan_lines=("☑️ 2 done", "⏳ Fit *model*", "\u2007\u2007\u2007+1 more"),
+            tool_lines=("🔍 Reading a file",),
+        )
+        data = to_embed_data(state, now=1.0)
+        assert data.description == "> one", "the description holds only the latest updates"
+        assert embed_fields(data) == [
+            ("Plan", "`☑️ 2 done`\n`⏳ Fit *model*`\n`\u2007\u2007\u2007+1 more`"),
+            ("Details", "`🔍 Reading a file`"),
+        ], "the plan field comes before Details, each line inline code like the tool lines"
+
+    def test_a_worst_case_plan_fits_an_embed_field(self) -> None:
+        state = _make_state(phase=TurnPhase.THINKING)
+        state = dataclasses.replace(state, plan_lines=("☑️ " + "`" * 60 + "…",) * 6)
+        plan = to_embed_data(state, now=1.0).plan
+        assert plan is not None and len(plan) <= 1024, "Discord caps a field value at 1,024"
+        assert plan.count("`") == 12, "a backtick in a step cannot break out of its code"
 
     def test_tool_line_markdown_stays_in_inline_code(self) -> None:
         state = dataclasses.replace(

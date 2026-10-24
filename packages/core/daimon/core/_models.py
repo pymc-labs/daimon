@@ -198,6 +198,9 @@ class PlatformPrincipal(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     active_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Home organisation id of a person verified to belong to another organisation.
+    # Sticky: written once by admission, never cleared by code.
+    foreign_home_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PrincipalLink(Base):
@@ -288,6 +291,11 @@ class TenantAccessPolicyRecord(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # False: an admin never chose; the tenant follows the deployment's keyed providers
+    # and `enabled_backends` keeps Anthropic only, which older builds still read safely.
+    enabled_backends_explicit: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
     )
 
 
@@ -1467,6 +1475,35 @@ class AgentMemoryStore(Base):
     )
 
 
+class AgentChannelMemoryStore(Base):
+    """Per-(tenant, agent, platform, channel) MA memory store binding: a held channel's memory.
+
+    A held turn (another organisation's requester, or a shared channel) mounts
+    this store instead of the agent-wide one and no personal store. `channel_id`
+    is the parent channel; threads under it share the row.
+    """
+
+    __tablename__ = "agent_channel_memory_store"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "agent_id", "platform", "channel_id", name="pk_agent_channel_memory_store"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    memory_store_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class AgentPersonalMemoryStore(Base):
     """Per-(tenant, agent, account) MA memory store binding: one person's own memory.
 
@@ -1663,6 +1700,10 @@ class McpToken(Base):
             "(platform IS NULL) = (channel_id IS NULL) AND (channel_id IS NULL OR kind = 'agent')",
             name="ck_mcp_tokens_channel",
         ),
+        CheckConstraint(
+            "surface IS NULL OR (surface = 'provider_turn' AND kind = 'agent')",
+            name="ck_mcp_tokens_surface",
+        ),
     )
 
     jti: Mapped[uuid.UUID] = mapped_column(
@@ -1698,6 +1739,8 @@ class McpToken(Base):
     # NULL for a token bound to no channel.
     platform: Mapped[str | None] = mapped_column(Text, nullable=True)
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # `provider_turn`: a chat-execution credential with no confirmation surface.
+    surface: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SlackBotToken(Base):
@@ -1805,8 +1848,9 @@ class TeamsMessageAdmission(Base):
     turn starts or the message is otherwise answered. `message` (the parsed
     inbound) is kept only while unhandled, so a restart can replay it; a dead
     owner's unhandled row is reclaimed at the next boot. `notice_sent` records
-    the restart notice, so no drain repeats it. A privacy purge deletes a
-    person's rows by (tenant, user); a tenant's deletion cascades to them.
+    the restart notice, so no drain repeats it. A privacy purge clears the
+    person and the words from their rows by (tenant, user) but keeps each row as
+    the duplicate key; a tenant's deletion cascades to them.
     """
 
     __tablename__ = "teams_message_admissions"
@@ -2423,6 +2467,38 @@ class ThreadModelSetting(Base):
     )
 
 
+class ProgressPlanScope(Base):
+    """An explicit progress-plans setting at one scope.
+
+    Same shape and meaning as `ThreadParticipationScope`: one row per (tenant,
+    platform, scope, scope_id), an empty scope_id for the workspace row, and no
+    row means "inherit". `daimon.core.scope_cascade.resolve_cascade` turns the
+    rows into an effective mode.
+    """
+
+    __tablename__ = "progress_plan_scopes"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "platform", "scope", "scope_id", name="pk_progress_plan_scopes"
+        ),
+        CheckConstraint(
+            "scope IN ('workspace', 'channel', 'thread')", name="ck_progress_plan_scopes_scope"
+        ),
+        CheckConstraint("mode IN ('on', 'off', 'disabled')", name="ck_progress_plan_scopes_mode"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    platform: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text)
+    scope_id: Mapped[str] = mapped_column(Text)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ThreadAutoResponse(Base):
     """One row per reply the agent posted in a thread unprompted.
 
@@ -2529,9 +2605,42 @@ class TurnOrigin(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The sender is from another organisation (Teams): no 1:1 chat with Daimon for them.
+    sender_foreign: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     # Set by `archive_thread` on this turn's own thread; the adapter archives
     # the thread after the turn's last post.
     archive_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The origin channel is shared with another organisation.
+    shared_channel: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+
+class SharedChannel(Base):
+    """A channel known to be shared with another organisation, recorded once and kept.
+
+    `source` is who revealed it: the platform's own signal, or a verified client
+    requester seen there. Every turn in it is held to it (`daimon.core.turn_hold`).
+    """
+
+    __tablename__ = "shared_channels"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "platform", "channel_id", name="pk_shared_channels"),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_shared_channels_tenants"
+        ),
+        CheckConstraint("source IN ('platform', 'client')", name="ck_shared_channels_source"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class PendingSkillAdd(Base):
@@ -2730,7 +2839,7 @@ class TurnOutcome(Base):
         ),
         CheckConstraint(
             "reason IN ('completed', 'interrupted', 'interrupt_timeout', "
-            "'connection_lost', 'upstream', 'rate_limited', 'session_terminated', "
+            "'connection_lost', 'upstream', 'refused', 'rate_limited', 'session_terminated', "
             "'mcp_degraded_empty', 'retrying_unsettled', 'requires_action', 'ceiling', "
             "'recovery_cancelled', 'recovery_failed', 'reducer_bug', "
             "'admission_balance_depleted', 'admission_cap_exceeded', "
@@ -3584,6 +3693,39 @@ class ThreadLease(Base):
     active: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
+class ThreadProviderRelease(Base):
+    """A confirmed provider switch's request to move one caller's thread.
+
+    The next admitted turn in the slot applies it (`daimon.core.thread_release`): when the
+    slot's binding is still at `generation` (0 = unbound), it writes a released
+    successor through the binding compare-and-swap, and the turn then selects its
+    provider afresh. Applied or stale, the row is deleted.
+    """
+
+    __tablename__ = "thread_provider_release"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "platform",
+            "channel_id",
+            "thread_id",
+            "account_id",
+            name="uq_thread_provider_release_slot",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class MuxOperation(Base):
     """An idempotent operation: found by (tenant, account, key), owned by a principal.
 
@@ -3651,7 +3793,11 @@ class UsageObservation(Base):
     """Each applied revision of a usage observation; the latest is the highest."""
 
     __tablename__ = "usage_observation"
-    __table_args__ = (PrimaryKeyConstraint("binding_id", "observation_id", "revision"),)
+    __table_args__ = (
+        PrimaryKeyConstraint("binding_id", "observation_id", "revision"),
+        # The OpenAI daily model cap reads one tenant's observations per turn.
+        Index("ix_usage_observation_tenant_id", "tenant_id"),
+    )
 
     binding_id: Mapped[str] = mapped_column(
         Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
@@ -3718,7 +3864,9 @@ class NeutralSkillVersion(Base):
 
     __tablename__ = "neutral_skill_versions"
     __table_args__ = (
-        CheckConstraint("provider IN ('openai', 'gemini')", name="ck_neutral_skill_provider"),
+        CheckConstraint(
+            "provider IN ('openai', 'gemini', 'selfhosted')", name="ck_neutral_skill_provider"
+        ),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
@@ -3820,6 +3968,10 @@ class AgentBackendRevisionRecord(Base):
             "backend IS NULL OR backend IN ('anthropic', 'openai', 'gemini')",
             name="ck_agent_backend_provider",
         ),
+        CheckConstraint(
+            "thread_mode IS NULL OR thread_mode IN ('per_caller', 'shared')",
+            name="ck_agent_backend_thread_mode",
+        ),
     )
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -3832,6 +3984,43 @@ class AgentBackendRevisionRecord(Base):
     fleet_grant: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     drop_consent: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # The admin-picked model; null is the provider's default (0118, so last).
+    model: Mapped[str | None] = mapped_column(Text)
+    # The agent's own profile, requirements and thread mode; null is the
+    # backend's default (0119).
+    profile: Mapped[str | None] = mapped_column(Text)
+    requires: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    thread_mode: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentOwner(Base):
+    """The one account that may edit an agent without being a server admin.
+
+    No row: only server admins may. Recorded when a person creates the agent
+    from chat, or assigned by an admin; never inferred.
+    """
+
+    __tablename__ = "agent_owner"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", name="pk_agent_owner"),
+        CheckConstraint("source IN ('created', 'admin_assigned')", name="ck_agent_owner_source"),
+        Index("ix_agent_owner_account", "owner_account_id"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_owner_tenants"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_owner_accounts"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
@@ -3860,6 +4049,16 @@ class FleetRun(Base):
         CheckConstraint(
             "total_budget_usd >= 0 AND reserved_usd >= 0 AND observed_usd >= 0",
             name="ck_fleet_run_amounts",
+        ),
+        CheckConstraint(
+            "end_notice IS NULL OR end_notice IN ('owed', 'shown', 'given_up')",
+            name="ck_fleet_run_end_notice",
+        ),
+        Index(
+            "ix_fleet_run_end_notice_owed",
+            "platform",
+            "end_notice_due_at",
+            postgresql_where=text("end_notice = 'owed'"),
         ),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
@@ -3891,6 +4090,15 @@ class FleetRun(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Whether the thread was told the run ended: "owed" from the end until a
+    # terminal card is rendered ("shown"), or the poller gives up ("given_up").
+    end_notice: Mapped[str | None] = mapped_column(Text)
+    end_notice_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    end_notice_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The run's live card, so a later render edits it instead of posting another.
+    card_message_id: Mapped[str | None] = mapped_column(Text)
 
 
 class FleetWorker(Base):
@@ -4321,3 +4529,81 @@ class RecruitmentOutboxRecord(Base):
     stable_key: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_request: Mapped[bytes | None] = mapped_column(LargeBinary)
+
+
+class SelfHostedAgentRecord(Base):
+    """Tenant-owned resource; spec contains model, system, tools, skills and metadata."""
+
+    __tablename__ = "selfhosted_agents"
+    __table_args__ = (
+        Index(
+            "uq_selfhosted_agents_active_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("archived_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    skill_attachments: Mapped[list[dict[str, str]]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SelfHostedEnvironmentRecord(Base):
+    """Harness routing and credential references live in the environment spec."""
+
+    __tablename__ = "selfhosted_environments"
+    __table_args__ = (
+        Index(
+            "uq_selfhosted_environments_active_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("archived_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SelfHostedResourceOperation(Base):
+    """Reference-only receipts, principal-owned and retained for seven days."""
+
+    __tablename__ = "selfhosted_resource_operations"
+    __table_args__ = (Index("ix_selfhosted_resource_operations_expires_at", "expires_at"),)
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    operation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now() + interval '7 days'")
+    )

@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import UUID
 
 import httpx
+import mux.drivers.openai as deployment
 import pytest
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import AgentBackendService, BackendActor
@@ -23,15 +24,14 @@ from daimon.core.turn.openai_deployment import OpenAIDeployment
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.runtime_manifest import read_frozen_root
 from daimon.core.turn.runtimes import build_channel_runtime
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.resources import AgentSpec
-from mux.drivers.openai import deployment
 from mux.drivers.openai.transport import SDKTransport
+from mux.testing.isolated_sdk import build_async_openai
 
 from .test_fleet_native_dispatch import _settled
 from .test_frozen_preparation import default_source_turn
 from .test_frozen_root import freeze, root_turn
-from .test_openai_host import SESSION_ID, Wire
+from .test_openai_host import SESSION_ID, Wire, openai_native_spend_cap
 from .test_openai_worker_plan import db_preflight as db_preflight
 from .test_openai_worker_plan import owned_database_preflight as owned_database_preflight
 
@@ -100,10 +100,12 @@ class ConversationWire(Wire):
 
 @pytest.fixture
 async def conversation_root(
-    db_preflight, db_clean, db_nullpool_engine, monkeypatch, tmp_path, request
+    db_preflight, db_clean, db_committing_engine, monkeypatch, tmp_path, request
 ):
+    # These workers carry a native budget: exercise a project that honours it.
+    openai_native_spend_cap(monkeypatch)
     async with aclosing(
-        root_turn.__wrapped__(db_preflight, db_nullpool_engine, live_root=True)
+        root_turn.__wrapped__(db_preflight, db_committing_engine, live_root=True)
     ) as roots:
         updated, current, source = await default_source_turn(await anext(roots))
         deps, prepared, _, intent, _, scope, _, transport = updated
@@ -138,6 +140,18 @@ async def conversation_root(
         actor = BackendActor(
             source.tenant_id, prepared.admission.account_id, Subject(is_admin=True)
         )
+        if getattr(request, "param", None) == "recorded_caps":
+            from daimon.core.channel_backend import AgentBackendRefused
+
+            # Financial admission would refuse every spawn; the grant never lands.
+            with pytest.raises(AgentBackendRefused, match="fleet provider limits exceed budget"):
+                await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
+            current_grant = await service.current(source)
+            assert current_grant is None or "provider_limits_usd" not in (
+                (current_grant.fleet_grant or {}).get("limits", {})
+            )
+            yield None
+            return
         preview = await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
         await service.set_fleet_grant(
             source,
@@ -376,13 +390,8 @@ async def test_missing_dispatch_host_runtime_refuses_before_native_allocation(
 
 @pytest.mark.parametrize("conversation_root", ["recorded_caps"], indirect=True)
 async def test_recorded_provider_ceilings_refuse_before_native_allocation(conversation_root):
-    from daimon.core.fleet_orchestration import FleetRefused
-
-    _, parent, policy, resolved, wire, ports, _, _ = conversation_root
-    with pytest.raises(FleetRefused, match="admission_evidence_invalid") as refused:
-        await FleetOrchestrator(ports).spawn(parent, policy, **terms(parent, resolved))
-    assert str(refused.value.__context__) == "provider limits exceed the retained run budget"
-    assert not wire.posts
+    """The recorded lines total .585 over a .49 run: refused at the grant preview."""
+    assert conversation_root is None
 
 
 @pytest.mark.parametrize("fault", ["environment", "tools", "mcp", "skills", "mount", "drop"])
@@ -411,6 +420,44 @@ async def test_conversation_worker_rejects_residual_authority_before_native_read
         changed = replace(resolved, spec=resolved.spec.model_copy(update=values[fault]))
     with pytest.raises(AdmissionDenied):
         plan.worker_environment(request, changed)
+    assert not wire.requests
+
+
+@pytest.mark.parametrize("had_skills", [False, True])
+async def test_a_conversation_worker_declares_losing_skills_only_if_its_source_had_them(
+    conversation_root, had_skills
+):
+    """J4 fleet-openai: a named agent with no skills has none to lose, so its worker
+    needs no declared skills drop; one whose source has skills still does."""
+    from daimon.core.turn.errors import AdmissionDenied
+    from mux.contracts.ids import SkillRef
+
+    _, parent, _, resolved, wire, ports, plan, _ = conversation_root
+    async with ports._load_preparation(parent) as root_request:
+        request = await root_request.for_worker(parent, resolved)
+    assert request.source is not None and request.source.effective_spec is not None
+    skills = (SkillRef(id="theirs", version="1"),) if had_skills else ()
+    request = replace(
+        request,
+        source=request.source.model_copy(
+            update={
+                "effective_spec": request.source.effective_spec.model_copy(
+                    update={"skills": skills}
+                )
+            }
+        ),
+    )
+    changed = replace(
+        resolved,
+        spec=resolved.spec.model_copy(
+            update={"declared_drops": tuple(d for d in DROPS if d != "skills")}
+        ),
+    )
+    if had_skills:
+        with pytest.raises(AdmissionDenied):
+            plan.worker_environment(request, changed)
+    else:
+        assert plan.worker_environment(request, changed) is None
     assert not wire.requests
 
 

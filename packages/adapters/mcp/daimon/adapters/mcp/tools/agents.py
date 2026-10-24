@@ -33,12 +33,20 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._owner import (
+    caller_owned_ids,
+    caller_owns_agent,
+    may_own,
+    owned_in,
+    owner_labels,
+)
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools._rule_view import (
     load_caller_view,
     load_isolation_view,
     load_skill_owners,
 )
+from daimon.adapters.mcp.tools._words import admin_noun, space_noun
 from daimon.adapters.mcp.tools.agent_chat import require_outside_chat_turn
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
@@ -51,6 +59,7 @@ from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
+from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -64,9 +73,11 @@ from daimon.core.defaults.mcp_merge import (
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.defaults.reconcile_agents import reconcile_agent
+from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agent
+from daimon.core.defaults.report import Action as ReconcileAction
 from daimon.core.defaults.skills import resolve_custom_skill_titles, resolve_skill_names
 from daimon.core.defaults.spec_merge import merge_mcp_servers_with_ma, merge_skills_with_ma
 from daimon.core.errors import DaimonError, DefaultsError
@@ -94,7 +105,10 @@ from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.tool_safety import get_mcp_server_name_rejection
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from mux.contracts.config import DEFAULT_BACKEND, ThreadMode
 from mux.contracts.ids import Provider
+from mux.contracts.profile import Capability
+from mux.profiles import selectable_models
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
 log = structlog.get_logger()
@@ -146,6 +160,13 @@ class AgentInfo(BaseModel):
     """Set only by ``fork_agent``: the source's own skills, uploaded again under the
     copy's name. The copy has them even when ``skills`` does not list them yet; do
     not add them again."""
+    owned_by_you: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    """Set by ``get_agent`` and ``list_agents``: whether the caller owns this agent
+    (created it, or an admin named them), so may change it without an admin."""
+    owner: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """Set by ``get_agent`` and ``list_agents``: who to ask about changing this agent:
+    ``"you"``, the owner's name, or ``"another member"`` when no name is known.
+    Absent when the agent has no owner: then only an admin changes it."""
 
     @classmethod
     def from_ma(
@@ -341,13 +362,6 @@ def _system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
     return None
 
 
-async def _may_see_setup(
-    runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
-) -> bool:
-    """Members see capabilities; native admins see setup details."""
-    return auth.is_admin
-
-
 async def _reject_guild_name_collision(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -361,7 +375,20 @@ async def _reject_guild_name_collision(
     """
     matches = await find_agents_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if matches:
-        raise ToolError(f"agent '{name}' already exists in this server — pick another name")
+        raise ToolError(
+            f"agent '{name}' already exists in this {space_noun(auth.platform)} — pick another name"
+        )
+
+
+async def _free_agent_name(runtime: McpRuntime, auth: AuthIdentity, name: str) -> str:
+    """`name`, or the first of `name-2`, `name-3`... that no live agent here holds."""
+    rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    taken = {row.metadata.get(MA_METADATA_KEY_NAME) for row in rows}
+    candidate, n = name, 1
+    while candidate in taken:
+        n += 1
+        candidate = f"{name}-{n}"
+    return candidate
 
 
 async def _list_agents_impl(
@@ -369,9 +396,11 @@ async def _list_agents_impl(
     auth: AuthIdentity,
     page: str | None,
     origin_context_id: str | None = None,
+    mine: bool = False,
 ) -> list[AgentInfo]:
     del page
     rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    owned = await caller_owned_ids(runtime, auth)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     caller = await load_caller_view(
         runtime,
@@ -380,17 +409,25 @@ async def _list_agents_impl(
         location_channel_id=origin_channel_id(origin),
         location_thread_id=origin.thread_id if origin is not None else None,
     )
-    rows = [row for row in rows if caller.sees_agent(row)]
+    # An owner always sees their own agents, routed anywhere or nowhere.
+    rows = [
+        row
+        for row in rows
+        if (owned_in(owned, auth, row.id) or (not mine and caller.sees_agent(row)))
+    ]
     skill_titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=rows, tenant_id=auth.tenant_id
     )
-    infos = [AgentInfo.from_ma(a, skill_titles=skill_titles) for a in rows]
+    owners = await owner_labels(runtime, auth, [a.id for a in rows])
+    infos = [
+        AgentInfo.from_ma(a, skill_titles=skill_titles).model_copy(
+            update={"owned_by_you": owned_in(owned, auth, a.id), "owner": owners.get(a.id)}
+        )
+        for a in rows
+    ]
     if auth.is_admin:
         return infos
-    return [
-        info if await _may_see_setup(runtime, auth, row) else info.for_member()
-        for row, info in zip(rows, infos, strict=True)
-    ]
+    return [info if info.owned_by_you else info.for_member() for info in infos]
 
 
 async def _get_agent_impl(
@@ -412,16 +449,18 @@ async def _get_agent_impl(
         location_thread_id=origin.thread_id if origin is not None else None,
     )
     info = await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
-    # The prompt is readable only by callers who could replace it: admins, and
-    # tools may edit at all. A defaults-managed or system
+    # The prompt is readable only by callers who could replace it: admins and the
+    # agent's owner, on an agent chat tools may edit at all. A defaults-managed or system
     # agent's prompt stays withheld even from admins — the edit path is a fork,
     # and the fork's own prompt is then readable.
-    sees_setup = auth.is_admin or await _may_see_setup(runtime, auth, agent)
+    owned = await caller_owns_agent(runtime, auth, agent.id)
+    sees_setup = auth.is_admin or owned
     if sees_setup and _system_agent_rejection(agent) is None:
         info = info.model_copy(update={"system": agent.system or ""})
     if not sees_setup:
         info = info.for_member()
-    return info
+    owner = (await owner_labels(runtime, auth, [agent.id])).get(agent.id)
+    return info.model_copy(update={"owned_by_you": owned, "owner": owner})
 
 
 def _reject_unknown_model(model: ModelSelection) -> None:
@@ -438,6 +477,102 @@ def _reject_unknown_model(model: ModelSelection) -> None:
     if choice_id not in ALLOWED_MODEL_IDS:
         allowed = ", ".join(ALLOWED_MODEL_IDS)
         raise ToolError(f"Model '{choice_id}' is not available. Choose one of: {allowed}")
+
+
+async def _move_this_thread(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    agent_name: str,
+    target: Provider,
+    *,
+    pinned_here: bool,
+) -> str:
+    """After a confirmed switch, move the requester's own slot of this thread too.
+
+    Only when the switched agent is the one answering here, and never a shared
+    thread (it stays pinned for everyone in it). Says plainly what happens.
+    """
+    from daimon.core.stores import mux_state, thread_agent_bindings
+    from daimon.core.thread_release import caller_slot, request_thread_release
+    from daimon.core.turn.notices import provider_name
+
+    provider = provider_name(target)
+    if pinned_here:
+        return "This channel pins its own provider, so this conversation stays on it."
+    async with runtime.session_factory() as session:
+        handed = await thread_agent_bindings.get_binding(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=origin.platform,
+            parent_channel_id=origin.parent_channel_id,
+            thread_id=origin.thread_id,
+        )
+    # Who answers this conversation's next message: a hand-off's agent, else this
+    # turn's responder. A setup conversation's configuration target never moves it.
+    answering = (
+        handed.responder_name
+        if handed is not None and handed.kind == "handoff"
+        else origin.responder_name
+    )
+    if (handed is not None and handed.kind == "setup") or agent_name != answering:
+        return f"{agent_name} isn't the one answering here, so this conversation is unchanged."
+    slot = caller_slot(
+        tenant_id=auth.tenant_id,
+        platform=origin.platform,
+        channel_id=origin.parent_channel_id,
+        thread_id=origin.thread_id,
+        account_id=auth.account_id,
+    )
+    async with runtime.session_factory.begin() as session:
+        shared = slot.model_copy(update={"account_id": None})
+        if await mux_state.get_binding(session, shared) is not None:
+            return (
+                "This conversation is shared, so it stays on its current model; "
+                f"start a new thread to talk to {agent_name} on {provider}."
+            )
+        pinned = await mux_state.get_binding(session, slot, include_released=True)
+        await request_thread_release(
+            session,
+            slot,
+            generation=pinned.generation if pinned is not None else 0,
+            now=datetime.datetime.now(datetime.UTC),
+        )
+    return (
+        f"This conversation moves to {provider} from the next message; "
+        "earlier messages here aren't carried over."
+    )
+
+
+def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
+    """Native agent edits share the alias resolver without changing model controls."""
+    choice = model_choice_id(model)
+    if choice in ALLOWED_MODEL_IDS:
+        return model
+    from daimon.core.agent_model_names import agent_catalog, model_name, resolve_model
+    from daimon.core.turn.notices import provider_name
+    from mux.profiles import MANAGED_AGENTS
+
+    choices = tuple(
+        entry.model for entry in agent_catalog() if entry.model.provider == MANAGED_AGENTS.provider
+    )
+    try:
+        resolved = resolve_model(choice, available=choices).id
+    except ValueError as exc:
+        # Another provider's model: say how to get there instead of a dead end.
+        with contextlib.suppress(ValueError):
+            other = resolve_model(choice)
+            if other.provider != MANAGED_AGENTS.provider:
+                raise ToolError(
+                    f"{model_name(other)} is a {provider_name(other.provider)} model. Create "
+                    "the agent on a Claude model such as sonnet, then switch it to "
+                    f"{provider_name(other.provider)} ({other.id}). Nothing was created yet."
+                ) from exc
+        if "could mean" not in str(exc):
+            # Unknown (not ambiguous): the refusal lists what this deployment offers.
+            _reject_unknown_model(model)
+        raise ToolError(str(exc)) from exc
+    return resolved if isinstance(model, str) else {**model, "id": resolved}
 
 
 def _build_create_spec(
@@ -460,6 +595,7 @@ def _build_create_spec(
     ``mcp_toolset``) is reshaped into a readable ``ToolError`` rather than leaking
     raw validator output.
     """
+    model = _resolve_native_agent_model(model)
     _reject_unknown_model(model)
     for server in mcp_servers or []:
         if (rejection := get_mcp_server_name_rejection(str(server.get("name") or ""))) is not None:
@@ -477,7 +613,8 @@ def _build_create_spec(
     except ValidationError as exc:
         raise ToolError(
             "create_agent: invalid agent configuration; check the supplied fields "
-            "and ensure every MCP server has a matching mcp_toolset entry. Nothing was saved."
+            "and ensure every mcp_servers entry has a matching mcp_toolset entry. "
+            "Nothing was saved."
         ) from exc
 
 
@@ -497,28 +634,54 @@ async def _create_agent_impl(
     await require_agent_creatable(
         runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
     )
-    await _reject_guild_name_collision(runtime, auth, spec.name)
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    outcome = await reconcile_agent(
-        runtime.client,
-        spec,
-        tenant_id=auth.tenant_id,
-        dry_run=False,
-        account_id=derive_guild_account_uuid(auth.tenant_id),
-        public_url=public_url,
-        # New agents created from chat are user-owned, NOT seeded resources —
-        # managed=True would stamp daimon_managed=true and make them
-        # sweep-eligible, so the next defaults apply (every boot/deploy)
-        # archives them because they aren't in the seeded spec list.
-        managed=False,
-        references=runtime.session_factory,
-    )
-    if outcome.anthropic_id is None:
-        raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
+    owner = may_own(auth)
+    async with contextlib.AsyncExitStack() as stack:
+        if owner:
+            # Check and create under one lock, so a concurrent creator of the same
+            # name is refused instead of owning (or rewriting) this agent.
+            await stack.enter_async_context(
+                agent_name_lock(runtime.session_factory, tenant_id=auth.tenant_id, name=spec.name)
+            )
+        await _reject_guild_name_collision(runtime, auth, spec.name)
+        public_url = (
+            str(runtime.settings.mcp.public_url)
+            if runtime.settings.mcp.public_url is not None
+            else None
+        )
+        try:
+            outcome = await reconcile_agent(
+                runtime.client,
+                spec,
+                tenant_id=auth.tenant_id,
+                dry_run=False,
+                account_id=derive_guild_account_uuid(auth.tenant_id),
+                public_url=public_url,
+                # New agents created from chat are user-owned, NOT seeded resources —
+                # managed=True would stamp daimon_managed=true and make them
+                # sweep-eligible, so the next defaults apply (every boot/deploy)
+                # archives them because they aren't in the seeded spec list.
+                managed=False,
+                references=runtime.session_factory,
+                # Never update an agent that took the name since the check above.
+                create_only=True,
+            )
+        except AgentNameTaken as exc:
+            raise ToolError(
+                f"agent '{spec.name}' already exists in this {space_noun(auth.platform)} "
+                "— pick another name"
+            ) from exc
+        if outcome.anthropic_id is None:
+            raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
+        if owner and outcome.action == ReconcileAction.CREATED:
+            # The person who created it owns it: they may edit it without an admin.
+            await record_agent_creator(
+                runtime.session_factory,
+                tenant_id=auth.tenant_id,
+                agent_id=derive_agent_uuid(
+                    tenant_id=auth.tenant_id, ma_agent_id=outcome.anthropic_id
+                ),
+                account_id=auth.account_id,
+            )
     queue_agent_face(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -604,6 +767,7 @@ async def _update_agent_impl(
     origin_context_id: str | None = None,
 ) -> AgentInfo:
     if model is not None:
+        model = _resolve_native_agent_model(model)
         _reject_unknown_model(model)
     scalars: dict[str, Any] = {"model": model, "description": description, "system": system}
     list_fields = (tools, mcp_servers, skills)
@@ -708,9 +872,9 @@ async def _update_agent_impl(
             merged_mcp_count = len(patch["mcp_servers"] or [])
             if merged_mcp_count > AGENT_MCP_CAP:
                 raise ToolError(
-                    f"Cannot attach MCP servers: the merged server set ({merged_mcp_count}) "
-                    f"exceeds this organization's per-agent MCP-server limit ({AGENT_MCP_CAP}). "
-                    f"No servers were changed on '{name}'. Attach fewer servers, or use "
+                    f"Cannot attach connections: the merged set ({merged_mcp_count}) "
+                    f"exceeds this organization's per-agent connection limit ({AGENT_MCP_CAP}). "
+                    f"Nothing was changed on '{name}'. Attach fewer, or use "
                     "detach_mcp_server before adding more."
                 )
         if tools is not None:
@@ -817,11 +981,13 @@ async def _require_mcp_replace_allowed(
         agent=agent,
         caller=reachability.admin_caller(auth),
         default=runtime.deployment_default,
+        owned=await caller_owns_agent(runtime, auth, agent.id),
     )
     if outcome != "allow":
         raise ToolError(
             f"'{agent.name}' already has {', '.join(repr(n) for n in replaced)} at another URL "
-            "and is shared, so repointing it needs a server or workspace admin, and the caller "
+            f"and is shared, so repointing it needs its owner or {admin_noun(auth.platform)}, "
+            "and the caller "
             "is not one. Nothing was changed. Do not retry under another name."
         )
     return True
@@ -907,28 +1073,62 @@ async def _fork_agent_impl(
     source_name: str,
     new_name: str,
     expected_ma_agent_id: str | None = None,
+    new_copy_if_taken: bool = False,
+    origin_context_id: str | None = None,
 ) -> AgentInfo:
+    from daimon.adapters.mcp.tools.task_continuity import forked_in_value
+    from daimon.core.defaults.metadata import (
+        MA_METADATA_KEY_FORKED_FROM,
+        MA_METADATA_KEY_FORKED_IN,
+    )
+
     # Forking is an admin's call: a fork routes nowhere and has no channel
     # pin of its own, so it is free to run anywhere the source can't.
     _require_admin(auth)
-    await _reject_guild_name_collision(runtime, auth, new_name)
-    source = await resolve_setup_agent(
-        runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
-    )
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
     public_url = runtime.settings.mcp.public_url
-    try:
-        copy = await copy_agent(
-            runtime.client,
-            runtime.session_factory,
-            tenant_id=auth.tenant_id,
-            source=source,
-            new_name=new_name,
-            public_url=str(public_url) if public_url is not None else None,
-            subject=mcp_subject(auth, is_admin=auth.is_admin),
-            default_agent_name=runtime.deployment_default.agent_name,
+    async with contextlib.AsyncExitStack() as stack:
+        # Pick, check and create under the name's lock, so two copies at once
+        # never both take the same name.
+        await stack.enter_async_context(
+            agent_name_lock(runtime.session_factory, tenant_id=auth.tenant_id, name=new_name)
         )
-    except DaimonError as exc:
-        raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
+        if new_copy_if_taken:
+            # "Make a copy of yourself" wants a new copy, never an earlier one.
+            picked = await _free_agent_name(runtime, auth, new_name)
+            if picked != new_name:
+                # A creator naming `picked` outright locks that name, not ours.
+                await stack.enter_async_context(
+                    agent_name_lock(runtime.session_factory, tenant_id=auth.tenant_id, name=picked)
+                )
+                new_name = picked
+        await _reject_guild_name_collision(runtime, auth, new_name)
+        source = await resolve_setup_agent(
+            runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
+        )
+        try:
+            copy = await copy_agent(
+                runtime.client,
+                runtime.session_factory,
+                tenant_id=auth.tenant_id,
+                source=source,
+                new_name=new_name,
+                public_url=str(public_url) if public_url is not None else None,
+                subject=mcp_subject(auth, is_admin=auth.is_admin),
+                default_agent_name=runtime.deployment_default.agent_name,
+                # Whoever made the copy owns it.
+                owner=auth.account_id if may_own(auth) else None,
+                # Made from a conversation: switching it from there hands it that
+                # conversation in the same step (J1, `copy_awaiting_its_switch`).
+                extra_metadata={
+                    MA_METADATA_KEY_FORKED_FROM: source.id,
+                    MA_METADATA_KEY_FORKED_IN: forked_in_value(origin),
+                }
+                if origin is not None
+                else None,
+            )
+        except DaimonError as exc:
+            raise ToolError(f"fork_agent: {exc} Nothing was created. Do not retry.") from exc
     info = await _build_agent_info(runtime.client, copy.agent, tenant_id=auth.tenant_id)
     if copy.dropped_skills:
         info = info.model_copy(update={"dropped_skills": list(copy.dropped_skills)})
@@ -993,18 +1193,17 @@ async def _capture_backend_source(
     from daimon.core.turn.admission import capture_backend_source
     from daimon.core.turn.deps import build_turn_deps
 
-    if (
-        origin is not None
-        and await session_card_gap(
+    if origin is not None and (
+        gap := await session_card_gap(
             runtime,
             auth,
             origin,
             tool_name="request_agent_backend_switch",
             require_public_context=True,
         )
-        is not None
     ):
-        raise channel_backend.AgentBackendRefused("source_unavailable")
+        # The gap names the cause, in the refusal log line and its copy.
+        raise channel_backend.AgentBackendRefused("source_context_unavailable", detail=gap)
     deps = build_turn_deps(
         runtime.settings,
         runtime.client,
@@ -1031,6 +1230,198 @@ async def _capture_backend_source(
     )
 
 
+#: What a target provider can't carry, in plain words (closed obligation labels).
+_MISSING_WORDS: Final[Mapping[str, str]] = {
+    "credentials": "a saved key that one of its kept connections needs",
+    "instructions": "instructions that can't be carried over unchanged",
+    "source_definition": "a setting or attachment that provider can't represent",
+    "source_context": "setup that couldn't be read completely",
+    "source_representation": "a saved version for that provider that is out of date",
+    "tools": "tools that must ask before publishing",
+    "model_options": "model options that provider doesn't take",
+}
+
+#: Why a source read failed for a reason that a retry won't fix.
+_SOURCE_DETAIL_WORDS: Final[Mapping[str, str]] = {
+    "identity": "this request doesn't come from the account that can change it here",
+    "source": "its saved setup doesn't match the agent that's live now. Ask its owner to "
+    "check it still exists",
+    "environment": "its working environment is missing or archived",
+    "place": "this conversation's channel couldn't be verified",
+}
+
+#: Why this conversation can't show the switch's Confirm card (a `CardGap`).
+_CARD_GAP_WORDS: Final[Mapping[str, str]] = {
+    "source_context_unavailable": (
+        "I can't confirm a change from a direct message or from a conversation that "
+        "started somewhere else. Ask in a server channel or thread where I answer."
+    ),
+    "no_live_session": (
+        "I couldn't find my conversation in this thread, so I can't post the Confirm card. "
+        "Mention me again here, or in a new thread."
+    ),
+    "other_agents_session": (
+        "Another agent's conversation runs in this thread, so I can't post the Confirm "
+        "card here. Mention me in a new thread."
+    ),
+    "session_not_gated": (
+        "This thread's conversation started without the Confirm card for this change. "
+        "Mention me in a new thread."
+    ),
+    "session_unreadable": (
+        "I couldn't check this conversation just now, so I can't post the Confirm card. "
+        "Try again in a minute."
+    ),
+}
+
+
+def _backend_switch_refusal(
+    exc: DaimonError | ValidationError,
+    agent_name: str,
+    target: Provider | None,
+    auth: AuthIdentity,
+    *,
+    with_code: bool = False,
+    current: Provider | None = None,
+) -> ToolError:
+    """The real reason a provider change was refused, and what the requester can do.
+
+    ``with_code`` appends the stable reason for direct API and coding-tool callers.
+    Never shows an exception type or an internal string.
+    """
+    from daimon.core.turn.notices import provider_name, switched_meanwhile_text
+
+    refused = exc if isinstance(exc, channel_backend.AgentBackendRefused) else None
+    reason = (
+        refused.reason
+        if refused is not None
+        else "invalid_request"
+        if isinstance(exc, ValidationError)
+        else "backend_unsupported"
+        if isinstance(exc, channel_backend.BackendUnsupported)
+        else "internal"
+    )
+    log.warning(
+        "agent_backend_switch_refused",
+        agent=agent_name,
+        target=target,
+        reason=reason,
+        error_type=type(exc).__name__,
+        missing=list(getattr(refused, "missing", ())),
+        detail=getattr(refused, "detail", None),
+    )
+    provider = provider_name(target or getattr(refused, "provider", None))
+    admin = admin_noun(auth.platform)
+    space = space_noun(auth.platform)
+    if reason == "backend_unsupported":
+        # Only the copy written for people passes through; internal labels never do.
+        said = str(exc)
+        text = (
+            said
+            if said.endswith(".") and " " in said and "_" not in said
+            else f"{provider} can't run here right now. Pick another, or ask whoever runs Daimon."
+        )
+    elif reason == "source_unsupported":
+        missing: tuple[str, ...] = getattr(refused, "missing", ())
+        things = [_MISSING_WORDS[item] for item in missing if item in _MISSING_WORDS]
+        text = (
+            f"'{agent_name}' can't move to {provider}: it has "
+            + ("; ".join(things) if things else "something that provider can't carry")
+            + ". Its owner can remove that from the agent, or keep it on "
+            + (provider_name(current) if current is not None else "its current provider")
+            + "."
+        )
+    elif reason == "source_context_unavailable":
+        text = _CARD_GAP_WORDS.get(
+            getattr(refused, "detail", None) or reason,
+            _CARD_GAP_WORDS["source_context_unavailable"],
+        )
+    elif reason == "source_unavailable":
+        detail: str | None = getattr(refused, "detail", None)
+        text = (
+            f"I can't change '{agent_name}' from here: {_SOURCE_DETAIL_WORDS[detail]}."
+            if detail in _SOURCE_DETAIL_WORDS
+            else f"I couldn't read '{agent_name}''s current setup (the provider didn't "
+            "answer in time). Try again in a minute."
+        )
+    else:
+        text = {
+            "agent_not_found": f"There's no agent named '{agent_name}' here. Ask me to list them.",
+            "tenant_mismatch": (
+                f"'{agent_name}' belongs to another {space} and can't be changed here."
+            ),
+            "owner_or_admin_required": f"Changing '{agent_name}' needs its owner or {admin}.",
+            "admin_required": f"This change needs {admin}.",
+            "actor_not_found": (
+                "I couldn't match you to an account here. Send a message first, then retry."
+            ),
+            "admin_required_for_shared_threads": f"Sharing threads in every channel needs {admin}.",
+            "feature_disabled": f"Choosing a model provider is turned off. Ask {admin}.",
+            "backend_not_allowed": (
+                f"{provider} isn't allowed in this {space}. Ask {admin} to allow it."
+            ),
+            "model_not_selectable": f"That model isn't available on {provider}. Pick another.",
+            "profile_not_selectable": f"That model isn't available on {provider}. Pick another.",
+            "selfhosted_requires_channel_configuration": (
+                f"A self-hosted model is set per channel, not per agent. Ask {admin}."
+            ),
+            "stale_preview": f"'{agent_name}' changed since the preview. Ask me to preview again.",
+            "stale_revision": switched_meanwhile_text(agent_name, current, target),
+            "re_confirm": "This change needs a fresh confirmation. Ask me to preview again.",
+            "drops_required": "The confirmation didn't accept what this switch drops. "
+            "Ask me to preview again.",
+            "drops_mismatch": "What this switch drops changed. Ask me to preview again.",
+            "revision_busy": "Another change to this agent is in progress. Retry in a moment.",
+            "invalid_request": "That request didn't match the preview. Ask me to preview again.",
+        }.get(
+            reason,
+            "Something on Daimon's side refused this change. "
+            "If it repeats, tell whoever runs Daimon.",
+        )
+    return ToolError(f"{text} Nothing changed." + (f" [{reason}]" if with_code else ""))
+
+
+async def _provider_now(
+    service: channel_backend.AgentBackendService, agent: BackendAgent
+) -> Provider:
+    """The provider the agent runs on now: its setting, else the default."""
+    setting = await service.current(agent)
+    return (setting.backend if setting is not None else None) or DEFAULT_BACKEND
+
+
+def _resolve_agent_model(backend: Provider | None, model: str | None) -> str | None:
+    from daimon.core.agent_model_names import resolve_switch_model
+
+    try:
+        return resolve_switch_model(backend, model)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _require_selectable_model(backend: Provider | None, model: str | None) -> None:
+    """Name the models on offer instead of a generic refusal for an unknown one."""
+    if model is None:
+        return
+    models = selectable_models(backend) if backend is not None else ()
+    if model not in models:
+        offer = f" Pick one of: {', '.join(models)}." if models else ""
+        raise ToolError(f"{model} isn't available on {backend or 'the default'} here.{offer}")
+
+
+async def _require_agent_editor(
+    service: channel_backend.AgentBackendService,
+    agent: BackendAgent,
+    actor: channel_backend.BackendActor,
+    auth: AuthIdentity,
+) -> None:
+    """The agent's owner or a current admin; the service checks again when it writes."""
+    if not await service.may_edit(agent, actor):
+        raise ToolError(
+            f"Changing '{agent.name}' needs its owner or {admin_noun(auth.platform)}. "
+            "Nothing changed. Do not retry."
+        )
+
+
 async def _set_agent_backend_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1039,10 +1430,12 @@ async def _set_agent_backend_impl(
     backend: Provider | None,
     expected_revision: int | None = None,
     preview_only: bool = False,
+    model: str | None = None,
 ) -> dict[str, JsonValue]:
-    _require_admin(auth)
+    model = _resolve_agent_model(backend, model)
+    _require_selectable_model(backend, model)
     if auth.agent_id is not None:
-        raise ToolError("An agent key cannot change model backends.")
+        raise ToolError("An agent key cannot change the model provider.")
     try:
         require_outside_chat_turn(auth)
     except ToolError as exc:
@@ -1050,7 +1443,7 @@ async def _set_agent_backend_impl(
             "Use request_agent_backend_switch in chat so the admin can confirm the preview."
         ) from exc
     if not channel_backend.backend_selection_enabled(runtime.settings.turn):
-        raise ToolError("Model backend selection is disabled on this deployment.")
+        raise ToolError("Choosing a model provider is turned off. Nothing changed.")
     service = channel_backend.make_backend_service(
         runtime.session_factory,
         runtime.settings.turn,
@@ -1061,6 +1454,7 @@ async def _set_agent_backend_impl(
         account_id=auth.account_id,
         subject=mcp_subject(auth, is_admin=auth.is_admin),
     )
+    on_now: Provider | None = None
     try:
         agent = await channel_backend.load_backend_agent(
             runtime.client,
@@ -1068,7 +1462,9 @@ async def _set_agent_backend_impl(
             tenant_id=auth.tenant_id,
             agent_name=name,
         )
-        preview = await service.preview(agent, backend)
+        await _require_agent_editor(service, agent, actor, auth)
+        on_now = await _provider_now(service, agent)
+        preview = await service.preview(agent, backend, model)
         if preview_only:
             return {
                 "agent": name,
@@ -1086,19 +1482,32 @@ async def _set_agent_backend_impl(
             agent_name=name,
         )
         local = preview.setting_revision if expected_revision is None else expected_revision
-        if backend is None:
-            revision = await service.clear_backend(
-                current, local, actor, expected_preview_digest=preview.digest
-            )
-        else:
-            revision = await service.set_backend(
-                current, backend, local, actor, expected_preview_digest=preview.digest
-            )
-    except channel_backend.AgentBackendRefused as exc:
-        raise ToolError(str(exc)) from exc
+        try:
+            if backend is None:
+                revision = await service.clear_backend(
+                    current, local, actor, expected_preview_digest=preview.digest
+                )
+            else:
+                revision = await service.set_backend(
+                    current,
+                    backend,
+                    local,
+                    actor,
+                    expected_preview_digest=preview.digest,
+                    model=model,
+                )
+        except channel_backend.AgentBackendRefused as exc:
+            if exc.reason == "stale_revision":
+                on_now = await _provider_now(service, current)
+            raise
+    except (channel_backend.AgentBackendRefused, channel_backend.BackendUnsupported) as exc:
+        raise _backend_switch_refusal(
+            exc, name, backend, auth, with_code=True, current=on_now
+        ) from exc
     return {
         "agent": name,
         "backend": revision.backend,
+        "model": revision.model,
         "revision": revision.local,
         "preview": cast(
             dict[str, JsonValue],
@@ -1112,6 +1521,8 @@ class AgentBackendSwitchInfo(BaseModel):
     status: Literal["preview", "changed"]
     agent_name: str
     target_backend: Provider
+    model: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    models: tuple[str, ...] = ()
     expected_revision: int
     preview_digest: str
     unsupported_skills: tuple[str, ...]
@@ -1121,6 +1532,30 @@ class AgentBackendSwitchInfo(BaseModel):
     cost_line: str
     summary: str
     declared_drops: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    agent_settings: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    # This chat's channel pins its own provider, which outranks the agent's setting here.
+    channel_pin: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+async def _channel_pin_line(runtime: McpRuntime, origin: TurnOriginRow) -> str | None:
+    """Say so when this chat's channel pins a provider: the agent's switch won't apply there."""
+    from daimon.core.channel_backend import channel_ref, current_backend
+    from daimon.core.stores import mux_state
+    from daimon.core.turn.notices import provider_name
+
+    channel = channel_ref(origin.tenant_id, origin.platform, origin.parent_channel_id)
+    async with runtime.session_factory() as session:
+        pinned = await current_backend(session, channel)
+        if (
+            pinned is None
+            or await mux_state.config_origin(session, channel, pinned.local) != "channel"
+        ):
+            return None
+    model = f" ({pinned.model})" if pinned.model else ""
+    return (
+        f"This channel pins {provider_name(pinned.backend)}{model}, so this agent keeps "
+        'answering on that here until an admin clears it: say "clear this channel\'s pin".'
+    )
 
 
 async def _request_agent_backend_switch_impl(
@@ -1133,23 +1568,42 @@ async def _request_agent_backend_switch_impl(
     preview_digest: str | None = None,
     origin_context_id: str | None = None,
     accepted_drops: tuple[str, ...] | None = None,
+    model: str | None = None,
+    thread_mode: ThreadMode | None = None,
+    required_capabilities: tuple[Capability, ...] | None = None,
+    for_everyone: bool = False,
+    unsaved_work: Literal["copy", "leave"] | None = None,
 ) -> AgentBackendSwitchInfo:
-    _require_admin(auth)
+    model = _resolve_agent_model(target_backend, model)
+    _require_selectable_model(target_backend, model)
     if auth.agent_id is not None or auth.platform_user_id is None:
-        raise ToolError("Request this change from an admin's active chat conversation.")
+        raise ToolError("Request this change from your active chat conversation.")
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     if origin is None:
-        raise ToolError("Request this change from an admin's active chat conversation.")
+        raise ToolError("Request this change from your active chat conversation.")
 
     from daimon.adapters.mcp.tools._session_gate import session_card_gap
+    from daimon.adapters.mcp.tools.task_continuity import (
+        _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
+        copy_awaiting_its_switch,
+    )
     from daimon.core.channel_backend import (
         BackendActor,
         load_backend_agent,
         make_backend_service,
     )
-    from daimon.core.confirmation import BackendSwitchReference
+    from daimon.core.confirmation import (
+        BackendSwitchReference,
+        reference_settings,
+        settings_line,
+        stated_settings,
+    )
     from pydantic import ValidationError
 
+    on_now: Provider | None = None
+    # A new copy of this conversation's responder, made here: the confirmed switch
+    # hands it this conversation too.
+    awaiting: str | None = None
     try:
         service = make_backend_service(
             runtime.session_factory,
@@ -1157,7 +1611,7 @@ async def _request_agent_backend_switch_impl(
             capture_source=partial(_capture_backend_source, runtime, auth, origin),
         )
         if not service.enabled:
-            raise ToolError("Model backend selection is disabled. Nothing changed.")
+            raise ToolError("Choosing a model provider is turned off. Nothing changed.")
         gap = await session_card_gap(
             runtime, auth, origin, tool_name="request_agent_backend_switch"
         )
@@ -1171,25 +1625,78 @@ async def _request_agent_backend_switch_impl(
             tenant_id=auth.tenant_id,
             agent_name=agent_name,
         )
-        preview = await service.preview(agent, target_backend)
-        if not preview.allowed:
+        if not for_everyone and await channel_backend.answers_for_everyone(
+            runtime.session_factory,
+            agent,
+            default_agent_name=runtime.deployment_default.agent_name,
+        ):
+            from daimon.core.turn.notices import default_agent_switch_text
+
             raise ToolError(
-                "That model backend is not enabled for this workspace. Nothing changed."
+                default_agent_switch_text(
+                    agent.name,
+                    target_backend,
+                    place=space_noun(auth.platform),
+                    me=origin.responder_name == agent.name,
+                )
+                + " Nothing changed."
             )
+        await _require_agent_editor(
+            service,
+            agent,
+            BackendActor(
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                subject=mcp_subject(auth, is_admin=auth.is_admin),
+            ),
+            auth,
+        )
+        on_now = await _provider_now(service, agent)
+        if agent.source is not None and await copy_awaiting_its_switch(
+            runtime,
+            auth,
+            origin,
+            ma_agent_id=agent.source.ref.id,
+            metadata=agent.source.spec.metadata,
+        ):
+            awaiting = agent.source.ref.id
+            # Every hand-off check, before a card is posted: its uncommitted-work
+            # question is one the person answers here, never on the card.
+            await _hand_off_task_impl(
+                runtime,
+                auth,
+                origin_context_id=str(origin.id),
+                agent_id=awaiting,
+                unsaved_work=unsaved_work,
+                switch="check",
+            )
+        if thread_mode == "shared" and not (auth.is_admin and auth.agent_id is None):
+            # The service refuses it too; say so before a card is posted.
+            raise ToolError(
+                f"Sharing threads applies in every channel, so it needs "
+                f"{admin_noun(auth.platform)}. Nothing changed."
+            )
+        settings = stated_settings(thread_mode, required_capabilities)
+        preview = await service.preview(agent, target_backend, model, settings)
+        if not preview.allowed:
+            raise ToolError("That model provider isn't turned on here. Nothing changed.")
         status: Literal["preview", "changed"] = "preview"
         summary = (
             "Show this compatibility and cost preview. If they want to proceed, call "
             "request_agent_backend_switch again with its expected_revision and preview_digest; "
-            "the requesting admin must Confirm on the card. Nothing has changed yet."
+            "the requester must Confirm on the card. Nothing has changed yet."
         )
         if preview_digest is not None:
             reference = BackendSwitchReference.model_validate(
                 {
                     "agent": agent_name,
                     "target_backend": target_backend,
+                    "model": model,
                     "expected_revision": expected_revision,
                     "preview_digest": preview_digest,
                     "accepted_drops": accepted_drops,
+                    "thread_mode": thread_mode,
+                    "required_capabilities": required_capabilities,
                 }
             )
             # The card check awaited provider I/O; reread configuration at the write edge.
@@ -1204,27 +1711,82 @@ async def _request_agent_backend_switch_impl(
                 account_id=auth.account_id,
                 subject=mcp_subject(auth, is_admin=auth.is_admin),
             )
-            await service.set_backend(
-                agent,
-                target_backend,
-                reference.expected_revision,
-                actor,
-                expected_preview_digest=reference.preview_digest,
-                **(
-                    {"accepted_drops": reference.accepted_drops}
-                    if reference.accepted_drops is not None
-                    else {}
-                ),
-            )
+            from daimon.core.turn.notices import provider_name
+
+            before = await service.current(agent)
+            old_provider = provider_name((before.backend if before else None) or DEFAULT_BACKEND)
+            if awaiting is not None:
+                # Checked again at the write edge, so a refusal changes nothing.
+                await _hand_off_task_impl(
+                    runtime,
+                    auth,
+                    origin_context_id=str(origin.id),
+                    agent_id=awaiting,
+                    unsaved_work=unsaved_work,
+                    switch="check",
+                )
+            try:
+                await service.set_backend(
+                    agent,
+                    target_backend,
+                    reference.expected_revision,
+                    actor,
+                    expected_preview_digest=reference.preview_digest,
+                    model=reference.model,
+                    settings=reference_settings(reference),
+                    **(
+                        {"accepted_drops": reference.accepted_drops}
+                        if reference.accepted_drops is not None
+                        else {}
+                    ),
+                )
+            except channel_backend.AgentBackendRefused as exc:
+                if exc.reason == "stale_revision":
+                    # Another switch landed first: name where the agent is now.
+                    on_now = await _provider_now(service, agent)
+                raise
+            if awaiting is not None:
+                # J1: the switch and the hand-off it promises, in one step. The model's
+                # own order was a coin toss: a copy handed this conversation before
+                # its switch posted the card again instead of answering.
+                try:
+                    await _hand_off_task_impl(
+                        runtime,
+                        auth,
+                        origin_context_id=str(origin.id),
+                        agent_id=awaiting,
+                        unsaved_work=unsaved_work,
+                        switch="commit",
+                    )
+                except ToolError as exc:
+                    raise ToolError(
+                        f"{agent_name} now uses {provider_name(target_backend)}, but this "
+                        "conversation couldn't be handed to it: "
+                        f"{str(exc).removesuffix(' Nothing was changed.')} Ask {agent_name} "
+                        "in a new conversation."
+                    ) from exc
             status = "changed"
             summary = (
-                "Model backend changed. Existing threads keep their backend; "
-                "channel overrides still take priority in new threads."
+                f"Model provider changed. New conversations with {agent_name} use "
+                f"{provider_name(target_backend)}; other existing threads keep {old_provider}. "
+                + await _move_this_thread(
+                    runtime,
+                    auth,
+                    origin,
+                    agent_name,
+                    target_backend,
+                    pinned_here=await _channel_pin_line(runtime, origin) is not None,
+                )
             )
+        channel_pin = await _channel_pin_line(runtime, origin)
+        if channel_pin is not None:
+            summary = f"{summary} {channel_pin}"
         return AgentBackendSwitchInfo(
             status=status,
             agent_name=agent.name,
             target_backend=preview.target_backend,
+            model=preview.target_model,
+            models=selectable_models(preview.target_backend),
             expected_revision=preview.setting_revision,
             preview_digest=preview.digest,
             unsupported_skills=preview.unsupported_skills,
@@ -1234,32 +1796,39 @@ async def _request_agent_backend_switch_impl(
             cost_line=preview.cost_line,
             summary=summary,
             declared_drops=preview.declared_drops,
+            agent_settings=settings_line(preview.target_settings)
+            if preview.target_settings
+            else None,
+            channel_pin=channel_pin,
         )
     except (DaimonError, ValidationError) as exc:
-        raise ToolError(
-            "The preview is unavailable or changed. Preview again; nothing changed."
+        raise _backend_switch_refusal(
+            exc, agent_name, target_backend, auth, current=on_now
         ) from exc
 
 
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     if channel_backend.backend_selection_enabled(runtime.settings.turn):
 
-        @mcp.tool(tags={"admin"})
+        @mcp.tool
         async def set_agent_backend(  # pyright: ignore[reportUnusedFunction]
             ctx: Context,
             name: str,
             backend: Provider | None,
             expected_revision: int | None = None,
             preview_only: bool = False,
+            model: str | None = None,
         ) -> dict[str, JsonValue]:
-            """Set an enabled model backend, or clear the agent setting with backend=null.
+            """Set an enabled model provider, or clear the agent setting with backend=null.
 
-            Admin only, for direct coding-tool or API requests. Chat turns use
-            request_agent_backend_switch so the admin confirms the preview.
+            The agent's owner or an admin, for direct coding-tool or API requests. Chat
+            turns use request_agent_backend_switch so the requester confirms the preview.
             The returned preview names compatibility limits and list prices.
-            Existing threads keep their backend; channel overrides still apply.
+            Existing threads keep their provider; channel settings still apply.
             expected_revision refuses a setting changed since it was read.
             preview_only returns the compatibility and cost preview without applying it.
+            model picks one of the provider's selectable models (Gemini: gemini-3.8-flash or
+            gemini-4-argon); omit it for the provider's default.
             """
             return await _set_agent_backend_impl(
                 runtime,
@@ -1268,24 +1837,34 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 backend=backend,
                 expected_revision=expected_revision,
                 preview_only=preview_only,
+                model=model,
             )
 
     @mcp.tool
     async def list_agents(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, page: str | None = None, origin_context_id: str | None = None
+        ctx: Context,
+        page: str | None = None,
+        origin_context_id: str | None = None,
+        mine: bool = False,
     ) -> list[AgentInfo]:
         """List agents visible here, including their attached ``mcp_servers`` and ``skills``.
 
+        Each agent says ``owned_by_you``: the caller owns it and may change it without
+        an admin, and ``owner``: who to ask about changing it (absent: admins only).
+        ``mine=true`` lists only the caller's own agents ("which agents do I
+        own?"), wherever they answer, including ones that answer nowhere yet.
         ``mcp_servers`` and ``created_at`` are null for a caller who is neither an
-        admin: setup details are
-        for admins, capabilities (name, description, model, skills) are not. Members
-        see the channel/thread responders and agents explicitly allowed to run
-        here; unrouted agents and other channels' agents are hidden.
-        Pass this turn's ``origin_context_id`` to verify its location. Without
-        a verified location a member cannot list unrestricted agents. Admins
-        retain their existing visibility. ``page`` is reserved for pagination.
+        admin nor its owner: setup details are for them, capabilities (name,
+        description, model, skills) are not. Members see the channel/thread
+        responders, agents explicitly allowed to run here, and their own agents;
+        other unrouted agents and other channels' agents are hidden.
+        Always pass this turn's ``origin_context_id`` to verify its location: without
+        it a member sees only their own agents. Admins retain their existing
+        visibility. ``page`` is reserved for pagination.
         """
-        return await _list_agents_impl(runtime, await _auth(ctx), page, origin_context_id)
+        return await _list_agents_impl(
+            runtime, await _auth(ctx), page, origin_context_id, mine=mine
+        )
 
     @mcp.tool
     async def get_agent(  # pyright: ignore[reportUnusedFunction]
@@ -1374,7 +1953,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         for Opus unless an older version is explicitly requested. List fields
         (``tools``, ``mcp_servers``, ``skills``) are added to, never replaced; shorter
         lists remove nothing. Use ``remove_skill`` or ``detach_mcp_server`` to remove.
-        Daimon requires ``fork_agent`` first; channel/workspace defaults require admin.
+        Daimon requires ``fork_agent`` first. Needs the agent's owner (whoever created it
+        in chat, or whom an admin named) or an admin.
 
         Prompt, model and skill changes reach a conversation on its next message, not the
         one running now. ``skills`` accepts names such as
@@ -1410,7 +1990,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         For Linear or other bearer-authenticated endpoints, use
         ``request_mcp_token`` instead;
         ``detach_mcp_server`` disconnects it. Fork Daimon with ``fork_agent`` before
-        directly changing its setup. Channel or workspace defaults need admin.
+        directly changing its setup. Needs the agent's owner or an admin.
 
         Connects the server; its tools are available from the agent's next message,
         not the one running now. Reusing a server name replaces the URL; the same
@@ -1428,10 +2008,18 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def fork_agent(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, source_name: str, new_name: str, expected_ma_agent_id: str | None = None
+        ctx: Context,
+        source_name: str,
+        new_name: str,
+        expected_ma_agent_id: str | None = None,
+        new_copy_if_taken: bool = False,
+        origin_context_id: str | None = None,
     ) -> AgentInfo:
         """Make a copy of Daimon or another agent that you can edit under a new name.
-        Admin-only. Copies its prompt, model, skills and the MCP servers that need
+        Admin-only. Only for a saved, named copy someone asked to keep. Running
+        copies of yourself on several models at once is not this: that is a fleet
+        of task workers (fleet_spawn), which needs no admin.
+        Copies its prompt, model, skills and the MCP servers that need
         no stored token. The copy starts with no credentials: no repo binding or
         GitHub access, no API/service keys and no connector tokens; attach its own
         with ``request_agent_key`` and the repo tools. An agent an operator pinned
@@ -1441,13 +2029,22 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Continue configuring it through Daimon with the copy named as the setup
         target. A returned ``answering`` field says the copy is routed nowhere yet:
-        post it verbatim."""
+        post it verbatim.
+
+        ``new_copy_if_taken``: when ``new_name`` is taken, copy under the first free
+        ``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``
+        is the copy's: name the copy by it, not ``new_name``. Pass true for "make a
+        copy of yourself" asks, where the person named no copy; when the person
+        names the copy, leave this false. Pass this active turn's
+        ``origin_context_id``."""
         return await _fork_agent_impl(
             runtime,
             await _auth(ctx),
             source_name,
             new_name,
             expected_ma_agent_id=expected_ma_agent_id,
+            new_copy_if_taken=new_copy_if_taken,
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool(tags={"admin"})
@@ -1469,8 +2066,11 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     from daimon.core.channel_backend import backend_selection_enabled
 
     if backend_selection_enabled(runtime.settings.turn):
+        from daimon.adapters.mcp.tools.fleet_config import register_fleet_config_tools
 
-        @mcp.tool(tags={"admin"})
+        register_fleet_config_tools(mcp, runtime)
+
+        @mcp.tool
         async def request_agent_backend_switch(  # pyright: ignore[reportUnusedFunction]
             ctx: Context,
             agent_name: str,
@@ -1479,16 +2079,47 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             preview_digest: str | None = None,
             origin_context_id: str | None = None,
             accepted_drops: tuple[str, ...] | None = None,
+            model: str | None = None,
+            thread_mode: ThreadMode | None = None,
+            required_capabilities: tuple[Capability, ...] | None = None,
+            for_everyone: bool = False,
+            unsaved_work: Literal["copy", "leave"] | None = None,
         ) -> AgentBackendSwitchInfo:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
-            Use when an admin asks to switch an agent to Anthropic, OpenAI or Gemini.
+            Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
+            or Gemini,
+            optionally naming a model naturally: "switch Researcher to argon" or
+            "switch Researcher to luna". For an Anthropic model change such as
+            "set Writer to opus 5.5", use update_agent with that natural model name.
+            ``model`` accepts natural names or one of
+            the returned ``models``; omit it for the provider's default. A provider
+            alone ("switch to GPT", "to Gemini") means its default: omit ``model`` and
+            preview; never ask which model. Never ask the person for a model id.
+            Ambiguous model names return the choices.
+            The switch applies to
+            new conversations wherever the agent answers, and to this conversation
+            from the next message when the switched agent answers here (the result's
+            summary says which). The server's default or built-in agent switches only
+            when the person says it's for everyone (for_everyone=true, on both calls);
+            otherwise offer the copy below. For "make a copy of yourself on Gemini":
+            copy the agent with fork_agent and new_copy_if_taken=true (always a NEW
+            copy, never an earlier one; use the name it returns from here on), then
+            switch the copy here. Don't hand_off_task first: the confirmed switch hands
+            this conversation to the copy and moves it to Gemini from the next message.
+            If that preview asks the uncommitted-work question, pass the person's
+            answer as ``unsaved_work`` on both calls.
             First call without preview_digest and show the returned compatibility,
-            shared-thread limits and cost line. Call again with that preview's
-            expected_revision, preview_digest and exact declared_drops as accepted_drops:
-            the requesting admin must Confirm
+            shared-thread limits, what won't be available, and the cost line. Call again
+            with the same model and that preview's expected_revision, preview_digest and
+            exact declared_drops as accepted_drops: the requester must Confirm
             on the card before anything is changed. A stale preview or expired card
             changes nothing; preview again. Pass this active turn's origin_context_id.
+            The same tool states the agent's own settings: ``thread_mode`` ("shared"
+            to share threads where the channel allows it, admins only; or "per_caller") and
+            ``required_capabilities`` (a channel that can't give one refuses the turn).
+            Pass both together; an omitted one returns to the default. To change only
+            settings, pass the agent's current target_backend and model.
             """
             return await _request_agent_backend_switch_impl(
                 runtime,
@@ -1499,4 +2130,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 preview_digest=preview_digest,
                 origin_context_id=origin_context_id,
                 accepted_drops=accepted_drops,
+                model=model,
+                thread_mode=thread_mode,
+                required_capabilities=required_capabilities,
+                for_everyone=for_everyone,
+                unsaved_work=unsaved_work,
             )

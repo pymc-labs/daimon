@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.contracts.actions import NativeInput, UserMessage, UserToolResult
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import NativePart, TextPart, ToolResultPayload
@@ -21,7 +20,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import compile_agent
-from mux.drivers.gemini.transport import Object, close_iterator
+from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, close_iterator
 from mux.errors import (
     ContinuityLost,
     ExtensionVersionError,
@@ -31,6 +30,7 @@ from mux.errors import (
     UnsupportedCapability,
 )
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from pydantic import JsonValue
 
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="allowed")
@@ -101,7 +101,7 @@ async def test_two_turns_reuse_history_environment_and_immutable_default(setup: 
     first = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
     second = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="two")
     assert first.turn_id != second.turn_id
-    assert [request["tools"] for request in t.requests] == [[], []]
+    assert [request["tools"] for request in t.requests] == [[NO_TOOLS_TOOL], [NO_TOOLS_TOOL]]
     assert t.requests[1]["previous_interaction_id"] == "i1"
     assert t.requests[1]["environment"] == "e1"
     assert t.requests[1]["agent_config"] == {"type": "antigravity", "model": "gemini-3.8-flash"}
@@ -231,7 +231,7 @@ async def test_required_action_continuation_keeps_root_until_real_completion(set
         key="result",
     )
     assert second.turn_id == first.turn_id
-    assert [request["tools"] for request in t.requests] == [[], []]
+    assert [request["tools"] for request in t.requests] == [[NO_TOOLS_TOOL], [NO_TOOLS_TOOL]]
     assert t.requests[1]["input"] == [
         {"type": "function_result", "name": "weather", "call_id": "call", "result": "cold"}
     ]
@@ -648,7 +648,7 @@ def test_unconfigured_agent_compiles_an_explicit_empty_tools_list(
     spec = AgentSpec(
         name="bounded", model=ModelRef(provider="gemini", id="gemini-3.8-flash"), tools=tools
     )
-    assert compile_agent(spec)["tools"] == []
+    assert compile_agent(spec)["tools"] == [NO_TOOLS_TOOL]
 
 
 def test_configured_agent_compiles_only_declared_builtin_custom_and_mcp_tools() -> None:
@@ -716,10 +716,10 @@ async def test_agent_worker_budget_is_in_the_owned_template_and_blocks_another_i
     assert transport.requests[0]["agent_config"] == {
         "type": "antigravity",
         "model": "gemini-3.5-flash-lite",
-        "max_total_tokens": 4096,
+        "max_total_tokens": 65_536,
     }
     assert transport.requests[0]["system_instruction"] == "Kept"
-    assert transport.requests[0]["tools"] == []
+    assert transport.requests[0]["tools"] == [NO_TOOLS_TOOL]
     assert await worker.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input") == first
     restarted = GeminiManagedAgents(
         transport,
@@ -754,6 +754,19 @@ def test_worker_model_permission_preserves_default_selections_and_thread_mode() 
     assert not runnable_selection(
         resolve_default(cheap.model_copy(update={"model": "gemini-3.5-pro"}))
     )
+
+
+def test_argon_is_an_opt_in_gemini_selection_that_never_changes_the_default() -> None:
+    from mux.profiles import backend_selection, runnable_selection
+
+    assert backend_selection("gemini").model == "gemini-3.8-flash"
+    argon = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-4-argon")
+    assert runnable_selection(resolve_default(argon))
+    assert not runnable_selection(
+        resolve_default(argon.model_copy(update={"thread_mode": "shared"}))
+    )
+    for near in ("gemini-4-argon-preview", "gemini-4", "Gemini-4-Argon"):
+        assert not runnable_selection(resolve_default(argon.model_copy(update={"model": near})))
 
 
 @pytest.mark.parametrize("ceiling", (False, 0, -1, 65_537, "4096"))
@@ -974,3 +987,153 @@ async def test_worker_without_complete_prompt_counting_refuses_before_dispatch()
         await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="uncounted")
     assert not transport.requests
     assert await state.get_operation(SCOPE, "uncounted") is None
+
+
+def high_demand() -> ProviderError:
+    return ProviderError("overloaded", retryable=True, native_code="high_demand")
+
+
+@pytest.fixture
+def instant_read_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mux.drivers.gemini import core
+
+    monkeypatch.setattr(core, "INTERACTION_READ_RETRY_DELAYS_S", (0.0,) * 5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+async def test_high_demand_read_is_retried_without_another_create(setup: Setup) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [high_demand(), ProviderError("upstream", retryable=True), native()]
+    snapshot = await ma.events.reconcile(SCOPE, s.ref)
+    assert snapshot.state == "idle"
+    assert len(t.requests) == 1
+    assert t.read_requests == ["i1"] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+async def test_persistent_high_demand_read_is_bounded_then_surfaced(setup: Setup) -> None:
+    from mux.drivers.gemini.core import INTERACTION_READ_RETRY_DELAYS_S
+
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [high_demand() for _ in range(10)]
+    with pytest.raises(ProviderError) as exc:
+        await ma.events.reconcile(SCOPE, s.ref)
+    assert exc.value.category == "overloaded"
+    assert exc.value.native_code == "high_demand_read_retries_exhausted"
+    assert len(t.read_requests) == len(INTERACTION_READ_RETRY_DELAYS_S) + 1
+    assert len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProviderError("invalid_request", retryable=False),
+        ProviderError("rate_limited", retryable=True),
+        ProviderError("upstream", retryable=False, native_code="malformed_interaction"),
+    ],
+)
+async def test_final_read_failures_are_not_retried(setup: Setup, failure: ProviderError) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [failure, native()]
+    with pytest.raises(ProviderError) as exc:
+        await ma.events.reconcile(SCOPE, s.ref)
+    assert exc.value is failure
+    assert t.read_requests == ["i1"]
+
+
+@pytest.mark.asyncio
+async def test_read_retry_stays_inside_the_caller_deadline(setup: Setup) -> None:
+    import asyncio
+
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [high_demand() for _ in range(10)]
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.1):
+            await ma.events.reconcile(SCOPE, s.ref)
+    assert t.read_requests == ["i1"]
+
+
+@pytest.mark.asyncio
+async def test_read_backoff_releases_the_account_lock_between_attempts(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from mux.drivers.gemini import core
+
+    monkeypatch.setattr(core, "INTERACTION_READ_RETRY_DELAYS_S", (2.0,) * 5)
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [high_demand(), native()]
+    backing_off = asyncio.create_task(ma.events.reconcile(SCOPE, s.ref))
+    while not t.read_requests:
+        await asyncio.sleep(0)
+    # A sibling on the same account gets the storage lock during the backoff
+    # (sleep >= 1s), instead of waiting it out or failing as busy.
+    async with asyncio.timeout(0.5):
+        await ma.events.list(SCOPE, s.ref, page=PageRequest())
+    assert not backing_off.done()
+    assert (await backing_off).state == "idle"
+    assert t.read_requests == ["i1", "i1"] and len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+async def test_cancel_wait_retries_a_high_demand_read(setup: Setup) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    sent = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    assert sent.turn_id is not None
+    receipt = await ma.events.cancel(SCOPE, s.ref, turn_id=sent.turn_id, key="cancel")
+    t.read_requests.clear()
+    t.reads["i1"] = [high_demand(), native(status="cancelled")]
+    deadline = datetime.now(UTC) + timedelta(seconds=5)
+    stop = await ma.events.wait_stopped(SCOPE, receipt, deadline=deadline)
+    assert stop.stopped and stop.outcome == "interrupted"
+    assert t.read_requests == ["i1", "i1"] and t.cancelled == ["i1"]
+    assert len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_wait_backoff_respects_the_deadline(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mux.drivers.gemini import core
+
+    monkeypatch.setattr(core, "INTERACTION_READ_RETRY_DELAYS_S", (10.0,) * 5)
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    sent = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    assert sent.turn_id is not None
+    receipt = await ma.events.cancel(SCOPE, s.ref, turn_id=sent.turn_id, key="cancel")
+    t.read_requests.clear()
+    t.reads["i1"] = [high_demand() for _ in range(10)]
+    deadline = datetime.now(UTC) + timedelta(seconds=0.2)
+    stop = await ma.events.wait_stopped(SCOPE, receipt, deadline=deadline)
+    assert not stop.stopped
+    assert t.read_requests == ["i1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+async def test_usage_reconcile_retries_a_high_demand_read(setup: Setup) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native())
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.read_requests.clear()
+    t.reads["i1"] = [high_demand(), native()]
+    assert await ma.usage.reconcile(SCOPE, s.ref)
+    assert t.read_requests == ["i1", "i1"] and len(t.requests) == 1

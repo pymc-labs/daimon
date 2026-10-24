@@ -165,7 +165,18 @@ def dialog(title: str, card: AdaptiveCard) -> TaskModuleResponse:
 
 
 def dialog_message(text: str) -> TaskModuleResponse:
+    """A dialog's closing note: the answer to its submit (`task/submit`), not its opening."""
     return TaskModuleResponse(task=TaskModuleMessageResponse(value=text))
+
+
+def dialog_notice(title: str, text: str) -> TaskModuleResponse:
+    """A one-line dialog: the answer to a click that opens one (`task/fetch`).
+
+    Teams shows "Unable to reach app" for a `dialog_message` there, though the
+    click's work was done.
+    """
+    card = AdaptiveCard(body=[TextBlock(text=text, wrap=True)], fallback_text=text)
+    return dialog(title, card)
 
 
 def button(

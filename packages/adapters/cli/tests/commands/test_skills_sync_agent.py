@@ -29,8 +29,9 @@ from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import GithubAppSettings, Settings
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.identity import get_or_create_cli_principal
-from daimon.testing import MARouter, build_fake_anthropic, list_response, make_tarball
+from daimon.testing import make_tarball
 from daimon.testing.factories import make_tenant
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import SecretStr
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

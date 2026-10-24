@@ -15,7 +15,7 @@ from daimon.testing.db import (  # noqa: F401  # pyright: ignore[reportUnusedImp
     db_session,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import make_stub_anthropic, stub_anthropic  # noqa: F401
+from mux.testing.drivers.anthropic.ma import make_stub_anthropic, stub_anthropic  # noqa: F401
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

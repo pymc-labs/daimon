@@ -11,7 +11,7 @@ from daimon.core._models import UsageEvent
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.stores import usage_events
 from daimon.testing.factories import make_tenant, make_usage_event
-from daimon.testing.ma_models import ma_model_usage
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 

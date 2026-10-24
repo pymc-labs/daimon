@@ -74,7 +74,8 @@ async def mint_panel_operator_token(
     beyond = sorted(parsed.difference(PANEL_SCOPES))
     if beyond:
         raise OperatorTokenError(
-            f"{', '.join(beyond)} is minted only with daimon mcp mint-operator-token"
+            f"{', '.join(beyond)} can't be granted from here; whoever runs this Daimon "
+            "install can make a token with it"
         )
     principal = await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id

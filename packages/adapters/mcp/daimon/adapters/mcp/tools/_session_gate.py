@@ -12,7 +12,6 @@ from typing import Literal
 
 import anthropic
 import structlog
-from anthropic.types.beta.beta_managed_agents_mcp_toolset import BetaManagedAgentsMCPToolset
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -29,7 +28,6 @@ from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
-    DAIMON_SERVER_NAME,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
     microsoft_send_tools,
@@ -101,10 +99,18 @@ async def session_card_gap(
                 owned=True,
                 legacy_thread_id=origin.thread_id,
             )
+            # A first mention in a channel creates its session before Discord opens
+            # the thread, so that session is stamped with the channel alone. The
+            # live row read above is keyed on this origin's thread, so the
+            # session is this thread's own.
+            opened_here = facts.thread is None and facts.channel == origin.parent_channel_id
             if (
                 facts.private
                 or facts.channel is None
-                or (facts.channel, facts.thread) != (origin.parent_channel_id, origin.thread_id)
+                or (
+                    (facts.channel, facts.thread) != (origin.parent_channel_id, origin.thread_id)
+                    and not opened_here
+                )
             ):
                 return "source_context_unavailable"
         if ma_session.agent.id != origin.responder_ma_agent_id:
@@ -187,49 +193,45 @@ async def _recorded_as_gated(
         tenant_id=auth.tenant_id,
         agent_id=agent.id,
     )
-    for asks_before_publishing in (False, True):
-        for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
-            tools = session_tools(
-                agent,
-                hidden,
-                tool_safety=runtime.settings.tool_safety,
-                public_url=None if public_url is None else str(public_url),
-                asks_before_publishing=asks_before_publishing,
-                confirmed_tools=WATCH_CONFIRMED_TOOLS
-                | backend_switch_tools(enabled=backend_selection_enabled(runtime.settings.turn))
-                | microsoft_send_tools(
-                    enabled=runtime.settings.microsoft_accounts.configured,
-                    tool_safety_on=runtime.settings.tool_safety.enabled,
+    selection = backend_selection_enabled(runtime.settings.turn)
+    confirmed = backend_switch_tools(enabled=selection) | microsoft_send_tools(
+        enabled=runtime.settings.microsoft_accounts.configured,
+        tool_safety_on=runtime.settings.tool_safety.enabled,
+    )
+    # A bind sent while the retired chat channel switch was also gated holds
+    # that one more gated tool; it still proves every card it gated.
+    legacy = confirmed | ({"request_channel_backend_switch"} if selection else set[str]())
+    # Pre-fleet-config sessions prove only the tools that were actually gated.
+    before_config = confirmed - {
+        "request_fleet_config",
+        "request_provider_allowlist",
+        "request_channel_pin_clear",
+    }
+    before_config_legacy = before_config | (
+        {"request_channel_backend_switch"} if selection else set[str]()
+    )
+    # Sessions bound after fleet config but before the channel pin clear.
+    before_pin_clear = confirmed - {"request_channel_pin_clear"}
+    lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
+    for confirmed_tools in dict.fromkeys(
+        candidate | lead_tools | watch_tools
+        for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+        for watch_tools in (WATCH_CONFIRMED_TOOLS, frozenset[str]())
+        if watch_tools or tool_name not in WATCH_CONFIRMED_TOOLS
+    ):
+        for asks_before_publishing in (False, True):
+            for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
+                tools = session_tools(
+                    agent,
+                    hidden,
+                    tool_safety=runtime.settings.tool_safety,
+                    public_url=None if public_url is None else str(public_url),
+                    asks_before_publishing=asks_before_publishing,
+                    confirmed_tools=confirmed_tools,
+                    daimon_rule_tools=daimon_rule_tools,
                 )
-                | await confirmation_tools(runtime.session_factory, auth.tenant_id),
-                daimon_rule_tools=daimon_rule_tools,
-            )
-            candidates = [tools]
-            if tool_name not in WATCH_CONFIRMED_TOOLS:
-                # Existing non-watch cards remain valid across watch enrollment's
-                # introduction. Reconstruct only that known historical difference;
-                # the whole recorded hash and the requested tool's ask still must
-                # match. This candidate can never prove a watch enrollment card.
-                candidates.append(
-                    [
-                        tool.model_copy(
-                            update={
-                                "configs": [
-                                    config
-                                    for config in tool.configs or []
-                                    if config.name not in WATCH_CONFIRMED_TOOLS
-                                ]
-                            }
-                        )
-                        if isinstance(tool, BetaManagedAgentsMCPToolset)
-                        and tool.mcp_server_name == DAIMON_SERVER_NAME
-                        else tool
-                        for tool in tools
-                    ]
-                )
-            for candidate in candidates:
-                if hash_tools(candidate) == recorded.tools_sha256 and has_confirmation_gate(
-                    [tool.model_dump(mode="json") for tool in candidate], tool_name=tool_name
+                if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
+                    [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
                 ):
                     return True
     return False

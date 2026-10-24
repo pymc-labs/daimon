@@ -143,8 +143,8 @@ def test_timed_credit_shows_under_the_total_in_both_views() -> None:
 
 def test_ready_embed_mentions_redemption_only_when_a_code_is_redeemable() -> None:
     """A deployment without promo codes keeps its ready message unchanged."""
-    assert "promo" not in (_build_ready_embed().description or ""), "no codes, no mention"
-    with_codes = _build_ready_embed(promo_codes=True).description or ""
+    assert "promo" not in (_build_ready_embed("daimon").description or ""), "no codes, no mention"
+    with_codes = _build_ready_embed("daimon", promo_codes=True).description or ""
     assert "Redeem it in `/billing`" in with_codes, "people are pointed at /billing"
 
 

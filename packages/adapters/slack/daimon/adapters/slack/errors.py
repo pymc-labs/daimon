@@ -56,6 +56,27 @@ NOT_SET_UP_NOTICE = (
 SETUP_OUT_OF_DATE_NOTICE = (
     "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
 )
+# What someone from another workspace (Slack Connect) is told: they cannot run
+# `/agent-setup`, so they are pointed at the people who can.
+_NOT_SET_UP_FOREIGN = (
+    "Daimon isn't set up in this channel yet.\n\n"
+    "Ask someone in the workspace that added Daimon to set it up."
+)
+_SETUP_OUT_OF_DATE_FOREIGN = (
+    "This channel's setup is out of date.\n\n"
+    "Ask someone in the workspace that added Daimon to check it."
+)
+
+
+def not_set_up_notice(*, foreign: bool = False) -> str:
+    """The not-set-up notice; `foreign` words it for a member of another workspace."""
+    return _NOT_SET_UP_FOREIGN if foreign else NOT_SET_UP_NOTICE
+
+
+def setup_out_of_date_notice(*, foreign: bool = False) -> str:
+    """The setup-out-of-date notice, for the same two audiences."""
+    return _SETUP_OUT_OF_DATE_FOREIGN if foreign else SETUP_OUT_OF_DATE_NOTICE
+
 
 _USAGE_LIMIT = (
     "Daimon has reached its usage limit.",
@@ -78,9 +99,8 @@ _OUR_SIDE = (
     "Try again. If it keeps happening, tell an admin.",
 )
 _SESSION_AGENT_MISMATCH = (
-    "This conversation's session belongs to another responder. "
-    "Your existing work is preserved. Continuing with this responder currently "
-    "requires a new conversation."
+    "This conversation belongs to another agent. Your work is kept. "
+    "To use a different agent, start a new conversation."
 )
 
 

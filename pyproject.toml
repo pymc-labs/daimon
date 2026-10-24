@@ -26,7 +26,7 @@ billing = ["daimon-adapter-mcp[billing]"]
 Repository = "https://github.com/pymc-labs/daimon"
 
 [tool.uv.workspace]
-members = ["packages/core", "packages/adapters/*", "packages/testing", "packages/mux", "apps/notebook-host", "apps/report-host"]
+members = ["packages/core", "packages/adapters/*", "packages/testing", "packages/mux", "apps/notebook-host", "apps/report-host", "apps/harness"]
 
 [tool.uv.sources]
 daimon-core = { workspace = true }
@@ -39,6 +39,7 @@ daimon-adapter-slack = { workspace = true }
 daimon-adapter-teams = { workspace = true }
 daimon-testing = { workspace = true }
 daimon-mux = { workspace = true }
+daimon-harness = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -59,14 +60,14 @@ select = ["E", "F", "I", "UP", "B", "SIM", "PGH", "ANN401", "RUF100"]
 
 [tool.pyright]
 exclude = ["qa/live/tests"]
-include = ["qa/live", "packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/adapters/sidecar/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host"]
+include = ["qa/live", "packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/adapters/sidecar/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host", "apps/harness/src/daimon_harness"]
 stubPath = "typings"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingImports = "error"
 
 [tool.importlinter]
-root_packages = ["daimon", "mux", "notebook_host", "report_host"]
+root_packages = ["daimon", "mux", "notebook_host", "report_host", "daimon_harness"]
 # External packages are in the graph so the mux contracts can forbid provider SDKs.
 include_external_packages = true
 
@@ -83,14 +84,22 @@ type = "forbidden"
 source_modules = ["mux.contracts", "mux.profiles", "mux.errors", "mux.state"]
 forbidden_modules = ["anthropic", "openai", "google", "mux.drivers"]
 
-# Each SDK is imported by its own driver and nowhere else in mux. The ignores
-# name drivers that do not exist yet, so unmatched ignores stay silent.
+# Each SDK is imported by its own driver, by that provider's test doubles under
+# `mux.testing.drivers.<provider>`, and by `mux.testing.isolated_sdk` (the one
+# module that builds SDK clients for every provider), and nowhere else in mux.
+# Unmatched ignores stay silent.
 [[tool.importlinter.contracts]]
 name = "Only mux.drivers.anthropic imports the anthropic SDK"
 type = "forbidden"
 source_modules = ["mux"]
 forbidden_modules = ["anthropic"]
-ignore_imports = ["mux.drivers.anthropic -> anthropic", "mux.drivers.anthropic.** -> anthropic"]
+ignore_imports = [
+    "mux.drivers.anthropic -> anthropic",
+    "mux.drivers.anthropic.** -> anthropic",
+    "mux.testing.drivers.anthropic -> anthropic",
+    "mux.testing.drivers.anthropic.** -> anthropic",
+    "mux.testing.isolated_sdk -> anthropic",
+]
 unmatched_ignore_imports_alerting = "none"
 
 [[tool.importlinter.contracts]]
@@ -98,7 +107,13 @@ name = "Only mux.drivers.openai imports the openai SDK"
 type = "forbidden"
 source_modules = ["mux"]
 forbidden_modules = ["openai"]
-ignore_imports = ["mux.drivers.openai -> openai", "mux.drivers.openai.** -> openai"]
+ignore_imports = [
+    "mux.drivers.openai -> openai",
+    "mux.drivers.openai.** -> openai",
+    "mux.testing.drivers.openai -> openai",
+    "mux.testing.drivers.openai.** -> openai",
+    "mux.testing.isolated_sdk -> openai",
+]
 unmatched_ignore_imports_alerting = "none"
 
 [[tool.importlinter.contracts]]
@@ -106,7 +121,13 @@ name = "Only mux.drivers.gemini imports the google.genai SDK"
 type = "forbidden"
 source_modules = ["mux"]
 forbidden_modules = ["google"]
-ignore_imports = ["mux.drivers.gemini -> google", "mux.drivers.gemini.** -> google"]
+ignore_imports = [
+    "mux.drivers.gemini -> google",
+    "mux.drivers.gemini.** -> google",
+    "mux.testing.drivers.gemini -> google",
+    "mux.testing.drivers.gemini.** -> google",
+    "mux.testing.isolated_sdk -> google",
+]
 unmatched_ignore_imports_alerting = "none"
 
 [[tool.importlinter.contracts]]
@@ -147,10 +168,13 @@ source_modules = [
     "daimon.core.agent_pins",
     "daimon.core.agent_post_identity",
     "daimon.core.agent_mcp_credentials",
+    "daimon.core.agent_model_names",
+    "daimon.core.agent_ownership",
     "daimon.core.agent_reach",
     "daimon.core.anthropic_spend",
     "daimon.core.answering_map",
     "daimon.core.artifacts",
+    "daimon.core.anthropic_guard",
     "daimon.core.authz",
     "daimon.core.billing",
     "daimon.core.billing_panel",
@@ -183,7 +207,9 @@ source_modules = [
     "daimon.core.direct_messages",
     "daimon.core.errors",
     "daimon.core.fleet",
+    "daimon.core.fleet_configuration",
     "daimon.core.fleet_orchestration",
+    "daimon.core.fleet_run_end",
     "daimon.core.fonts",
     "daimon.core.github_app_auth",
     "daimon.core.github_app_session",
@@ -227,6 +253,7 @@ source_modules = [
     "daimon.core.mcp_token_check",
     "daimon.core.mcp_token_connect",
     "daimon.core.mcp_tool_annotations",
+    "daimon.core.mcp_hold",
     "daimon.core.mcp_vault",
     "daimon.core.mcp_vault_janitor",
     "daimon.core.media",
@@ -236,6 +263,7 @@ source_modules = [
     "daimon.core.message_feedback",
     "daimon.core.message_split",
     "daimon.core.microsoft_identity",
+    "daimon.core.microsoft_write_paths",
     "daimon.core.model_presets",
     "daimon.core.models_catalog",
     "daimon.core.name_mentions",
@@ -252,6 +280,8 @@ source_modules = [
     "daimon.core.pending_file_sweeper",
     "daimon.core.permissions",
     "daimon.core.platform_names",
+    "daimon.core.platform_system",
+    "daimon.core.platform_words",
     "daimon.core.posted_controls",
     "daimon.core.pricing",
     "daimon.core.privacy",
@@ -259,6 +289,7 @@ source_modules = [
     "daimon.core.promo_codes",
     "daimon.core.promo_credit",
     "daimon.core.promo_settlement",
+    "daimon.core.provider_keys",
     "daimon.core.purge",
     "daimon.core.reader_agent",
     "daimon.core.reports",
@@ -272,12 +303,15 @@ source_modules = [
     "daimon.core.recruitment_service",
     "daimon.core.routine_delivery",
     "daimon.core.routine_sandbox",
+    "daimon.core.routine_hold",
     "daimon.core.routines",
     "daimon.core.routing_facts",
     "daimon.core.rule_views",
     "daimon.core.runtime_health",
     "daimon.core.scheduler",
     "daimon.core.scope",
+    "daimon.core.scope_cascade",
+    "daimon.core.selfhosted_usage",
     "daimon.core.session_compat",
     "daimon.core.session_fence_retry",
     "daimon.core.session_mutation",
@@ -323,10 +357,12 @@ source_modules = [
     "daimon.core.thread_models",
     "daimon.core.thread_naming",
     "daimon.core.thread_participation",
+    "daimon.core.thread_release",
     "daimon.core.tool_safety",
     "daimon.core.turn",
     "daimon.core.turn_card_intent_sweep",
     "daimon.core.turn_keys",
+    "daimon.core.turn_hold",
     "daimon.core.turn_origin",
     "daimon.core.turn_queue",
     "daimon.core.untrusted",
@@ -359,7 +395,7 @@ type = "forbidden"
 source_modules = ["daimon.core"]
 forbidden_modules = ["daimon.testing"]
 
-# Expand package members explicitly so mux.conformance is excluded while the
+# Expand package members explicitly so mux.testing is excluded while the
 # mux initializer itself remains covered. The boundary regression inventories
 # mux siblings so a new top-level package cannot silently escape this list.
 [[tool.importlinter.contracts]]
@@ -372,7 +408,7 @@ source_modules = [
     "mux.drivers", "mux.drivers.**", "mux.errors",
     "mux.profiles", "mux.profiles.**", "mux.state", "mux.state.**",
 ]
-forbidden_modules = ["mux.conformance", "mux.conformance.**", "daimon.testing", "daimon.testing.**"]
+forbidden_modules = ["mux.testing", "mux.testing.**", "daimon.testing", "daimon.testing.**"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
@@ -395,16 +431,52 @@ type = "forbidden"
 source_modules = ["report_host"]
 forbidden_modules = ["daimon"]
 
+[[tool.importlinter.contracts]]
+name = "harness must not import daimon"
+type = "forbidden"
+source_modules = ["daimon_harness"]
+forbidden_modules = ["daimon"]
+
+# Daimon reaches a provider driver through its package (`mux.drivers.<provider>`),
+# whose `__all__` is the host-facing API; the driver's submodules and private
+# modules are not an import path. The ignores are the names that stay on a
+# submodule because a package-level export would add a generic name:
+# openai `KEY` and `reserved`, gemini `credential`, and selfhosted `segment` and
+# `usage`. `mux.drivers.selfhosted.wire` is a documented public module.
+[[tool.importlinter.contracts]]
+name = "Daimon product code imports provider drivers through their packages"
+type = "forbidden"
+source_modules = ["daimon.core", "daimon.adapters"]
+forbidden_modules = [
+    "mux.drivers.anthropic.**",
+    "mux.drivers.openai.**",
+    "mux.drivers.gemini.**",
+    "mux.drivers.selfhosted.**",
+    "mux.contracts._base",
+]
+allow_indirect_imports = true
+ignore_imports = [
+    "daimon.core.turn.openai_deployment -> mux.drivers.openai.mcp_auth",
+    "daimon.core.turn.openai_deployment -> mux.drivers.openai.skill_bindings",
+    "daimon.core.turn.gemini_deployment -> mux.drivers.gemini.mcp_auth",
+    # `mux.drivers.selfhosted.wire` is public (the daimon-harness/0 protocol).
+    "daimon.core.** -> mux.drivers.selfhosted.wire",
+    # Generic names (`segment`, `usage`) that stay on their submodule.
+    "daimon.core.turn.selfhosted_deployment -> mux.drivers.selfhosted.events",
+    "daimon.core.turn.selfhosted_deployment -> mux.drivers.selfhosted.normalize",
+]
+
 [tool.pytest.ini_options]
 pythonpath = [".", "tests/golden"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["qa/live/tests", "packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/adapters/sidecar/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests"]
-addopts = "--import-mode=importlib -m 'not contract and not slow and not judge'"
+testpaths = ["qa/live/tests", "packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/adapters/sidecar/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests", "apps/harness/tests"]
+addopts = "--import-mode=importlib -p daimon.testing.stop_leg_default -m 'not contract and not slow and not judge and not platform_contract'"
 markers = [
     "judge: manual Codex subscription transcript judge -- excluded by default",
     "contract: live MA API tests -- opt-in only, never gate CI",
+    "platform_contract: sends every Slack and Discord payload to the real platform validators -- opt-in, needs QA bot tokens, never gates CI",
     "slow: expensive image distributions or real marimo subprocesses (port 8100-8199) — opt-in",
     "no_cli_local_seed: CLI test manages its own tenant lifecycle -- skip the autouse cli:local seed",
     "fresh_schema: DB test runs DDL -- give it a private throwaway schema instead of the wiped per-worker one",
@@ -423,9 +495,13 @@ dev = [
     "fastmcp>=3.2.4",
     "pyjwt>=2.12.1",
     "msal>=1.39.0",
+    "google-cloud-secret-manager>=2.25.0",
+    # Newer google-api-core needs a newer opentelemetry-api than the runtime lock pins.
+    "google-api-core<2.30",
     "daimon-testing",
     "aioresponses>=0.7.9",
     "syrupy>=5.5.3",
     "jsonschema>=4.23",
     "pytest-timeout>=2.3",
+    "hypothesis>=6.150,<7",
 ]

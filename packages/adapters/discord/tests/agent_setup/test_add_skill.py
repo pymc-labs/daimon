@@ -18,7 +18,6 @@ from anthropic.types.beta import SkillListResponse
 from daimon.adapters.discord.agent_setup import add_skill as add_skill_mod
 from daimon.adapters.discord.agent_setup.add_skill import (
     ADD_LABEL,
-    ADD_SKILL_LABEL,
     BUILT_IN_MESSAGE,
     AddSkillModal,
     SkillPreviewView,
@@ -41,9 +40,10 @@ from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
@@ -51,7 +51,6 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
-from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001
@@ -267,7 +266,7 @@ async def test_an_unbound_agent_refuses_a_members_form(
     view = _details_view(world, world.put_agent())
     interaction = _interaction()
 
-    await _button(view, ADD_SKILL_LABEL).callback(interaction)
+    await view._on_add_skill(interaction)
 
     interaction.response.send_modal.assert_not_awaited()
     assert (
@@ -282,7 +281,7 @@ async def test_a_built_in_agent_is_refused_with_the_fork_route(
     built_in = world.put_agent().model_copy(update={"is_built_in": True})
     interaction = _interaction(admin=True)
 
-    await _button(_details_view(world, built_in), ADD_SKILL_LABEL).callback(interaction)
+    await _details_view(world, built_in)._on_add_skill(interaction)
 
     interaction.response.send_modal.assert_not_awaited()
     assert interaction.response.send_message.await_args.args[0] == BUILT_IN_MESSAGE
@@ -295,12 +294,12 @@ async def test_a_server_default_needs_a_server_admin(
     agent = world.put_agent()
     await _route(world, TenantScopeRef(tenant_id=world.tenant_id))
     member = _interaction()
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(member)
+    await _details_view(world, agent)._on_add_skill(member)
     member.response.send_modal.assert_not_awaited()
     assert "needs someone with Manage Server" in member.response.send_message.await_args.args[0]
 
     admin = _interaction(admin=True)
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(admin)
+    await _details_view(world, agent)._on_add_skill(admin)
     admin.response.send_modal.assert_awaited_once()
 
 
@@ -453,15 +452,15 @@ async def test_a_pinned_agent_opens_add_skill_only_inside_its_channels_or_for_an
     await _pin(world, OTHER_CHANNEL_ID)
 
     outside = _interaction()
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(outside)
+    await _details_view(world, agent)._on_add_skill(outside)
     outside.response.send_modal.assert_not_awaited()
     assert outside.response.send_message.await_args.args[0] == PIN_WRITE_REFUSAL
 
     inside = _interaction(channel_id=OTHER_CHANNEL_ID)
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(inside)
+    await _details_view(world, agent)._on_add_skill(inside)
     inside.response.send_modal.assert_not_awaited()
     admin = _interaction(admin=True)
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(admin)
+    await _details_view(world, agent)._on_add_skill(admin)
     admin.response.send_modal.assert_awaited_once()
 
 
@@ -474,11 +473,11 @@ async def test_a_member_in_a_thread_of_a_pinned_channel_cannot_add(
     await _pin(world, OTHER_CHANNEL_ID)
 
     inside = _interaction(channel_id=THREAD_ID, thread_of=OTHER_CHANNEL_ID)
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(inside)
+    await _details_view(world, agent)._on_add_skill(inside)
     inside.response.send_modal.assert_not_awaited()
 
     elsewhere = _interaction(channel_id=THREAD_ID, thread_of=CHANNEL_ID)
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(elsewhere)
+    await _details_view(world, agent)._on_add_skill(elsewhere)
     elsewhere.response.send_modal.assert_not_awaited()
 
 

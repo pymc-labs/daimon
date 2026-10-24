@@ -239,3 +239,47 @@ async def test_generated_files_get_plain_unsupported_note(db_session_factory):
     assert where == f"{CHANNEL};messageid=17"
     assert "Report" in text and "files are not supported here" in text
     assert "file_report" not in text
+
+
+async def _shared_tenant_row(
+    factory: async_sessionmaker[AsyncSession], **overrides: object
+) -> RoutineRow:
+    from daimon.core.stores.shared_channels import mark_channel_shared
+
+    async with factory.begin() as session:
+        tenant = await make_tenant(session)
+        await mark_channel_shared(
+            session, tenant_id=tenant.id, platform="teams", channel_id=CHANNEL, source="platform"
+        )
+    return _row(tenant_id=tenant.id, channel_id=CHANNEL, **overrides)
+
+
+async def test_a_shared_channels_result_never_falls_back_to_a_dm(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _shared_tenant_row(db_session_factory)
+    teams = _Teams(post_status=404)
+    poster = make_teams_routine_poster(
+        db_session_factory, teams, tenant_id=row.tenant_id, dm_policies={}
+    )
+
+    outcome = await poster(row)
+
+    assert outcome == DeliveryOutcome(status="skipped", note="destination_unavailable")
+    assert teams.posts == [], "nothing reaches the creator's 1:1 chat"
+
+
+async def test_a_shared_channels_result_is_not_quoted_in_the_creators_activity_feed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _shared_tenant_row(db_session_factory)
+    teams, feed = _Teams(), _Notices()
+    poster = make_teams_routine_poster(
+        db_session_factory, teams, tenant_id=row.tenant_id, dm_policies={}, feed=feed
+    )
+
+    outcome = await poster(row)
+
+    assert outcome == DeliveryOutcome(status="delivered")
+    assert [where for where, _ in teams.posts] == [f"{CHANNEL};messageid=17"]
+    assert feed.calls == [], "the notice would carry the result outside the channel"

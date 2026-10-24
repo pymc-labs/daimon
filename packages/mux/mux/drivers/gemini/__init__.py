@@ -17,13 +17,33 @@ from mux.drivers.gemini.core import (
     GeminiEnvironments,
     GeminiEvents,
     GeminiSessions,
+    compile_agent,
+    compile_environment,
     page_values,
+)
+from mux.drivers.gemini.deployment import (
+    configured_catalog_transport,
+    configured_transport,
+    downscoped_storage_token,
+)
+from mux.drivers.gemini.flash import (
+    ATTEMPT_MODELS,
+    FLASH_MODELS,
+    FLASH_PRIMARY,
+    FlashAccounting,
+    FlashAttempt,
+    FlashTransport,
 )
 from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver
 from mux.drivers.gemini.resources import GeminiArtifacts, GeminiSkills
-from mux.drivers.gemini.skill_deployment import SkillBundlePublisher
-from mux.drivers.gemini.storage import Storage
-from mux.drivers.gemini.transport import Transport
+from mux.drivers.gemini.skill_deployment import (
+    GCSBundleDeployment,
+    RetainedSkillDeployments,
+    SkillBundlePublisher,
+    verify_retained_deployments,
+)
+from mux.drivers.gemini.storage import Records, Storage
+from mux.drivers.gemini.transport import NO_TOOLS_FUNCTION, NO_TOOLS_TOOL, SDKTransport, Transport
 from mux.errors import UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
 from mux.state.store import StateStore
@@ -31,6 +51,9 @@ from mux.state.store import StateStore
 
 class GeminiUsage(Base):
     async def reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
+        return await self.retrying(lambda: self._reconcile(scope, session))
+
+    async def _reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
             for interaction, root in record.interactions.items():
@@ -142,4 +165,38 @@ class GeminiManagedAgents:
         raise UnsupportedCapability((namespace,), PROFILE.profile_id)
 
 
-__all__ = ["GeminiCatalogAdapter", "GeminiManagedAgents", "MCPSecretResolver"]
+__all__ = [
+    "NO_TOOLS_FUNCTION",
+    "NO_TOOLS_TOOL",
+    "ATTEMPT_MODELS",
+    "AgentCatalogTransport",
+    "FLASH_MODELS",
+    "FLASH_PRIMARY",
+    "FlashAccounting",
+    "FlashAttempt",
+    "FlashTransport",
+    "GCSBundleDeployment",
+    "GCSSecretResolver",
+    "GeminiAgents",
+    "GeminiArtifacts",
+    "GeminiCatalogAdapter",
+    "GeminiEnvironments",
+    "GeminiEvents",
+    "GeminiManagedAgents",
+    "GeminiSessions",
+    "GeminiSkills",
+    "GeminiUsage",
+    "MCPSecretResolver",
+    "Records",
+    "RetainedSkillDeployments",
+    "SkillBundlePublisher",
+    "Storage",
+    "SDKTransport",
+    "Transport",
+    "compile_agent",
+    "compile_environment",
+    "configured_catalog_transport",
+    "configured_transport",
+    "downscoped_storage_token",
+    "verify_retained_deployments",
+]

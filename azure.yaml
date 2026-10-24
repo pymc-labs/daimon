@@ -1,0 +1,5 @@
+# Provisioning only: the staged runbook controls image publication and migration order.
+name: daimon
+infra:
+  provider: bicep
+  path: deploy/azure/azd

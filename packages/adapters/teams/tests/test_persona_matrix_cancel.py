@@ -20,10 +20,9 @@ from daimon.adapters.teams import card
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
-from daimon.testing import build_fake_anthropic, ma_session
-from daimon.testing.ma import MARouter, sse_response
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -74,7 +73,7 @@ def _click(user: Persona, action: dict[str, object], *, channel: bool) -> dict[s
 async def test_cancel_requester_persona_matrix(
     db_session_factory: async_sessionmaker[AsyncSession], requester: Persona
 ) -> None:
-    """Mocked permission tests interrupt only the active turn's author."""
+    """Mocked permission tests: another non-admin cannot interrupt the active turn."""
     await provision_tenant(
         db_session_factory,
         platform="teams",
@@ -125,7 +124,8 @@ async def test_cancel_requester_persona_matrix(
         sender = message["from"]
         assert isinstance(sender, dict)
         sender["tenantId"] = requester.tenant_id
-    stranger = PERSONAS[1] if requester.name == "admin" else PERSONAS[0]
+    # Not an admin: a current admin may stop anyone's turn.
+    stranger = PERSONAS[2] if requester.name == "member" else PERSONAS[1]
     session = ma_session(id=SESSION_ID, agent_id=AGENT_ID, environment_id=ENV_ID)
     with patch("daimon.core.turn.prepare.create_session", return_value=session):
         async with running_service(runtime, fake) as service:
@@ -152,7 +152,7 @@ async def test_cancel_requester_persona_matrix(
             assert len(sent) == 1, "a stranger sends no interrupt to Managed Agents"
             accepted = await post_activity(service, _click(requester, value, channel=channel))
             await finish_turns(service.turns)
-    assert "Cancelling" in json.dumps(accepted), accepted
+    assert card.STOPPING_HEADLINE in json.dumps(accepted, ensure_ascii=False), accepted
     assert [event["type"] for batch in sent for event in batch["events"]] == [
         "user.message",
         "user.interrupt",

@@ -8,7 +8,6 @@ from typing import Literal
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt
 from mux.drivers.anthropic import turn as turn_module
@@ -17,6 +16,7 @@ from mux.drivers.anthropic.normalize import EventNormalizer
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.turn import AnthropicEvents
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)

@@ -100,6 +100,7 @@ from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import current_outcome
+from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.posture import Billed, UsageRecorder
 from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState, extract_final_response
@@ -116,7 +117,7 @@ from daimon.core.usage_recording import record_turn_usage
 from daimon.core.workspace_ports_compat import restore_transfer_records
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic.outputs import Outputs
+from mux.drivers.anthropic import Outputs
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -200,17 +201,16 @@ TransferOutcome = FullHandoff | TranscriptOnly | HistoryOnly
 # What each gap rung means to a person, as a noun phrase — `handoff_context`
 # renders these into "Not carried over: …". Never a reason code.
 _GAP_PHRASING: dict[GapReason | Literal["events_unavailable"], str] = {
-    "session_dead": "the previous workspace's files, because its workspace had already closed",
-    "checkpoint_failed": "the previous workspace's files, because saving them did not finish",
-    "checkpoint_timeout": "the previous workspace's files, because saving them ran out of time",
-    "bundle_oversize": "the previous workspace's files, because together they were too large "
-    "to carry",
-    "upload_failed": "the previous workspace's files, because the saved archive could not be "
+    "session_dead": "the previous working files, because they had already closed",
+    "checkpoint_failed": "the previous working files, because saving them did not finish",
+    "checkpoint_timeout": "the previous working files, because saving them ran out of time",
+    "bundle_oversize": "the previous working files, because together they were too large to carry",
+    "upload_failed": "the previous working files, because the saved archive could not be "
     "transferred",
-    "not_worth_checkpointing": "the previous workspace's files, of which there were none yet",
-    "archive_missing": "the previous workspace's files, because the saved archive was gone "
+    "not_worth_checkpointing": "the previous working files, of which there were none yet",
+    "archive_missing": "the previous working files, because the saved archive was gone "
     "before it could be read",
-    "events_unavailable": "the previous workspace's files and the previous conversation",
+    "events_unavailable": "the previous working files and the previous conversation",
 }
 
 _COMMITTED_DURING_CHECKPOINT = "the agent committed to the repository during checkpoint"
@@ -228,7 +228,7 @@ def _left_out_phrase(paths: tuple[str, ...], more: int) -> str | None:
     if more:
         listed = f"{listed} and {more} more" if named else f"{more} files"
     return (
-        "these files from the previous workspace, left out because the whole workspace was "
+        "these files from before, left out because the whole set was "
         f"too large to carry (regenerate them if the task needs them): {listed}"
     )
 
@@ -446,6 +446,7 @@ async def transfer_workspace(
     before_send: Callable[[], Awaitable[None]] | None = None,
     account_id: uuid.UUID | None = None,
     fernet: MultiFernet | None = None,
+    turn_path: Literal["legacy", "mux"] | None = None,
 ) -> TransferOutcome:
     """Walk the ladder for one replacement and report how far it got.
 
@@ -469,6 +470,9 @@ async def transfer_workspace(
     bundle, anything else (including an unanswered None) captures them. The
     choice reaches the checkpoint prompt and, when it was `"leave"`, is also
     reported as something the successor did not get.
+
+    `turn_path` is the turn path the checkpoint turn runs on, resolved by the
+    caller; `None` reads settings in the driver.
 
     Never raises for an expected degradation — every rung below the top is a
     returned value. It does raise for an unexpected upstream failure (a 500
@@ -558,54 +562,60 @@ async def transfer_workspace(
 
     # Unattended: the old session is gated before the message and before every
     # confirmation batch, each a single attempt.
-    with unattended_sends(
-        session_gate(
-            client,
-            old_session_id,
-            tool_safety,
-            scope=scope,
-            public_url=public_url,
-            session_factory=sessionmaker,
-            tenant_id=tenant_id,
-            entry_point="checkpoint",
-        )
-    ):
-        state = await run_turn(
-            privacy=privacy,
-            anthropic=client,
-            session_id=old_session_id,
-            scope=turn_scope,
-            user_message=f"{controls}\n\n{prompt}",
-            system_blocks=checkpoint_system_blocks,
-            lifecycle=_NoOpLifecycle(),
-            cancel=asyncio.Event(),
-            now=now,
-            billing=Billed(
-                record=_bind_checkpoint_recorder(
-                    sessionmaker,
-                    tenant_id=tenant_id,
-                    external_user_id=external_user_id,
-                    ma_session_id=old_session_id,
-                    model_id=old_snapshot.pricing_id,
-                    markup=markup,
-                    channel_id=channel_id,
-                )
-            ),
-            tool_confirmation=unattended_posture(
+    persistence_token = current_persistence.set(None)
+    try:
+        with unattended_sends(
+            session_gate(
+                client,
+                old_session_id,
                 tool_safety,
-                session=old_session,
-                fernet=fernet,
+                scope=scope,
                 public_url=public_url,
                 session_factory=sessionmaker,
                 tenant_id=tenant_id,
-                channel_id=session_rules_channel(old_session, platform=platform),
                 entry_point="checkpoint",
-            ),
-            deadline=checkpoint_deadline,
-            # The checkpoint executes the old session: decided again right before.
-            before_send=before_send,
-        )
-    failure = _checkpoint_gap_reason(state)
+            )
+        ):
+            state = await run_turn(
+                privacy=privacy,
+                anthropic=client,
+                session_id=old_session_id,
+                scope=turn_scope,
+                user_message=f"{controls}\n\n{prompt}",
+                system_blocks=checkpoint_system_blocks,
+                lifecycle=_NoOpLifecycle(),
+                cancel=asyncio.Event(),
+                now=now,
+                billing=Billed(
+                    record=_bind_checkpoint_recorder(
+                        sessionmaker,
+                        tenant_id=tenant_id,
+                        external_user_id=external_user_id,
+                        ma_session_id=old_session_id,
+                        model_id=old_snapshot.pricing_id,
+                        markup=markup,
+                        channel_id=channel_id,
+                    )
+                ),
+                tool_confirmation=unattended_posture(
+                    tool_safety,
+                    session=old_session,
+                    fernet=fernet,
+                    public_url=public_url,
+                    session_factory=sessionmaker,
+                    tenant_id=tenant_id,
+                    channel_id=session_rules_channel(old_session, platform=platform),
+                    entry_point="checkpoint",
+                ),
+                path=turn_path,
+                deadline=checkpoint_deadline,
+                # The checkpoint executes the old session: decided again right before.
+                before_send=before_send,
+            )
+        failure = _checkpoint_gap_reason(state)
+    finally:
+        current_persistence.reset(persistence_token)
+
     if failure is not None:
         log.warning(
             "workspace_transfer.checkpoint_failed",
@@ -821,6 +831,8 @@ class WorkspaceTransferRunner:
     fernet: MultiFernet | None = None
     account_id: uuid.UUID | None = None
     """The account from the caller's existing tenant authorization decision."""
+    turn_path: Literal["legacy", "mux"] | None = None
+    """The turn path the checkpoint turn runs on; `None` reads settings in the driver."""
 
     async def __call__(
         self,
@@ -862,6 +874,7 @@ class WorkspaceTransferRunner:
             unsaved_work=unsaved_work,
             channel_id=self.channel_id,
             before_send=before_send,
+            turn_path=self.turn_path,
         )
         prepared = as_prepared_replacement(
             outcome,

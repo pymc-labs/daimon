@@ -28,13 +28,9 @@ from daimon.core.scope import ScopeContext
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.tenants import list_all_tenant_ids
 from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.testing import ma_environment
-from daimon.testing.ma import (
-    EMPTY_SESSION_STATS,
-    EMPTY_SESSION_USAGE,
-    MARouter,
-    list_response,
-)
+from daimon.testing.ma_models import ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

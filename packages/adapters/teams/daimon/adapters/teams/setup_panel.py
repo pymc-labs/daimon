@@ -17,7 +17,7 @@ from __future__ import annotations
 import functools
 import re
 import uuid
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 
 import anthropic
@@ -28,6 +28,7 @@ from daimon.adapters.teams.add_skill import (
     add_previewed_skill,
     skill_change_refusal,
 )
+from daimon.adapters.teams.billing_panel import TeamChannels, named_channels
 from daimon.adapters.teams.card_actions import (
     FAILED,
     SENDING_PANEL_ERRORS,
@@ -35,6 +36,7 @@ from daimon.adapters.teams.card_actions import (
     card_actor,
     dialog,
     dialog_message,
+    dialog_notice,
     edit_origin_card,
     get_or_create_account,
     guarded,
@@ -51,9 +53,10 @@ from daimon.adapters.teams.setup_conversation import (
 )
 from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import DetailListName
-from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
+from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref, build_subject
@@ -85,6 +88,8 @@ from daimon.core.rule_views import load_rule_viewer
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
+from daimon.core.stores.platform_names import get_channel_names
+from daimon.core.stores.teams_installations import list_teams_installations
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -96,11 +101,12 @@ from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import AdaptiveCard
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import Provider
+from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger()
 
 GONE = "That agent is no longer available. It may have been deleted."
-NOT_CONFIGURED = "This deployment is not set up for coding-tool access yet. Ask the operator."
+NOT_CONFIGURED = "Coding-tool access isn't set up yet. Ask the operator."
 #: The panel is outside channels, so minting requires a server admin.
 NEEDS_ADMIN = (
     "You can't create this token.\n\n"
@@ -108,11 +114,29 @@ NEEDS_ADMIN = (
 )
 NOT_MINTER = "Only the person who minted this token can revoke it."
 OPERATOR_NEEDS_ADMIN = "Only an admin can mint or revoke operator tokens."
-OPERATOR_NOT_CONFIGURED = "This deployment has no MCP signing key, so it mints no operator tokens."
+OPERATOR_NOT_CONFIGURED = "Operator tokens aren't set up yet. Ask whoever runs Daimon."
 DM_ONLY = "Open setup from our 1:1 chat to start a setup conversation."
 STARTED = "Setup conversation started. Reply in this chat."
 ALREADY_ENDED = "This setup conversation has already ended."
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+_NEW_AGENT_TITLE = "New agent"
+_TOKEN_TITLE = "Use from your coding tools"
+_OPERATOR_TITLE = "Operator tokens"
+_SKILL_TITLE = "Add a skill"
+
+# Opening a dialog and answering its submit take different replies to a refusal:
+# Teams shows "Unable to reach app" for a message answering the open.
+type Refuse = Callable[[str], TaskModuleInvokeResponse]
+
+
+def _token_notice(text: str) -> TaskModuleInvokeResponse:
+    return dialog_notice(_TOKEN_TITLE, text)
+
+
+def _operator_notice(text: str) -> TaskModuleInvokeResponse:
+    return dialog_notice(_OPERATOR_TITLE, text)
 
 
 async def _guarded[T](work: Awaitable[T], failed: T) -> T:
@@ -131,8 +155,29 @@ def _models() -> tuple[ModelChoice, ...]:
 class SetupPanel:
     """Handlers for the command, the panel buttons and the two dialogs."""
 
-    def __init__(self, runtime: TeamsRuntime) -> None:
+    def __init__(self, runtime: TeamsRuntime, *, team_channels: TeamChannels | None = None) -> None:
         self._runtime = runtime
+        self._team_channels = team_channels
+
+    async def _channel_names(
+        self, tenant_id: uuid.UUID, channel_ids: Sequence[str]
+    ) -> dict[str, str]:
+        """The cards' channel names: the teams' live listings, else the stored names."""
+        if not channel_ids:
+            return {}
+        async with self._runtime.sessionmaker() as session:
+            teams = await list_teams_installations(session, tenant_id=tenant_id)
+            stored = await get_channel_names(
+                session, tenant_id=tenant_id, platform="teams", channel_ids=channel_ids
+            )
+        return await named_channels(
+            self._runtime.sessionmaker,
+            self._team_channels,
+            tenant_id=tenant_id,
+            team_ids=[team.team_id for team in teams],
+            channel_ids=channel_ids,
+            stored=stored,
+        )
 
     async def command(self, context: CommandContext) -> None:
         await context.send_card(
@@ -153,8 +198,8 @@ class SetupPanel:
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
         if await card_actor(self._runtime, ctx.activity) is None:
-            return dialog_message(DENIED)
-        return dialog("New agent", cards.new_agent_form(_models(), {}))
+            return dialog_notice(_NEW_AGENT_TITLE, DENIED)
+        return dialog(_NEW_AGENT_TITLE, cards.new_agent_form(_models(), {}))
 
     async def on_create_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -164,7 +209,7 @@ class SetupPanel:
     async def on_token_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._mint(ctx.activity), dialog_message(FAILED))
+        return await _guarded(self._mint(ctx.activity), _token_notice(FAILED))
 
     async def on_token_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -174,7 +219,7 @@ class SetupPanel:
     async def on_operator_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._operator_open(ctx.activity), dialog_message(FAILED))
+        return await _guarded(self._operator_open(ctx.activity), _operator_notice(FAILED))
 
     async def on_operator_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -184,7 +229,7 @@ class SetupPanel:
     async def on_skill_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._skill_open(ctx.activity), dialog_message(FAILED))
+        return await _guarded(self._skill_open(ctx.activity), dialog_notice(_SKILL_TITLE, FAILED))
 
     async def on_skill_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -199,18 +244,18 @@ class SetupPanel:
     async def _skill_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None:
-            return dialog_message(DENIED)
+            return dialog_notice(_SKILL_TITLE, DENIED)
         agent = await self._skill_target(
             actor, str(submitted_fields(activity.value.data).get("agent") or "")
         )
         if agent is None:
-            return dialog_message(GONE)
+            return dialog_notice(_SKILL_TITLE, GONE)
         account_id = await get_or_create_account(self._runtime, actor)
         if refusal := await skill_change_refusal(
             self._runtime, actor, agent, account_id=account_id
         ):
-            return dialog_message(refusal)
-        return dialog(f"Add a skill to {agent.name}", cards.add_skill_form(agent.name))
+            return dialog_notice(f"{_SKILL_TITLE} to {agent.name}", refusal)
+        return dialog(f"{_SKILL_TITLE} to {agent.name}", cards.add_skill_form(agent.name))
 
     async def _skill_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -263,14 +308,14 @@ class SetupPanel:
             rows = await list_panel_operator_tokens(
                 session, tenant_id=actor.tenant_id, now=datetime.now(UTC)
             )
-        return dialog("Operator tokens", cards.operator_tokens_card(rows, notice=notice))
+        return dialog(_OPERATOR_TITLE, cards.operator_tokens_card(rows, notice=notice))
 
     async def _operator_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None or not actor.is_admin:
-            return dialog_message(OPERATOR_NEEDS_ADMIN)
+            return _operator_notice(OPERATOR_NEEDS_ADMIN)
         if self._runtime.settings.mcp.jwt_secret is None:
-            return dialog_message(OPERATOR_NOT_CONFIGURED)
+            return _operator_notice(OPERATOR_NOT_CONFIGURED)
         return await self._operator_tokens(actor)
 
     async def _operator_submit(
@@ -419,13 +464,43 @@ class SetupPanel:
         unrouted = (r.name for r in roster.rows if r.answering_tier is None and not r.is_built_in)
         request_agent = next(unrouted, roster.answering.name if roster.answering else None)
         window = paginate(answering_map.channel_overrides, page=page, page_size=cards.PAGE_SIZE)
+        names = await self._channel_names(
+            actor.tenant_id, cards.routing_channel_ids(answering_map, window)
+        )
         return cards.routing_card(
             answering_map,
             window,
             is_admin=actor.is_admin,
             request_agent=request_agent,
             changes_channels=actor.is_admin,
+            channel_names=names,
         )
+
+    async def _without_hidden_places(
+        self, session: AsyncSession, actor: Actor, details: AgentDetails
+    ) -> AgentDetails:
+        """`details` without the channels an isolated channel's line hides from `actor`.
+
+        As Who answers where does: a member never learns an isolated channel's
+        name, or that an agent answers there. Admins see every place.
+        """
+        viewer = await load_rule_viewer(
+            session,
+            self._runtime.anthropic,
+            tenant_id=actor.tenant_id,
+            channel_id=actor.conversation_id,
+            is_admin=actor.is_admin,
+            platform="teams",
+            default=self._runtime.deployment_default,
+        )
+        if viewer is None:
+            return details
+        places = tuple(
+            place
+            for place in details.answers_in
+            if place.tier != "channel" or viewer.sees_place(place.channel_id)
+        )
+        return details.model_copy(update={"answers_in": places})
 
     async def _details(
         self, actor: Actor, name: str, page: int, expanded: DetailListName | None = None
@@ -457,6 +532,15 @@ class SetupPanel:
                 is_admin=actor.is_admin,
                 channel_label=None,
             )
+            details = await self._without_hidden_places(session, actor, details)
+            # Only a member's ownership adds anything: an admin already gets every control.
+            owned = not actor.is_admin and await owns_agent(
+                session,
+                tenant_id=actor.tenant_id,
+                ma_agent_id=match.ma_agent_id,
+                platform="teams",
+                platform_user_id=actor.user_id,
+            )
             github_panel = await load_grants_panel(
                 session,
                 tenant_id=actor.tenant_id,
@@ -466,6 +550,9 @@ class SetupPanel:
                 agent_name=match.name,
             )
         coding_tools = mcp.public_url is not None and mcp.jwt_secret is not None
+        channel_names = await self._channel_names(
+            actor.tenant_id, cards.place_channel_ids(details, here=actor.conversation_id)
+        )
         backend_options: tuple[Provider, ...] = ()
         backend_selection: Provider | None = None
         if actor.is_admin and channel_backend.backend_selection_enabled(
@@ -487,10 +574,13 @@ class SetupPanel:
             here=actor.conversation_id,
             page=page,
             coding_tools=coding_tools,
+            is_admin=actor.is_admin,
+            owned=owned,
             github_panel=github_panel,
             expanded=expanded,
             backend_options=backend_options,
             backend_selection=backend_selection,
+            channel_names=channel_names,
         )
 
     async def _act(
@@ -517,7 +607,7 @@ class SetupPanel:
                     reason="needs_admin" if not actor.is_admin else "feature_disabled",
                     agent_name=name,
                 )
-                return toast("Model backend wasn't changed. Ask an organisation admin.")
+                return toast("Model provider wasn't changed. Ask an organisation admin.")
             if op == "backend_cancel":
                 card = await self._details(actor, name, page)
                 return replace_card(card) if card is not None else toast(GONE)
@@ -545,7 +635,7 @@ class SetupPanel:
                     reason="selection_unavailable",
                     agent_name=name,
                 )
-                return toast("Model backend preview is unavailable. Nothing was changed.")
+                return toast("That preview isn't available. Nothing was changed; choose again.")
             if op == "backend_preview":
                 preview = selection.preview
                 return replace_card(
@@ -559,7 +649,7 @@ class SetupPanel:
                 or not isinstance(digest, str)
                 or not digest
             ):
-                return toast("That preview is no longer available. Choose a model backend again.")
+                return toast("That preview is no longer available. Choose a model provider again.")
             account_id = await get_or_create_account(self._runtime, actor)
             live_actor = await card_actor(self._runtime, activity)
             if live_actor is None:
@@ -666,6 +756,8 @@ class SetupPanel:
                     model=values["model"],
                     account_id=derive_guild_account_uuid(actor.tenant_id),
                     public_url=str(mcp_url) if mcp_url is not None else None,
+                    sessionmaker=self._runtime.sessionmaker,
+                    creator_account_id=await get_or_create_account(self._runtime, actor),
                 )
                 created_id = outcome.anthropic_id
                 if created_id is None:
@@ -673,7 +765,7 @@ class SetupPanel:
             except DaimonError as exc:
                 error = str(exc)
         if error is not None or created_id is None:
-            return dialog("New agent", cards.new_agent_form(_models(), values, error))
+            return dialog(_NEW_AGENT_TITLE, cards.new_agent_form(_models(), values, error))
         log.info("teams.agent_setup.created", tenant_id=str(actor.tenant_id), agent_name=name)
         queue_agent_face(
             self._runtime.sessionmaker,
@@ -698,13 +790,13 @@ class SetupPanel:
         """Mint a coding token for an admin."""
         actor = await card_actor(self._runtime, activity)
         if actor is None:
-            return dialog_message(DENIED)
+            return _token_notice(DENIED)
         name = str(submitted_fields(activity.value.data).get("agent") or "")
         if self._runtime.settings.mcp.jwt_secret is None or (
             self._runtime.settings.mcp.public_url is None
         ):
-            return dialog_message(NOT_CONFIGURED)
-        return await self._issue(actor, name, channel_id=None)
+            return _token_notice(NOT_CONFIGURED)
+        return await self._issue(actor, name, channel_id=None, refuse=_token_notice)
 
     async def _token_submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleInvokeResponse:
         data = submitted_fields(activity.value.data)
@@ -718,19 +810,21 @@ class SetupPanel:
             actor,
             str(data.get("agent") or ""),
             channel_id=None if channel == cards.UNBOUND else channel,
+            refuse=dialog_message,
         )
 
     async def _issue(
-        self, actor: Actor, name: str, *, channel_id: str | None
+        self, actor: Actor, name: str, *, channel_id: str | None, refuse: Refuse
     ) -> TaskModuleInvokeResponse:
         """Mint `name`'s token as `authorize_coding_token` decides, as Discord and Slack do.
 
         `channel_id` is checked with the current policy for stale form submissions.
+        `refuse` words a refusal for the open or the submit that asked.
         """
         secret = self._runtime.settings.mcp.jwt_secret
         public_url = self._runtime.settings.mcp.public_url
         if secret is None or public_url is None:
-            return dialog_message(NOT_CONFIGURED)
+            return refuse(NOT_CONFIGURED)
         roster = await self._roster(actor.tenant_id, None, is_admin=None)
         target = next((row for row in roster.rows if row.name == name), None)
         try:
@@ -745,7 +839,7 @@ class SetupPanel:
                     ),
                 )
         except AccessPolicyUnreadable:
-            return dialog_message(POLICY_UNREADABLE_REFUSAL)
+            return refuse(POLICY_UNREADABLE_REFUSAL)
         agent = AgentRef.of(name)
         if target is not None and channel_id is not None and any_agent_rules(policy):
             ma_agent = await retrieve_agent(
@@ -762,9 +856,9 @@ class SetupPanel:
             await self._audit(
                 actor, "coding_token_mint", outcome="denied", reason=f"authz:{decision.reason}"
             )
-            return dialog_message(NEEDS_ADMIN)
+            return refuse(NEEDS_ADMIN)
         if target is None:
-            return dialog_message(GONE)
+            return refuse(GONE)
         account_id = await get_or_create_account(self._runtime, actor)
         async with self._runtime.sessionmaker.begin() as session:
             token = await mint_agent_mcp_token(
@@ -794,7 +888,7 @@ class SetupPanel:
         card = cards.token_card(
             agent_name=name, cli=cli, mcp_json=mcp_json, jti=str(jti), channel_id=bound_channel_id
         )
-        return dialog("Use from your coding tools", card)
+        return dialog(_TOKEN_TITLE, card)
 
     async def _audit(
         self,

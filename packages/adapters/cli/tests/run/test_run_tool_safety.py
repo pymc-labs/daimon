@@ -23,8 +23,10 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, sse_response
-from daimon.testing.ma_models import ma_agent, ma_session, with_coordinator, with_hidden_capability
+from daimon.testing.ma import MARouter
+from daimon.testing.ma_models import ma_agent, with_coordinator, with_hidden_capability
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, json_body, sse_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

@@ -59,8 +59,8 @@ def _runtime_with_agent(
     from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.scope import DeploymentDefault as _DeploymentDefault
-    from daimon.testing.ma import build_fake_anthropic, list_response
     from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 
     metadata: dict[str, str] = {}
     if managed:

@@ -41,7 +41,7 @@ async def test_purge_legacy_output_and_noop_downgrade(db_session, enabled):
             ),
             {"id": row.id},
         )
-    path = Path(__file__).parents[1] / "alembic/versions/0117_clear_legacy_routine_output.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0140_clear_legacy_routine_output.py"
     spec = importlib.util.spec_from_file_location("legacy_output_migration", path)
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)

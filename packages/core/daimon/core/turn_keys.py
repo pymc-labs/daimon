@@ -53,9 +53,9 @@ async def list_turn_key_names(
 
     `agent_id` is the answering session's own agent — never an arbitrary
     target resolved from a name. The store already returns rows ordered by
-    key, so the result is sorted for free; this function adds no sort of its
-    own and no deduplication (the store's primary key already guarantees
-    uniqueness).
+    key's codepoint (`COLLATE "C"`, whatever the database collation), so the
+    result is sorted for free; this function adds no sort of its own and no
+    deduplication (the store's primary key already guarantees uniqueness).
 
     The return type is `tuple[str, ...]`: no row, no mapping, no field
     through which a stored value is reachable. That is what makes the

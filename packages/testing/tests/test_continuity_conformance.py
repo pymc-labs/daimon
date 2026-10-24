@@ -6,8 +6,6 @@ from typing import Literal
 
 import httpx
 import pytest
-from daimon.testing.conformance.gemini import GeminiScript
-from daimon.testing.conformance.runner import ConformanceFailure
 from daimon.testing.continuity_conformance import (
     HistoryExpectations,
     LossProbe,
@@ -15,9 +13,6 @@ from daimon.testing.continuity_conformance import (
     collect_history_evidence,
     collect_loss_evidence,
 )
-from daimon.testing.drivers.gemini.fake import MemoryStorage
-from daimon.testing.drivers.openai.conformance import SCOPE, OpenAIScriptedTransport
-from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 from mux.contracts.ports import ManagedAgents
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.openai import OpenAIDriver
@@ -25,6 +20,11 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ScopeViolation
+from mux.testing.conformance.gemini import GeminiScript
+from mux.testing.conformance.runner import ConformanceFailure
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.drivers.openai.conformance import SCOPE, OpenAIScriptedTransport
+from mux.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 
 
 @pytest.mark.parametrize("kind", ["expiry", "unexpected_loss"])

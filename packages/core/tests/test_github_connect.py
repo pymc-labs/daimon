@@ -100,6 +100,67 @@ async def test_connect_followup_resumes_task_once_and_keeps_repo_names_private(
 
 
 @pytest.mark.asyncio
+async def test_connect_activation_grants_repos_from_two_installations(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id, admin_id, agent_id = (uuid.uuid4() for _ in range(3))
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    token = await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        agent_id=agent_id,
+        agent_name="ResearchBot",
+    )
+    invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
+    assert invitation is not None
+    confirmed = [
+        github_connect.RepoConfirmation(
+            repo_id=repo_id,
+            owner_id=installation_id,
+            installation_id=installation_id,
+            full_name=f"owner{installation_id}/repo{repo_id}",
+            max_access="write",
+        )
+        for installation_id, repo_id in ((71, 101), (72, 102))
+    ]
+    for repo in confirmed:
+        await github_app_installations.upsert(
+            db_session,
+            installation_id=repo.installation_id,
+            account_login=f"owner{repo.installation_id}",
+            repo_full_names=[repo.full_name],
+        )
+        db_session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=repo.repo_id,
+                owner_id=repo.owner_id,
+                installation_id=repo.installation_id,
+                repo_full_name=repo.full_name,
+                max_access="write",
+                authorized_by_github_user_id=17,
+                status="active",
+                version=1,
+            )
+        )
+    await db_session.flush()
+    activated = await github_connect.activate_confirmed_agent(
+        db_session, invitation=invitation, repos=confirmed
+    )
+    assert activated is not None
+    assert {
+        grant.repo_id
+        for grant in await github_access.list_agent_grants(
+            db_session, tenant_id=tenant_id, agent_id=agent_id
+        )
+    } == {101, 102}
+
+
+@pytest.mark.asyncio
 async def test_teams_connect_followup_queues_the_task_wake_in_its_thread(
     db_session: AsyncSession,
 ) -> None:
@@ -580,7 +641,7 @@ async def test_cancel_blocks_concurrent_github_confirmation(
 
 @pytest.mark.asyncio
 async def test_expiry_sweep_rechecks_cancel_after_waiting_for_row_lock(
-    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
+    db_engine: AsyncEngine, db_committing_engine: AsyncEngine, db_clean: None
 ) -> None:
     del db_clean
     sessionmaker = async_sessionmaker(bind=db_engine, expire_on_commit=False)
@@ -635,7 +696,7 @@ async def test_expiry_sweep_rechecks_cancel_after_waiting_for_row_lock(
             await asyncio.wait_for(sweep_started.wait(), timeout=5)
             assert sweep_pid is not None
             # Confirm the DELETE reached the row lock before committing Cancel.
-            async with AsyncSession(db_nullpool_engine) as probe:
+            async with AsyncSession(db_committing_engine) as probe:
                 for _ in range(500):
                     waiting = await probe.scalar(
                         text(
@@ -918,6 +979,252 @@ async def _confirm_repo(
 
 
 @pytest.mark.asyncio
+async def test_cross_agent_confirmations_serialize_before_agent_locks(
+    db_engine: AsyncEngine, db_clean: None
+) -> None:
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    tenant_id, admin_id, agent_a, agent_b = (uuid.uuid4() for _ in range(4))
+    invitations: list[tuple[str, str, uuid.UUID, github_connect.RepoConfirmation]] = []
+    async with factory.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+        await session.flush()
+        session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+        await session.flush()
+        for repo_id, name in ((101, "one/x"), (102, "two/y")):
+            await github_app_installations.upsert(
+                session,
+                installation_id=repo_id,
+                account_login=name.split("/", 1)[0],
+                repo_full_names=[name],
+            )
+            session.add(
+                TenantGitHubRepo(
+                    tenant_id=tenant_id,
+                    repo_id=repo_id,
+                    owner_id=repo_id,
+                    installation_id=repo_id,
+                    repo_full_name=name,
+                    max_access="write",
+                    authorized_by_github_user_id=7,
+                    status="active",
+                    version=1,
+                )
+            )
+        await session.flush()
+        await github_access.stage_grant(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_b,
+            repo_id=101,
+            baseline_access="write",
+            ceiling_access="write",
+            granted_by_account_id=admin_id,
+        )
+        await github_access.stage_grant(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_a,
+            repo_id=102,
+            baseline_access="write",
+            ceiling_access="write",
+            granted_by_account_id=admin_id,
+        )
+        for target, repo_id, name in ((agent_a, 101, "one/x"), (agent_b, 102, "two/y")):
+            token = await github_connect.mint_invitation(
+                session,
+                tenant_id=tenant_id,
+                requester_account_id=admin_id,
+                agent_id=target,
+                agent_name="Helper",
+            )
+            state = str(uuid.uuid4())
+            await github_connect.create_flow(
+                session,
+                invitation_hash=github_connect.digest(token),
+                state=state,
+                cookie="cookie",
+                encrypted_verifier=b"encrypted",
+            )
+            invitations.append(
+                (
+                    state,
+                    token,
+                    target,
+                    github_connect.RepoConfirmation(
+                        repo_id=repo_id,
+                        owner_id=repo_id,
+                        installation_id=repo_id,
+                        full_name=name,
+                        max_access="write",
+                    ),
+                )
+            )
+    first_locked, release_first = asyncio.Event(), asyncio.Event()
+
+    async def connect(
+        state: str,
+        token: str,
+        target: uuid.UUID,
+        repo: github_connect.RepoConfirmation,
+        *,
+        pause: bool,
+    ) -> None:
+        async with factory.begin() as session:
+            invitation = await github_connect.get_invitation(session, github_connect.digest(token))
+            assert invitation is not None
+            if pause:
+                await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
+                first_locked.set()
+                await release_first.wait()
+            assert await github_connect.confirm(
+                session, state=state, cookie="cookie", github_user_id=7, repos=[repo]
+            )
+            assert (
+                await github_connect.activate_confirmed_agent(
+                    session, invitation=invitation, repos=[repo], repo_locks_held=True
+                )
+                is not None
+            )
+
+    first = asyncio.create_task(connect(*invitations[0], pause=True))
+    try:
+        await asyncio.wait_for(first_locked.wait(), timeout=5)
+        second = asyncio.create_task(connect(*invitations[1], pause=False))
+        await asyncio.sleep(0.05)
+        assert not second.done()
+    finally:
+        release_first.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=10)
+    async with factory() as session:
+        assert {
+            g.repo_id
+            for g in await github_access.list_agent_grants(
+                session, tenant_id=tenant_id, agent_id=agent_a
+            )
+        } == {101, 102}
+        assert {
+            g.repo_id
+            for g in await github_access.list_agent_grants(
+                session, tenant_id=tenant_id, agent_id=agent_b
+            )
+        } == {101, 102}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("installations", "read_only", "expected"),
+    [
+        (12, False, "would exceed 12 GitHub accounts or orgs"),
+        (1, True, "would have read-only GitHub repos across accounts or orgs"),
+        (11, False, None),
+    ],
+)
+async def test_confirm_reassignment_checks_existing_agent_grants_before_writing(
+    db_session: AsyncSession, installations: int, read_only: bool, expected: str | None
+) -> None:
+    tenant_id, admin_id, agent_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    # The named agent invitation lets a server-wide move identify every grant holder.
+    await github_connect.mint_invitation(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=admin_id,
+        agent_id=agent_id,
+        agent_name="ResearchBot",
+    )
+    token = await github_connect.mint_invitation(
+        db_session, tenant_id=tenant_id, requester_account_id=admin_id
+    )
+    state = f"transfer-{uuid.uuid4()}"
+    await github_connect.create_flow(
+        db_session,
+        invitation_hash=github_connect.digest(token),
+        state=state,
+        cookie="cookie",
+        encrypted_verifier=b"encrypted",
+    )
+    repo_ids = [101, 102] + [1000 + number for number in range(2, installations + 1)]
+    for repo_id in repo_ids:
+        installation_id = 1 if repo_id in (101, 102) else repo_id - 1000
+        db_session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=repo_id,
+                owner_id=installation_id,
+                installation_id=installation_id,
+                repo_full_name=f"owner{installation_id}/repo{repo_id}",
+                max_access="write",
+                authorized_by_github_user_id=7,
+                status="active",
+                version=1,
+            )
+        )
+        db_session.add(
+            AgentGitHubGrant(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=repo_id,
+                baseline_access="read" if read_only else "write",
+                ceiling_access="read" if read_only else "write",
+            )
+        )
+    await db_session.flush()
+    moved = github_connect.RepoConfirmation(
+        repo_id=101,
+        owner_id=13,
+        installation_id=13,
+        full_name="owner13/repo101",
+        max_access="write",
+    )
+    also_confirmed = github_connect.RepoConfirmation(
+        repo_id=102,
+        owner_id=1,
+        installation_id=1,
+        full_name="owner1/repo102",
+        max_access="write",
+    )
+    confirmed = [also_confirmed, moved]
+    if expected is None:
+        assert await github_connect.confirm(
+            db_session,
+            state=state,
+            cookie="cookie",
+            github_user_id=7,
+            repos=confirmed,
+        )
+        assert (
+            await github_access.repo_for_agent(
+                db_session, tenant_id=tenant_id, repo_id=101, agent_id=agent_id
+            )
+        ).installation_id == 13
+    else:
+        with pytest.raises(github_connect.GrantReassignmentError, match=expected) as error:
+            await github_connect.confirm(
+                db_session,
+                state=state,
+                cookie="cookie",
+                github_user_id=7,
+                repos=confirmed,
+            )
+        assert "ResearchBot" in str(error.value)
+        assert "owner13/repo101 moved to owner13" in str(error.value)
+        assert "then reconnect" in str(error.value)
+        unchanged = await github_access.repo_for_agent(
+            db_session, tenant_id=tenant_id, repo_id=101, agent_id=agent_id
+        )
+        assert unchanged is not None and unchanged.installation_id == 1
+        untouched = await github_access.repo_for_agent(
+            db_session, tenant_id=tenant_id, repo_id=102, agent_id=agent_id
+        )
+        assert untouched is not None and untouched.version == 1
+        invitation = await github_connect.get_invitation(db_session, github_connect.digest(token))
+        assert invitation is not None and invitation.connected_repo_count is None
+
+
+@pytest.mark.asyncio
 async def test_confirm_records_the_authorizers_permission(db_session: AsyncSession) -> None:
     tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
     db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
@@ -1045,10 +1352,10 @@ async def test_workspace_a_can_connect_org_repo_after_workspace_b(
 
 @pytest.mark.asyncio
 async def test_refresh_serializes_for_one_github_user(
-    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
+    db_engine: AsyncEngine, db_committing_engine: AsyncEngine, db_clean: None
 ) -> None:
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
-    probe_sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    probe_sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     user_id = 98765
     async with sessionmaker.begin() as session:
@@ -1116,10 +1423,10 @@ async def test_refresh_serializes_for_one_github_user(
 
 @pytest.mark.asyncio
 async def test_bad_refresh_token_does_not_break_a_rotated_link(
-    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
+    db_engine: AsyncEngine, db_committing_engine: AsyncEngine, db_clean: None
 ) -> None:
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
-    probe_sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    probe_sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     async with sessionmaker.begin() as session:
         session.add(
@@ -1176,12 +1483,12 @@ async def test_bad_refresh_token_does_not_break_a_rotated_link(
 @pytest.mark.asyncio
 async def test_expired_refresh_does_not_break_a_rotated_link(
     db_engine: AsyncEngine,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     db_clean: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
-    probe_sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    probe_sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     async with sessionmaker.begin() as session:
         session.add(

@@ -32,9 +32,9 @@ from daimon.core.continuity.wakes import (
     start_wake,
 )
 from daimon.core.stores.task_continuations import get_continuation
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)

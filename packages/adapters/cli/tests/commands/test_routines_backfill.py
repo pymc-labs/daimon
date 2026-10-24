@@ -19,7 +19,7 @@ import pytest
 from daimon.adapters.cli.commands.routines import run_backfill_agent_names
 from daimon.core.stores.routines import create_routine
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter
+from mux.testing.drivers.anthropic.ma import MARouter
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

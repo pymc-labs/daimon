@@ -10,6 +10,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import caller_owned_ids, owned_in
 from daimon.adapters.mcp.tools._rule_view import load_caller_view, load_isolation_view
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -38,7 +39,7 @@ async def require_turn_origin(
         origin_id = uuid.UUID(origin_context_id)
     except ValueError as exc:
         raise ToolError(
-            "The turn origin is invalid; retry from the originating conversation."
+            "The origin_context_id is invalid; retry from the originating conversation."
         ) from exc
     async with runtime.session_factory() as session:
         origin = await get_active_origin(
@@ -57,7 +58,14 @@ async def require_turn_origin(
     if executing_agent is not None and executing_agent != derive_agent_uuid(
         tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
     ):
-        raise ToolError("This turn origin belongs to another responder.")
+        raise ToolError("That origin_context_id belongs to another agent.")
+    if auth.hold is not None and not auth.hold.contains(
+        origin.thread_id or origin.parent_channel_id, origin.parent_channel_id
+    ):
+        raise ToolError(
+            "This conversation is held to the channel it runs in, and that origin_context_id "
+            "is outside it. Tell the caller. Do not retry."
+        )
     return origin
 
 
@@ -74,7 +82,8 @@ async def resolve_setup_agent(
 ) -> BetaManagedAgentsAgent:
     """Resolve a name without adopting an ambiguous or recreated namesake.
 
-    An agent the caller's channel isolation hides resolves as missing.
+    An agent the caller's channel isolation hides resolves as missing, unless the
+    caller owns it.
     ``location_channel_id`` is the turn's channel from a verified origin
     (`load_caller_view`), so a setup thread in an isolated channel sees
     that channel's own agents.
@@ -91,7 +100,11 @@ async def resolve_setup_agent(
         location_channel_id=location_channel_id,
         location_thread_id=location_thread_id,
     )
-    agents = [agent for agent in agents if caller.sees_agent(agent)]
+    owned = await caller_owned_ids(runtime, auth) if agents else frozenset[str]()
+    # An owner always reaches their own agent, routed anywhere or nowhere.
+    agents = [
+        agent for agent in agents if caller.sees_agent(agent) or owned_in(owned, auth, agent.id)
+    ]
     if expected_ma_agent_id is not None:
         for agent in agents:
             if agent.id == expected_ma_agent_id:
@@ -141,14 +154,10 @@ async def _set_setup_target_impl(
     )
     target = next((agent for agent in agents if agent.id == agent_id), None)
     if target is None or not caller.sees_agent(target):
-        raise ToolError(
-            "That agent is missing from this tenant. Which current agent should I configure?"
-        )
+        raise ToolError("That agent is missing here. Which current agent should I configure?")
     target_name = target.metadata.get(MA_METADATA_KEY_NAME)
     if not target_name:
-        raise ToolError(
-            "That agent has no configuration name. Select a named agent in this tenant."
-        )
+        raise ToolError("That agent has no configuration name. Select a named agent here.")
     async with runtime.session_factory.begin() as session:
         active_origin = await get_active_origin(
             session,
@@ -160,7 +169,7 @@ async def _set_setup_target_impl(
             for_update=True,
         )
         if active_origin is None:
-            raise ToolError("This turn origin expired; retry in the setup conversation.")
+            raise ToolError("The origin_context_id expired; retry in the setup conversation.")
         binding = await get_binding(
             session,
             tenant_id=origin.tenant_id,
@@ -173,14 +182,14 @@ async def _set_setup_target_impl(
                 "This thread is not a setup conversation, so there is no selected "
                 "target to switch. That does not block configuring the agent: name "
                 "it and use update_agent or a request tool directly. A setup "
-                "conversation is opened with the Manage agents button in the "
+                "conversation is opened with the Set up agents button in the "
                 "setup panel. Nothing was changed."
             )
         if binding.kind == "handoff":
             raise ToolError(
                 f"This is a handoff conversation: {binding.responder_name} answers here "
                 "because this task was handed to it, so there is no setup target to "
-                "change. Use Manage agents to pick an agent. Nothing was changed."
+                "change. Use Set up agents to pick an agent. Nothing was changed."
             )
         updated_binding = await update_target(
             session,

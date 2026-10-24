@@ -27,7 +27,7 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-_ADMIN_REQUIRED = "requires a workspace or server admin"
+_ADMIN_REQUIRED = "requires an admin"
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:

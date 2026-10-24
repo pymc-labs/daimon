@@ -28,9 +28,9 @@ from daimon.adapters.teams.output_delivery import FILE_INFO_CONTENT_TYPE
 from daimon.core import output_delivery
 from daimon.core._models import MessageFeedback
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.testing import build_fake_anthropic, list_response, ma_agent
-from daimon.testing.ma import MARouter
+from daimon.testing.ma_models import ma_agent
 from microsoft_teams.api import MessageActivity
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

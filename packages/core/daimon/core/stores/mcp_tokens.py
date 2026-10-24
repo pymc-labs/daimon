@@ -18,13 +18,13 @@ inside core logic.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import McpToken
-from daimon.core.stores.domain import McpTokenKind, McpTokenRow
+from daimon.core.stores.domain import McpTokenKind, McpTokenRow, McpTokenSurface
 from sqlalchemy import CursorResult, String, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,7 @@ async def create_mcp_token_row(
     max_issued_usd: Decimal | None = None,
     platform: str | None = None,
     channel_id: str | None = None,
+    surface: McpTokenSurface | None = None,
 ) -> None:
     """Insert a new mcp_tokens row.
 
@@ -66,6 +67,7 @@ async def create_mcp_token_row(
         max_issued_usd=max_issued_usd,
         platform=platform,
         channel_id=channel_id,
+        surface=surface,
     )
     session.add(orm)
     await session.flush()
@@ -245,7 +247,7 @@ async def prune_expired_ephemeral_tokens(
     session: AsyncSession,
     *,
     expires_before: datetime,
-    chat_label_prefix: str,
+    chat_label_prefixes: Sequence[str],
     panel_label: str,
 ) -> int:
     """Delete bounded system tokens after expiry plus the caller's retention grace.
@@ -259,7 +261,12 @@ async def prune_expired_ephemeral_tokens(
             or_(
                 and_(
                     McpToken.kind == "agent",
-                    McpToken.label == chat_label_prefix + McpToken.jti.cast(String),
+                    or_(
+                        *(
+                            McpToken.label == prefix + McpToken.jti.cast(String)
+                            for prefix in chat_label_prefixes
+                        )
+                    ),
                 ),
                 and_(McpToken.kind == "cli", McpToken.label == panel_label),
             ),

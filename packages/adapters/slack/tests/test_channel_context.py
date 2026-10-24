@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -382,7 +382,15 @@ class _TurnStopped(Exception):
     """Ends the turn once its message is built; the run itself is not under test."""
 
 
-_MEMBER = SlackRequester(is_admin=False, display_name=None)
+def _member(team_id: str, display_name: str | None = None) -> SlackRequester:
+    """A verified member of the host workspace ``team_id``."""
+    return SlackRequester(
+        is_admin=False,
+        display_name=display_name,
+        team_id=team_id,
+        is_stranger=False,
+        host_team_id=team_id,
+    )
 
 
 async def _first_turn(
@@ -392,7 +400,7 @@ async def _first_turn(
     team_id: str,
     thread_id: str,
     on_turn: Callable[..., Awaitable[None]],
-    requester: SlackRequester | None = _MEMBER,
+    requester: SlackRequester | None | Literal["member"] = "member",
 ) -> uuid.UUID:
     """Run one Slack turn body for a mention at ``_TRIGGER`` with admission and
     session binding stubbed; ``on_turn`` stands in for `run_prepared_turn`
@@ -439,7 +447,7 @@ async def _first_turn(
             patch(
                 "daimon.adapters.slack.app.resolve_requester",
                 new_callable=AsyncMock,
-                return_value=requester,
+                return_value=_member(team_id) if requester == "member" else requester,
             )
             if requester is not None
             else nullcontext()
@@ -532,7 +540,7 @@ async def test_user_query_carries_the_requesters_display_name(
         team_id=f"T_NAME_{int(in_thread)}",
         thread_id="1700000000.000100" if in_thread else _TRIGGER,
         on_turn=capture,
-        requester=SlackRequester(is_admin=False, display_name='Al "A" <b>'),
+        requester=_member(f"T_NAME_{int(in_thread)}", 'Al "A" <b>'),
     )
 
     (user_message,) = sent

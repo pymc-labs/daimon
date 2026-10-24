@@ -90,7 +90,7 @@ log = structlog.get_logger(__name__)
 
 _NO_AGENT_MSG = "only an agent can tidy its own messages; this call runs as no agent"
 _NO_TURN_MSG = (
-    "pass this turn's origin_context_id: tidy limits are counted per turn. Do not retry without it."
+    "pass your origin_context_id: tidy limits are counted per reply. Do not retry without it."
 )
 _ESCALATION_MSG = (
     "this is the support-escalation channel: messages there are a shared record and "
@@ -101,8 +101,8 @@ _NOT_POSTED_MSG = (
     "tidy your own posts, replies and status cards. Do not retry."
 )
 _TURN_RUNNING_MSG = (
-    "this message belongs to a turn that is still running, so it cannot be changed yet. "
-    "Do not retry in this turn."
+    "this message belongs to a reply that is still running, so it cannot be changed yet. "
+    "Do not retry in this reply."
 )
 _NOT_CONVERSATION_OWNER_MSG = (
     "only the person who started this conversation, or a server admin, can have it "
@@ -114,7 +114,7 @@ _OTHER_AGENT_MSG = (
 _NOT_BOT_MSG = "this is not daimon's own post, so it cannot be changed. Do not retry."
 _LIMIT_MSG = {
     "turn": (
-        f"you have used this turn's tidy limit ({PER_TURN_LIMIT} edits or deletes). "
+        f"you have used this reply's tidy limit ({PER_TURN_LIMIT} edits or deletes). "
         "Stop and tell the caller what is left."
     ),
     "hour": (
@@ -528,9 +528,16 @@ async def run_action(
             try:
                 policy = await load_access_policy(session, tenant_id=ctx.actor.tenant_id)
             except AccessPolicyUnreadable as exc:
-                raise ToolError("this workspace's access policy could not be read") from exc
+                raise ToolError("the access settings here could not be read") from exc
             for check in checks:
-                fresh_read = ChannelReadPolicy(policy, read.origin_channel_ids, agent, read.origin)
+                fresh_read = ChannelReadPolicy(
+                    policy,
+                    read.origin_channel_ids,
+                    agent,
+                    read.origin,
+                    subject=read.subject,
+                    hold=read.hold,
+                )
                 for channel, parent in check.sealed:
                     fresh_read.require(channel, parent)
                 await require_channel_writable(

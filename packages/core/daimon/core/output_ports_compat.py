@@ -8,7 +8,7 @@ from anthropic.types.beta import FileMetadata
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import legacy_call
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic.outputs import Outputs
+from mux.drivers.anthropic import Outputs
 
 
 async def list_output_records(

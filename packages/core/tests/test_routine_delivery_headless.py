@@ -17,8 +17,11 @@ from daimon.core.stores.domain import RoutineRow
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
-from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
+
+from .turn_path_support import HeadlessIdentity, TurnIOSpy, TurnPath
 
 _NOW = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC)
 
@@ -57,7 +60,9 @@ def _events(tool_name: str, tool_input: dict[str, object], *, is_error: bool) ->
     ]
 
 
-async def _final_state(events: list[Any]) -> TurnState:
+async def _final_state(
+    events: list[Any], *, turn_path: TurnPath, identity: HeadlessIdentity
+) -> TurnState:
     router = MARouter()
     router.add(
         "POST",
@@ -107,6 +112,9 @@ async def _final_state(events: list[Any]) -> TurnState:
         trigger_message="go",
         on_state=states.append,
         tool_safety=OPEN_TOOL_SAFETY,
+        tenant_id=identity.tenant_id,
+        account_id=identity.account_id,
+        turn_path=turn_path,
     )
     (state,) = states
     return state
@@ -184,7 +192,15 @@ async def test_post_detection_on_the_real_driver_state(
     is_error: bool,
     row: tuple[str, str],
     posted: bool,
+    turn_path: TurnPath,
+    headless_identity: HeadlessIdentity,
+    turn_io_used: TurnIOSpy,
 ) -> None:
-    state = await _final_state(_events(tool_name, tool_input, is_error=is_error))
+    state = await _final_state(
+        _events(tool_name, tool_input, is_error=is_error),
+        turn_path=turn_path,
+        identity=headless_identity,
+    )
+    turn_io_used.assert_ran(turn_path)
     assert agent_posted_to(state, _row(*row)) is posted
     assert json.dumps(tool_input)  # the input survived the SSE round trip as JSON

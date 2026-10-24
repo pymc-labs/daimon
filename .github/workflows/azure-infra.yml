@@ -1,0 +1,35 @@
+name: Azure infrastructure
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/azure/**'
+      - 'azure.yaml'
+      - 'scripts/azure/**'
+      - 'tests/test_azure_infra.py'
+      - '.github/workflows/azure-infra.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install standalone Bicep
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/Azure/bicep/releases/download/v0.48.1/bicep-linux-x64 \
+            -o "$HOME/.local/bin/bicep"
+          echo 'b09ec25a9d376c1f8e33ede6ed22b587f915ad68488d5db77a6f9541748c7f6e  '"$HOME/.local/bin/bicep" | sha256sum --check
+          chmod +x "$HOME/.local/bin/bicep"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build and lint offline
+        run: scripts/azure/validate.sh
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Check deployment contracts
+        run: uv run pytest tests/test_azure_infra.py

@@ -18,9 +18,9 @@ from daimon.adapters.discord.errors import render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.mux_compat import list_memory_entries, read_memory
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from discord.ext import commands
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 
 @pytest.mark.parametrize(

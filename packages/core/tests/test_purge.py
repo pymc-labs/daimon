@@ -54,8 +54,9 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_tenant,
 )
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
-from daimon.testing.ma_models import ma_agent, ma_session
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -707,13 +708,13 @@ async def test_privacy_sweep_continues_after_repeated_item_exception(
 @pytest.mark.parametrize("crash_at", ["remove_pending", "finish_work"])
 async def test_privacy_delete_recovers_after_upstream_success_crash(
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
     crash_at: str,
 ) -> None:
     # Independent connections preserve committed pending IDs when the injected
     # failure rolls back the acknowledgement transaction.
-    db_session_factory = async_sessionmaker(bind=db_nullpool_engine, expire_on_commit=False)
+    db_session_factory = async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await make_cli_principal(
@@ -1710,7 +1711,7 @@ async def test_personal_memory_erasure_survives_agent_archive_and_missing_princi
         archive_memory_store_for_agent,
         ensure_personal_memory_store_and_mount,
     )
-    from daimon.testing.ma import (
+    from mux.testing.drivers.anthropic.ma import (
         FakeMemoryStoreState,
         NotHandled,
         combine_handlers,

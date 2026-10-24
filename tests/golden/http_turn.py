@@ -16,9 +16,9 @@ import anthropic
 import httpx
 import pytest
 from daimon.testing import turn_fakes
-from daimon.testing.isolated_sdk import build_async_anthropic
-from daimon.testing.ma import list_response, send_events_response
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma import list_response, send_events_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.isolated_sdk import build_async_anthropic
 
 
 class EventBytes(httpx.AsyncByteStream):

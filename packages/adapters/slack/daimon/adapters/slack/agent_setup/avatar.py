@@ -44,7 +44,7 @@ async def may_edit_avatar(
 ) -> bool:
     if not identity_enabled_for(runtime.settings, "slack", team_id):
         return False
-    if not await resolve_is_admin(client, user_id=user_id):
+    if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
         return False
     agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=agent_name)
     return agent is not None and not is_builtin_agent(

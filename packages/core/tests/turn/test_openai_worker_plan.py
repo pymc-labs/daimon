@@ -19,7 +19,6 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_deployment import OpenAIDeployment, build_openai_runtime
 from daimon.core.turn.openai_host import driver
 from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.ids import SkillRef, ThreadRef
 from mux.contracts.resources import (
     AgentPatch,
@@ -35,6 +34,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
+from mux.testing.isolated_sdk import build_async_openai
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -54,6 +54,7 @@ from .native_counterpart_support import (
 from .test_openai_deployment import application as application
 from .test_openai_deployment import manifest
 from .test_openai_host import Wire as SessionWire
+from .test_openai_host import openai_native_spend_cap
 
 
 @pytest.fixture
@@ -557,6 +558,7 @@ async def claimed_openai_worker(
         limits=root.limits.model_copy(update={"deadline": selected.now() + timedelta(minutes=2)}),
     )
     if native_budget is not None:
+        openai_native_spend_cap(monkeypatch)
         root = replace(
             root,
             limits=type(root.limits).model_validate(
@@ -743,7 +745,7 @@ async def claimed_openai_worker(
         api_key="offline",
         base_url="https://openai.invalid/v1",
     ) as sdk:
-        from mux.drivers.openai import deployment as native_transport
+        import mux.drivers.openai as native_transport
 
         monkeypatch.setattr(
             native_transport, "configured_transport", lambda **kwargs: SDKTransport(sdk)
@@ -857,7 +859,11 @@ async def test_openai_worker_refuses_unsupported_or_revoked_authority_before_nat
             run_id=worker.run_id,
         )
         ended = next(row for row in rows if row.id == worker.id)
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
+        # A cancel from outside is never a refusal (#1413 review B3).
+        assert (ended.status, ended.error_code) == (
+            "failed",
+            "watch_ended" if fault == "cancelled" else "preparation_refused",
+        )
         assert ended.reserved_usd > 0 and ended.binding_id is None and ended.turns_used == 0
 
 
@@ -1143,8 +1149,10 @@ async def test_native_worker_budget_conflict_refuses_before_transport(
     assert calls == []
 
 
-async def test_native_budget_compiler_is_decimal_context_independent(target):
+async def test_native_budget_compiler_is_decimal_context_independent(target, monkeypatch):
     from decimal import localcontext
+
+    openai_native_spend_cap(monkeypatch)
 
     from daimon.core.neutral_resources import WorkerLimits
 
@@ -1353,3 +1361,60 @@ async def test_budgeted_session_without_ack_remains_unknown(claimed_openai_worke
         call.method == "DELETE" or call.method == "POST" and call.url.path.endswith("/events")
         for call in calls
     )
+
+
+def _astra(request):
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+
+    revision = request.admission.backend_revision
+    astra = ConfigRevision.create(
+        revision.channel,
+        revision.local,
+        resolve_default(
+            BackendConfig(backend="openai", profile=revision.profile, model="gpt-6-astra")
+        ),
+    )
+    return replace(request, admission=replace(request.admission, backend_revision=astra))
+
+
+def _with_astra(plan, owned, monkeypatch, *, spend_limit: int | None = None) -> None:
+    # The deployment row authorizes Astra alongside Luna, as a fleet row would.
+    grant = plan.configuration_grant
+    assert grant is not None
+    widened = plan.model_copy(
+        update={
+            "configuration_grant": grant.model_copy(
+                update={"models": (*grant.models, "gpt-6-astra")}
+            ),
+            "spend_limit_usd_cents": spend_limit,
+        }
+    )
+    manifest(monkeypatch, owned.manifest_path, [widened.model_dump(mode="json")])
+
+
+async def test_astra_worker_runtime_runs_at_astra_controls_and_price(
+    target: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request, _, plan, _, owned = target
+    _with_astra(plan, owned, monkeypatch, spend_limit=5)
+    # ROOT: on our project (no native session cap) Astra runs at its own price, bounded
+    # by admission and the daily model cap; the row's limit is never sent.
+    runtime = build_openai_runtime(_astra(request))
+    assert runtime.controls.model == "gpt-6-astra"
+    assert runtime.price is not None and runtime.price.model == "gpt-6-astra"
+    assert (runtime.price.input, runtime.price.output) == (Decimal("10.00"), Decimal("50.00"))
+    assert runtime.controls.spend_limit_usd_cents is None
+    # Where a project honours native caps, the row's limit becomes `spend_control`.
+    openai_native_spend_cap(monkeypatch)
+    assert build_openai_runtime(_astra(request)).controls.spend_limit_usd_cents == 5
+
+
+async def test_astra_runs_without_a_native_spend_limit(
+    target: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ROOT: Astra runs under the host guard and the daily model cap, not a native cap."""
+    request, _, plan, _, owned = target
+    _with_astra(plan, owned, monkeypatch)
+    assert request.worker.limits.native_budget_usd is None and plan.spend_limit_usd_cents is None
+    assert build_openai_runtime(_astra(request)).controls.spend_limit_usd_cents is None
+    assert build_openai_runtime(request).controls.spend_limit_usd_cents is None

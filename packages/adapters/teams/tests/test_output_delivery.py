@@ -30,8 +30,8 @@ from daimon.core.stores.file_uploads import create_upload, store_upload_content
 from daimon.core.teams_file_offers import UploadOffer, sign_offer
 from daimon.core.teams_graph import GraphClient, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from microsoft_teams.api import Attachment, FileConsentCard, FileConsentInvokeActivity
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

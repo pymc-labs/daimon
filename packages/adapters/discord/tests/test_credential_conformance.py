@@ -28,7 +28,7 @@ from daimon.testing.discord_credential_conformance import (
     read_used_at,
     rejected_token_submit,
 )
-from daimon.testing.ma import build_stub_anthropic
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import HttpUrl
 from sqlalchemy import Column, MetaData, String, Table
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine

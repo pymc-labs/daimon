@@ -61,7 +61,7 @@ def runtime_and_auth(platform="discord", policy=None):
 )
 async def test_policy_denies_before_network(policy):
     runtime, auth = runtime_and_auth(policy=policy)
-    with pytest.raises(ToolError, match="denied"):
+    with pytest.raises(ToolError, match="not allowed"):
         await direct_messages.send_direct_message_impl(
             runtime, auth, recipient_id="123", content="hello"
         )
@@ -238,7 +238,7 @@ async def test_slack_policy_denies_before_building_client(monkeypatch, policy):
     runtime, auth = runtime_and_auth("slack", policy=policy)
     factory = AsyncMock(side_effect=AssertionError("policy denial must precede network access"))
     monkeypatch.setattr(direct_messages, "slack_web_client", factory)
-    with pytest.raises(ToolError, match="denied"):
+    with pytest.raises(ToolError, match="not allowed"):
         await direct_messages.send_direct_message_impl(
             runtime, auth, recipient_id="U456", content="private"
         )
@@ -315,7 +315,7 @@ async def test_noncanonical_policy_denies_before_client_creation(
     slack_client = MagicMock(side_effect=AssertionError("Slack client must not be created"))
     monkeypatch.setattr(direct_messages, "rest_client", discord_client)
     monkeypatch.setattr(direct_messages, "slack_web_client", slack_client)
-    with pytest.raises(ToolError, match="denied"):
+    with pytest.raises(ToolError, match="not allowed"):
         await direct_messages.send_direct_message_impl(
             runtime, auth, recipient_id="123" if platform == "discord" else "U456", content="hello"
         )

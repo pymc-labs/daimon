@@ -13,12 +13,12 @@ from daimon.core.turn.io import neutral_inputs
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.ma import send_events_response
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic.actions import translate_inputs
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma import send_events_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 from .conftest import (
     make_agent_message,

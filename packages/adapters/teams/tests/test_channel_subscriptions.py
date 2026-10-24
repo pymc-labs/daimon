@@ -27,6 +27,7 @@ from daimon.adapters.teams.channel_subscriptions import (
     RENEW_MARGIN,
     RETRY_DELAY,
     ChannelSubscriptions,
+    Deliver,
     SeenChannel,
     channel_resource,
     client_state_hash,
@@ -194,9 +195,6 @@ class FlakyDatabase:
         return self._factory.begin()
 
 
-Deliver = Callable[[GraphMessage, TeamsChannelSubscriptionRow], Awaitable[bool]]
-
-
 class Harness:
     """`ChannelSubscriptions` over the test DB and `FakeGraph`, with what it delivered."""
 
@@ -209,6 +207,8 @@ class Harness:
         deliver: Deliver | None = None,
     ) -> None:
         self.delivered: list[GraphMessage] = []
+        # Whether each delivery let an @mention of the bot through.
+        self.mentions: list[bool] = []
         self.tasks: list[asyncio.Task[None]] = []
         self.now = NOW
         self.clock = 1000.0
@@ -217,8 +217,11 @@ class Harness:
         async def lookup(_team: str, _channel: str) -> str | None:
             return channel_type
 
-        async def record(message: GraphMessage, _row: TeamsChannelSubscriptionRow) -> None:
+        async def record(
+            message: GraphMessage, channel: TeamsChannelSubscriptionRow, *, mentions: bool = False
+        ) -> None:
             self.delivered.append(message)
+            self.mentions.append(mentions)
 
         def spawn(coro: Any, *, name: str) -> asyncio.Task[None]:
             task = asyncio.create_task(coro, name=name)
@@ -550,6 +553,7 @@ async def test_missed_reads_only_what_came_after_the_watermark(
     assert [m.id for m in harness.delivered] == ["102", "103"], (
         "only newer messages, oldest first; the handled root is not delivered again"
     )
+    assert harness.mentions == [False, False], "a missed notice leaves mentions to Bot Framework"
     [listing] = graph.calls("GET")
     assert listing.url.params["$expand"] == "replies", "one page read, replies included"
 
@@ -943,6 +947,7 @@ async def test_a_boot_catches_up_once_within_its_window(
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
     assert [m.id for m in harness.delivered] == ["103"], "only what the window holds"
+    assert harness.mentions == [True], "a boot makes up for the mentions Bot Framework missed"
     assert len(graph.calls("GET")) == 1, "one read, then no polling"
 
 

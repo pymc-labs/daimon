@@ -246,3 +246,34 @@ class Event(Contract):
         """The payload parsed into its model, or None for an open type."""
         model = PAYLOAD_MODELS.get(self.type)
         return None if model is None else model.model_validate(self.payload)
+
+
+__all__ = [
+    "AgentMessageDeltaPayload",
+    "AgentMessagePayload",
+    "ArtifactPart",
+    "Authority",
+    "ContentPart",
+    "Event",
+    "HistoryGapPayload",
+    "ImagePart",
+    "NativePart",
+    "NativeProvenance",
+    "OPEN_PREFIXES",
+    "PAYLOAD_MODELS",
+    "ReconciledPayload",
+    "RequiredAction",
+    "RequiresActionPayload",
+    "RetryStatus",
+    "SessionErrorPayload",
+    "StatusRunningPayload",
+    "StatusTerminatedPayload",
+    "TextPart",
+    "ToolResultPayload",
+    "ToolServerDegradedPayload",
+    "ToolUsePayload",
+    "TurnEndedPayload",
+    "TurnOutcome",
+    "UsageObservedPayload",
+    "UserMessagePayload",
+]

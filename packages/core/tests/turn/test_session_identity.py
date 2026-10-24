@@ -11,8 +11,8 @@ from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.turn.errors import SessionAgentMismatch
 from daimon.core.turn.session_identity import check_session_agent
 from daimon.testing.factories import make_thread_session
-from daimon.testing.ma import MARouter, build_fake_anthropic
-from daimon.testing.ma_models import ma_session, ma_session_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

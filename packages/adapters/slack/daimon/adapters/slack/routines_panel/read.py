@@ -71,9 +71,10 @@ async def load_routines(
     return entries, over_cap_count, agent_name_map
 
 
-async def routines_viewer(client: AsyncWebClient, *, user_id: str) -> str | None:
+async def routines_viewer(client: AsyncWebClient, *, user_id: str, team_id: str) -> str | None:
     """``viewer_user_id`` for ``load_routines``: None for an admin, else the user.
 
     A failed admin lookup counts as not admin, so it narrows rather than widens.
     """
-    return None if await resolve_is_admin(client, user_id=user_id) else user_id
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
+    return None if is_admin else user_id

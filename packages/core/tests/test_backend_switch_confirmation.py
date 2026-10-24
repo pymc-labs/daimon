@@ -146,18 +146,18 @@ def test_preview_is_a_read_but_confirm_is_never_unattended() -> None:
 
 
 @pytest.fixture
-async def owned_preview(db_preflight, db_nullpool_engine):
+async def owned_preview(db_preflight, db_committing_engine):
     from daimon.core.authz import Subject
     from daimon.core.channel_backend import BackendActor, load_backend_agent, make_backend_service
     from daimon.core.config import TurnSettings
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-    from daimon.testing.ma import list_response
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma import list_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     try:
         require_owned_sessionmaker(sessions)
     except ValueError:
@@ -218,7 +218,7 @@ async def test_server_preview_and_current_admin_are_the_only_card_authority(owne
     assert prepared.admin
     preview = await service.preview(agent, "openai")
     assert prepared.detail_lines[-1] == preview.cost_line
-    assert "worst-case per turn: unknown" in prepared.detail_lines[-1].lower()
+    assert "worst case per reply: unknown" in prepared.detail_lines[-1].lower()
     assert prepared.detail_lines[0].startswith("Unsupported skills: ")
     trace.queue(reply())
     assert await check(prepared, "requester") is None
@@ -289,7 +289,14 @@ async def test_click_rechecks_real_preview_and_rejects_changed_facts(owned_previ
     elif change == "revision":
         await service.set_backend(agent, "anthropic", 0, actor)
     trace.queue(reply())
-    assert await check(prompt, "requester") is not None
+    refused = await check(prompt, "requester")
+    assert refused is not None
+    if change == "revision":
+        # Someone else's switch landed after this card was posted: say where it is now.
+        assert refused.startswith(
+            f"Someone just switched {prompt.backend_switch.agent}; it's now on Anthropic. "
+            "Ask again if you still want"
+        ), refused
     current = await service.current(agent)
     assert current is None if change != "revision" else current.local == 1
     assert not trace.violations and not trace.replies
@@ -639,8 +646,9 @@ async def test_real_sdk_create_and_desired_snapshot_use_the_same_opt_in_tools(se
         session_tools,
     )
     from daimon.core.sessions import create_session
-    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     native = ma_agent(
         tools=[
@@ -755,8 +763,9 @@ async def test_real_sdk_refresh_preserves_default_bytes_and_the_selected_gate(ow
     from daimon.core.session_compat import ReplaceToolsAndMcpServers
     from daimon.core.session_snapshot import desired_snapshot, hash_tools, session_tools
     from daimon.core.session_update_ops import AppliedOps, apply_update_ops
-    from daimon.testing.ma_models import ma_agent, ma_session
-    from daimon.testing.ma_transport import ScriptedReply
+    from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     service, backend_agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
     native = ma_agent(
@@ -843,3 +852,401 @@ async def test_real_sdk_refresh_preserves_default_bytes_and_the_selected_gate(ow
     assert bodies[0] == bodies[1]
     assert bodies[1] != bodies[2]
     assert not trace.violations and not trace.replies
+
+
+def test_switch_prompt_carries_an_optional_model() -> None:
+    picked = prompt_for_tool_call(
+        _call(target_backend="gemini", model="gemini-4-argon"),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    assert picked.backend_switch is not None and picked.backend_switch.model == "gemini-4-argon"
+    legacy = prompt_for_tool_call(
+        _call(), requester_platform_user_id="requester", now=datetime.now(UTC)
+    )
+    assert legacy.backend_switch is not None and "model" not in legacy.backend_switch.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("default_agent", "place"), [(False, "server"), (True, "server"), (True, "workspace")]
+)
+async def test_card_names_the_model_and_where_the_switch_applies(
+    owned_preview, default_agent, place
+):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+
+    service, agent, actor, sessions, client, trace, payload, reply, _ = owned_preview
+    policy = await service.tenant_policy(agent.tenant_id)
+    await service.set_tenant_allowlist(
+        agent.tenant_id, ("anthropic", "openai", "gemini"), policy.revision, actor
+    )
+    preview = await service.preview(agent, "gemini", "gemini-4-argon")
+    prompt = prompt_for_tool_call(
+        _call(
+            target_backend="gemini",
+            model="gemini-4-argon",
+            expected_revision=preview.setting_revision,
+            preview_digest=preview.digest,
+            for_everyone=default_agent,
+        ),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    prepare, check = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        default_agent_name="Researcher" if default_agent else "daimon",
+        place_word=place,
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    assert prepared.title == "Switch Researcher to Gemini (gemini-4-argon)?"
+    assert prepared.consequence is not None
+    reach = (
+        f"Affects new conversations for everyone on this {place}"
+        if default_agent
+        else "Affects new conversations wherever Researcher answers"
+    )
+    assert prepared.consequence.startswith(reach + "; other existing threads keep their model.")
+    assert prepared.detail_lines[-1] == preview.cost_line
+    # The same card for the default model refuses: the server preview differs.
+    other = prompt.model_copy(
+        update={"backend_switch": prompt.backend_switch.model_copy(update={"model": None})}
+    )
+    trace.queue(reply())
+    assert await check(other, "requester") is not None
+    assert await service.current(agent) is None
+
+
+async def test_the_agents_owner_may_confirm_without_being_an_admin(owned_preview):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+    from daimon.core.stores import agent_owners
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    admin = AsyncMock(return_value=False)
+    _, check = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=admin,
+    )
+    async with sessions.begin() as session:
+        await agent_owners.set_owner(
+            session,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            owner_account_id=actor.account_id,
+            source="admin_assigned",
+        )
+    trace.queue(reply())
+    assert await check(prompt, "requester") is None
+    # Ownership moves away between the card and the click: the click refuses.
+    async with sessions.begin() as session:
+        await agent_owners.clear_owner(session, tenant_id=agent.tenant_id, agent_id=agent.agent_id)
+    trace.queue(reply())
+    assert await check(prompt, "requester") is not None
+    assert await service.current(agent) is None
+
+
+def test_switch_prompt_binds_the_stated_agent_settings() -> None:
+    from daimon.core.confirmation import reference_settings, settings_line
+
+    prompt = prompt_for_tool_call(
+        _call(thread_mode="shared", required_capabilities=["tool_loop"]),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    assert prompt.backend_switch is not None
+    settings = reference_settings(prompt.backend_switch)
+    assert settings is not None and settings.facts() == {
+        "requires": {"tool_loop": {"level": "required", "fallback": None}},
+        "thread_mode": "shared",
+    }
+    assert settings_line(settings.facts()) == (
+        "shares threads where the channel allows it; requires tool_loop"
+    )
+    plain = prompt_for_tool_call(_call(), requester_platform_user_id="r", now=datetime.now(UTC))
+    assert plain.backend_switch is not None and reference_settings(plain.backend_switch) is None
+    with pytest.raises(ValidationError):
+        prompt_for_tool_call(
+            _call(thread_mode="everyone"), requester_platform_user_id="r", now=datetime.now(UTC)
+        )
+
+
+async def test_the_card_says_plainly_that_saved_keys_wont_be_available(owned_preview, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    real = await service.preview(agent, "openai")
+    dropping = type(real).model_validate(
+        {
+            **real.model_dump(),
+            "drop_consent": {
+                "declared_drops": ["credentials", "memory", "sandbox"],
+                "source_pin": "a" * 64,
+                "target_digest": "b" * 64,
+            },
+        }
+    )
+    monkeypatch.setattr(service, "preview", AsyncMock(return_value=dropping))
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+    )
+    prompt = prompt_for_tool_call(
+        _call(
+            expected_revision=dropping.setting_revision,
+            preview_digest=dropping.digest,
+            accepted_drops=list(dropping.declared_drops),
+        ),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    assert prepared.action == "Switch Researcher to OpenAI"
+    assert (
+        "On OpenAI it won't have its saved keys, its memory and its sandbox" in prepared.consequence
+    )
+    assert prepared.consequence.count("saved keys") == 1
+    assert "credentials" not in prepared.action + prepared.consequence
+    assert "Nothing is deleted" in prepared.consequence
+
+
+@pytest.mark.parametrize("answering", ["Researcher", "someone-else", None])
+async def test_the_card_says_this_conversation_moves_only_when_the_agent_answers_here(
+    owned_preview, answering
+):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        answering_agent_name=answering,
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    moves = "This conversation moves to OpenAI from your next message"
+    assert (moves in prepared.consequence) == (answering == "Researcher")
+    assert "other existing threads keep their model" in prepared.consequence
+
+
+@pytest.mark.parametrize("handed_to", ["Researcher", "someone-else", None])
+async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_preview, handed_to):
+    """J2: the turn's agent hands the thread to the copy, then switches the copy.
+
+    The approved switch moves the copy's conversation here and drops its history,
+    so the card must say so even though the turn's own agent is someone else.
+    """
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+    from daimon.core.stores.thread_agent_bindings import upsert_responder_binding
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    if handed_to is not None:
+        async with sessions.begin() as session:
+            await upsert_responder_binding(
+                session,
+                tenant_id=agent.tenant_id,
+                platform="discord",
+                parent_channel_id="parent-1",
+                thread_id="thread-1",
+                responder_ma_agent_id=f"agent_{handed_to}",
+                responder_name=handed_to,
+                created_by_account_id=actor.account_id,
+                now=datetime.now(UTC),
+            )
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        answering_agent_name="daimon",
+        handoff_thread=("discord", "parent-1", "thread-1"),
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    moves = "This conversation moves to OpenAI from your next message"
+    assert (moves in prepared.consequence) == (handed_to == "Researcher")
+    if handed_to == "Researcher":
+        assert "earlier messages here aren't carried over" in prepared.consequence
+
+
+async def _reload(owned_preview):
+    from daimon.core.channel_backend import load_backend_agent
+
+    _, agent, _, sessions, client, *_ = owned_preview
+    return await load_backend_agent(
+        client, sessions, tenant_id=agent.tenant_id, agent_name="Researcher"
+    )
+
+
+def _switch_callbacks(owned_preview, *, default_agent_name: str = "daimon"):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+
+    service, agent, actor, sessions, client, *_ = owned_preview
+    return backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        default_agent_name=default_agent_name,
+        answering_agent_name="Researcher",
+    )
+
+
+def _switch_prompt(preview, **changes: object):
+    return prompt_for_tool_call(
+        _call(
+            target_backend="gemini",
+            expected_revision=preview.setting_revision,
+            preview_digest=preview.digest,
+            **changes,
+        ),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+
+
+@pytest.mark.parametrize("default", ["named", "managed"])
+async def test_a_default_agent_card_is_refused_unless_its_for_everyone(owned_preview, default):
+    """A dropped for_everyone on the confirm call posts no card: the copy offer instead."""
+    from daimon.core.confirmation import CardRefusal
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+
+    service, agent, actor, sessions, client, trace, payload, reply, _ = owned_preview
+    policy = await service.tenant_policy(agent.tenant_id)
+    await service.set_tenant_allowlist(
+        agent.tenant_id, ("anthropic", "openai", "gemini"), policy.revision, actor
+    )
+    if default == "managed":
+        # A built-in agent is found by its managed mark, whatever its name.
+        payload["metadata"][MA_METADATA_KEY_MANAGED] = "true"
+    trace.queue(reply())
+    agent = await _reload(owned_preview)
+    preview = await service.preview(agent, "gemini", None)
+    prepare, check = _switch_callbacks(
+        owned_preview, default_agent_name="Researcher" if default == "named" else "daimon"
+    )
+    trace.queue(reply())
+    with pytest.raises(CardRefusal) as refused:
+        await prepare(_switch_prompt(preview))
+    assert str(refused.value) == (
+        "Switching Researcher changes it for everyone on this server. "
+        "To try Gemini just here, I can make a copy of me on Gemini."
+    )
+    trace.queue(reply())
+    assert await check(_switch_prompt(preview), "requester") == str(refused.value)
+    trace.queue(reply())
+    prepared = await prepare(_switch_prompt(preview, for_everyone=True))
+    assert prepared.consequence is not None
+    assert prepared.consequence.startswith("Affects new conversations for everyone on this server")
+    assert await service.current(agent) is None
+
+
+async def test_a_switch_that_lands_before_the_card_is_posted_says_who_won(owned_preview):
+    from daimon.core.confirmation import CardRefusal
+
+    service, agent, actor, sessions, client, trace, payload, reply, _ = owned_preview
+    policy = await service.tenant_policy(agent.tenant_id)
+    await service.set_tenant_allowlist(
+        agent.tenant_id, ("anthropic", "openai", "gemini"), policy.revision, actor
+    )
+    preview = await service.preview(agent, "gemini", None)
+    await service.set_backend(agent, "openai", 0, actor)
+    prepare, _ = _switch_callbacks(owned_preview)
+    trace.queue(reply())
+    with pytest.raises(CardRefusal) as refused:
+        await prepare(_switch_prompt(preview))
+    assert str(refused.value) == (
+        "Someone just switched Researcher; it's now on OpenAI. Ask again if you still want Gemini."
+    )
+
+
+async def test_a_refusal_worded_for_the_person_reaches_the_model_as_is():
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import CardRefusal
+    from daimon.core.tool_safety import OPEN_TOOL_SAFETY, backend_switch_tools
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.posture import PolicyApproval
+
+    said = (
+        "Someone just switched Researcher; it's now on OpenAI. Ask again if you still want Gemini."
+    )
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="requester",
+        confirm=AsyncMock(side_effect=CardRefusal(said)),
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=backend_switch_tools(enabled=True),
+    )
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(_call())
+    assert result.allow is False and result.deny_message == said
+
+
+async def test_the_card_never_promises_a_move_in_a_setup_conversation(owned_preview):
+    """A setup conversation stays put on an approved switch, so the card says nothing moves."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+    from daimon.core.stores.thread_agent_bindings import create_binding
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    async with sessions.begin() as session:
+        await create_binding(
+            session,
+            tenant_id=agent.tenant_id,
+            platform="discord",
+            parent_channel_id="parent-1",
+            thread_id="thread-1",
+            responder_ma_agent_id="agent_daimon",
+            responder_name="daimon",
+            configuration_target_name="Researcher",
+            kind="setup",
+        )
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        answering_agent_name="Researcher",
+        handoff_thread=("discord", "parent-1", "thread-1"),
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    assert "This conversation moves" not in prepared.consequence
+    assert "other existing threads keep their model" in prepared.consequence

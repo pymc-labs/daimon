@@ -589,10 +589,11 @@ async def test_picker_offers_every_permission_level_and_counts_hidden(
     assert [choices[i]["data-max-access"] for i in (1, 2, 3, 4, 5)] == ["write"] * 5
     assert choices[201]["data-installation"] == "78"
     assert "hidden because your GitHub account" not in page
-    assert "Missing a repo? Add it to the Daimon GitHub App on GitHub." in page
-    # One bulk button per installation owner, a live shown count, and a clear button.
-    assert "Everything in alpha</button>" in page and "Everything in beta</button>" in page
-    assert 'id="select-shown"' in page and "Select all 6 shown" in page
+    assert "Not listed?" in page and "Open GitHub setup" in page
+    # The owner sheet only offers repos under that owner.
+    assert "Everything in alpha</button>" not in page
+    assert "Everything in beta</button>" not in page
+    assert 'id="select-shown"' in page
     assert 'id="clear-selection"' in page
     assert 'name="picker_access"' not in page
 
@@ -621,7 +622,7 @@ async def test_app_write_grant_requires_installation_write_but_not_person_write(
     org = _Org(77, 55, "alpha", permissions, [(1, level)])
     async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
         hidden, _page = await editor.page()
-        saved = await editor.save(hidden, repo="1", access_1="write")
+        saved = await editor.save(hidden, repo="1", access="write")
         if not installation_writes:
             assert saved.status_code == 403
             assert await editor.grants() == {}
@@ -652,8 +653,7 @@ async def test_bulk_write_repos_in_one_installation(
         # Every GitHub page was fetched: more than the 100 a page holds, and 378 in all.
         assert len(_choices(page)) == 378
         ids = sorted(org_levels)
-        body = {f"access_{repo_id}": "write" for repo_id in ids}
-        saved = await editor.save(hidden, repo=[str(repo_id) for repo_id in ids], **body)
+        saved = await editor.save(hidden, repo=[str(repo_id) for repo_id in ids], access="write")
         assert saved.status_code == 200
         grants = await editor.grants()
     assert len(grants) == 300
@@ -701,7 +701,7 @@ async def test_read_level_readd_after_admin_write_grant_stays_write(
     org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(1, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
         hidden, _page = await editor.page()
-        assert (await editor.save(hidden, repo="1", access_1="write")).status_code == 200
+        assert (await editor.save(hidden, repo="1", access="write")).status_code == 200
         assert await editor.grants() == {1: "write"}
 
         hidden, _page = await editor.page()
@@ -710,7 +710,7 @@ async def test_read_level_readd_after_admin_write_grant_stays_write(
 
         org.repos[0] = (1, "read")
         hidden, _page = await editor.page()
-        assert (await editor.save(hidden, repo="1", access_1="write")).status_code == 200
+        assert (await editor.save(hidden, repo="1", access="write")).status_code == 200
         assert await editor.grants() == {1: "write"}
         async with editor.sessionmaker() as session:
             [row] = await github_access.list_authorized_repos(
