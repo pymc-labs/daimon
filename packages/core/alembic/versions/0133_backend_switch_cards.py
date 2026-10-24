@@ -15,7 +15,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0133_backend_switch_cards"
-down_revision: str | None = "0128_fleet_run_end_notice"
+down_revision: str | None = "0132_thread_handoff_summary"
 branch_labels: str | None = None
 depends_on: str | None = None
 
