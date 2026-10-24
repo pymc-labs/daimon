@@ -2931,21 +2931,29 @@ def _consented_before(
     """
     without_skills = _with_skills_dropped(target, source_system)
     candidates = (
-        _with_switch_tool_dropped(target, _without_losses_line(target)),
+        _with_switch_tool_dropped(target, _without_losses_line(target, source_system)),
         without_skills,
         _with_switch_tool_dropped(without_skills, source_system) if without_skills else None,
     )
     return any(_consented(candidate, consent) for candidate in candidates)
 
 
-def _without_losses_line(target: AgentSpec) -> str | None:
-    """The target's instructions before its "Unavailable capabilities" line, if any:
-    the source's own plus any representation paragraph (the skill tools line)."""
-    marker = "\n\nUnavailable capabilities: "
+def _without_losses_line(target: AgentSpec, source_system: str | None) -> str | None:
+    """The target's instructions before its "Unavailable capabilities" line: the
+    source's own plus any representation paragraph (the skill tools line).
+
+    An agent with no instructions of its own has the losses line alone, with no
+    paragraph before it: that is the source's (absent) instructions.
+    """
+    line = "Unavailable capabilities: "
     system = target.system
-    if system is None or marker not in system:
+    if system is None:
         return system
-    return system[: system.rindex(marker)]
+    if "\n\n" + line in system:
+        return system[: system.rindex("\n\n" + line)]
+    if system.startswith(line):
+        return source_system
+    return system
 
 
 def source_preservation_pin(source: BackendAgent) -> str:

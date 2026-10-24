@@ -746,6 +746,24 @@ async def test_a_consent_that_dropped_skills_still_prepares_and_now_keeps_them(
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_dropped_skills_and_the_switch_tool_still_prepares(
+    consent_recorded_before_self_cards, consent_recorded_before_skill_tools, template, monkeypatch
+):
+    """Both older differences at once: switched before the switch tool was offered
+    and before skills came along. It prepares, with both now kept."""
+    from daimon.core.turn.runtime_manifest import SKILL_READ_INSTRUCTION
+
+    request, quote, *_ = template
+    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
+    assert {"skills", switch_drop} <= set(quote.declared_drops)
+    consent_recorded_before_self_cards["old"] = False
+    monkeypatch.setattr(consent_recorded_before_skill_tools, "SKILL_READ_PROXY", "call_tool")
+    selected, _ = await _prepared(request)
+    assert not {"skills", switch_drop} & set(selected.target_spec.declared_drops)
+    assert SKILL_READ_INSTRUCTION in (selected.target_spec.system or "")
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_an_old_consent_with_any_other_difference_still_needs_a_new_confirmation(
     consent_recorded_before_self_cards, template, monkeypatch
 ):
