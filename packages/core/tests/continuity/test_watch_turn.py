@@ -352,16 +352,12 @@ def _explicit_read_snapshot():
 @pytest.mark.parametrize(
     "level",
     [
-        "session",
         "agent",
-        "model",
         "server",
         "tool",
         "default",
         "config",
         "policy",
-        "stats",
-        "usage",
     ],
 )
 @pytest.mark.parametrize("value", [None, False, [], {"enabled": True}])
@@ -381,7 +377,7 @@ async def test_watch_refuses_unknown_capability_fields_before_mutation(monkeypat
         "config": snapshot.agent.tools[0].configs[0],
         "policy": snapshot.agent.tools[0].configs[0].permission_policy,
     }
-    # Simulate a new response field, including an empty value: unknown is never safe.
+    # Unknown fields in capability containers refuse even when empty.
     targets[level].__pydantic_extra__["future_execution_capability"] = value
     update = AsyncMock()
     monkeypatch.setattr(capabilities, "update_session_record", update)
@@ -514,21 +510,23 @@ async def test_watch_uses_shared_watch_policy_and_named_read_projection(monkeypa
     }
 
 
-@pytest.mark.parametrize("level", ["stats", "usage"])
-def test_watch_keeps_telemetry_closed_when_shared_helper_accepts_it(level):
-    from daimon.core.turn.errors import AdmissionDenied
+@pytest.mark.parametrize("level", ["session", "model", "stats", "usage"])
+def test_watch_accepts_additive_non_capability_fields(level: str) -> None:
 
     snapshot = _explicit_read_snapshot()
-    getattr(snapshot, level).__pydantic_extra__["future_execution_capability"] = False
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        watch_turn.validate_watch_snapshot(snapshot)
+    if level == "session":
+        target = snapshot
+    else:
+        target = snapshot.agent.model if level == "model" else getattr(snapshot, level)
+    extras = target.__pydantic_extra__
+    assert extras is not None
+    extras["new_metadata"] = False
+    capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
+    watch_turn.validate_watch_snapshot(snapshot)
 
 
 @pytest.mark.parametrize("level", ["session", "agent", "model", "tool", "config"])
-def test_watch_refuses_unreviewed_private_instance_attributes(level):
-    from daimon.core.turn.errors import AdmissionDenied
+def test_watch_ignores_sdk_private_instance_bookkeeping(level):
 
     snapshot = _explicit_read_snapshot()
     target = {
@@ -538,11 +536,9 @@ def test_watch_refuses_unreviewed_private_instance_attributes(level):
         "tool": snapshot.agent.tools[0],
         "config": snapshot.agent.tools[0].configs[0],
     }[level]
-    object.__setattr__(target, "_future_execution_capability", False)
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        watch_turn.validate_watch_snapshot(snapshot)
+    object.__setattr__(target, "_sdk_bookkeeping", False)
+    capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
+    watch_turn.validate_watch_snapshot(snapshot)
 
 
 async def test_watch_server_names_cannot_alias_shared_allowlist_keys():
@@ -580,13 +576,7 @@ async def test_watch_server_names_cannot_alias_shared_allowlist_keys():
 
 
 @pytest.mark.parametrize("effort", ["max", {"type": "high"}])
-def test_watch_model_allowlist_pins_reviewed_preset_fields(effort):
-    from daimon.core.turn.errors import AdmissionDenied
-
-    reviewed = frozenset({"id", "speed", "inference_geo", "effort"})
-    # Watches intentionally adopt this shared schema. Any widening needs review,
-    # including a field newly understood by the SDK rather than a response extra.
-    assert reviewed == capabilities._MODEL
+def test_watch_accepts_additions_to_inference_settings(effort):
     snapshot = _explicit_read_snapshot()
     snapshot.agent.model = snapshot.agent.model.model_copy(
         update={
@@ -594,14 +584,12 @@ def test_watch_model_allowlist_pins_reviewed_preset_fields(effort):
             "effort": effort,
         }
     )
-    assert set(snapshot.agent.model.model_dump()) == reviewed
     watch_turn.validate_watch_snapshot(snapshot)
     for name in ("future_execution_capability", "tools", "system", "multiagent"):
         for value in (None, False, [], {"enabled": True}):
             unknown = snapshot.model_copy(deep=True)
             unknown.agent.model = unknown.agent.model.model_copy(update={name: value})
-            with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-                watch_turn.validate_watch_snapshot(unknown)
+            watch_turn.validate_watch_snapshot(unknown)
 
 
 async def test_watch_refuses_duplicate_server_toolsets_before_any_mutation(monkeypatch):

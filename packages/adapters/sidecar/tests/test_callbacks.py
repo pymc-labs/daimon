@@ -590,7 +590,13 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     prepared = replace(prepared, mapping_id=live.id)
     unsupported = ending in ("unknown_capability", "multiagent")
     if ending == "unknown_capability":
-        snapshot = snapshot.model_copy(update={"future_execution_capability": {"enabled": True}})
+        snapshot = snapshot.model_copy(
+            update={
+                "agent": snapshot.agent.model_copy(
+                    update={"future_execution_capability": {"enabled": True}}
+                )
+            }
+        )
     elif ending == "multiagent":
         from anthropic.types.beta.beta_managed_agents_session_multiagent_coordinator import (
             BetaManagedAgentsSessionMultiagentCoordinator,

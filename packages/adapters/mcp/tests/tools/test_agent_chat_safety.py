@@ -516,7 +516,11 @@ async def test_a_failed_gate_sends_nothing_and_starts_no_worker(
     ("unconstrainable", "named"),
     [
         (with_coordinator, "delegation to other agents"),
-        (with_hidden_capability, "unreviewed value at session.agent.model.effort"),
+        (
+            with_hidden_capability,
+            "unreviewed provider field session.agent.future_capability: "
+            "capability behavior has not been reviewed",
+        ),
     ],
     ids=["coordinator", "hidden_field"],
 )
