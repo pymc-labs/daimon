@@ -3040,7 +3040,13 @@ async def read_preparation_counterpart(
         if error.reason != "backend_unsupported":
             raise
         raise AdmissionDenied(reason="backend_unsupported") from error
-    except (UnsupportedCapability, TimeoutError, TurnError, AgentBackendRefused) as error:
+    except AgentBackendRefused as error:
+        # A stale consent is not missing provider setup: name the fresh preview
+        # the person needs. Any other backend refusal stays unsupported (J6g).
+        if error.reason == "re_confirm":
+            raise AdmissionDenied(reason="backend_unsupported", cause="re_confirm") from error
+        raise AdmissionDenied(reason="backend_unsupported") from error
+    except (UnsupportedCapability, TimeoutError, TurnError) as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception:
         raise AdmissionDenied(reason="backend_unsupported") from None

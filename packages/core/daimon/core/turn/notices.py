@@ -262,6 +262,12 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "{agent} runs on {provider}, which isn't set up here yet.",
         'Ask {who} to say "switch {agent_mid} to {default}", or to finish setting up {provider}.',
     ),
+    # The provider is set up; the stored switch consent is stale. Never say the
+    # provider is missing (J6g): a fresh preview and Confirm is the fix.
+    "re_confirm": _Copy(
+        "{agent}'s model-provider switch needs to be confirmed again.",
+        "Ask again to preview the switch to {provider}, then Confirm on the new card.",
+    ),
 }
 _PROVIDER_NAMES = {
     MANAGED_AGENTS.provider: "Anthropic",

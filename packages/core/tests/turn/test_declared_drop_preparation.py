@@ -1562,3 +1562,25 @@ async def test_agent_origin_openai_host_preserves_original_consent_before_paid_r
             await mux_state.get_config_agent_revision(db, revision, agent_id=source.agent_id)
             == accepted
         )
+
+
+async def test_a_stale_switch_consent_names_reconfirm_not_missing_provider(monkeypatch):
+    """SMOKE 42591c55 J6g: a keyless preview's consent came back as "not set up".
+
+    The provider is fine; the stored switch consent needs a fresh preview. The
+    generic `backend_unsupported` path used to make admission say "runs on Gemini,
+    which isn't set up here yet", a dead end. Preserve the re-confirm word.
+    """
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.errors import AdmissionDenied
+
+    async def refuse(_request):
+        raise AgentBackendRefused("re_confirm")
+
+    monkeypatch.setattr(runtime_manifest, "prepare_source", refuse)
+    with pytest.raises(AdmissionDenied) as refused:
+        await runtime_manifest.read_preparation_counterpart(object())  # type: ignore[arg-type]
+    assert refused.value.reason == "backend_unsupported"
+    assert refused.value.cause == "re_confirm", "never the generic agent_backend cause"
+    assert isinstance(refused.value.__cause__, AgentBackendRefused)
