@@ -1865,7 +1865,9 @@ errors do not send the page-data migration notice.
 All imports start PAUSED and unconfirmed; rerunning the same tenant/legacy ID is
 idempotent. Unknown poll tools import with `source_unmapped`, cannot resume, and
 queue this owner DM through the existing Discord notice path:
-`this watch is paused until page data moves to Daimon OS`. Sending the notice never
+`this watch is paused until page data moves to Daimon OS`. Archived workspaces
+are excluded from notice batches. Expiry notices cover only watches that expired
+within the last hour (the sidecar cleanup sweep interval). Sending the notice never
 resumes the watch. Notebook/report hosts have no queryable page collection store;
 `artifact_db_query` has no OS mapping in this release. No page store is created.
 
