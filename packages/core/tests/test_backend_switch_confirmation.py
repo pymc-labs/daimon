@@ -908,7 +908,13 @@ async def test_card_names_the_model_and_where_the_switch_applies(
         if default_agent
         else "Affects new conversations wherever Researcher answers"
     )
-    assert prepared.consequence.startswith(reach + "; other existing threads keep their model.")
+    # A switch moves each person's own conversation on their next message (#1495);
+    # never "existing threads keep" the old provider.
+    assert prepared.consequence.startswith(
+        reach + ". Each person's own conversation with Researcher moves to Gemini on their "
+        "next message; shared threads stay on Anthropic."
+    )
+    assert "keep" not in prepared.consequence.split("\n")[0]
     assert prepared.detail_lines[-1] == preview.cost_line
     # The same card for the default model refuses: the server preview differs.
     other = prompt.model_copy(
@@ -1047,7 +1053,7 @@ async def test_the_card_says_this_conversation_moves_only_when_the_agent_answers
     prepared = await prepare(prompt)
     moves = "This conversation moves to OpenAI from your next message"
     assert (moves in prepared.consequence) == (answering == "Researcher")
-    assert "other existing threads keep their model" in prepared.consequence
+    assert "shared threads stay on Anthropic" in prepared.consequence
 
 
 @pytest.mark.parametrize("handed_to", ["Researcher", "someone-else", None])
@@ -1245,7 +1251,7 @@ async def test_the_card_never_promises_a_move_in_a_setup_conversation(owned_prev
     trace.queue(reply())
     prepared = await prepare(prompt)
     assert "This conversation moves" not in prepared.consequence
-    assert "other existing threads keep their model" in prepared.consequence
+    assert "shared threads stay on Anthropic" in prepared.consequence
 
 
 async def _switch_card(

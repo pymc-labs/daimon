@@ -38,6 +38,7 @@ from daimon.core.setup_conversations import (
 )
 from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import McpTokenRow
+from daimon.core.turn.notices import conversations_follow_line
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -316,7 +317,11 @@ def backend_preview_card(
         shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
         lines.append(f"{label}: {shown}")
     lines.extend(
-        [preview.cost_line, "Existing threads keep their provider; channel settings still apply."]
+        [
+            preview.cost_line,
+            conversations_follow_line(agent_name, None if clear else preview.target_backend)
+            + " Channel settings still apply.",
+        ]
     )
     if not preview.allowed:
         lines.append("This provider is off for this organisation. Pick another.")

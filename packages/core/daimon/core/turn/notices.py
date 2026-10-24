@@ -296,6 +296,28 @@ def provider_name(provider: str | None) -> str:
     return _PROVIDER_NAMES.get(provider or "", "a model provider")
 
 
+def conversations_follow_line(
+    agent: str | None, target: str | None, before: str | None = None
+) -> str:
+    """What a provider switch does to existing conversations: each person's own
+    conversation follows it on their next message; a shared one stays (#1495).
+
+    `target` None is "use the default"; `before` None is unknown here.
+    """
+    who = agent or "this agent"
+    if before is not None and (target or DEFAULT_BACKEND) == before:
+        return (
+            f"Each person's own conversation with {who} moves to the new setting on their "
+            "next message; shared threads keep the current one."
+        )
+    stays = f"on {provider_name(before)}" if before is not None else "on their current provider"
+    return (
+        f"Each person's own conversation with {who} moves to "
+        f"{provider_name(target or DEFAULT_BACKEND)} on their next message; shared threads "
+        f"stay {stays}."
+    )
+
+
 def switched_meanwhile_text(agent: str, now_on: str | None, wanted: str | None) -> str:
     """Two switches of one agent at once: the other landed first. The same on every platform."""
     where = f"; it's now on {provider_name(now_on)}" if now_on else ""

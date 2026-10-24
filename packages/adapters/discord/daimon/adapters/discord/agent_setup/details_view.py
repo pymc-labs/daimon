@@ -57,6 +57,7 @@ from daimon.core.setup_conversations import (
     shared_keys_sentence,
 )
 from daimon.core.stores.domain import CompatibilityPreview
+from daimon.core.turn.notices import conversations_follow_line
 from mux.contracts.config import BackendConfig
 
 import discord
@@ -387,7 +388,11 @@ class DetailsView(PanelViewBase):
             lines.extend(
                 [
                     backend_preview.cost_line,
-                    "Existing threads keep their provider; channel settings still apply.",
+                    conversations_follow_line(
+                        self.agent.name if self.agent is not None else None,
+                        None if backend_clear else backend_preview.target_backend,
+                    )
+                    + " Channel settings still apply.",
                 ]
             )
             if not backend_preview.allowed:

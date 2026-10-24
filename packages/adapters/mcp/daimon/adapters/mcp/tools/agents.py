@@ -2062,6 +2062,8 @@ async def _set_agent_backend_impl(
         raise _backend_switch_refusal(
             exc, name, backend, auth, with_code=True, current=on_now
         ) from exc
+    from daimon.core.turn.notices import conversations_follow_line
+
     return {
         "agent": name,
         "backend": revision.backend,
@@ -2071,7 +2073,9 @@ async def _set_agent_backend_impl(
             dict[str, JsonValue],
             TypeAdapter(type(preview)).dump_python(preview, mode="json"),
         ),
-        "applies": "New threads use this setting; existing threads and channel overrides remain.",
+        "applies": "New threads use this setting. "
+        + conversations_follow_line(name, revision.backend, on_now)
+        + " Channel overrides still apply.",
     }
 
 
@@ -2423,10 +2427,9 @@ async def _request_agent_backend_switch_impl(
                 account_id=auth.account_id,
                 subject=mcp_subject(auth, is_admin=auth.is_admin),
             )
-            from daimon.core.turn.notices import provider_name
+            from daimon.core.turn.notices import conversations_follow_line, provider_name
 
             before = await service.current(agent)
-            old_provider = provider_name((before.backend if before else None) or DEFAULT_BACKEND)
             if awaiting is not None:
                 # Checked again at the write edge, so a refusal changes nothing.
                 await _hand_off_task_impl(
@@ -2494,7 +2497,13 @@ async def _request_agent_backend_switch_impl(
             status = "changed"
             summary = (
                 f"Model provider changed. New conversations with {agent_name} use "
-                f"{provider_name(target_backend)}; other existing threads keep {old_provider}. "
+                f"{provider_name(target_backend)}. "
+                + conversations_follow_line(
+                    agent_name,
+                    target_backend,
+                    (before.backend if before else None) or DEFAULT_BACKEND,
+                )
+                + " "
                 + await _move_this_thread(
                     runtime,
                     auth,
@@ -2550,7 +2559,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             The agent's owner or an admin, for direct coding-tool or API requests. Chat
             turns use request_agent_backend_switch so the requester confirms the preview.
             The returned preview names compatibility limits and list prices.
-            Existing threads keep their provider; channel settings still apply.
+            Each person's own conversation with the agent moves to the new provider on
+            their next message; shared threads stay on the old one; channel settings
+            still apply.
             expected_revision refuses a setting changed since it was read.
             preview_only returns the compatibility and cost preview without applying it.
             model picks one of the provider's selectable models (Gemini: gemini-3.8-flash or

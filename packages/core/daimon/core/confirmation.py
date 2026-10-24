@@ -1045,11 +1045,15 @@ def backend_switch_callbacks(
                 else ()
             ),
         )
-        from daimon.core.turn.notices import provider_name
+        from daimon.core.turn.notices import conversations_follow_line, provider_name
+        from mux.contracts.config import DEFAULT_BACKEND
 
         provider = provider_name(preview.target_backend)
         target = provider + (f" ({preview.target_model})" if preview.target_model else "")
         action = f"Switch {agent.name} to {target}"
+        # Read before the switch is applied: the provider its shared threads stay on.
+        setting = await service.current(agent)
+        before = (setting.backend if setting is not None else None) or DEFAULT_BACKEND
         unavailable = (
             f"On {provider} it won't have {drop_words(preview.declared_drops)}"
             if preview.declared_drops
@@ -1071,7 +1075,8 @@ def backend_switch_callbacks(
                 "detail_lines": details,
                 "consequence": (
                     reach
-                    + "; other existing threads keep their model."
+                    + ". "
+                    + conversations_follow_line(agent.name, preview.target_backend, before)
                     + (
                         f" This conversation moves to {provider} from your next message "
                         "(unless it's shared or this channel pins its provider); earlier "
