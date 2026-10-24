@@ -1748,6 +1748,14 @@ class HostFleetPorts:
                                         # cancel shows as result_not_successful rather
                                         # than a CancelledError (SMOKE 5ad12cc3).
                                         if (watched := cancel_failure_code(cancel)) is not None:
+                                            if watched != code:
+                                                log.info(
+                                                    "fleet.worker_failure_cancel_override",
+                                                    run_id=str(worker.run_id),
+                                                    worker_id=str(worker.id),
+                                                    original_code=code,
+                                                    failure_code=watched,
+                                                )
                                             code = watched
                                         # run_worker records its own pre-native failures;
                                         # a second commit would only wait on the lock again.
@@ -1777,9 +1785,7 @@ class HostFleetPorts:
                         # Cancelled before it was ever claimed: end it now with why, so it
                         # neither waits for the deadline sweep ("ran out of time") nor holds
                         # the run open (SMOKE 26250cd6 J10).
-                        await asyncio.shield(
-                            end_pending(_CANCEL_CODES.get(getattr(cancel, "reason", None) or ""))
-                        )
+                        await asyncio.shield(end_pending(cancel_failure_code(cancel)))
 
             task = asyncio.create_task(execute())
             self._tasks[worker.id] = task

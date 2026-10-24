@@ -1346,10 +1346,19 @@ async def run_worker(
             failure_code = (
                 "preparation_deadline_exceeded"
                 if deadline_hit
-                # The budget watch's own reason, when it is what cancelled this worker.
-                else cancel_failure_code(cancel)
-                or worker_failure_code(error, "preparation_refused")
+                else worker_failure_code(error, "preparation_refused")
             )
+            # The budget watch's own reason, when it is what cancelled this worker.
+            if not deadline_hit and (watched := cancel_failure_code(cancel)) is not None:
+                if watched != failure_code:
+                    log.info(
+                        "fleet.worker_failure_cancel_override",
+                        run_id=str(worker.run_id),
+                        worker_id=str(worker.id),
+                        original_code=failure_code,
+                        failure_code=watched,
+                    )
+                failure_code = watched
             await asyncio.shield(
                 commit_worker_failure(request, parent, claim, failure_code=failure_code)
             )
