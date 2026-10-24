@@ -754,7 +754,7 @@ def backend_switch_callbacks(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     current_admin: Callable[[str], Awaitable[bool]],
-    current_platform_admin: Callable[[str], Awaitable[bool]] | None = None,
+    current_platform_admin: Callable[[str], Awaitable[bool]],
     resource_host: NeutralResourceHost | None = None,
     default_agent_name: str | None = None,
     place_word: str = "server",
@@ -871,7 +871,7 @@ def backend_switch_callbacks(
         ):
             raise ValueError("This confirmation is unavailable. Preview again.")
         subject = build_subject(
-            is_admin=current_platform_admin is not None and await current_platform_admin(clicker),
+            is_admin=await current_platform_admin(clicker),
             platform_user_id=clicker,
         )
         if not subject.is_admin:

@@ -81,9 +81,7 @@ async def skill_change_refusal(
         return BUILT_IN
     caller = await admin_caller(
         runtime,
-        tenant_id=actor.tenant_id,
         user_id=actor.user_id,
-        is_admin=actor.admin_for(DelegatedAction.SKILLS),
     )
     names = (agent.name, *(agent_pin_names(ma_agent.name, ma_agent.metadata) if ma_agent else ()))
 

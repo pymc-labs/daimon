@@ -89,9 +89,7 @@ async def _may_manage_request(
     )
     if live_agent is None or live_agent.id != request.ma_agent_id:
         return False
-    caller = await admin_caller(
-        runtime, client, tenant_id=request.tenant_id, user_id=user_id, is_admin=False
-    )
+    caller = await admin_caller(client, user_id=user_id)
     facts = await gather_target_facts(
         runtime,
         operation="github_grant",

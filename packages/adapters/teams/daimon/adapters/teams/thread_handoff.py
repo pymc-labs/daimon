@@ -37,7 +37,6 @@ from daimon.adapters.teams.identity import (
     foreign_tenant,
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.admin_actions import DelegatedAction
 from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
@@ -116,9 +115,7 @@ class TeamsThreadHandoff:
             ma_agent_id=agent_id,
             caller=await admin_caller(
                 runtime,
-                tenant_id=actor.tenant_id,
                 user_id=actor.user_id,
-                is_admin=actor.admin_for(DelegatedAction.ROUTING),
             ),
             default=runtime.deployment_default,
             channel="this chat" if personal else "this channel",

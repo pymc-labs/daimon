@@ -217,17 +217,11 @@ class SlackConfirmationCards:
         rule_factory = runtime.sessionmaker if runtime is not None else None
 
         async def rule_subject(clicker: str) -> Subject:
-            from daimon.adapters.slack.admin import resolve_is_admin
             from daimon.adapters.slack.admin_caller import admin_caller
 
             if runtime is None or tenant_id is None:
                 return Subject()
-            admin = team_id is not None and await resolve_is_admin(
-                client, user_id=clicker, host_team_id=team_id, action=DelegatedAction.TOOL_RULES
-            )
-            caller = await admin_caller(
-                runtime, client, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
-            )
+            caller = await admin_caller(client, user_id=clicker)
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
                     session,

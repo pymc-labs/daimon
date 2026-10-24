@@ -276,9 +276,7 @@ async def _replacement_refused_at_submit(
             agent_names=agent_pin_names(agent.name, agent.metadata),
             ma_agent_id=str(agent.id),
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            caller=await admin_caller(
-                runtime, client, tenant_id=row.tenant_id, user_id=user_id, is_admin=False
-            ),
+            caller=await admin_caller(client, user_id=user_id),
             caller_account_id=row.account_id,
         )
     outcome = decide_operation("key_replace", is_admin=is_admin, target=facts)
@@ -314,15 +312,7 @@ async def _decide_mcp_connect_at_submit(
         server_name=row.target,
         url=row.mcp_server_url,
         platform="slack",
-        caller=await admin_caller(
-            runtime,
-            client,
-            tenant_id=row.tenant_id,
-            user_id=user_id,
-            is_admin=await resolve_is_admin(
-                client, user_id=user_id, host_team_id=team_id, action=None
-            ),
-        ),
+        caller=await admin_caller(client, user_id=user_id),
         default=runtime.deployment_default,
         shares_token=True,
     )

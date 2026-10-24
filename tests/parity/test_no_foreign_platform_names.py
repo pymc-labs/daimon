@@ -82,7 +82,9 @@ def test_a_turns_controls_name_only_its_own_platform(platform: ChatPlatform, pla
     thread = {"dm": "D1:1" if platform == "slack" else "dm:1", "channel": "T_THREAD"}[place]
     channel = "D1" if place == "dm" else "C_PARENT"
     rendered = render_turn_origin(
-        _origin(platform, parent_channel_id=channel, thread_id=thread), responder_handle="@daimon"
+        _origin(platform, parent_channel_id=channel, thread_id=thread),
+        effective_is_admin=False,
+        responder_handle="@daimon",
     )
     controls = json.loads(rendered.split("\n")[1])
 

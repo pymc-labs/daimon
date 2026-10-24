@@ -361,6 +361,7 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
         tenant_id=chat.auth.tenant_id,
         account_id=chat.auth.account_id,
         current_admin=_AsyncMock(return_value=chat.auth.is_admin),
+        current_platform_admin=_AsyncMock(return_value=False),
     )
     card = await prepare(
         prompt_for_tool_call(

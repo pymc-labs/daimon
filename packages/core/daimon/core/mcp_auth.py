@@ -268,7 +268,6 @@ def mint_jwt(
 CHAT_TOKEN_TTL = dt.timedelta(hours=1)
 CHAT_TOKEN_REFRESH_MARGIN = dt.timedelta(minutes=50)
 CHAT_TOKEN_LABEL_PREFIX = "vault-chat:"
-PANEL_TOKEN_LABEL = BILLING_PANEL_TOKEN_LABEL
 EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
 
 
@@ -637,7 +636,7 @@ async def mint_panel_mcp_token(
         secret=secret,
         now=now,
         expires_at=now + dt.timedelta(minutes=10),
-        label=PANEL_TOKEN_LABEL,
+        label=BILLING_PANEL_TOKEN_LABEL,
     )
 
 

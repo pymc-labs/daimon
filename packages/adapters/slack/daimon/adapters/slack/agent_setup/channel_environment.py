@@ -60,9 +60,7 @@ async def load_picker_subject(
     is_admin: bool,
 ) -> Subject:
     """The caller as `authorize` sees them. `is_admin` is resolved live."""
-    caller = await admin_caller(
-        runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
-    )
+    caller = await admin_caller(client, user_id=user_id)
     async with runtime.sessionmaker() as session:
         return await load_live_subject(
             session,

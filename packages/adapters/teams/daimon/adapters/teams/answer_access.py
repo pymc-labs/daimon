@@ -88,9 +88,7 @@ async def clicker(runtime: TeamsRuntime, actor: Actor) -> AdminCaller:
     """The clicker with the grant-named teams they own. Network: call with no session open."""
     return await admin_caller(
         runtime,
-        tenant_id=actor.tenant_id,
         user_id=actor.user_id,
-        is_admin=actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS),
     )
 
 

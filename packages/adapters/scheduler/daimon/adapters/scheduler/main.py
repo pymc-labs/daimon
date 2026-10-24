@@ -944,11 +944,11 @@ async def _sweep_lead_intake(sm: async_sessionmaker[AsyncSession]) -> None:
 
 async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
     """Bound ephemeral credential history without pruning operator/external keys."""
+    from daimon.core.admin_actions import BILLING_PANEL_TOKEN_LABEL
     from daimon.core.mcp_auth import (
         CHAT_TOKEN_LABEL_PREFIX,
         EPHEMERAL_TOKEN_RETENTION,
         HELD_CHAT_TOKEN_LABEL_PREFIX,
-        PANEL_TOKEN_LABEL,
     )
     from daimon.core.stores.mcp_tokens import prune_expired_ephemeral_tokens
 
@@ -958,7 +958,7 @@ async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
                 session,
                 expires_before=datetime.now(UTC) - EPHEMERAL_TOKEN_RETENTION,
                 chat_label_prefixes=(CHAT_TOKEN_LABEL_PREFIX, HELD_CHAT_TOKEN_LABEL_PREFIX),
-                panel_label=PANEL_TOKEN_LABEL,
+                panel_label=BILLING_PANEL_TOKEN_LABEL,
             )
     except SQLAlchemyError:
         log.exception("scheduler.mcp_token_sweep.failed")
