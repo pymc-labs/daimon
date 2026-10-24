@@ -354,13 +354,21 @@ async def test_worker_task_logs_original_failure_without_exception_payload(
             await task
         await asyncio.sleep(0)
     failures = [row for row in logs if row["event"] == "fleet.worker_task_failed"]
+    # Where it was raised is a code location (`frame`), checked by shape only.
+    for row in failures:
+        for cause in row["causes"]:
+            assert cause.pop("frame", "daimon.").startswith(("daimon.", "mux."))
     assert failures == [
         {
             "event": "fleet.worker_task_failed",
             "run_id": str(parent.fleet.run_id),
             "worker_id": first["worker_id"],
             "error_class": failure.__name__,
-            "causes": [{"type": "RuntimeError" if failure is RuntimeError else "redacted"}],
+            "causes": [
+                {"type": "RuntimeError"}
+                if failure is RuntimeError
+                else {"type": "unlisted", "class": "asyncio.exceptions.CancelledError"}
+            ],
             "log_level": "warning",
         }
     ]

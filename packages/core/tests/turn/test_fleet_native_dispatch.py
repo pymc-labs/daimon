@@ -1142,7 +1142,7 @@ async def test_worker_failure_log_retains_closed_refusal_without_private_payload
             if kind == "capability"
             else {"type": "AdmissionDenied", "reason": "backend_unsupported"}
         )
-        assert row["causes"] == [expected, {"type": "RuntimeError"}]
+        assert _unframed(row["causes"]) == [expected, {"type": "RuntimeError"}]
         assert row["run_id"] == str(root.fleet.run_id)
         assert row["worker_id"] == result["worker_id"]
         assert row["error_class"] == type(error).__name__
@@ -1241,11 +1241,11 @@ async def test_dispatch_failure_ends_claim_and_preserves_siblings_and_collection
                 {"type": "RuntimeError"},
             ]
         )
-        assert row["causes"] == expected and private not in json.dumps(row)
+        assert _unframed(row["causes"]) == expected and private not in json.dumps(row)
         from daimon.core.observability import redact_log_event
 
         scrubbed = redact_log_event(None, "warning", row)
-        assert scrubbed["causes"] == expected and private not in json.dumps(scrubbed)
+        assert _unframed(scrubbed["causes"]) == expected and private not in json.dumps(scrubbed)
     finally:
         release.set()
         await ports.close()
@@ -1441,3 +1441,11 @@ async def test_dispatch_skips_a_second_failure_commit_run_worker_already_recorde
         assert commits == ([] if recorded else ["setup_error"])
     finally:
         await ports.close()
+
+
+def _unframed(causes: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Causes without their `frame` (a code location: module:function:line)."""
+    for cause in causes:
+        frame = cause.get("frame")
+        assert frame is None or str(frame).startswith(("daimon.", "mux."))
+    return [{k: v for k, v in cause.items() if k != "frame"} for cause in causes]

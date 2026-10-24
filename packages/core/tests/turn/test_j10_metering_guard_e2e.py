@@ -308,3 +308,52 @@ async def test_the_watch_still_fails_closed_once_reads_fail_for_the_whole_window
     assert outcome == "usage_unavailable"
     assert {event.reason for event in cancelled.values()} == {"usage_unavailable"}
     assert time.monotonic() - started < 5
+
+
+async def test_the_watch_s_first_cause_survives_a_deferred_failure_and_the_sweep(
+    worker_root, monkeypatch
+):
+    """J10b (run 4fc62626, smoke dce44708): the watch cancelled every worker for
+    `usage_unavailable`, the workers' own failure writes hit DBAPIError under the same
+    contention and were deferred, and the deadline sweep ended them
+    `deadline_expired`: the real cause was lost. The first decision is recorded on
+    its own, so the sweep keeps it."""
+    from sqlalchemy import text
+
+    request, root, _, resolved, prices, _, _, _, _ = worker_root
+    real_finish = fleet.finish
+
+    async def busy_finish(*args, **kwargs):
+        raise DBAPIError("UPDATE fleet_worker", None, RuntimeError("lock busy"))
+
+    async def blind_watch(*, cancelled, finished, **_kwargs):
+        while not cancelled:  # the waiting worker registers its cancel event
+            await asyncio.sleep(0.02)
+        channel_budget.cancel_workers(cancelled, "usage_unavailable", run_id=root.fleet.run_id)
+        return "usage_unavailable"
+
+    monkeypatch.setattr(channel_budget, "watch_fleet_budget", blind_watch)
+    monkeypatch.setattr(fleet, "finish", busy_finish)
+    ports = _ports(request, prices, max_per_tenant=1)
+    owner = FleetOrchestrator(ports)
+    try:
+        waiting = await owner.spawn(
+            root, await _policy(request), **_spawn_terms(request, root, resolved, "waits")
+        )
+        started = time.monotonic()
+        row = await _row(request, root, waiting["worker_id"])
+        while row.error_code is None and time.monotonic() - started < 5:
+            await asyncio.sleep(0.05)
+            row = await _row(request, root, waiting["worker_id"])
+        assert row.status == "pending", "its own failure write was deferred, as in J10b"
+    finally:
+        await ports.close()
+    monkeypatch.setattr(fleet, "finish", real_finish)
+    async with request.deps.sessionmaker.begin() as db:
+        await db.execute(
+            text("UPDATE fleet_run SET deadline_at=now()-interval '1 second' WHERE id=:id"),
+            {"id": root.fleet.run_id},
+        )
+    await fleet.sweep_expired(request.deps.sessionmaker, tenant_id=request.tenant_id)
+    row = await _row(request, root, waiting["worker_id"])
+    assert (row.status, row.error_code) == ("failed", "usage_unavailable"), row.error_code

@@ -1626,3 +1626,48 @@ async def test_deadline_sweep_ends_only_expired_workers_without_settling_money(
     assert done.reserved_usd == Decimal("1.5")
     assert next(w for w in rows if w.id == healthy.id) == healthy
     assert await fleet.sweep_expired(sm) == (0, 0)
+
+
+async def test_a_recorded_cancel_cause_wins_over_a_later_end_and_blocks_a_claim(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """J10b: the budget watch's `usage_unavailable` is recorded before the worker ends.
+    Whatever ends it later (its own failure, the deadline sweep) keeps that cause; a
+    person's stop is still a stop; a pending worker with a recorded cause is never
+    started; an ended worker is never re-marked."""
+    sm = db_session_factory
+    run = await _run(sm)
+    pending = await _worker(sm, run, 0)
+    other = await _worker(sm, run, 1)
+    ended = await fleet.finish(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=other.id,
+        expected_version=other.version,
+        status="failed",
+        error_code="worker_lost",
+    )
+    marked = await fleet.record_cancel_cause(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_ids=(pending.id, ended.id),
+        error_code="usage_unavailable",
+    )
+    assert marked == 1, "only the worker not yet ended is marked"
+    assert await fleet.claim_worker(sm, tenant_id=run.tenant_id, run_id=run.id, cap=5) is None
+    _, rows = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    latest = next(w for w in rows if w.id == pending.id)
+    assert latest.status == "pending" and latest.error_code == "usage_unavailable"
+    final = await fleet.finish(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=pending.id,
+        expected_version=latest.version,
+        status="failed",
+        error_code="deadline_expired",
+    )
+    assert final.error_code == "usage_unavailable"
+    with pytest.raises(FleetConflict):
+        await fleet.record_cancel_cause(
+            sm, tenant_id=run.tenant_id, worker_ids=(pending.id,), error_code="deadline_expired"
+        )

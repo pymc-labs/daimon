@@ -312,6 +312,47 @@ def worker_failure_code(
     return "setup_error"
 
 
+async def record_cancel_cause(
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    worker_ids: tuple[uuid.UUID, ...],
+    attempts: int = 3,
+) -> bool:
+    """Record `usage_unavailable` on the cancelled workers, retried briefly.
+
+    Its own short transaction, so the busy path that blinded the watch can't also
+    erase why it cancelled. Returns whether it was recorded.
+    """
+    from daimon.core.channel_backend import exception_labels
+    from daimon.core.stores import fleet
+    from sqlalchemy.exc import SQLAlchemyError
+
+    for attempt in range(attempts):
+        try:
+            marked = await fleet.record_cancel_cause(
+                sessions,
+                tenant_id=tenant_id,
+                worker_ids=worker_ids,
+                error_code="usage_unavailable",
+            )
+        except SQLAlchemyError as error:
+            log.warning(
+                "fleet.cancel_cause_retry",
+                run_id=str(run_id),
+                attempt=attempt + 1,
+                **exception_labels(error),
+            )
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.25 * 2**attempt)
+            continue
+        log.info("fleet.cancel_cause_recorded", run_id=str(run_id), workers=marked)
+        return True
+    log.warning("fleet.cancel_cause_unrecorded", run_id=str(run_id))
+    return False
+
+
 class FleetRefused(ValueError):
     """Closed refusal code, with no request, result or credential material."""
 
@@ -1657,7 +1698,7 @@ class HostFleetPorts:
                                     parent.limits.deadline, now=request.now(), refuse_expired=True
                                 )
                             ):
-                                await watch_fleet_budget(
+                                decided = await watch_fleet_budget(
                                     sessionmaker=self.sessions,
                                     parent=parent,
                                     prices=self.prices,
@@ -1665,6 +1706,15 @@ class HostFleetPorts:
                                     cancelled=cancellations,
                                     finished=finished,
                                 )
+                        if decided == "usage_unavailable":
+                            # The first cause, kept: the workers' own failure records may
+                            # be deferred by the same contention (J10b).
+                            await record_cancel_cause(
+                                self.sessions,
+                                tenant_id=worker.tenant_id,
+                                run_id=worker.run_id,
+                                worker_ids=tuple(cancellations),
+                            )
                     except TimeoutError:
                         reason = "run_deadline"
                         raise

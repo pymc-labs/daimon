@@ -1124,11 +1124,15 @@ async def _admit_gates(
                 if error.cause is None:
                     # The agent's own backend: its runtime can't serve this agent here.
                     raise _backend_refusal(revision, "agent", None) from error
-                if error.cause == "re_confirm" and error.provider is None:
-                    # The copy names the provider the switch went to (J6g).
+                if (
+                    error.cause in ("re_confirm", "preparation_busy", "preparation_failed")
+                    and error.provider is None
+                ):
+                    # The copy names the provider the switch went to (J6g); a busy
+                    # or failed preparation is never "not set up".
                     raise AdmissionDenied(
                         reason="backend_unsupported",
-                        cause="re_confirm",
+                        cause=error.cause,
                         provider=revision.backend,
                     ) from error
             raise

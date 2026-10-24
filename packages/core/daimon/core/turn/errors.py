@@ -58,6 +58,12 @@ BackendRefusalCause = Literal[
     # preview instead of claiming the provider is not set up (J6g).
     "re_confirm",
     "no_credit_yet",
+    # Getting the agent ready failed for a reason a retry can clear (a timeout, a
+    # busy database): "busy, try again", never "not set up".
+    "preparation_busy",
+    # Getting the agent ready failed for a reason nobody proved is missing setup:
+    # "couldn't get it ready", with the reference, never "not set up".
+    "preparation_failed",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 
