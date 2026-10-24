@@ -83,7 +83,7 @@ async def chat(fresh_chat, monkeypatch):
     return fresh_chat
 
 
-# Nothing here forks, so the member variant (J2's strict xfail on fork) doesn't apply.
+# Nothing here forks, so the member variant adds nothing.
 @pytest.mark.parametrize("fresh_chat", ["admin"], indirect=True)
 async def test_j6_the_built_in_daimon_has_a_skill_a_built_in_tool_and_daimon_mcp(chat):
     """On Anthropic, nothing is represented: the agent itself carries all three."""

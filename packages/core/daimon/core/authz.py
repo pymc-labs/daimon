@@ -501,6 +501,19 @@ def _decide_hand_off(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
     if subject.is_admin and not subject.via_agent_key:
         return ALLOW
+    # A person may hand this thread to an agent they own (a copy they made), routed
+    # anywhere or nowhere: the binding is this thread only. `reach.owned` is read from
+    # the owner rows by the caller, never claimed.
+    reach = req.reach
+    if (
+        reach is not None
+        and reach.owned
+        and subject.platform_user_id is not None
+        and not subject.via_agent_key
+        and not subject.client
+        and req.hold is None
+    ):
+        return ALLOW
     return _deny("admin_required")
 
 

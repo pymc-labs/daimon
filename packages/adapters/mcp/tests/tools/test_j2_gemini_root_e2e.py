@@ -156,21 +156,7 @@ class Chat:
     trace: ScriptedTransport
 
 
-@pytest.fixture(
-    params=(
-        "admin",
-        pytest.param(
-            "member",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "a member is offered the copy but fork_agent refuses it (requires a server"
-                    " admin); the member path lands with the #1423/#1425 stack"
-                ),
-            ),
-        ),
-    )
-)
+@pytest.fixture(params=("admin", "member"))
 async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
     """The built-in Daimon answering a person's first message in a fresh public channel."""
     from daimon.core.provider_keys import DEFAULT_KEY_ENV

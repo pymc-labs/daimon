@@ -143,6 +143,8 @@ def _thread_line(state: PanelState) -> str | None:
     responder = context.responder_name or "Daimon"
     if context.kind == "handoff":
         return f"-# In this thread **{responder}** answers (handed off)"
+    if context.kind == "owner":
+        return f"-# In this thread **{responder}** answers (a private copy, only for its owner)"
     if context.target_name is None:
         return f"-# In this thread **{responder}** answers"
     return f"-# In this thread **{responder}** answers while setting up **{context.target_name}**"

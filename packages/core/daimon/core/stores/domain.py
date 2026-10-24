@@ -1109,7 +1109,7 @@ class ThreadAgentBindingRow(BaseModel):
     platform: str
     parent_channel_id: str
     thread_id: str
-    kind: Literal["setup", "handoff"] = "setup"
+    kind: Literal["setup", "handoff", "owner"] = "setup"
     responder_ma_agent_id: str
     responder_name: str
     configuration_target_ma_agent_id: str | None

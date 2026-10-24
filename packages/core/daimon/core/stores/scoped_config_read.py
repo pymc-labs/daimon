@@ -63,6 +63,17 @@ async def resolve(
             thread_id=context.thread_id,
         )
         if binding is not None:
+            if (
+                binding.kind == "owner"
+                and context.account_id is not None
+                and context.account_id != binding.creator_account_id
+            ):
+                # Someone's private copy answers only them: nobody else's turn (or
+                # session) ever runs on it.
+                raise UserFacingError(
+                    f"This thread belongs to someone's private copy ({binding.responder_name}). "
+                    "Ask me in the channel or a new thread."
+                )
             if binding.deleted:
                 raise UserFacingError(
                     "This setup conversation was deleted. Open a new setup conversation."

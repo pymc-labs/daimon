@@ -1,4 +1,5 @@
-"""A member copies the agent answering their turn, owns the copy, and switches it.
+"""A member copies the agent answering their turn, owns the copy, hands it this thread,
+and switches it.
 
 TARGET-V2 J10 policy: any member may fork the agent they are talking to (within its
 default caps); the copy is theirs, so they may switch its provider. The agent's MCP
@@ -237,6 +238,16 @@ async def test_a_member_copies_the_answering_agent_and_switches_their_copy(fresh
     async with chat.runtime.session_factory() as session:
         owner = await agent_owners.owner_of(session, chat.auth.tenant_id, copy_id)
     assert owner == chat.auth.account_id
+    # Hand this thread to the copy while it is still on this provider: it answers
+    # nowhere yet, and it is theirs, so they may.
+    from daimon.adapters.mcp.tools.task_continuity import (
+        _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    handed = await _hand_off_task_impl(
+        chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
+    )
+    assert handed.destination_ma_agent_id == copy.id
     # Switch the copy to GPT: preview, then the confirmed call (what the card runs).
     preview = await _request_agent_backend_switch_impl(
         chat.runtime,
@@ -257,6 +268,8 @@ async def test_a_member_copies_the_answering_agent_and_switches_their_copy(fresh
         accepted_drops=preview.declared_drops,
     )
     assert changed.status == "changed"
+    # The thread is the copy's now, so the switch moves this very conversation.
+    assert "This conversation moves to OpenAI from the next message" in changed.summary
     service = AgentBackendService(chat.runtime.session_factory, enabled=True)
     switched = await load_backend_agent(
         chat.runtime.client,

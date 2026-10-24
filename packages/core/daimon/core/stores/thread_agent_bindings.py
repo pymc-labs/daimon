@@ -28,7 +28,7 @@ async def create_binding(
     configuration_target_ma_agent_id: str | None = None,
     configuration_target_name: str | None = None,
     creator_account_id: uuid.UUID | None = None,
-    kind: Literal["setup", "handoff"] = "setup",
+    kind: Literal["setup", "handoff", "owner"] = "setup",
 ) -> ThreadAgentBindingRow:
     """Bind a thread to a responder.
 
@@ -347,8 +347,12 @@ async def upsert_responder_binding(
     responder_name: str,
     created_by_account_id: uuid.UUID | None,
     now: datetime,
+    kind: Literal["handoff", "owner"] = "handoff",
 ) -> ThreadAgentBindingRow:
     """Record that this thread's task was handed to `responder_ma_agent_id`.
+
+    `kind='owner'` is a hand-off to the caller's own private agent: it answers only
+    `created_by_account_id` (`scoped_config_read.resolve`).
 
     The location row is taken `FOR UPDATE` first, so two handoffs racing in one
     thread serialize instead of colliding on the unique location constraint,
@@ -387,7 +391,7 @@ async def upsert_responder_binding(
             responder_ma_agent_id=responder_ma_agent_id,
             responder_name=responder_name,
             creator_account_id=created_by_account_id,
-            kind="handoff",
+            kind=kind,
         )
     updated = (
         await session.execute(
@@ -396,6 +400,9 @@ async def upsert_responder_binding(
             .values(
                 responder_ma_agent_id=responder_ma_agent_id,
                 responder_name=responder_name,
+                kind=kind,
+                # An owner binding answers only its owner, so it names them.
+                **({"creator_account_id": created_by_account_id} if kind == "owner" else {}),
                 configuration_target_ma_agent_id=None,
                 configuration_target_name=None,
                 # A summary belongs to the hand-off that wrote it, never a later one.

@@ -1334,11 +1334,13 @@ async def test_a_member_may_own_only_so_many_copies(
     await _fork_agent_impl(
         runtime, auth, source_name="src", new_name="first", expected_ma_agent_id="ag_src"
     )
-    with pytest.raises(ToolError, match="most is 1"):
+    with pytest.raises(ToolError, match="most is 1") as full:
         await _fork_agent_impl(
             runtime, auth, source_name="src", new_name="second", expected_ma_agent_id="ag_src"
         )
     assert len(created) == 1, "nothing more is created"
+    # Archiving is admin-only, so the way out names who can do it.
+    assert "Ask a server admin to archive one" in str(full.value)
     # An admin is not limited.
     admin = replace(auth, role=Role.ADMIN, is_admin=True)
     await _fork_agent_impl(

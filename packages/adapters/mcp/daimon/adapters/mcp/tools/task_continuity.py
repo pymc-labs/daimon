@@ -27,6 +27,7 @@ from typing import Annotated, Literal, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import may_own
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
@@ -332,6 +333,11 @@ async def _hand_off_task_impl(
                     account_id=auth.account_id,
                     admin=admin,
                     via_agent_key=auth.agent_id is not None,
+                    # A person's own unheld credential: a copy they own may take
+                    # this thread even before it answers anywhere.
+                    may_own=may_own(auth) and auth.hold is None,
+                    client=auth.client,
+                    hold=auth.hold,
                 ),
                 destination=handoff_destination,
                 current_responder_ma_agent_id=origin.responder_ma_agent_id,
@@ -604,6 +610,13 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str, admin: str) -> str:
                 "Tell the caller an admin can make the handoff, or ask in one of that "
                 "agent's own channels.",
                 "Nothing was changed. Do not retry.",
+            ]
+        )
+    if refusal.reason == "shared_thread":
+        return "\n".join(
+            [
+                render_handoff_refused(refusal, channel=channel),
+                "Tell the caller exactly that. Nothing was changed. Do not retry.",
             ]
         )
     if refusal.reason in ("writers_none", "invoker_not_allowed", "own_agents_only", "not_a_reader"):

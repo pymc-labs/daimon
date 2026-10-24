@@ -1460,7 +1460,8 @@ async def _require_member_copy_room(runtime: McpRuntime, auth: AuthIdentity) -> 
     if len(mine) >= limit:
         raise ToolError(
             f"You already have {len(mine)} copies of your own (the most is {limit}). "
-            "Archive one you no longer use, or ask an admin to make this copy. "
+            f"Ask {admin_noun(auth.platform)} to archive one you no longer use, or to "
+            "make this copy. "
             "Nothing was created."
         )
 

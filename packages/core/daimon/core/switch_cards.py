@@ -117,7 +117,9 @@ async def move_this_thread(
     # Who answers this conversation's next message: a hand-off's agent, else this
     # turn's responder. A setup conversation's configuration target never moves it.
     answering = (
-        handed.responder_name if handed is not None and handed.kind == "handoff" else responder_name
+        handed.responder_name
+        if handed is not None and handed.kind in ("handoff", "owner")
+        else responder_name
     )
     if (handed is not None and handed.kind == "setup") or agent_name != answering:
         return f"{agent_name} isn't the one answering here, so this conversation is unchanged."
