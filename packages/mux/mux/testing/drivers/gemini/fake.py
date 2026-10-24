@@ -26,6 +26,11 @@ class MemoryStorage:
             yield snapshot
             self._records = snapshot
 
+    @asynccontextmanager
+    async def read(self) -> AsyncIterator[Records]:
+        """The last committed records, without waiting for a writer; never saved."""
+        yield deepcopy(self._records)
+
 
 class FakeTransport:
     def __init__(self) -> None:

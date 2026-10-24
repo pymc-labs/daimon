@@ -1,5 +1,6 @@
 """Offline Gemini port probes using documented wire records and no provider access."""
 
+import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -8,7 +9,7 @@ from mux.contracts.actions import NativeInput, UserMessage, UserToolResult
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import NativePart, TextPart, ToolResultPayload
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, Scope, ThreadRef
+from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, ResourceRef, Scope, ThreadRef
 from mux.contracts.ports import ManagedAgents, Steering
 from mux.contracts.resources import (
     AgentSpec,
@@ -1137,3 +1138,174 @@ async def test_usage_reconcile_retries_a_high_demand_read(setup: Setup) -> None:
     t.reads["i1"] = [high_demand(), native()]
     assert await ma.usage.reconcile(SCOPE, s.ref)
     assert t.read_requests == ["i1", "i1"] and len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reading", ["usage", "events"])
+@pytest.mark.parametrize("change", ["removed", "replaced"])
+async def test_reconcile_never_applies_a_read_to_an_interaction_changed_meanwhile(
+    setup: Setup, reading: str, change: str
+) -> None:
+    """The provider reads run outside the records transaction; the result is applied
+    in a short one afterwards. An interaction removed, or given to another turn, while
+    its read ran must never receive that read."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(usage=None))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    before = await ma.usage.list(SCOPE, s.ref, page=PageRequest())
+    t.saved["i1"]["usage"] = {
+        "total_input_tokens": 10,
+        "total_output_tokens": 100,
+        "total_thought_tokens": 0,
+    }
+    t.saved["i1"]["updated"] = datetime.now(UTC).isoformat()
+    real_get = t.get
+
+    async def get_then_change(interaction: str) -> Object:
+        raw = await real_get(interaction)
+        async with storage.transaction() as records:  # another writer, mid-read
+            record = records.sessions[s.ref.id]
+            if change == "removed":
+                del record.interactions[interaction]
+            else:
+                record.interactions[interaction] = "another-turn"
+        return raw
+
+    t.get = get_then_change  # type: ignore[method-assign]
+    if reading == "usage":
+        await asyncio.wait_for(ma.usage.reconcile(SCOPE, s.ref), 5)
+    else:
+        await asyncio.wait_for(ma.events.reconcile(SCOPE, s.ref), 5)
+    assert await ma.usage.list(SCOPE, s.ref, page=PageRequest()) == before
+
+
+@pytest.mark.asyncio
+async def test_a_completed_interactions_events_are_delivered_while_a_writer_holds_records(
+    setup: Setup,
+) -> None:
+    """J6g PAKM6G failed busy right after `interaction.completed`: the stream reconciled,
+    then read the turn's events through the account's write transaction again. Another
+    copy's writer taking the records row the moment the reconcile commits must not stop
+    the events it just committed from being delivered."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native()
+    t.streams["i1"] = [{"event_type": "interaction.completed"}]
+    real_reconcile = ma.events.reconcile
+    real_transaction = storage.transaction
+    held = False
+
+    async def reconcile_then_a_writer_takes_the_row(scope: Scope, session: ResourceRef):
+        nonlocal held
+        result = await real_reconcile(scope, session)
+        held = True
+        return result
+
+    def transaction(*, after_dispatch: bool = False):
+        if held:
+            raise RuntimeError("records row held by another copy's writer")
+        return real_transaction(after_dispatch=after_dispatch)
+
+    ma.events.reconcile = reconcile_then_a_writer_takes_the_row  # type: ignore[method-assign]
+    storage.transaction = transaction  # type: ignore[method-assign]
+    streamed = [e async for e in ma.events.stream(SCOPE, s.ref)]
+    assert held, "the writer took the row after the reconcile"
+    assert any(e.type == "session.turn_ended" for e in streamed), [e.type for e in streamed]
+
+
+#: Later than any stamp the turn's own send records, so the fresher read is applied.
+_STAMP = (datetime.now(UTC) + timedelta(hours=1)).replace(microsecond=0).isoformat()
+
+
+def _read_at_stamp(status: str, output_tokens: int) -> Object:
+    """A provider read whose `updated` is the same second as the one recorded."""
+    return native(
+        status=status,
+        created=_STAMP,
+        updated=_STAMP,
+        usage={
+            "total_input_tokens": 10,
+            "total_output_tokens": output_tokens,
+            "total_thought_tokens": 0,
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stale",
+    [
+        pytest.param(_read_at_stamp("in_progress", 120), id="un-finalises"),
+        pytest.param(_read_at_stamp("completed", 100), id="lowers-usage"),
+        pytest.param(_read_at_stamp("in_progress", 200), id="re-opens-the-turn"),
+    ],
+)
+async def test_a_stale_read_with_an_equal_stamp_never_undoes_a_fresher_one(
+    setup: Setup, stale: Object
+) -> None:
+    """#1557 review 1: provider reads run outside the records lock, so an older read can
+    commit after a fresher one with the same seconds-precision stamp. It must never
+    un-finalise usage, lower a count, or re-open the finished turn."""
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[], usage=None))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = _read_at_stamp("completed", 120)
+    await ma.usage.reconcile(SCOPE, s.ref)
+    fresher = await ma.usage.list(SCOPE, s.ref, page=PageRequest())
+    assert fresher.data[-1].final and fresher.data[-1].output_tokens == 120
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+
+    t.saved["i1"] = stale
+    await ma.usage.reconcile(SCOPE, s.ref)
+    assert await ma.usage.list(SCOPE, s.ref, page=PageRequest()) == fresher
+    current = await ma.sessions.retrieve(SCOPE, s.ref)
+    assert current.state == "idle" and current.active_root_turn is None
+
+
+@pytest.mark.asyncio
+async def test_a_read_from_a_workspace_replaced_meanwhile_is_refused(setup: Setup) -> None:
+    """#1557 review 4: the read is checked against the snapshot's workspace before the
+    lock, and again against the current record when it is applied."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native())
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    real_get = t.get
+
+    async def get_while_the_workspace_changes(interaction: str) -> Object:
+        raw = await real_get(interaction)
+        async with storage.transaction() as records:
+            records.sessions[s.ref.id].environment_id = "e2"
+        return raw
+
+    t.get = get_while_the_workspace_changes  # type: ignore[method-assign]
+    with pytest.raises(ContinuityLost):
+        await asyncio.wait_for(ma.usage.reconcile(SCOPE, s.ref), 5)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_observation_holds_no_lock_while_it_reads_the_provider(
+    setup: Setup,
+) -> None:
+    """#1557 review 2: wait_stopped polls the provider; each read used to hold the
+    account's records row for its whole duration."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    sent = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    assert sent.turn_id is not None
+    receipt = await ma.events.cancel(SCOPE, s.ref, turn_id=sent.turn_id, key="cancel")
+    t.saved["i1"]["status"] = "cancelled"
+    real_get = t.get
+    wrote: list[bool] = []
+
+    async def get_while_another_writer_commits(interaction: str) -> Object:
+        async with storage.transaction():
+            wrote.append(True)
+        return await real_get(interaction)
+
+    t.get = get_while_another_writer_commits  # type: ignore[method-assign]
+    deadline = datetime.now(UTC) + timedelta(seconds=1)
+    stop = await asyncio.wait_for(ma.events.wait_stopped(SCOPE, receipt, deadline=deadline), 5)
+    assert wrote and stop.stopped and stop.outcome == "interrupted"
+    t.get = real_get  # type: ignore[method-assign]  # retrieve still reads under the lock
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"

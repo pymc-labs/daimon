@@ -9,7 +9,7 @@ across workers for the same provider account.
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, cast
 
 from mux.contracts.events import Event
 from mux.contracts.ids import ModelRef, Scope
@@ -101,6 +101,20 @@ class Storage(Protocol):
         work and POST time) or earlier request cancellation still bounds that wait.
         """
         ...
+
+
+def read_records(storage: Storage) -> AbstractAsyncContextManager[Records]:
+    """Records for a pure read: a committed snapshot where the storage offers `read()`.
+
+    A storage may provide `read()`: the last committed Records, taken without the
+    write fence and never saved, so listing usage or events never waits behind a
+    writer for the same account. Without it, the write transaction serves the read.
+    Mutating what it yields persists nothing.
+    """
+    reader = getattr(storage, "read", None)
+    if callable(reader):
+        return cast(AbstractAsyncContextManager[Records], reader())
+    return storage.transaction()
 
 
 def owner(scope: Scope) -> tuple[str, str]:
