@@ -78,6 +78,28 @@ async def get_active_origin(
     return TurnOriginRow.model_validate(origin) if origin is not None else None
 
 
+async def thread_requester_accounts(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    now: datetime,
+) -> set[uuid.UUID]:
+    """Everyone who took a turn in one thread recently (an origin not yet expired)."""
+    rows = await session.scalars(
+        select(TurnOrigin.account_id)
+        .where(
+            TurnOrigin.tenant_id == tenant_id,
+            TurnOrigin.platform == platform,
+            TurnOrigin.thread_id == thread_id,
+            TurnOrigin.expires_at > now,
+        )
+        .distinct()
+    )
+    return set(rows)
+
+
 async def list_active_origins(
     session: AsyncSession,
     *,

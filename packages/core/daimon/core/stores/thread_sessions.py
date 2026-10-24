@@ -118,6 +118,29 @@ async def list_live_thread_sessions(
     return [ThreadSessionRow.model_validate(row) for row in rows]
 
 
+async def thread_session_accounts(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> set[_uuid.UUID | None]:
+    """Everyone who has had a session in one thread, live or closed (None: no account).
+
+    For a decision about the thread itself, like `list_live_thread_sessions`.
+    """
+    rows = await session.scalars(
+        select(ThreadSession.account_id)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_id,
+        )
+        .distinct()
+    )
+    return set(rows)
+
+
 async def list_live_sessions_for_agent(
     session: AsyncSession, *, tenant_id: _uuid.UUID, agent_id: _uuid.UUID
 ) -> list[ThreadSessionRow]:
