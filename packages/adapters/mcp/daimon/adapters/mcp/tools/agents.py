@@ -1736,9 +1736,12 @@ async def _request_agent_backend_switch_impl(
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
         status: Literal["preview", "changed"] = "preview"
         summary = (
-            "Show this compatibility and cost preview. If they want to proceed, call "
-            "request_agent_backend_switch again with its expected_revision and preview_digest; "
-            "the requester must Confirm on the card. Nothing has changed yet."
+            "Tell the person in plain words the compatibility, what won't be available "
+            "and the cost line, then call request_agent_backend_switch again in this same "
+            "turn with its expected_revision and preview_digest. Do not ask the person to "
+            "reply yes or to confirm in chat: the second call posts the switch card, and "
+            "they Confirm on it. The request that began this turn is already the go-ahead. "
+            "Nothing has changed yet."
         )
         if preview_digest is not None:
             reference = BackendSwitchReference.model_validate(
@@ -2190,11 +2193,14 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             this conversation to the copy and moves it to Gemini from the next message.
             If that preview asks the uncommitted-work question, pass the person's
             answer as ``unsaved_work`` on both calls.
-            First call without preview_digest and show the returned compatibility,
-            shared-thread limits, what won't be available, and the cost line. Call again
-            with the same model and that preview's expected_revision, preview_digest and
-            exact declared_drops as accepted_drops: the requester must Confirm
-            on the card before anything is changed. A stale preview or expired card
+            First call without preview_digest: tell the person in plain words the
+            compatibility, shared-thread limits, what won't be available and the cost
+            line, then call again in this same turn with the same model and that preview's
+            expected_revision, preview_digest and exact declared_drops as accepted_drops.
+            Never ask the person to reply "yes", to confirm in chat, or for a second
+            go-ahead: the request that began this turn is the go-ahead, and the second
+            call posts the card, where they Confirm. Never confirm, approve or accept it
+            on their behalf, and never say you did. A stale preview or expired card
             changes nothing; preview again. Pass this active turn's origin_context_id.
             The same tool states the agent's own settings: ``thread_mode`` ("shared"
             to share threads where the channel allows it, admins only; or "per_caller") and

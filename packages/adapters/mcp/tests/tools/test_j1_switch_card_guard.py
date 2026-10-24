@@ -260,6 +260,11 @@ def _assert_the_card_is_posted_in_this_turn(*guidance: str) -> None:
         for pattern in _HOLDS_THE_CARD_BACK:
             assert not re.search(pattern, text, flags=re.IGNORECASE), (pattern, text)
         assert "preview_digest" in text, text  # says how to post the card: call again
+        # Says it outright (SMOKE 42591c55 J5: "If they want to proceed" read as "ask for
+        # a chat yes"): the second call is in this turn, and no chat yes is asked for.
+        flat = " ".join(text.lower().split())
+        assert "same turn" in flat, text
+        assert re.search(r"(do not|never) ask the person to reply", flat), text
 
 
 async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
