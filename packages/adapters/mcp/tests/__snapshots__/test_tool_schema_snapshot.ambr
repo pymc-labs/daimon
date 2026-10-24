@@ -6128,6 +6128,28 @@
             'additionalProperties': False,
             'description': 'Model proposal; original text and verification flags are fetched server-side.',
             'properties': dict({
+              'attribution_evidence': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'attribution_value': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
               'classification': dict({
                 '$ref': '#/$defs/LeadClassification',
               }),
