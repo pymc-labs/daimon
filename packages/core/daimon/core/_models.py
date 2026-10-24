@@ -2208,6 +2208,46 @@ class WizardSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class FleetPlan(Base):
+    """A fleet run's plan, before it runs (`daimon.core.fleet_plan`).
+
+    Built from the agent's fleet grant and the models the person named, shown to the
+    person, and accepted once. With `fleet.require_plan` on, a chat turn's fleet
+    spawn needs an accepted plan for its thread and stays inside it. `plan` is a
+    serialized `daimon.core.fleet_plan.Plan`, validated back at read time;
+    `digest` pins what was accepted. Account-scoped (purged by the accounts.id
+    cascade).
+    """
+
+    __tablename__ = "fleet_plans"
+    __table_args__ = (
+        Index("ix_fleet_plans_thread", "tenant_id", "platform", "channel_id", "thread_id"),
+        CheckConstraint(
+            "status IN ('pending', 'accepted', 'cancelled')", name="ck_fleet_plans_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    # dict[str, Any]: a serialized Plan, validated back into the model at read time.
+    plan: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SlackEventDedup(Base):
     """Exactly-once gate for inbound Slack events.
 
