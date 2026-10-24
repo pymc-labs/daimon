@@ -24,7 +24,7 @@ def render_tool_refusal_unreachable(name: str, channel: str) -> str:
     """`ToolError` text: `name` cannot be handed a task because it answers nowhere."""
     return "\n".join(
         [
-            f"'{name}' does not answer anywhere in this workspace, so it cannot be handed a task.",
+            f"'{name}' does not answer anywhere here, so it cannot be handed a task.",
             f"Tell the caller an admin can say: make {name} answer in {channel}. Then the "
             "handoff will work.",
             "Nothing was changed. Do not retry.",

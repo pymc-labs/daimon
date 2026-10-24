@@ -42,8 +42,8 @@ from daimon.core.posted_controls import classify_card_state
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.credential_requests import create_credential_request
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

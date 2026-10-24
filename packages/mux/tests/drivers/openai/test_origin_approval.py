@@ -6,7 +6,6 @@ import json
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserToolConfirmation
 from mux.contracts.events import RequiresActionPayload
 from mux.drivers.openai import OpenAIDriver
@@ -15,6 +14,7 @@ from mux.drivers.openai.transport import Object, SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, UnsupportedCapability
+from mux.testing.isolated_sdk import build_async_openai
 
 from .conftest import REF, SCOPE, native_session, page, turn
 

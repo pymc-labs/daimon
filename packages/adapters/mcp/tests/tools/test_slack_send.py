@@ -1426,7 +1426,7 @@ async def test_send_message_is_refused_when_the_policy_is_unreadable(
     auth = _auth(tenant_id=tenant.id)
     with aioresponses() as m:
         _mock_public_channel_access(m)
-        with pytest.raises(ToolError, match="access policy could not be read"):
+        with pytest.raises(ToolError, match="access settings here could not be read"):
             await _slack_send_message_impl(
                 runtime, auth, channel_id="C1", content="hi", attachments=None, file_handles=None
             )

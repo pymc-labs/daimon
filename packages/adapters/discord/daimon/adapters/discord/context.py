@@ -316,7 +316,7 @@ def _render_message(
                 if not omit_oversized_image_urls
                 else "Larger than "
                 f"{MAX_VISION_IMAGE_DIMENSION}px on an edge. Its URL is withheld: "
-                "reading it at full size already terminated a session in this thread."
+                "reading it at full size already ended a conversation in this thread."
             )
         lines.append(f"<attachment{att_attrs}/>")
     lines.append("</attachments>")

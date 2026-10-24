@@ -26,7 +26,7 @@ from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.receipts import CancelReceipt, Operation, SendReceipt
 from mux.state.store import binding_slot
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 
 from .test_frozen_preparation import revoke
 from .test_frozen_root import root_turn as root_turn
@@ -119,6 +119,7 @@ async def test_caller_guard_identity_is_composed_and_refuses_before_native_alloc
                 request.admission,
                 tenant_id=request.tenant_id,
                 preparation=request,
+                platform="discord",
             ),
         )
     assert callback_calls == [caller]
@@ -128,6 +129,35 @@ async def test_caller_guard_identity_is_composed_and_refuses_before_native_alloc
     assert non_get == [("POST", "/v1/memory_stores")]
     root = await root_record(root_turn)
     assert root.result["root_finance"]["input_keys"] == []
+    assert root.result["root_finance"]["exposure_usd"] == "0.06"
+
+
+async def test_a_root_without_a_native_cap_keeps_the_host_hold_and_no_native_budget(
+    root_turn, monkeypatch
+):
+    """A provider with no native session cap (OpenAI on our project: `spend_control`
+    is a 400) still gets the grant's root controls and cash hold, never a native budget."""
+    from daimon.core.turn.prepare import _admitted_profile  # pyright: ignore[reportPrivateUsage]
+    from mux import profiles
+
+    _, prepared, *_ = root_turn
+    profile_id = _admitted_profile(prepared._preparation.admission)
+    original = profiles.PROFILES[profile_id]
+    monkeypatch.setitem(
+        profiles.PROFILES,
+        profile_id,
+        original.model_copy(
+            update={"support": {**original.support, "session_spend_control": "unsupported"}}
+        ),
+    )
+    request = await select_controls(root_turn)
+    assert request.native_budget_usd is None
+    assert request.root_controls is not None
+    assert request.root_controls["cash_budget_usd"] == "0.06"
+    # The grant's figure only sizes the hold here; nothing records it as a native cap.
+    assert "native_budget_usd" not in request.root_controls
+    assert request.root_controls["hold_budget_usd"] == "0.03"
+    root = await root_record(root_turn)
     assert root.result["root_finance"]["exposure_usd"] == "0.06"
 
 
@@ -219,9 +249,9 @@ async def test_revoked_grant_refuses_at_claim_but_drain_bypasses_it(root_turn, k
 
 async def test_real_root_allocation_carries_native_budget_and_replays_ack(root_turn):
     from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
-    from daimon.testing.ma import make_fake_memory_store_handler
-    from daimon.testing.ma_models import ma_session
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma import make_fake_memory_store_handler
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     callback_calls = []
 
@@ -256,7 +286,11 @@ async def test_real_root_allocation_carries_native_budget_and_replays_ack(root_t
 
     async def create():
         return await create_ma_session(
-            request.deps, request.admission, tenant_id=request.tenant_id, preparation=request
+            request.deps,
+            request.admission,
+            tenant_id=request.tenant_id,
+            preparation=request,
+            platform="discord",
         )
 
     first = await run_controlled_preparation(request, create())
@@ -439,7 +473,11 @@ async def test_busy_preallocation_closes_unstarted_native_preparation_without_io
         slot, holder="other-root", turn_id="other-root", now=request.now(), ttl=timedelta(minutes=5)
     )
     preparing = create_ma_session(
-        request.deps, request.admission, tenant_id=request.tenant_id, preparation=request
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        preparation=request,
+        platform="discord",
     )
     before = len(root_turn[-1].requests)
     try:
@@ -612,3 +650,27 @@ async def test_crash_resumed_claim_retains_first_observer_outcome_without_double
         "first-observer outcome must survive a resumed claim under a different current observer"
     )
     assert finance_after["exposure_usd"] == finance["exposure_usd"], "no extra debit on resume"
+
+
+async def test_the_claim_guard_runs_without_holding_the_tenant_fleet_lock(root_turn):
+    """SMOKE J4: the send claim held the fleet lock (and the tenant row) while the guard
+    read the grant on other sessions, so every fleet admission in the tenant waited."""
+    deps, _, _, _, _, scope, binding, _ = root_turn
+    free: list[bool] = []
+
+    async def probe() -> None:
+        async with deps.sessionmaker.begin() as db:
+            free.append(
+                (
+                    await db.execute(
+                        text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+                        {"key": f"fleet:{scope.tenant_id}"},
+                    )
+                ).scalar_one()
+            )
+
+    request = await select_controls(root_turn, before_native=probe)
+    await deps.state_store.put_binding(binding, expected_generation=0)
+    free.clear()
+    await send(root_turn, request, "guarded")
+    assert free and all(free)

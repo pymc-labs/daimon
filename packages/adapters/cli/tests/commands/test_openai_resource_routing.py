@@ -36,13 +36,18 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.neutral_catalog import AgentRevision, PostgresNeutralCatalog
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import get_tenant
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_anthropic
-from daimon.testing.ma import FakeMAState, MARouter, list_response, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent
 from mux.contracts.config import BackendConfig, ConfigRevision
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import Agent, AgentSpec
+from mux.testing.drivers.anthropic.ma import (
+    FakeMAState,
+    MARouter,
+    list_response,
+    make_fake_ma_handler,
+)
+from mux.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_anthropic
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import functools
+import itertools
 import json
 import re
 import uuid
@@ -21,6 +22,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import (
     PrivateChannelMessagesSettings,
@@ -37,23 +39,22 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.testing import (
-    build_fake_anthropic,
-    ma_session,
-    ma_session_agent,
-    make_agent_env_echo_handler,
-)
 from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.db import db_clean as db_clean
+from daimon.testing.db import db_committing_engine as db_committing_engine
+from daimon.testing.db import db_committing_pool as db_committing_pool
 from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
 from daimon.testing.db import db_session as db_session
 from daimon.testing.db import db_session_factory as db_session_factory
+from daimon.testing.ma import make_agent_env_echo_handler
 from jsonschema import Draft6Validator
 from jsonschema.exceptions import best_match
 from microsoft_teams.api import MessageActivityInput, SentActivity
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http.client import MiddlewareContext
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Synthetic identifiers only.
@@ -381,6 +382,17 @@ def assert_card_renders(content: dict[str, Any]) -> None:
     assert version <= (1, 5), f"Teams renders up to 1.5, not {content['version']}"
 
 
+def notice_text(response: Any) -> str:
+    """The text of the one-line dialog that answers a click opening a dialog.
+
+    Teams shows "Unable to reach app" for a bare `message` task there, so an open
+    that refuses answers with `continue` and a single text block.
+    """
+    assert response["task"]["type"] == "continue", response
+    [line] = response["task"]["value"]["card"]["content"]["body"]
+    return line["text"]
+
+
 def assert_teams_accepts(request: SentRequest) -> None:
     """One recorded activity as Teams takes it: renderable cards, under its size cap, and
     an edit naming the activity it replaces."""
@@ -532,11 +544,18 @@ def patched_admission() -> Iterator[None]:
         env.return_value = "env_test_id"
         balance.return_value = False
         cap.return_value = False
-        create.return_value = ma_session(
-            id="sess-teams-1",
-            agent=ma_session_agent(id="agent_test_id"),
-            environment_id="env_test_id",
-        )
+        minted = itertools.count(1)
+
+        async def mint_session(*_args: Any, **_kwargs: Any) -> Any:
+            # A real create returns a new id each call, and the mux state store
+            # refuses one session bound to two slots (`stores/mux_state.py`).
+            return ma_session(
+                id=f"sess-teams-{next(minted)}",
+                agent=ma_session_agent(id="agent_test_id"),
+                environment_id="env_test_id",
+            )
+
+        create.side_effect = mint_session
         yield
 
 
@@ -600,6 +619,25 @@ def patched_turns(
 
 
 @pytest.fixture
+def instant_output_settle() -> Iterator[None]:
+    """`TeamsApp` sweeps a turn's outputs on the production poll schedule, minus the waiting.
+
+    The sweep's settle schedule counts the delays it asks `sleep` for, not the clock, so a
+    zero-length sleep walks the same polls (2 s, 4 s) in the same order. For a test about
+    the turn rather than the settle floor.
+    """
+
+    async def no_wait(_delay: float) -> None:
+        await asyncio.sleep(0)
+
+    with patch(
+        "daimon.adapters.teams.app.TeamsOutputDelivery",
+        functools.partial(TeamsOutputDelivery, sleep=no_wait),
+    ):
+        yield
+
+
+@pytest.fixture
 async def provisioned_tenant(db_session_factory: async_sessionmaker[AsyncSession]) -> None:
     await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
 
@@ -632,6 +670,15 @@ def no_admission_reclaimer() -> Iterator[AsyncMock]:
     """The periodic reclaim would share the test connection too; boot's pass still runs."""
     with patch("daimon.adapters.teams.app.TeamsApp._reclaim_loop", new_callable=AsyncMock) as loop:
         yield loop
+
+
+@pytest.fixture(autouse=True)
+def no_restart_catch_up() -> Iterator[AsyncMock]:
+    """The boot's Graph catch-up would share the test connection too; its own tests run it."""
+    with patch(
+        "daimon.adapters.teams.restart_catch_up.RestartCatchUp.run", new_callable=AsyncMock
+    ) as run:
+        yield run
 
 
 @pytest.fixture
@@ -678,3 +725,21 @@ def isolate_agent_faces() -> Iterator[None]:
 
     yield
     cancel_pending_agent_faces()
+
+
+@pytest.fixture(autouse=True)
+def _status_log_off() -> Iterator[None]:
+    """Pin `turn.status_log` off, so the environment cannot change what a test sees."""
+    from daimon.core.turn.status_log import status_log_override
+
+    with status_log_override(False):
+        yield
+
+
+@pytest.fixture
+def status_log_on(_status_log_off: None) -> Iterator[None]:
+    """Run a test with `turn.status_log` on; every other test runs with it off."""
+    from daimon.core.turn.status_log import status_log_override
+
+    with status_log_override(True):
+        yield

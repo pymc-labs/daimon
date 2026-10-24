@@ -62,7 +62,7 @@ async def send_direct_message_impl(
         raise ToolError("recipient_id must be one platform user ID, not a mention or channel")
     policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
     if not policy.allows(recipient_id):
-        raise ToolError("recipient is denied by this tenant's direct-message policy")
+        raise ToolError("direct messages to this recipient are not allowed here")
     await require_dm_recipient_allowed(runtime, auth, recipient_id=recipient_id)
     chunks = [content[i : i + 1900] for i in range(0, len(content), 1900)]
     ids: list[str] = []
@@ -82,7 +82,7 @@ async def send_direct_message_impl(
                 await guild.fetch_member(int(caller))
                 recipient = await guild.fetch_member(int(recipient_id))
                 if recipient.bot:
-                    raise ToolError("recipient must be a human tenant member")
+                    raise ToolError("recipient must be a person in this server")
                 dm = await recipient.create_dm()
                 for chunk in chunks:
                     message = await dm.send(chunk, allowed_mentions=discord.AllowedMentions.none())
@@ -111,9 +111,7 @@ async def send_direct_message_impl(
                 or user.get("is_bot")
                 or user.get("is_stranger")
             ):
-                raise ToolError(
-                    "sender and recipient must be active human members of this workspace"
-                )
+                raise ToolError("sender and recipient must be active human members here")
         opened = await client.conversations_open(users=recipient_id)  # pyright: ignore[reportUnknownMemberType]
         channel = cast(dict[str, str], opened["channel"])["id"]
         identity_kwargs = await _agent_identity_kwargs(runtime, auth)

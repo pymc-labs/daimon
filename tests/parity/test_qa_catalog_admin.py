@@ -232,7 +232,7 @@ async def test_the_isolated_client_takes_nothing_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from daimon.testing.headless_bindings import isolated_anthropic
-    from daimon.testing.isolated_sdk import AmbientSDKConfigurationError
+    from mux.testing.isolated_sdk import AmbientSDKConfigurationError
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"egress attempted: {request.url}")

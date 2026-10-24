@@ -4,6 +4,87 @@ This guide expands the README quickstart. It covers the full Docker Compose
 setup, running the processes by hand, Slack, Microsoft Teams, the Claude Code
 login mounts, chart storage and connecting MCP servers.
 
+## Azure infrastructure
+
+The repository includes Bicep templates in `deploy/azure/` and a root `azure.yaml`
+for Azure Developer CLI. They provision a Container Apps environment, Discord,
+Teams, MCP and scheduler apps, a manual migration/seeding job, Burstable
+PostgreSQL, RBAC Key Vault, a private Blob container, ACR, Log Analytics and an
+optional Azure OpenAI model deployment with a Foundry project. Known model names
+used as deployment aliases must match their underlying model regardless of
+letter case. The services array selects which adapters run; MCP receives the
+selected platform settings.
+Service secrets use Key Vault references through managed identity.
+
+Deployment is staged: foundation, image publication and successful init, then
+serving apps. The baseline uses public endpoints and does not implement private
+networking. By default (`chartStorage=azure_blob`), MCP uses private Blob chart
+storage with the runtime managed identity: delegation-key access is scoped to
+the storage account and blob data access to the charts container. Existing S3
+installations must set `chartStorage=external` to omit Blob defaults and roles;
+Blob mode rejects shared or MCP S3 secret mappings before app startup. These templates have been validated
+offline only; subscription deployment and runtime behavior have not been verified. See `deploy/azure/README.md` in the
+repository for parameters, deployment commands, required roles and limitations.
+
+## Self-hosted resource records
+
+`daimon selfhosted init` stores an agent and an environment in Postgres for an
+existing tenant. Apply migrations first. It needs the database connection and
+no Anthropic or model credential. It prints the agent ID and environment ID,
+one per line; repeating it with matching names and configuration reuses them.
+A changed configuration is refused. Archived names can be initialized again
+with a new active record.
+
+```bash
+# DAIMON_DATABASE__URL contains the Postgres connection URL.
+daimon selfhosted init \
+  --tenant-id <tenant-uuid> \
+  --harness-url https://harness.example \
+  --model gpt-6-luna \
+  --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY
+```
+
+The default names are `daimon` and `default`; override them with `--name` and
+`--environment-name`. `--system-file` reads the agent's system prompt from a
+UTF-8 file. `--model` is the Azure deployment name. The command records
+`DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY` as a variable name; it does not read or store its value.
+`--packages-note` records an operator note without installing packages.
+
+The record schema also accepts Foundry routing with
+`--transport foundry_invocations --agent-name <hosted-agent>` and
+`--project-endpoint <project-endpoint>`, with `--auth-mode entra` and
+`--auth-ref <audience>`. Both routing fields are required for that transport.
+The harness image runs tini as PID 1 to reap orphaned tool processes. Custom
+entrypoints must retain that reaper. Multi-session service additionally requires
+all shared scratch directories, including `/var/tmp` and `/dev/shm`, to deny tool
+UID writes; startup scans writable storage mounts and refuses unsafe directories.
+Tools use private per-session temporary directories.
+
+Current deployments use direct transport; the harness refuses unsigned Foundry
+gateway authentication. Direct `/v0/*` requests are the default transport. HTTPS is required outside
+loopback. `--allow-insecure-http` explicitly permits HTTP on internal service
+names/private addresses for an in-cluster deployment.
+
+Self-hosted resources belong to one tenant. Their full mux specs, revisions,
+archive state and mutation receipts live in Postgres. MCP credentials are
+referenced by environment variable name, and harness URLs cannot embed
+credentials. These records do not provision an Azure resource or start a
+harness.
+
+Selfhosted admission is disabled by default. Enable
+`DAIMON_SELFHOSTED__ADMISSION_ENABLED` only with a configured self-hosted runtime
+and a profile that supplies usage observations. Select selfhosted on the channel;
+agent backend preferences cannot choose it. Existing setup/handoff threads that
+reference Managed Agents responders cannot continue on a selfhosted channel.
+
+For self-hosted tool preparation, wildcard MCP credential bindings require
+`DAIMON_SELFHOSTED__SINGLE_TENANT=true`; shared installations must list tenant
+UUIDs. Credential-free HTTP MCP destinations in private or metadata ranges are
+refused, except loopback. Operators can allow exact hosts through the JSON list
+`DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`. This host check classifies literals
+and internal names; configure harness egress to prevent DNS rebinding and
+redirects into private networks too.
+
 ## Upgrading an existing installation
 
 The new MCP server is strict immediately by default: credentials need a live
@@ -222,6 +303,78 @@ that lock, including platform markers, and starts the installed application
 directly so startup cannot resolve different packages. Build it from the
 repository root with `docker build -f apps/report-host/Dockerfile .`.
 
+### Self-hosted agent harness
+
+For an Azure Container Apps dynamic-session pool, use the pool's published
+management endpoint as `harness_url` and set the environment's native
+configuration to `session_pool: true`, `transport: "direct"`,
+`auth_mode: "entra"`, `auth_ref: "https://dynamicsessions.io"`.
+The host's identity needs Azure ContainerApps Session Executor on the pool;
+its operator harness-auth binding must allow that audience, the exact pool
+endpoint origin and the tenant. Every C3 request carries the deterministic
+session identifier, including event polling, approvals and cancellation.
+Keep admission disabled until live header forwarding and durable state recovery
+have been verified. See `apps/harness/README.md` for routing and authentication
+details.
+Ephemeral harness sandboxes require Blob checkpoints before enabling selfhosted
+admission. Set `HARNESS_CHECKPOINT_ACCOUNT_URL` to the HTTPS storage account
+origin and `HARNESS_CHECKPOINT_CONTAINER` to an existing private container;
+`HARNESS_CHECKPOINT_KEEP` defaults to three snapshots. Use single-session mode
+and a service identity with Storage Blob Data Contributor on that container.
+The harness requires a header-protected managed identity endpoint, captures it
+before scrubbing the tool environment, and refuses an IMDS fallback.
+
+The harness checkpoints workspace files, conversation history and request
+inventory before model I/O and after each terminal turn, including cancellation.
+Before paid work, small Blob write-ahead records protect turn idempotency and
+request inventory independently of workspace uploads. A write-ahead failure
+refuses paid work with a retryable durability error. A new sandbox restores
+checkpoints and write-ahead records before serving authenticated session requests. Storage
+restore failures return 503 and corrupt recovery refuses new work. Checkpoint
+write failures warn once per session and allow polls and later turns to continue.
+Unsupported or oversized workspace entries produce a degraded checkpoint with
+a manifest of skipped entries. Recovery uses the client cursor to report a
+history gap and terminate interrupted turns without reusing event sequences. See
+`apps/harness/README.md` for limits, permissions and deployment verification.
+
+The standalone harness image defaults to the OpenAI Agents SDK against Azure OpenAI.
+`HARNESS_LOOP=codex` opts into the Codex app-server loop using the same harness
+tool policies, UID isolation and Azure credential boundary. The image pins
+Codex 0.162.1. Bundled controller skills are disabled; harness-provided skills
+still use the normal tool and approval boundary. The OpenAI live-test override
+requires `HARNESS_RUNTIME_MODE=probe` and refuses Azure/managed-identity
+configuration; production defaults to Azure. See `apps/harness/README.md` for the experimental backend
+limitations and offline verification; production enablement requires review.
+Build it from the repository root with
+`docker build -f apps/harness/Dockerfile -t daimon-harness .`. Its dependencies
+are exported from `uv.lock`; the image includes NumPy, pandas, PyMC and
+PyMC-Marketing. Supply `HARNESS_TOKEN`, `AZURE_OPENAI_ENDPOINT` and either
+`AZURE_OPENAI_API_KEY` or ACA managed identity at runtime. The model credential
+uses only `ManagedIdentityCredential`, with `IDENTITY_ENDPOINT` and
+`IDENTITY_HEADER` required together and an optional `AZURE_CLIENT_ID`; these
+values are captured then scrubbed. File-backed credentials, certificate paths,
+projected workload tokens and tool-readable regular files on external mounts
+refuse startup. Mount checks use mountinfo rather than filenames and include
+read-only mounts. Only image/runtime system paths and isolated session storage
+are exempt. All non-completed Azure responses preserve usage but end as `errored`
+with the provider reason or error.
+Mount a
+persistent home directory at `/home/harness`; run one worker per HOME. The image
+starts as root, drops the service to UID 10000 and retains the capabilities needed
+to assign separate tool UIDs and work/skills directories to sessions. Production
+refuses a same-UID fallback. `HARNESS_SESSION_MODE=single` is the default: the
+first session ID binds persistently and all other IDs receive 409 `session_bound`.
+Use one custom container per session in Azure Container Apps dynamic sessions.
+Every tool receives a session-local HOME, cwd and TMPDIR. Multi-session mode
+requires verified `hidepid=2` process visibility, per-session UIDs and a shared
+`/tmp` that tools cannot write; otherwise startup refuses it.
+Use direct ACA transport with private ingress and
+bearer or Entra authentication; unsigned Foundry gateway mode refuses startup.
+Port 8088 serves authenticated `/v0/*` endpoints and `/invocations`. Model calls,
+tool execution and session files remain in the configured runtime and Azure
+model endpoint. The application README documents environment variables and
+Foundry deployment constraints.
+
 ### Running the processes by hand
 
 Requires [`uv`](https://docs.astral.sh/uv/):
@@ -247,6 +400,125 @@ carries its own token, so `mcp` replicas need no sticky sessions behind a load
 balancer, and a redeploy does not strand connected clients. The hourly limits
 on notebook publishes and bundle uploads are kept in memory, so each replica
 counts its own.
+
+The `selfhosted.loop` harness backend has a separate operator admission switch,
+`DAIMON_SELFHOSTED__ADMISSION_ENABLED`, which defaults to `false`. Disabled
+admission refuses with `selfhosted_admission_disabled`. Enabling it still requires
+usage observations and a configured self-hosted core runtime; it does not select
+a backend for any channel. See [configuration](configuration.md) for the setting.
+
+## Self-hosted harness runtime
+
+The opt-in `selfhosted.loop` backend runs chat turns through a separately
+operated `daimon-harness/0` service. Set `DAIMON_TURN__PATH=mux` and enable
+channel backends and `DAIMON_SELFHOSTED__ADMISSION_ENABLED=true`, then select
+the selfhosted agent/environment for the channel.
+The `selfhosted.loop` profile and `daimon selfhosted init` default to the Azure
+deployment name `gpt-6.1-sol`; pass `--model` for another deployment. Azure
+templates parameterize model name, version, deployment name, SKU and capacity;
+see the [Azure deployment guide](https://github.com/pymc-labs/daimon/blob/main/deploy/azure/README.md) for Luna smoke tests.
+Each caller gets a separate persistent harness session. Steer, shared sessions,
+workers, session transfer, memory stores and workspace export/import are not
+supported. Admission refuses policies the harness cannot enforce.
+
+Mount a credential-free JSON manifest and point
+`DAIMON_TURN__PROVIDER_RUNTIME_FILE` at it. Each entry grants exactly one
+configuration to one tenant, channel and account; no wildcard grants are read:
+
+```json
+[
+  {
+    "profile": "selfhosted.loop",
+    "tenant_id": "<tenant UUID>",
+    "platform": "discord",
+    "channel_id": "<channel id>",
+    "account_id": "<account UUID>",
+    "config_digest": "<admitted ConfigRevision.content_digest()>",
+    "agent_id": "sh_agent_<id>",
+    "environment_id": "sh_env_<id>",
+    "infrastructure_usd": "0",
+    "max_tool_calls": 100,
+    "deadline_s": 300
+  }
+]
+```
+
+`infrastructure_usd` is required: enter an audited per-request infrastructure
+cost, or explicitly choose zero when the operator funds it separately. Configure
+selfhosted billing's deployment-to-model mapping and verified model rates;
+an unpriced or expired deployment is refused before any harness HTTP call.
+Unmeasured model attempts remain pending for reconciliation.
+
+Production uses `HarnessConfig.transport="direct"` with a private harness
+endpoint. Direct transport sends authenticated `/v0` requests to `harness_url`.
+The Foundry invocation adapter is retained for future platform validation;
+unsigned gateway identity headers do not authorize harness calls. `bearer_env`
+only accepts operator variables named `DAIMON_SELFHOSTED__HARNESS_TOKEN_*`.
+Declare each in `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`, a JSON list of
+`{"name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY", "origin": "https://harness.example", "tenants": ["TENANT_UUID"]}`.
+Entra mode requires a binding too, with `auth_mode: "entra"` and `name` equal
+to the exact audience, for example `https://harness.example`. The exact HTTPS
+origin and tenant must match before the host resolves a bearer secret or mints
+an Entra token. An audience grant never authorizes another destination.
+Wildcard tenants require `DAIMON_SELFHOSTED__SINGLE_TENANT=true`.
+Environment revision pins are checked before replay and credential resolution.
+`entra` reuses one Azure DefaultAzureCredential and token per runtime, refreshing
+before expiry. Transport errors during refresh remain retryable. Configure ingress and the invoked identity's access
+for the chosen transport. Both transports use JSON acknowledgements and durable
+event polling, including after a dropped connection.
+
+Daimon's MCP public URL and JWT secret must be configured. Each turn receives a
+caller-bound MCP token only in `X-Daimon-MCP-Authorization`; it never enters the
+manifest or turn JSON and is revoked when the turn ends. Third-party MCP
+credentials are operator-provisioned environment references on the harness.
+Host tool-safety denies and confirmation gates merge with the pinned agent's
+tool policy; the stricter effective permission wins, including server defaults.
+MCP approvals retain their server and tool names during live delivery and replay.
+Replay applies the same explicit agent permissions as live delivery. Approval
+cards and tool results share the tool call identity; confirmations retain the
+harness action identity. Repeated call records can tighten an explicit approval
+permission; they cannot relax it. Host inspection pauses still honor automatic
+permissions and saved allow rules, including unattended runs. After a host
+restart, historical approval records recover completed batch members so the
+remaining approvals can still be submitted.
+
+Selfhosted turns support unversioned seeded skills from the configured defaults
+root. Custom skill uploads and channel-library additions have no supported
+selfhosted provisioning path yet: no production CLI or MCP upload route writes
+the selfhosted skill catalog. Existing Anthropic library uploads do not populate
+it. Do not configure custom version pins expecting those uploads to be available.
+
+The internal catalog reader can load already-retained bundles, including exact
+channel grants, but its store API and test-seeded rows are not an upload feature.
+It looks up agent pins in the agent's tenant catalog, never a deployment account's
+catalog. Attached pins carry uploader account and principal provenance; authorized
+shared-agent callers can read only those attached versions. A channel grant
+without retained bytes is skipped, and an agent pin without retained bytes
+refuses the turn. No provider upload or Anthropic fallback fills missing bytes.
+
+Replay and Stop page through long in-turn histories by cursor under their
+existing deadlines, without a fixed 5,000-record ceiling.
+Explicit agent `ask` permissions always require confirmation, even for sandbox
+writes or tools the host otherwise permits. Daimon proxy calls use the underlying
+tool's host safety and confirmation rules; neutral calls run with default settings.
+Session replay resumes from a durable accounting cursor, and each invocation
+persists its own starting position for recovery.
+On a deadline or abandonment the finalizer attempts bounded cancellation and
+replays usage. Unmatched requests remain pending under their original admission;
+subsequent session replay also records late receipts from earlier turns.
+Unavailable skills are reported once in the bound thread.
+
+Editing the agent applies to an open thread at its next message. When the agent's
+instructions, model, tools, skills or MCP servers change between two messages, the
+second turn runs with the new configuration on the same harness session, so files
+the thread already wrote to its workspace are still there. A turn that is running
+when the edit lands finishes on the configuration it started with. A message sent
+while it is still running does not start a turn: the person is told the current work
+must finish first, and the edit applies to their next message after it ends. Each
+turn is metered at the model and tariff it used. A changed environment (a different environment or a
+new environment revision), a different account scope, or an archived agent still
+requires a fresh session binding. This applies to the self-hosted backend only;
+the OpenAI backend still refuses a changed bound configuration.
 
 ## Self-host on OpenAI
 
@@ -948,13 +1220,57 @@ To add short-lived presigned chart links, configure
 When URL delivery is configured, `deliver_turn_charts` writes the chart to
 the private artifact store.
 
-- The storage boundary uses the vendor-neutral S3 API with SigV4 and
+- The default `s3` backend uses the S3 API with SigV4 and
   virtual-hosted-style addressing. Confirm that contract with your provider.
   Path-style-only endpoints, including default MinIO setups, are not
   supported.
 - Objects remain private. Daimon never applies a public-read ACL.
 - Presigned URL expiry does not delete stored objects. Configure a bucket
   lifecycle rule for the retention period your deployment requires.
+
+For Azure Blob Storage, set the following on the MCP service:
+
+```bash
+DAIMON_ARTIFACTS__BACKEND=azure_blob
+DAIMON_ARTIFACTS__ENDPOINT_URL=https://<account>.blob.core.windows.net
+DAIMON_ARTIFACTS__BUCKET=charts
+DAIMON_ARTIFACTS__AZURE_CLIENT_ID=<user-assigned-managed-identity-client-id>
+```
+
+`BUCKET` names the private Blob container for this backend. Provision the
+container in advance and disable anonymous blob access on the storage account.
+Assign **Storage Blob Delegator** to the managed identity at storage-account
+scope, and **Storage Blob Data Contributor** scoped to the charts container
+(or a custom container-scoped data role with read/write but no delete).
+The account role permits generating a user-delegation key; the container role
+limits blob data access to charts. Container-scoped data permissions alone
+cannot mint the delegation key. No account key or S3 credential is needed.
+`ManagedIdentityCredential` uses only `DAIMON_ARTIFACTS__AZURE_CLIENT_ID`, which
+is required outside Azurite. There is no fallback to environment service
+principals, CLI logins, or other developer credentials. `ENDPOINT_URL` must
+be the account URL, without a container path, query, fragment or userinfo.
+See Microsoft's
+[user-delegation SAS guide](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-user-delegation-sas-create-python).
+
+Blob links are HTTPS-only, read-only SAS capabilities for one blob, with the
+same `DAIMON_ARTIFACTS__URL_TTL_SECONDS` lifetime (default 600 seconds, maximum
+86400) as S3 links. SAS expiry does not delete the blob; configure an Azure
+Storage lifecycle policy for retention. Download headers force attachments,
+and SVGs are served as `application/octet-stream`.
+
+For local Azurite only, set `DAIMON_ARTIFACTS__AZURE_CONNECTION_STRING` with an
+explicit `BlobEndpoint` matching `DAIMON_ARTIFACTS__ENDPOINT_URL`, for example
+`http://127.0.0.1:10000/devstoreaccount1`. Connection strings are rejected for
+non-loopback endpoints, including Compose service hostnames such as `azurite`;
+use a loopback endpoint on the host for local tests. Its account-name path is
+the only allowed exception to the account-URL path restriction. Azurite uses
+a shared-key service SAS because it does not support Entra user-delegation keys. Never set this option in Azure.
+The optional Docker-backed test runs a disposable emulator:
+`uv run pytest packages/adapters/mcp/tests/artifacts/test_azurite.py`.
+
+Notebook and report hosts keep their own filesystem-backed data directories;
+these settings only select the hosted MCP chart/artifact store. There is no
+object-store listing or deletion API in this storage boundary.
 
 See `.env.example` for the optional region, URL lifetime and image-embedding
 controls.
@@ -1326,7 +1642,7 @@ a restart invalidates them and the person must send a new message.
 
 ### Rolling out routine DM destinations
 
-Migration `0112_routine_dm_destination` expands the routine destination enum
+Migration `0135_routine_dm_destination` expands the routine destination enum
 and constrains DM recipients to the non-null owner. Deploy compatible readers,
 scheduler and Discord posters before creating any `dm` rows; stop older
 writers and posters during a mixed-version rollout. Apply the migration before
@@ -1350,7 +1666,7 @@ and digest-pinned TLS proxy after migrations. Set `DAIMON_SIDECAR_PUBLIC_HOST`
 Only callback paths are public; database, `/healthz` and other paths remain private.
 The application uses the lane's `DAIMON_LANE_IMAGE` and `DAIMON_LANE_SHA`.
 
-Migration `0119_watches` follows `0118_lead_intake` and has no downgrade;
+Migration `0142_watches` follows `0141_lead_intake` and has no downgrade;
 retain compatible readers for rollback. `DAIMON_WATCHES__ENABLED` and the core-owned
 database `global` gate default false. Enable both only after release review.
 Disabling either blocks new events and future sends; disabling the durable gate
@@ -1405,7 +1721,7 @@ per-write output checks, tool restoration and cancellation behavior.
 
 #### Polling and owner management
 
-Migration `0120_watch_polling` adds leased scheduling and the transactional OS result
+Migration `0143_watch_polling` adds leased scheduling and the transactional OS result
 port. Sidecar gains only `claim_watch_polls()`; it still cannot enumerate tables,
 read credentials/policy, submit source results or enqueue arbitrary wakes. The OS
 MCP database login must own the migrations/result function (or receive an explicit
@@ -1551,7 +1867,7 @@ raw-source and 90-day evidence expiry happen even when no triage routine fires.
 
 ### Clearing retained legacy routine output
 
-Migration `0117_clear_legacy_routine_output` clears `last_result_tail`,
+Migration `0140_clear_legacy_routine_output` clears `last_result_tail`,
 `last_error`, `delivery_payload`, and `delivery_note` on existing routines whose
 `destination_kind`, `destination_id`, and `channel_id` are all NULL, including
 paused and failed routines. Older runners could save the owner's personal-memory
@@ -1573,3 +1889,13 @@ processes, with existing Discord and encryption keys. Supply
 recruitment keys to MCP, sidecar or agent environments. Synthetic QA can use
 `DAIMON_RECRUITMENT__SYNTHETIC=true` without a backend key or additional service.
 See [Recruitment threads](recruitment.md) for permissions, retention and recovery.
+Selfhosted Azure metering requires explicit deployment-to-model mappings and
+operator-verified model tariffs in `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
+`DAIMON_BILLING__SELFHOSTED__MODELS`. See [selfhosted Azure usage](billing.md#selfhosted-azure-usage)
+for tariff histories, the runtime admission gate and durable snapshot, explicit
+compute-cost attribution, and paginated pending-usage reconciliation.
+
+Harness process cleanup enumerates present `/proc` PIDs, including after PID wrap.
+If procfs uses hidepid, configure `gid=60002` for the trusted cleanup verifier;
+only that helper receives the exemption group. Multi-session harness mode requires
+`hidepid=2,gid=60002`. Ordinary tool processes do not receive the exemption.

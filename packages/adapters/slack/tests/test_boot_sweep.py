@@ -19,7 +19,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

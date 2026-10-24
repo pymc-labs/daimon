@@ -71,15 +71,15 @@ from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
     combine_handlers,
     make_fake_ma_handler,
 )
-from daimon.testing.ma_models import ma_agent
-from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -759,7 +759,7 @@ async def test_coding_tools_action_when_unconfigured_posts_a_note_and_mints_noth
         ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
     )
     assert len(ephemerals) == 1, "the click is answered even when nothing can be minted"
-    assert "not set up" in ephemerals[0]["text"], "the note names the missing deployment setup"
+    assert "isn't set up" in ephemerals[0]["text"], "the note names the missing deployment setup"
 
 
 async def test_github_link_from_channel_setup_posts_to_channel(

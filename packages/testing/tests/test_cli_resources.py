@@ -31,15 +31,15 @@ from daimon.testing.cli_resources import (
     opt_in_operator_profile,
 )
 from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.isolated_sdk import build_async_openai
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.ids import ModelRef
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import SDKTransport as OpenAITransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.isolated_sdk import build_async_openai
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 pytest_plugins = ["daimon.testing.db"]

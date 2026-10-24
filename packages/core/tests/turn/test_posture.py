@@ -24,7 +24,7 @@ from daimon.core.turn.posture import (
     RequireApproval,
     UsageRecorder,
 )
-from daimon.testing.ma_models import ma_model_usage
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
 
 def _make_event(*, event_id: str = "sevt_1") -> BetaManagedAgentsSpanModelRequestEndEvent:

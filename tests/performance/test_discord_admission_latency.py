@@ -44,10 +44,11 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import admission as admission_module
 from daimon.core.turn.admission import admit
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
-from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -263,6 +264,7 @@ async def _run_batch(
         try:
             await admit(
                 deps,
+                requester_org=RequesterOrg.HOST,
                 tenant_id=tenant_id,
                 platform="discord",
                 external_user_id="200000000000000000",

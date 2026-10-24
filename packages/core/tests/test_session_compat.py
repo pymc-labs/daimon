@@ -764,3 +764,32 @@ def test_an_unchanged_personal_store_reuses_the_session() -> None:
         )
         == ReuseAsIs()
     )
+
+
+def test_a_difference_in_the_mounted_credentials_hold_replaces_the_session() -> None:
+    unheld = make_snapshot()
+    held = make_snapshot(mcp_hold="slack:C-SYN-1:client")
+    other = make_snapshot(mcp_hold="slack:C-SYN-2:client")
+    capabilities = DEFAULT_MA_CAPABILITIES
+
+    for recorded, desired in ((unheld, held), (held, unheld), (held, other)):
+        decision = decide_session_compatibility(
+            recorded=recorded, desired=desired, capabilities=capabilities, now=NOW
+        )
+        assert isinstance(decision, ReplaceSession)
+        assert decision.reasons == ("credential_hold",)
+    assert isinstance(
+        decide_session_compatibility(
+            recorded=held, desired=held, capabilities=capabilities, now=NOW
+        ),
+        ReuseAsIs,
+    )
+
+
+def test_an_unheld_snapshot_keeps_the_form_and_fingerprint_it_was_recorded_with() -> None:
+    unheld = make_snapshot()
+
+    assert "mcp_hold" not in unheld.model_dump(mode="json")
+    assert fingerprint_identity(unheld) != fingerprint_identity(
+        make_snapshot(mcp_hold="slack:C-SYN-1:client")
+    )

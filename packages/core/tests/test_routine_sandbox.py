@@ -16,8 +16,10 @@ from daimon.core.routine_sandbox import (
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.routines import create_routine
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from daimon.testing.ma import MARouter
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 
 EDITED = "2026-10-02T09:00:00Z"
 

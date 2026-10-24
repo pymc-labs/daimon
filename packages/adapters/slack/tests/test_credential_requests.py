@@ -384,7 +384,7 @@ async def test_mcp_oauth_click_refuses_when_the_deployment_has_no_crypto_keys(
     await handle_credential_request_click(runtime, _click_payload(token))
 
     posts = fake_slack_web_client.mock.requests.get(("POST", _EPHEMERAL_URL), [])
-    assert len(posts) == 1 and "cannot sign you in" in posts[0].kwargs["json"]["text"], (
+    assert len(posts) == 1 and "isn't set up yet" in posts[0].kwargs["json"]["text"], (
         "the person learns the operator must finish setup"
     )
     async with db_session_factory() as session:

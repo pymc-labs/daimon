@@ -34,7 +34,7 @@ from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from pydantic import PostgresDsn, SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -158,7 +158,7 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
             )
             slack.get(
                 re.compile(r"https://slack.com/api/users.info.*"),
-                payload={"ok": True, "user": {"is_admin": is_admin}},
+                payload={"ok": True, "user": {"is_admin": is_admin, "team_id": "T_SETUP"}},
                 repeat=True,
             )
             slack.post(

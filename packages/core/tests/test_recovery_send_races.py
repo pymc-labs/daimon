@@ -28,9 +28,9 @@ from .turn.test_run_prepared_turn import (
 )
 
 
-async def test_recovery_adopt_seal_present_before_recovery(db_session, db_nullpool_engine):
+async def test_recovery_adopt_seal_present_before_recovery(db_session, db_committing_engine):
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     first = await bind(admitted())
     moved = _agent(model_id="claude-opus-4-6")
@@ -53,9 +53,11 @@ async def test_recovery_adopt_seal_present_before_recovery(db_session, db_nullpo
         )
 
 
-async def test_recovery_adopt_already_sealed_replacement_is_allowed(db_session, db_nullpool_engine):
+async def test_recovery_adopt_already_sealed_replacement_is_allowed(
+    db_session, db_committing_engine
+):
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     first = await bind(admitted())
     await policy("seal")
@@ -81,8 +83,8 @@ async def test_recovery_adopt_already_sealed_replacement_is_allowed(db_session, 
 
 
 @pytest.mark.parametrize("change", ["none", "pin", "seal"])
-async def test_recovery_reseed_policy_change_before_send(db_session, db_nullpool_engine, change):
-    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+async def test_recovery_reseed_policy_change_before_send(db_session, db_committing_engine, change):
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     row = await make_thread_session(
@@ -168,10 +170,10 @@ async def test_recovery_reseed_policy_change_before_send(db_session, db_nullpool
 @pytest.mark.parametrize("change", ["pin", "seal"])
 @pytest.mark.parametrize("path", ["fresh", "replacement"])
 async def test_policy_change_inside_create_session(
-    db_session, db_nullpool_engine, monkeypatch, change, path
+    db_session, db_committing_engine, monkeypatch, change, path
 ):
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     agent = None
     if path == "replacement":
@@ -209,7 +211,7 @@ async def test_policy_change_inside_create_session(
 
 
 @pytest.mark.parametrize("change", ["pin", "seal"])
-async def test_checkpoint_after_lock_wait(db_session, db_nullpool_engine, monkeypatch, change):
+async def test_checkpoint_after_lock_wait(db_session, db_committing_engine, monkeypatch, change):
     """Does the checkpoint (executes the OLD session) run after a policy change
     that landed during the preparation lock wait?"""
     import asyncio
@@ -219,7 +221,7 @@ async def test_checkpoint_after_lock_wait(db_session, db_nullpool_engine, monkey
     from daimon.core.session_preparation_stages import lock_preparation
 
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     await bind(admitted())
     moved = _agent(model_id="claude-opus-4-6")

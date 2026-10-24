@@ -26,7 +26,13 @@ from mux.errors import BindingConflict, OperationConflict, ScopeViolation
 from mux.state.journal import JournalEntry
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.operations import InvalidTransition, SendClaimed, recovery, request_digest
-from mux.state.store import ConfigRevisionConflict, StateStore, bind_new_slot
+from mux.state.store import (
+    ConfigRevisionConflict,
+    StateStore,
+    bind_new_slot,
+    is_released,
+    released_successor,
+)
 from mux.state.usage_ledger import UsageRevisionConflict
 
 type StoreMaker = Callable[[], StateStore]
@@ -186,6 +192,27 @@ async def check_binding_cas_on_generation(make: StoreMaker) -> None:
         await store.put_binding(_binding(2, id_="other"), expected_generation=1)
     rebound = await store.put_binding(_binding(2, session="sesn_2"), expected_generation=1)
     assert await store.get_binding(SHARED) == rebound
+
+
+async def check_a_released_slot_reads_unbound_and_its_next_bind_keeps_its_identity(
+    make: StoreMaker,
+) -> None:
+    store = make()
+    bound = await store.put_binding(_binding(), expected_generation=0)
+    released = await store.put_binding(released_successor(bound), expected_generation=1)
+    assert is_released(released) and released.id == bound.id and released.generation == 2
+    assert await store.get_binding(SHARED) is None, "a released slot reads as unbound"
+    assert await store.get_binding(SHARED, include_released=True) == released
+    # Another host's first bind adopts the slot: its identity, the next generation.
+    adopted = await store.put_binding(
+        _binding(session="sesn_2", id_="other_host"), expected_generation=0
+    )
+    assert (adopted.id, adopted.generation) == (bound.id, 3)
+    assert adopted.native_refs["session"] == "sesn_2"
+    assert await store.get_binding(SHARED) == adopted
+    # Nothing else skips the compare-and-swap: a bound slot refuses another first bind.
+    with raises(BindingConflict):
+        await store.put_binding(_binding(session="sesn_3", id_="third"), expected_generation=0)
 
 
 async def check_a_binding_id_names_one_slot(make: StoreMaker) -> None:
@@ -597,3 +624,52 @@ CHECKS: tuple[Callable[[StoreMaker], Awaitable[None]], ...] = tuple(
     check for name, check in sorted(globals().items()) if name.startswith("check_")
 )
 """Every check, for a store's test module to parametrize over."""
+
+__all__ = [
+    "CHANNEL",
+    "CHECKS",
+    "NOW",
+    "PRIVATE_A",
+    "PROV",
+    "Raised",
+    "SCOPE",
+    "SESSION",
+    "SHARED",
+    "StoreMaker",
+    "TENANTS",
+    "TENANT_A",
+    "TENANT_B",
+    "TENANT_C",
+    "THREAD",
+    "TTL",
+    "check_a_binding_id_names_one_slot",
+    "check_a_released_slot_reads_unbound_and_its_next_bind_keeps_its_identity",
+    "check_a_changed_replay_of_the_current_revision_is_refused",
+    "check_a_foreign_lease_cannot_claim_an_unwritten_journal",
+    "check_a_rebind_keeps_the_old_session_journal_with_its_slot",
+    "check_a_session_journal_takes_only_its_slot_lease",
+    "check_a_session_no_binding_names_takes_no_appends",
+    "check_a_slot_bound_operation_needs_its_own_lease",
+    "check_an_operation_slot_must_be_in_scope",
+    "check_another_principal_cannot_use_an_operation_key",
+    "check_binding_cas_on_generation",
+    "check_c02_binding_survives_restart_and_is_never_silently_replaced",
+    "check_c03_operation_key_reuse",
+    "check_c03_timeout_after_acceptance_is_unknown_not_resent",
+    "check_c05_overlapping_pages_and_child_completion",
+    "check_c07_usage_revisions_apply_signed_deltas_once",
+    "check_c13_parallel_new_binding_race_yields_one_binding",
+    "check_committed_state_cannot_be_changed_through_values",
+    "check_config_revisions_are_immutable",
+    "check_exactly_one_concurrent_sender_wins_the_claim",
+    "check_journal_revision_of_same_source_is_a_new_entry",
+    "check_lease_one_root_turn_and_monotonic_fence",
+    "check_operation_keys_are_per_tenant_and_account",
+    "check_previews_never_complete_a_turn_nor_block_the_record",
+    "check_private_bindings_of_one_thread_stay_apart",
+    "check_reconciled_absence_allows_one_resend_under_the_same_key",
+    "check_stale_fence_cannot_commit",
+    "check_usage_is_charged_only_under_the_binding_of_its_session",
+    "check_usage_null_after_known_keeps_the_accounted_value",
+    "raises",
+]

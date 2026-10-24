@@ -86,7 +86,7 @@
             "error": {
               "error_kind": "TurnError",
               "kind": "ceiling",
-              "message": "ceiling: this turn stopped responding and was abandoned \u2014 start fresh with a new message"
+              "message": "ceiling: this reply stopped responding and was dropped \u2014 send a new message"
             },
             "finished_tool_ids": [],
             "long_prompt_usage_totals": {
@@ -112,7 +112,7 @@
           {
             "error_kind": "TurnError",
             "kind": "ceiling",
-            "message": "ceiling: this turn stopped responding and was abandoned \u2014 start fresh with a new message"
+            "message": "ceiling: this reply stopped responding and was dropped \u2014 send a new message"
           }
         ],
         "kwargs": {}

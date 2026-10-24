@@ -37,9 +37,10 @@ from daimon.testing.factories import (
     make_tenant_config,
     make_thread_session,
 )
-from daimon.testing.ma import build_fake_anthropic, resolved_agent_env_router
+from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -247,7 +248,7 @@ async def test_read_only_change_is_rechecked_before_session_use(db_session_facto
 
 @pytest.mark.fresh_schema
 async def test_dm_agent_migration_round_trip_preserves_enablement(db_session):
-    path = Path(__file__).parents[1] / "alembic/versions/0111_cold_dm_agent.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0134_cold_dm_agent.py"
     spec = importlib.util.spec_from_file_location("cold_dm_migration", path)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)

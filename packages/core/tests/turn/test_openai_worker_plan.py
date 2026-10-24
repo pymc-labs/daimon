@@ -19,7 +19,6 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_deployment import OpenAIDeployment, build_openai_runtime
 from daimon.core.turn.openai_host import driver
 from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.ids import SkillRef, ThreadRef
 from mux.contracts.resources import (
     AgentPatch,
@@ -35,10 +34,14 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
+from mux.testing.isolated_sdk import build_async_openai
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..test_fleet_permissions import POLICY, parent
+from .conversation_worker_support import conversation_root as conversation_root
+from .conversation_worker_support import safe_claimed_openai_worker as safe_claimed_openai_worker
+from .conversation_worker_support import worker_root as worker_root
 from .native_counterpart_support import (
     Owned,
 )
@@ -54,6 +57,7 @@ from .native_counterpart_support import (
 from .test_openai_deployment import application as application
 from .test_openai_deployment import manifest
 from .test_openai_host import Wire as SessionWire
+from .test_openai_host import openai_native_spend_cap
 
 
 @pytest.fixture
@@ -557,6 +561,7 @@ async def claimed_openai_worker(
         limits=root.limits.model_copy(update={"deadline": selected.now() + timedelta(minutes=2)}),
     )
     if native_budget is not None:
+        openai_native_spend_cap(monkeypatch)
         root = replace(
             root,
             limits=type(root.limits).model_validate(
@@ -743,7 +748,7 @@ async def claimed_openai_worker(
         api_key="offline",
         base_url="https://openai.invalid/v1",
     ) as sdk:
-        from mux.drivers.openai import deployment as native_transport
+        import mux.drivers.openai as native_transport
 
         monkeypatch.setattr(
             native_transport, "configured_transport", lambda **kwargs: SDKTransport(sdk)
@@ -754,63 +759,31 @@ async def claimed_openai_worker(
             pool.release()
 
 
-async def test_openai_fresh_or_clone_worker_uses_actual_dispatch_allocation_binding_and_journal(
-    claimed_openai_worker,
-) -> None:
+async def test_automatic_worker_refuses_before_native_allocation_or_input(claimed_openai_worker):
     from daimon.core.fleet import spawn_operation_key
     from daimon.core.headless_runner import run_worker
-    from daimon.core.stores import mux_state
-    from daimon.core.stores.turn_outcomes import list_for_tenant
-    from daimon.core.turn.outcomes import drain_outcomes
+    from daimon.core.stores import fleet
 
     request, root, worker, prices, owned, calls, _ = claimed_openai_worker
-    result = await run_worker(
-        request,
-        parent=root,
-        worker=worker,
-        trigger_message="Complete the assigned task",
-        prices=prices,
-        cancel=asyncio.Event(),
-    )
-    assert result.id == worker.id and result.status == "succeeded"
-    assert result.turns_used == 1 and result.result is not None
-    assert result.result.excerpt == "answer turn-1"
-    posts = [call for call in calls if call.method == "POST"]
-    assert [call.url.path for call in posts] == [
-        "/v1/agents",
-        "/v1/agents/sessions",
-        "/v1/agents/sessions/native-openai-session/events",
-    ]
-    assert (
-        posts[0].headers["Idempotency-Key"]
-        == spawn_operation_key(worker.run_id, 0) + ":agent_create:0"
-    )
-    assert (
-        posts[1].headers["Idempotency-Key"]
-        == spawn_operation_key(worker.run_id, 0) + ":session_create:0"
-    )
-    assert json.loads(posts[1].content)["agent_id"] == "allocated-worker"
-    async with request.deps.sessionmaker() as db:
-        journal = await mux_state.read_events(
-            db, result.result.session_id, after=result.result.sequence - 1, limit=1
+    with pytest.raises(AdmissionDenied, match="Automatic sandbox or custom tools"):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Complete the assigned task",
+            prices=prices,
+            cancel=asyncio.Event(),
         )
-    assert len(journal) == 1 and journal[0].type == "agent.message"
-    assert journal[0].id == f"fleet:{worker.id}:result"
-    recorded = await request.deps.state_store.read_events(result.result.session_id, after=-1)
-    messages = [event for event in recorded if event.type == "agent.message"]
-    assert any(
-        event.id == "openai:item:turn-1:answer" and event.native.event_id == "turn-1:answer"
-        for event in messages
-    ), "the accepted display identity must retain the true native stream provenance"
-    await drain_outcomes()
-    async with request.deps.sessionmaker() as db:
-        outcomes = await list_for_tenant(db, request.tenant_id)
-    assert any(
-        row.origin == "worker"
-        and row.session_id == result.result.session_id
-        and row.reason.value == "completed"
-        for row in outcomes
+    assert calls == [], "even allocation would send the worker's task to OpenAI"
+    operation = await request.deps.state_store.get_operation(
+        request.scope, spawn_operation_key(worker.run_id, 0) + ":agent_create:0"
     )
+    assert operation is None
+    async with request.deps.sessionmaker.begin() as db:
+        _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
+    current = next(row for row in rows if row.id == worker.id)
+    assert current.status == "failed" and current.result is None and current.binding_id is None
+    assert current.turns_used == 0 and current.reserved_usd == worker.reserved_usd
     assert await owned.resources.entry(owned.retained.catalog_id) == owned.retained
 
 
@@ -857,18 +830,26 @@ async def test_openai_worker_refuses_unsupported_or_revoked_authority_before_nat
             run_id=worker.run_id,
         )
         ended = next(row for row in rows if row.id == worker.id)
-        assert ended.status == "failed" and ended.error_code == "preparation_refused"
-        assert ended.reserved_usd > 0 and ended.binding_id is None and ended.turns_used == 0
+        # A cancel from outside is never a refusal (#1413 review B3).
+        assert (ended.status, ended.error_code) == (
+            "failed",
+            "watch_ended" if fault == "cancelled" else "preparation_refused",
+        )
+        assert (
+            ended.reserved_usd == worker.reserved_usd
+            and ended.binding_id is None
+            and ended.turns_used == 0
+        )
 
 
 async def test_openai_worker_lost_agent_ack_is_retained_without_reallocation(
-    claimed_openai_worker,
+    safe_claimed_openai_worker,
 ) -> None:
     from daimon.core.fleet import spawn_operation_key
     from daimon.core.headless_runner import run_worker
     from daimon.core.turn.persistence import UncertainSend
 
-    request, root, worker, prices, owned, calls, wire = claimed_openai_worker
+    request, root, worker, prices, owned, calls, wire = safe_claimed_openai_worker
     wire.fail_create = True
     for _ in range(2):
         with pytest.raises((ProviderError, UncertainSend, AdmissionDenied)):
@@ -885,14 +866,21 @@ async def test_openai_worker_lost_agent_ack_is_retained_without_reallocation(
     key = spawn_operation_key(worker.run_id, 0)
     claim = await request.deps.state_store.get_operation(request.scope, key + ":agent_create:0")
     assert claim is not None and claim.operation.status == "outcome_unknown"
-    assert await owned.resources.catalog.get_agent(request.scope, key + ":agent") is None
+    from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
+
+    catalog = PostgresNeutralCatalog(
+        request.deps.sessionmaker, provider="openai", account_scope_id="project"
+    )
+    assert await catalog.get_agent(request.scope, key + ":agent") is None
 
 
-async def test_worker_native_mutations_reuse_the_owned_guard(claimed_openai_worker, monkeypatch):
+async def test_automatic_worker_refuses_before_owned_native_mutation_guards(
+    claimed_openai_worker, monkeypatch
+):
     from daimon.core.headless_runner import run_worker
     from daimon.core.turn import openai_host
 
-    request, root, worker, prices, _, _, _ = claimed_openai_worker
+    request, root, worker, prices, _, calls, _ = claimed_openai_worker
     build = request.deps.turn_runtime_factory
     assert build is not None
     create = openai_host._create
@@ -927,28 +915,31 @@ async def test_worker_native_mutations_reuse_the_owned_guard(claimed_openai_work
 
     request = replace(request, deps=replace(request.deps, turn_runtime_factory=instrument_build))
     monkeypatch.setattr(openai_host, "_create", instrument_create)
-    result = await run_worker(
-        request,
-        parent=root,
-        worker=worker,
-        trigger_message="Complete the task",
-        prices=prices,
-        cancel=asyncio.Event(),
-    )
-    assert result.status == "succeeded"
-    # Publication checks authority before catalog work and before native claim;
-    # session mutation checks it once at its native claim boundary.
-    assert checks == {"agent": 2, "session": 1}
+    with pytest.raises(AdmissionDenied, match="Automatic sandbox or custom tools"):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Complete the task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    # Profile refusal precedes both native claim boundaries. The supported
+    # conversation worker keeps the real guard's agent=2/session=1 control.
+    assert checks == {"agent": 0, "session": 0}
+    assert calls == []
+
+    assert not any(call.method == "POST" and call.url.path.endswith("/events") for call in calls)
 
 
 @pytest.mark.parametrize("boundary", ["agent", "session"])
 async def test_worker_mutation_guard_refuses_cancellation_after_readback(
-    claimed_openai_worker, monkeypatch, boundary
+    safe_claimed_openai_worker, monkeypatch, boundary
 ):
     from daimon.core.headless_runner import run_worker
     from daimon.core.turn import openai_host
 
-    request, root, worker, prices, _, calls, _ = claimed_openai_worker
+    request, root, worker, prices, _, calls, _ = safe_claimed_openai_worker
     cancel = asyncio.Event()
     verify = OpenAIDeployment.verify_environment
     create = openai_host._create
@@ -979,50 +970,41 @@ async def test_worker_mutation_guard_refuses_cancellation_after_readback(
 
 
 @pytest.mark.parametrize("native_budget", [Decimal("0.01")])
-async def test_native_worker_budget_reaches_real_request_and_one_input(claimed_openai_worker):
-    from daimon.core.fleet import FleetConflict
+async def test_automatic_worker_keeps_native_budget_but_refuses_its_input(claimed_openai_worker):
     from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import fleet
 
     request, root, worker, prices, _, calls, _ = claimed_openai_worker
     assert request.worker.limits.max_turns == 1
     assert 0 < (request.worker.limits.deadline - request.now()).total_seconds() <= 120
-    result = await run_worker(
-        request,
-        parent=root,
-        worker=worker,
-        trigger_message="Bounded task",
-        prices=prices,
-        cancel=asyncio.Event(),
-    )
-    assert result.status == "succeeded" and result.turns_used == result.max_turns == 1
-    created = [
-        call for call in calls if call.method == "POST" and call.url.path == "/v1/agents/sessions"
-    ]
-    assert len(created) == 1
-    assert json.loads(created[0].content)["spend_control"] == {"limit": 1}
-    with pytest.raises(FleetConflict):
+    with pytest.raises(AdmissionDenied, match="Automatic sandbox or custom tools"):
         await run_worker(
             request,
             parent=root,
-            worker=result,
-            trigger_message="Refused second input",
+            worker=worker,
+            trigger_message="Bounded task",
             prices=prices,
             cancel=asyncio.Event(),
         )
-    assert sum(call.method == "POST" and call.url.path.endswith("/events") for call in calls) == 1
+    assert calls == []
+    async with request.deps.sessionmaker.begin() as db:
+        _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
+    current = next(row for row in rows if row.id == worker.id)
+    assert current.turns_used == 0 and current.max_turns == 1
+    assert current.status == "failed" and current.binding_id is None
 
 
 @pytest.mark.parametrize("native_budget", [Decimal("0.01")])
 @pytest.mark.parametrize("echo", [None, True, "1", 1.0, 2])
 async def test_native_worker_budget_mismatch_never_dispatches(
-    claimed_openai_worker, monkeypatch, echo
+    safe_claimed_openai_worker, monkeypatch, echo
 ):
     from daimon.core.errors import TurnError
     from daimon.core.headless_runner import run_worker
     from daimon.core.stores import fleet
     from mux.errors import ContinuityLost
 
-    request, root, worker, prices, _, calls, wire = claimed_openai_worker
+    request, root, worker, prices, _, calls, wire = safe_claimed_openai_worker
     original = wire.session
 
     def changed():
@@ -1047,17 +1029,17 @@ async def test_native_worker_budget_mismatch_never_dispatches(
     async with request.deps.sessionmaker.begin() as db:
         _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
     persisted = next(row for row in rows if row.id == worker.id)
-    assert persisted.turns_used == 0 and persisted.reserved_usd == worker.budget_usd
+    assert persisted.turns_used == 1 and persisted.reserved_usd == worker.budget_usd
 
 
 @pytest.mark.parametrize("native_budget", [Decimal("0.01")])
-async def test_budgeted_worker_lost_ack_keeps_one_claim(claimed_openai_worker, monkeypatch):
-    from daimon.core.errors import TurnError
+async def test_automatic_worker_refuses_before_budgeted_input_can_lose_ack(
+    claimed_openai_worker, monkeypatch
+):
     from daimon.core.headless_runner import run_worker
     from daimon.core.stores import fleet
 
     request, root, worker, prices, _, calls, _ = claimed_openai_worker
-    request = replace(request, deadline=request.now() + timedelta(seconds=5))
     original = httpx.MockTransport.handle_async_request
 
     async def lost_ack(transport, call):
@@ -1067,7 +1049,7 @@ async def test_budgeted_worker_lost_ack_keeps_one_claim(claimed_openai_worker, m
         return response
 
     monkeypatch.setattr(httpx.MockTransport, "handle_async_request", lost_ack)
-    with pytest.raises(TurnError):
+    with pytest.raises(AdmissionDenied, match="Automatic sandbox or custom tools"):
         await run_worker(
             request,
             parent=root,
@@ -1076,22 +1058,22 @@ async def test_budgeted_worker_lost_ack_keeps_one_claim(claimed_openai_worker, m
             prices=prices,
             cancel=asyncio.Event(),
         )
-    assert sum(call.method == "POST" and call.url.path.endswith("/events") for call in calls) == 1
+    assert calls == []
     async with request.deps.sessionmaker.begin() as db:
         _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
     persisted = next(row for row in rows if row.id == worker.id)
-    assert persisted.turns_used == 1 and persisted.reserved_usd == worker.budget_usd
+    assert persisted.turns_used == 0 and persisted.reserved_usd == worker.reserved_usd
 
 
 @pytest.mark.parametrize("native_budget", [Decimal("0.01")])
 async def test_native_worker_budget_rejection_never_falls_back_uncapped(
-    claimed_openai_worker, monkeypatch
+    safe_claimed_openai_worker, monkeypatch
 ):
     from daimon.core.errors import TurnError
     from daimon.core.headless_runner import run_worker
     from daimon.core.stores import fleet
 
-    request, root, worker, prices, _, calls, _ = claimed_openai_worker
+    request, root, worker, prices, _, calls, _ = safe_claimed_openai_worker
     original = httpx.MockTransport.handle_async_request
 
     async def rejected(transport, call):
@@ -1126,7 +1108,7 @@ async def test_native_worker_budget_rejection_never_falls_back_uncapped(
     async with request.deps.sessionmaker.begin() as db:
         _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
     persisted = next(row for row in rows if row.id == worker.id)
-    assert persisted.turns_used == 0 and persisted.reserved_usd == worker.budget_usd
+    assert persisted.turns_used == 1 and persisted.reserved_usd == worker.budget_usd
 
 
 @pytest.mark.parametrize("native_budget", [Decimal("0.01")])
@@ -1143,8 +1125,10 @@ async def test_native_worker_budget_conflict_refuses_before_transport(
     assert calls == []
 
 
-async def test_native_budget_compiler_is_decimal_context_independent(target):
+async def test_native_budget_compiler_is_decimal_context_independent(target, monkeypatch):
     from decimal import localcontext
+
+    openai_native_spend_cap(monkeypatch)
 
     from daimon.core.neutral_resources import WorkerLimits
 
@@ -1172,7 +1156,323 @@ async def test_native_budget_compiler_is_decimal_context_independent(target):
 
 
 @pytest.mark.parametrize("native_budget", [Decimal("0.01")])
-async def test_budgeted_worker_can_cancel_after_its_one_input(claimed_openai_worker, monkeypatch):
+async def test_automatic_worker_cannot_send_an_input_to_cancel(claimed_openai_worker, monkeypatch):
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import fleet
+
+    from .test_openai_host import Stream
+
+    request, root, worker, prices, _, calls, wire = claimed_openai_worker
+    cancel = asyncio.Event()
+    original_session = wire.session
+
+    def active_session():
+        raw = original_session()
+        if wire.turns and not wire.cancelled:
+            raw["status"] = "in_progress"
+        return raw
+
+    async def blocked(stream):
+        await stream.wire.sent.wait()
+        turn = stream.wire.turns[-1]
+        turn["status"] = "in_progress"
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "agent.session.turn.in_progress",
+                    "event_id": turn["id"] + ":running",
+                    "session_id": turn["session_id"],
+                    "turn": turn,
+                }
+            )
+            + "\n\n"
+        ).encode()
+        cancel.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(wire, "session", active_session)
+    monkeypatch.setattr(Stream, "__aiter__", blocked)
+    with pytest.raises(AdmissionDenied, match="Automatic sandbox or custom tools"):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Cancellable task",
+            prices=prices,
+            cancel=cancel,
+        )
+    assert not wire.cancelled and not cancel.is_set()
+    bodies = [
+        json.loads(call.content)
+        for call in calls
+        if call.method == "POST" and call.url.path.endswith("/events")
+    ]
+    assert sum(body["events"][0]["type"] != "agent.session.input.cancel" for body in bodies) == 0
+    assert sum(body["events"][0]["type"] == "agent.session.input.cancel" for body in bodies) == 0
+    async with request.deps.sessionmaker.begin() as db:
+        _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
+    assert next(row for row in rows if row.id == worker.id).turns_used == 0
+
+
+@pytest.mark.parametrize("native_budget", [Decimal("0.01")])
+@pytest.mark.parametrize("stage", ["ack", "get"])
+@pytest.mark.parametrize("echo", [None, True, "1", 1.0, 2])
+async def test_bad_budget_echo_retains_ack_and_deletes_owned_session(
+    safe_claimed_openai_worker, monkeypatch, stage, echo
+):
+    from daimon.core.errors import TurnError
+    from daimon.core.fleet import FleetConflict, spawn_operation_key
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import fleet, mux_state
+    from mux.errors import ContinuityLost
+
+    request, root, worker, prices, _, calls, wire = safe_claimed_openai_worker
+    key = spawn_operation_key(worker.run_id, worker.ordinal) + ":send:0"
+    cleanup_receipts = []
+    original = httpx.MockTransport.handle_async_request
+
+    async def echo_and_inspect(transport, call):
+        if call.method == "DELETE":
+            async with request.deps.sessionmaker() as db:
+                receipt = await mux_state.get_operation(db, request.scope, key)
+            assert receipt is not None and receipt.operation.status == "processed"
+            assert receipt.result["ref"]["id"] == "native-openai-session"
+            assert receipt.result["state"] == "provisioning"
+            cleanup_receipts.append(receipt)
+        response = await original(transport, call)
+        selected = (
+            call.method == "POST" and call.url.path == "/v1/agents/sessions"
+            if stage == "ack"
+            else call.method == "GET" and call.url.path.endswith("native-openai-session")
+        )
+        if selected and response.status_code == 200:
+            raw = json.loads(response.content)
+            if echo is None:
+                raw.pop("spend_control", None)
+            else:
+                raw["spend_control"] = {"limit": echo}
+            return httpx.Response(200, json=raw)
+        return response
+
+    monkeypatch.setattr(httpx.MockTransport, "handle_async_request", echo_and_inspect)
+    with pytest.raises((ContinuityLost, TurnError, AdmissionDenied, FleetConflict)):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Refused budget",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert wire.deleted and len(cleanup_receipts) == 1
+    restarted_store = mux_state.PostgresStateStore(request.deps.sessionmaker)
+    receipt = await restarted_store.get_operation(request.scope, key)
+    assert receipt is not None and receipt.result["ref"]["id"] == "native-openai-session"
+    deletion = await restarted_store.get_operation(
+        request.scope, spawn_operation_key(worker.run_id, worker.ordinal) + ":session_delete:0"
+    )
+    assert deletion is not None and deletion.operation.status == "processed"
+    assert deletion.result["deleted"][0]["id"] == "native-openai-session"
+    restarted = replace(request, deps=replace(request.deps, state_store=restarted_store))
+    with pytest.raises((ContinuityLost, TurnError, AdmissionDenied, FleetConflict)):
+        await run_worker(
+            restarted,
+            parent=root,
+            worker=worker,
+            trigger_message="Refused budget",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert (
+        sum(call.method == "POST" and call.url.path == "/v1/agents/sessions" for call in calls) == 1
+    )
+    assert sum(call.method == "DELETE" for call in calls) == 1
+    assert not any(call.method == "POST" and call.url.path.endswith("/events") for call in calls)
+    async with request.deps.sessionmaker.begin() as db:
+        _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
+    retained = next(row for row in rows if row.id == worker.id)
+    assert retained.turns_used == 1 and retained.binding_id is None
+    assert retained.reserved_usd == worker.budget_usd
+
+
+@pytest.mark.parametrize("native_budget", [Decimal("0.01")])
+async def test_budgeted_session_without_ack_remains_unknown(
+    safe_claimed_openai_worker, monkeypatch
+):
+    from daimon.core.fleet import spawn_operation_key
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import mux_state
+
+    request, root, worker, prices, _, calls, wire = safe_claimed_openai_worker
+    original = httpx.MockTransport.handle_async_request
+
+    async def lost_ack(transport, call):
+        response = await original(transport, call)
+        if call.method == "POST" and call.url.path == "/v1/agents/sessions":
+            raise httpx.ReadError("offline no session ACK", request=call)
+        return response
+
+    monkeypatch.setattr(httpx.MockTransport, "handle_async_request", lost_ack)
+    with pytest.raises(ProviderError):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="No ACK",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert not wire.deleted
+    key = spawn_operation_key(worker.run_id, worker.ordinal) + ":send:0"
+    receipt = await mux_state.PostgresStateStore(request.deps.sessionmaker).get_operation(
+        request.scope, key
+    )
+    assert receipt is not None and receipt.operation.status == "outcome_unknown"
+    assert receipt.operation.resource is None and not receipt.result
+    assert (
+        sum(call.method == "POST" and call.url.path == "/v1/agents/sessions" for call in calls) == 1
+    )
+    assert not any(
+        call.method == "DELETE" or call.method == "POST" and call.url.path.endswith("/events")
+        for call in calls
+    )
+
+
+def _astra(request):
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+
+    revision = request.admission.backend_revision
+    astra = ConfigRevision.create(
+        revision.channel,
+        revision.local,
+        resolve_default(
+            BackendConfig(backend="openai", profile=revision.profile, model="gpt-6-astra")
+        ),
+    )
+    return replace(request, admission=replace(request.admission, backend_revision=astra))
+
+
+def _with_astra(plan, owned, monkeypatch, *, spend_limit: int | None = None) -> None:
+    # The deployment row authorizes Astra alongside Luna, as a fleet row would.
+    grant = plan.configuration_grant
+    assert grant is not None
+    widened = plan.model_copy(
+        update={
+            "configuration_grant": grant.model_copy(
+                update={"models": (*grant.models, "gpt-6-astra")}
+            ),
+            "spend_limit_usd_cents": spend_limit,
+        }
+    )
+    manifest(monkeypatch, owned.manifest_path, [widened.model_dump(mode="json")])
+
+
+async def test_astra_worker_runtime_runs_at_astra_controls_and_price(
+    target: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request, _, plan, _, owned = target
+    _with_astra(plan, owned, monkeypatch, spend_limit=5)
+    # ROOT: on our project (no native session cap) Astra runs at its own price, bounded
+    # by admission and the daily model cap; the row's limit is never sent.
+    runtime = build_openai_runtime(_astra(request))
+    assert runtime.controls.model == "gpt-6-astra"
+    assert runtime.price is not None and runtime.price.model == "gpt-6-astra"
+    assert (runtime.price.input, runtime.price.output) == (Decimal("10.00"), Decimal("50.00"))
+    assert runtime.controls.spend_limit_usd_cents is None
+    # Where a project honours native caps, the row's limit becomes `spend_control`.
+    openai_native_spend_cap(monkeypatch)
+    assert build_openai_runtime(_astra(request)).controls.spend_limit_usd_cents == 5
+
+
+async def test_astra_runs_without_a_native_spend_limit(
+    target: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ROOT: Astra runs under the host guard and the daily model cap, not a native cap."""
+    request, _, plan, _, owned = target
+    _with_astra(plan, owned, monkeypatch)
+    assert request.worker.limits.native_budget_usd is None and plan.spend_limit_usd_cents is None
+    assert build_openai_runtime(_astra(request)).controls.spend_limit_usd_cents is None
+    assert build_openai_runtime(request).controls.spend_limit_usd_cents is None
+
+
+@pytest.mark.parametrize("native_budget", [Decimal("0.01")])
+async def test_conversation_worker_budget_reaches_real_request_and_one_input(
+    safe_claimed_openai_worker,
+):
+    from daimon.core.fleet import FleetConflict
+    from daimon.core.headless_runner import run_worker
+
+    request, root, worker, prices, _, calls, _ = safe_claimed_openai_worker
+    assert request.worker.limits.max_turns == 1
+    assert 0 < (request.worker.limits.deadline - request.now()).total_seconds() <= 120
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Bounded task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded" and result.turns_used == result.max_turns == 1
+    created = [
+        call for call in calls if call.method == "POST" and call.url.path == "/v1/agents/sessions"
+    ]
+    assert len(created) == 1
+    assert json.loads(created[0].content)["spend_control"] == {"limit": 1}
+    with pytest.raises(FleetConflict):
+        await run_worker(
+            request,
+            parent=root,
+            worker=result,
+            trigger_message="Refused second input",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert sum(call.method == "POST" and call.url.path.endswith("/events") for call in calls) == 0
+
+
+@pytest.mark.parametrize("native_budget", [Decimal("0.01")])
+async def test_conversation_worker_lost_ack_keeps_one_claim(
+    safe_claimed_openai_worker, monkeypatch
+):
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import fleet
+
+    request, root, worker, prices, _, calls, _ = safe_claimed_openai_worker
+    original = httpx.MockTransport.handle_async_request
+
+    async def lost_ack(transport, call):
+        response = await original(transport, call)
+        if call.method == "POST" and call.url.path == "/v1/agents/sessions":
+            raise httpx.ReadError("offline lost acknowledgment", request=call)
+        return response
+
+    monkeypatch.setattr(httpx.MockTransport, "handle_async_request", lost_ack)
+    # Conversation-only carries input in create, so an unknown ACK fails
+    # preparation rather than a later running turn. Its claim stays charged.
+    with pytest.raises(ProviderError):
+        await run_worker(
+            request,
+            parent=root,
+            worker=worker,
+            trigger_message="Uncertain input",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert (
+        sum(call.method == "POST" and call.url.path == "/v1/agents/sessions" for call in calls) == 1
+    )
+    async with request.deps.sessionmaker.begin() as db:
+        _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
+    persisted = next(row for row in rows if row.id == worker.id)
+    assert persisted.turns_used == 1 and persisted.reserved_usd == worker.budget_usd
+
+
+@pytest.mark.parametrize("native_budget", [Decimal("0.01")])
+async def test_conversation_worker_can_cancel_after_its_one_input(
+    safe_claimed_openai_worker, monkeypatch
+):
     from daimon.core.errors import TurnError
     from daimon.core.fleet import FleetConflict
     from daimon.core.headless_runner import run_worker
@@ -1180,7 +1480,7 @@ async def test_budgeted_worker_can_cancel_after_its_one_input(claimed_openai_wor
 
     from .test_openai_host import Stream
 
-    request, root, worker, prices, _, calls, wire = claimed_openai_worker
+    request, root, worker, prices, _, calls, wire = safe_claimed_openai_worker
     cancel = asyncio.Event()
     original_session = wire.session
 
@@ -1226,130 +1526,8 @@ async def test_budgeted_worker_can_cancel_after_its_one_input(claimed_openai_wor
         for call in calls
         if call.method == "POST" and call.url.path.endswith("/events")
     ]
-    assert sum(body["events"][0]["type"] != "agent.session.input.cancel" for body in bodies) == 1
+    assert sum(body["events"][0]["type"] != "agent.session.input.cancel" for body in bodies) == 0
     assert sum(body["events"][0]["type"] == "agent.session.input.cancel" for body in bodies) == 1
     async with request.deps.sessionmaker.begin() as db:
         _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
     assert next(row for row in rows if row.id == worker.id).turns_used == 1
-
-
-@pytest.mark.parametrize("native_budget", [Decimal("0.01")])
-@pytest.mark.parametrize("stage", ["ack", "get"])
-@pytest.mark.parametrize("echo", [None, True, "1", 1.0, 2])
-async def test_bad_budget_echo_retains_ack_and_deletes_owned_session(
-    claimed_openai_worker, monkeypatch, stage, echo
-):
-    from daimon.core.errors import TurnError
-    from daimon.core.fleet import spawn_operation_key
-    from daimon.core.headless_runner import run_worker
-    from daimon.core.stores import fleet, mux_state
-    from mux.errors import ContinuityLost
-
-    request, root, worker, prices, _, calls, wire = claimed_openai_worker
-    key = spawn_operation_key(worker.run_id, worker.ordinal) + ":session_create:0"
-    cleanup_receipts = []
-    original = httpx.MockTransport.handle_async_request
-
-    async def echo_and_inspect(transport, call):
-        if call.method == "DELETE":
-            async with request.deps.sessionmaker() as db:
-                receipt = await mux_state.get_operation(db, request.scope, key)
-            assert receipt is not None and receipt.operation.status == "processed"
-            assert receipt.result["ref"]["id"] == "native-openai-session"
-            assert receipt.result["state"] == "provisioning"
-            cleanup_receipts.append(receipt)
-        response = await original(transport, call)
-        selected = (
-            call.method == "POST" and call.url.path == "/v1/agents/sessions"
-            if stage == "ack"
-            else call.method == "GET" and call.url.path.endswith("native-openai-session")
-        )
-        if selected and response.status_code == 200:
-            raw = json.loads(response.content)
-            if echo is None:
-                raw.pop("spend_control", None)
-            else:
-                raw["spend_control"] = {"limit": echo}
-            return httpx.Response(200, json=raw)
-        return response
-
-    monkeypatch.setattr(httpx.MockTransport, "handle_async_request", echo_and_inspect)
-    with pytest.raises((ContinuityLost, TurnError, AdmissionDenied)):
-        await run_worker(
-            request,
-            parent=root,
-            worker=worker,
-            trigger_message="Refused budget",
-            prices=prices,
-            cancel=asyncio.Event(),
-        )
-    assert wire.deleted and len(cleanup_receipts) == 1
-    restarted_store = mux_state.PostgresStateStore(request.deps.sessionmaker)
-    receipt = await restarted_store.get_operation(request.scope, key)
-    assert receipt is not None and receipt.result["ref"]["id"] == "native-openai-session"
-    deletion = await restarted_store.get_operation(
-        request.scope, spawn_operation_key(worker.run_id, worker.ordinal) + ":session_delete:0"
-    )
-    assert deletion is not None and deletion.operation.status == "processed"
-    assert deletion.result["deleted"][0]["id"] == "native-openai-session"
-    restarted = replace(request, deps=replace(request.deps, state_store=restarted_store))
-    with pytest.raises((ContinuityLost, TurnError, AdmissionDenied)):
-        await run_worker(
-            restarted,
-            parent=root,
-            worker=worker,
-            trigger_message="No reallocation",
-            prices=prices,
-            cancel=asyncio.Event(),
-        )
-    assert (
-        sum(call.method == "POST" and call.url.path == "/v1/agents/sessions" for call in calls) == 1
-    )
-    assert sum(call.method == "DELETE" for call in calls) == 1
-    assert not any(call.method == "POST" and call.url.path.endswith("/events") for call in calls)
-    async with request.deps.sessionmaker.begin() as db:
-        _, rows = await fleet.run_status(db, tenant_id=request.tenant_id, run_id=worker.run_id)
-    retained = next(row for row in rows if row.id == worker.id)
-    assert retained.turns_used == 0 and retained.binding_id is None
-    assert retained.reserved_usd == worker.budget_usd
-
-
-@pytest.mark.parametrize("native_budget", [Decimal("0.01")])
-async def test_budgeted_session_without_ack_remains_unknown(claimed_openai_worker, monkeypatch):
-    from daimon.core.fleet import spawn_operation_key
-    from daimon.core.headless_runner import run_worker
-    from daimon.core.stores import mux_state
-
-    request, root, worker, prices, _, calls, wire = claimed_openai_worker
-    original = httpx.MockTransport.handle_async_request
-
-    async def lost_ack(transport, call):
-        response = await original(transport, call)
-        if call.method == "POST" and call.url.path == "/v1/agents/sessions":
-            raise httpx.ReadError("offline no session ACK", request=call)
-        return response
-
-    monkeypatch.setattr(httpx.MockTransport, "handle_async_request", lost_ack)
-    with pytest.raises(ProviderError):
-        await run_worker(
-            request,
-            parent=root,
-            worker=worker,
-            trigger_message="No ACK",
-            prices=prices,
-            cancel=asyncio.Event(),
-        )
-    assert not wire.deleted
-    key = spawn_operation_key(worker.run_id, worker.ordinal) + ":session_create:0"
-    receipt = await mux_state.PostgresStateStore(request.deps.sessionmaker).get_operation(
-        request.scope, key
-    )
-    assert receipt is not None and receipt.operation.status == "outcome_unknown"
-    assert receipt.operation.resource is None and not receipt.result
-    assert (
-        sum(call.method == "POST" and call.url.path == "/v1/agents/sessions" for call in calls) == 1
-    )
-    assert not any(
-        call.method == "DELETE" or call.method == "POST" and call.url.path.endswith("/events")
-        for call in calls
-    )

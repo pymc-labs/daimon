@@ -7,10 +7,10 @@ import pytest
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_environment
 from daimon.testing.ma_models import ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.resources import EnvironmentSpec
 from mux.drivers.anthropic.resources.environments import environment_payload
 from mux.drivers.anthropic.schemas import EnvironmentConfig
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import ValidationError
 
 

@@ -605,6 +605,8 @@ async def test_native_chat_credential_grant_keeps_source_expiry_and_revocation(
         responder_ma_agent_id="agent_native",
         responder_name="native",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         # Ambient rendering context alone cannot authorize native origin use.
         with execution_origin(None):
@@ -661,3 +663,128 @@ async def test_native_chat_credential_grant_keeps_source_expiry_and_revocation(
             assert bound is not None and bound.chat_session_id == str(origin.id)
             await revoke_mcp_token(db, jti=uuid.UUID(original["jti"]), now=now)
         assert await verifier.verify_token(derived) is None
+
+
+async def test_selfhosted_chat_credential_keeps_no_anthropic_flag_without_resource_row(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.core.mcp_auth import mint_chat_mcp_token
+    from daimon.testing.factories import make_account, make_tenant
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    secret = b"selfhosted-test-signing-key-32bytes"
+    token, _, _ = await mint_chat_mcp_token(
+        db_session,
+        account_id=account.id,
+        agent_id=uuid.uuid4(),
+        secret=secret,
+        now=dt.datetime.now(dt.UTC),
+        anthropic_disabled=True,
+    )
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+    assert claims["anthropic_disabled"] is True
+
+
+async def test_a_provider_turn_surface_is_registry_only_and_needs_chat_execution(
+    db_session: AsyncSession,
+) -> None:
+    """The surface lives on the row the verifier reads, never in the token's claims."""
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    secret = b"a" * 32
+    now = dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC)
+    token = await mint_agent_mcp_token(
+        db_session,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=uuid.uuid4(),
+        label="any label",
+        secret=secret,
+        now=now,
+        ttl_days=600 / 86400,  # pyright: ignore[reportArgumentType]
+        chat_execution=True,
+        surface="provider_turn",
+    )
+    decoded = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
+    assert set(decoded) == {"sub", "chat_agent_id", "jti", "exp"}
+    row = await get_mcp_token(db_session, jti=uuid.UUID(decoded["jti"]))
+    assert row is not None and row.surface == "provider_turn"
+    with pytest.raises(ValueError, match="chat-execution"):
+        await mint_agent_mcp_token(
+            db_session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            label="external key",
+            secret=secret,
+            now=now,
+            surface="provider_turn",
+        )
+
+
+@pytest.mark.parametrize("minted", ["provider_turn", None])
+async def test_a_provider_turn_resolves_only_a_provider_turn_credential(
+    db_engine, db_session: AsyncSession, tmp_path, monkeypatch, minted
+) -> None:
+    """A pinned OpenAI/Gemini credential without the surface would skip the server gate."""
+    from daimon.core.mcp_auth import resolve_agent_mcp_credential
+    from daimon.core.mcp_oauth import discovery
+    from mux.contracts.ids import Scope
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    sessions = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    secret = b"a" * 32
+    now = dt.datetime.now(dt.UTC)
+    agent_id = uuid.uuid4()
+    async with sessions.begin() as session:
+        tenant_id, account_id = await _seed_tenant_and_account(session)
+        token = await mint_agent_mcp_token(
+            session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            label="F2-owned-session-boundary",
+            secret=secret,
+            now=now,
+            ttl_days=600 / 86400,  # pyright: ignore[reportArgumentType]
+            chat_execution=True,
+            surface=minted,
+        )
+    path = tmp_path / "caller.token"
+    path.write_text(token)
+    path.chmod(0o600)
+
+    async def listed(_url, _token):
+        return frozenset({"search_tools", "call_tool"})
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", listed)
+    scope = Scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id),
+        principal_id="caller",
+        authorization_id="admitted",
+    )
+
+    async def resolve(surface):
+        return await resolve_agent_mcp_credential(
+            sessions,
+            path=path,
+            secret=secret,
+            scope=scope,
+            agent_id=agent_id,
+            destination="https://mcp.invalid/mcp",
+            tools=("search_tools", "call_tool"),
+            now=now,
+            chat_execution=True,
+            surface=surface,
+        )
+
+    if minted == "provider_turn":
+        assert await resolve("provider_turn") == token
+    else:
+        with pytest.raises(ValueError, match="invalid scoped agent token"):
+            await resolve("provider_turn")
+        # Callers that require no surface are unchanged.
+        assert await resolve(None) == token

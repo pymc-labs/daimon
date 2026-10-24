@@ -22,8 +22,8 @@ from daimon.core.mux_compat import list_memory_entries, read_memory
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import CliPrincipalRow
 from daimon.testing.ma_models import ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

@@ -19,9 +19,9 @@ from daimon.core.roster import RosterAgent
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

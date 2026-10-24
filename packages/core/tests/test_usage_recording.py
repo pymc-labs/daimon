@@ -27,7 +27,7 @@ from daimon.core._models import UsageEvent
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_model_usage
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -257,10 +257,10 @@ async def test_record_turn_usage_debit_idempotent_replay_no_double_debit(
 
 async def test_record_turn_usage_ledger_failure_rolls_back_pair_and_allows_retry(
     db_session_factory: async_sessionmaker[AsyncSession],
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
 ) -> None:
     """A ledger constraint failure must roll back the preceding usage insert."""
-    independent_sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    independent_sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with independent_sessions() as session:
         tenant = await make_tenant(session)
         await session.commit()

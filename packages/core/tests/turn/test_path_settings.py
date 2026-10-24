@@ -1,4 +1,4 @@
-"""The experimental turn path requires an explicit opt-in."""
+"""The turn path defaults to mux; legacy is the emergency stop."""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ def test_turn_flag_matches_main_settings_and_turn_only_loader(
         monkeypatch.setenv("DAIMON_TURN__PATH", value)
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://offline:offline@localhost/db")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "offline-fixture")
-    expected = value or "legacy"
+    expected = value or "mux"
     assert load_settings(_env_file=None).turn.path == expected
     assert load_turn_settings(_env_file=None).path == expected
-    assert TurnSettings().path == "legacy"
+    assert TurnSettings().path == "mux"
 
 
 def test_turn_only_loader_needs_no_unrelated_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,7 +51,7 @@ async def test_runtime_path_fallback_honors_env_and_keeps_explicit_overrides(
     from daimon.core.turn.deps import build_turn_deps
     from daimon.core.turn.run import _turn_port_kwargs  # pyright: ignore[reportPrivateUsage]
     from daimon.testing.ma_models import ma_agent, ma_environment
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     monkeypatch.setenv("DAIMON_TURN__PATH", "mux")
     settings = MagicMock()

@@ -21,9 +21,10 @@ from daimon.core.purge import AccountPurgeResult
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import find_platform_principal
-from daimon.testing import ma_agent, ma_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .drivers.protocol import PlatformDriver

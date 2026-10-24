@@ -1,0 +1,304 @@
+"""A fleet worker's own setup fails fast in plain words instead of waiting out its run.
+
+SMOKE 8db7ec87 J4: a named Gemini worker was claimed, never reached the provider and
+sat at "starting" until the run's deadline, then took 49 s more to fail.
+"""
+
+import asyncio
+from dataclasses import replace
+
+import pytest
+import structlog
+from daimon.core.fleet import FleetConflict, worker_error_text
+from daimon.core.stores import fleet
+from sqlalchemy import text
+
+from ..test_fleet_budget import tariffs
+from .test_native_session_receipts import native_worker as native_worker
+from .test_native_session_receipts import source_read_only as source_read_only
+
+
+async def _ended(request, claimed):
+    _, rows = await fleet.run_status(
+        request.deps.sessionmaker, tenant_id=claimed.tenant_id, run_id=claimed.run_id
+    )
+    (ended,) = [row for row in rows if row.id == claimed.id]
+    return ended
+
+
+async def test_a_stuck_setup_step_fails_the_worker_within_the_setup_bound(
+    native_worker, monkeypatch
+):
+    from daimon.core import headless_runner
+
+    request, root, claimed, trace, _ = native_worker
+
+    async def stuck(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(headless_runner, "WORKER_SETUP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", stuck)
+    with structlog.testing.capture_logs() as logs:
+        async with asyncio.timeout(10):
+            with pytest.raises(FleetConflict) as raised:
+                await headless_runner.run_worker(
+                    request,
+                    parent=root,
+                    worker=claimed,
+                    trigger_message="Complete the task",
+                    prices=tariffs(root),
+                    cancel=asyncio.Event(),
+                )
+    assert raised.value.reason == "worker_setup_busy"
+    ended = await _ended(request, claimed)
+    assert ended.status == "failed" and ended.error_code == "preparation_deadline_exceeded"
+    assert worker_error_text(ended.error_code) == "it took too long to start; try again"
+    stages = [(e["stage"], e["outcome"]) for e in logs if e["event"] == "fleet.worker_stage"]
+    assert stages == [("policy", "ok"), ("source", "setup_timeout")]
+    assert not any(call.method == "POST" for call in trace.requests)
+
+
+async def test_a_busy_fleet_lock_fails_the_worker_instead_of_waiting(native_worker, monkeypatch):
+    from daimon.core import headless_runner
+
+    request, root, claimed, trace, _ = native_worker
+    monkeypatch.setattr(headless_runner, "WORKER_SETUP_LOCK_TIMEOUT", "200ms")
+    held = asyncio.Event()
+
+    async def hold_fleet_lock() -> None:
+        # Another transaction (a concurrent admission or sweep) holds the tenant fleet lock
+        # well past the worker's lock wait; the failure commit then waits only for it.
+        async with request.deps.sessionmaker.begin() as db:
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"fleet:{claimed.tenant_id}"},
+            )
+            held.set()
+            await asyncio.sleep(1)
+
+    holder = asyncio.create_task(hold_fleet_lock())
+    try:
+        await held.wait()
+        async with asyncio.timeout(5):
+            with pytest.raises(FleetConflict) as raised:
+                await headless_runner.run_worker(
+                    request,
+                    parent=root,
+                    worker=claimed,
+                    trigger_message="Complete the task",
+                    prices=tariffs(root),
+                    cancel=asyncio.Event(),
+                )
+        assert raised.value.reason == "worker_setup_busy"
+    finally:
+        await holder
+    ended = await _ended(request, claimed)
+    assert ended.status == "failed" and ended.error_code == "preparation_deadline_exceeded"
+    assert not any(call.method == "POST" for call in trace.requests)
+
+
+async def test_a_busy_fleet_lock_defers_the_failure_record_to_the_sweep(native_worker, monkeypatch):
+    """J4 failed 49 s past its deadline: the failure commit waited on a held fleet lock."""
+    from daimon.core import headless_runner
+
+    request, root, claimed, _, _ = native_worker
+    monkeypatch.setattr(headless_runner, "WORKER_SETUP_LOCK_TIMEOUT", "100ms")
+    monkeypatch.setattr(headless_runner, "WORKER_FAILURE_COMMIT_LOCK_TIMEOUT", "100ms")
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_fleet_lock() -> None:
+        async with request.deps.sessionmaker.begin() as db:
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"fleet:{claimed.tenant_id}"},
+            )
+            held.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold_fleet_lock())
+    try:
+        await held.wait()
+        with structlog.testing.capture_logs() as logs:
+            async with asyncio.timeout(5):
+                with pytest.raises(FleetConflict) as raised:
+                    await headless_runner.run_worker(
+                        request,
+                        parent=root,
+                        worker=claimed,
+                        trigger_message="Complete the task",
+                        prices=tariffs(root),
+                        cancel=asyncio.Event(),
+                    )
+        assert getattr(raised.value, headless_runner.FAILURE_RECORDED)
+        assert [
+            e["failure_code"] for e in logs if e["event"] == "fleet.worker_failure_commit_deferred"
+        ] == ["preparation_deadline_exceeded"]
+    finally:
+        release.set()
+        await holder
+    # Left for the deadline sweep, never marked running.
+    assert (await _ended(request, claimed)).status == "starting"
+
+
+async def test_the_setup_bound_never_cuts_a_slow_native_bind(native_worker, monkeypatch):
+    """The bound covers the worker's own setup only: native allocation keeps its deadline."""
+    from daimon.core import headless_runner
+
+    request, root, claimed, _, _ = native_worker
+    original = headless_runner.bind_session_impl
+
+    async def slow_bind(*args, **kwargs):
+        await asyncio.sleep(2.5)
+        return await original(*args, **kwargs)
+
+    # Longer than this fixture's own setup (admission alone is ~0.2 s), shorter than the bind.
+    monkeypatch.setattr(headless_runner, "WORKER_SETUP_TIMEOUT_S", 2.0)
+    monkeypatch.setattr(headless_runner, "bind_session_impl", slow_bind)
+    result = await headless_runner.run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded" and result.turns_used == 1
+
+
+async def test_an_intent_change_names_the_fields_that_differ(native_worker, monkeypatch):
+    """SMOKE d75dd687: Argon workers failed with intent_changed and nothing said which part
+    of the admitted intent no longer matched."""
+    from dataclasses import replace
+
+    from daimon.core import headless_runner
+
+    request, root, claimed, _, _ = native_worker
+    claimed = replace(claimed, max_turns=claimed.max_turns + 1)
+    with structlog.testing.capture_logs() as logs, pytest.raises(FleetConflict) as raised:
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert raised.value.reason == "intent_changed"
+    (event,) = [e for e in logs if e["event"] == "fleet.worker_intent_changed"]
+    assert event["fields"] == ["max_turns"]
+
+
+async def test_no_source_capture_runs_while_the_worker_holds_a_pooled_connection(native_worker):
+    """#1426 review: the resolve stage held its transaction's connection (and the shared
+    policy fence) over the guard's HTTP source read, then opened a second pooled session
+    for the fleet lock. Setup and resolve captures now run with none of the worker's
+    connections checked out; a capture at send time holds at most the session's send
+    fence, which is held across the provider send by design."""
+    import traceback
+
+    from daimon.core import headless_runner
+
+    request, root, claimed, _, _ = native_worker
+    pool = request.deps.sessionmaker.kw["bind"].sync_engine.pool
+    real = headless_runner.capture_preparation_source
+    held: list[tuple[bool, int]] = []
+
+    async def counted(*args, **kwargs):
+        frames = {frame.name for frame in traceback.extract_stack()}
+        held.append((bool(frames & {"checked_send", "claim_send"}), pool.checkedout()))
+        return await real(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(headless_runner, "capture_preparation_source", counted)
+        result = await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert result.status == "succeeded"
+    setup = [count for in_send, count in held if not in_send]
+    sending = [count for in_send, count in held if in_send]
+    assert len(setup) >= 3 and setup == [0] * len(setup)
+    assert sending and max(sending) <= 1
+
+
+async def test_a_source_change_during_resolve_is_still_refused(native_worker, monkeypatch):
+    """Capturing once before the resolve transaction keeps the source re-check: when that
+    capture no longer resolves to the admitted intent, the check inside the transaction
+    refuses before any native allocation."""
+    from daimon.core import headless_runner
+
+    request, root, claimed, trace, _ = native_worker
+    real_capture = headless_runner.capture_preparation_source
+    real_resolve = headless_runner.resolve_worker_spec
+    drifted: list[object] = []
+    calls = 0
+
+    async def capture(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        captured = await real_capture(*args, **kwargs)
+        if calls == 2:  # the resolve stage's capture
+            drifted.append(captured)
+        return captured
+
+    def resolve(*args, captured_source=None, **kwargs):
+        resolved = real_resolve(*args, captured_source=captured_source, **kwargs)
+        if any(captured_source is source for source in drifted):
+            return replace(resolved, digest="0" * 64)
+        return resolved
+
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", capture)
+    monkeypatch.setattr(headless_runner, "resolve_worker_spec", resolve)
+    with pytest.raises(FleetConflict) as raised:
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert raised.value.reason == "source_intent_changed"
+    assert not any(
+        call.method == "POST" and call.path in ("/v1/agents", "/v1/sessions")
+        for call in trace.requests
+    )
+
+
+async def test_the_resolve_transaction_never_takes_the_tenant_fleet_lock(
+    native_worker, monkeypatch
+):
+    """#1426 review: re-running the funding check inside the resolve transaction held the
+    tenant fleet lock until that transaction committed, and a refusal there rolled back
+    the overrun evidence the check wrote. The resolve transaction re-verifies only the
+    policy and the source intent; funding is checked outside it."""
+    import traceback
+
+    from daimon.core import headless_runner
+    from daimon.core.stores import fleet as fleet_store
+
+    request, root, claimed, _, _ = native_worker
+    real = fleet_store.lock_budget
+    inside_resolve: list[bool] = []
+
+    async def watched(*args, **kwargs):
+        inside_resolve.append(
+            any(frame.name == "resolve_turn_backend" for frame in traceback.extract_stack())
+        )
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_store, "lock_budget", watched)
+    result = await headless_runner.run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    assert inside_resolve and not any(inside_resolve)

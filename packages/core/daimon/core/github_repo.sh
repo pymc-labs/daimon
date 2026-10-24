@@ -93,7 +93,7 @@ fi
 requested=$1
 shift
 case "$1" in
-    repo|pr|issue|api|release|run|workflow|label|search|browse|clone) ;;
+    repo|pr|issue|api|release|run|workflow|label|search|browse|clone|push) ;;
     auth|config|alias|extension|secret|variable)
         printf 'gh %s is unavailable through this helper\n' "$1" >&2
         exit 2
@@ -121,6 +121,74 @@ if [ "$1" = clone ]; then
     git -C "$clone_dir" config --add credential.https://github.com.helper \
         '!sh /mnt/session/uploads/github-repo.sh --git-credential'
     git -C "$clone_dir" config credential.useHttpPath true
+elif [ "$1" = push ]; then
+    shift
+    push_usage() {
+        printf 'usage: sh github-repo.sh owner/repo push [-q|--quiet] <branch>...\n' >&2
+        exit 2
+    }
+    quiet=
+    case "${1:-}" in
+        -q|--quiet) quiet=$1; shift ;;
+    esac
+    [ "$#" -ge 1 ] || push_usage
+    for branch in "$@"; do
+        case "$branch" in
+            ''|-*) push_usage ;;
+        esac
+    done
+    # Exactly one effective push URL, after pushurl, insteadOf and
+    # pushInsteadOf, and it must be the requested repository.
+    origin_urls=$(git remote get-url --push --all origin 2>/dev/null || true)
+    case "$origin_urls" in
+        '')
+            printf 'this clone does not have a GitHub origin for %s\n' "$selected_repo" >&2
+            exit 2
+            ;;
+        *'
+'*)
+            printf 'this clone has more than one push URL for origin\n' >&2
+            exit 2
+            ;;
+    esac
+    origin_key=$(printf '%s' "$origin_urls" | tr '[:upper:]' '[:lower:]')
+    origin_key=${origin_key%.git}
+    selected_key=$(printf '%s' "$selected_repo" | tr '[:upper:]' '[:lower:]')
+    if [ "$origin_key" != "https://github.com/$selected_key" ]; then
+        printf 'this clone is not a clone of %s\n' "$selected_repo" >&2
+        exit 2
+    fi
+    # Only existing local branches, each pushed by an explicit same-name
+    # refspec (no +, no bare name), so remote.origin.push, push.default and
+    # null or deleting sources never apply.
+    count=$#
+    while [ "$count" -gt 0 ]; do
+        branch=$1
+        shift
+        count=$((count - 1))
+        git check-ref-format --branch "$branch" >/dev/null 2>&1 || push_usage
+        if ! git rev-parse --verify -q "refs/heads/$branch^{commit}" >/dev/null 2>&1; then
+            printf 'no local branch %s\n' "$branch" >&2
+            exit 2
+        fi
+        set -- "$@" "refs/heads/$branch:refs/heads/$branch"
+    done
+    # The credential helper answers over stdin, so the placeholder never
+    # appears in argv or a URL. The empty entry resets inherited helpers.
+    helper='!sh /mnt/session/uploads/github-repo.sh --git-credential'
+    if [ -n "$quiet" ]; then
+        GIT_TERMINAL_PROMPT=0 git \
+            -c credential.https://github.com.helper= \
+            -c "credential.https://github.com.helper=$helper" \
+            -c credential.useHttpPath=true \
+            push -q origin "$@"
+    else
+        GIT_TERMINAL_PROMPT=0 git \
+            -c credential.https://github.com.helper= \
+            -c "credential.https://github.com.helper=$helper" \
+            -c credential.useHttpPath=true \
+            push origin "$@"
+    fi
 else
     GH_TOKEN="$placeholder" gh "$@"
 fi

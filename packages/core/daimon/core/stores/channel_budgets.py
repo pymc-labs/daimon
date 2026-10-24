@@ -13,12 +13,31 @@ from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import ChannelBudget
-from daimon.core.stores import read_persisted_columns
+from daimon.core.stores import check_persisted_read, read_persisted_columns
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+def _channel_budget_query(
+    tenant_id: uuid.UUID, platform: str, channel_id: str
+) -> Select[tuple[ChannelBudget]]:
+    return select(ChannelBudget).where(
+        ChannelBudget.tenant_id == tenant_id,
+        ChannelBudget.platform == platform,
+        ChannelBudget.channel_id == channel_id,
+    )
+
+
+def check_channel_budget_read(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
+) -> None:
+    """What `get_channel_budget(persisted=True)` refuses, without reading the budget."""
+    check_persisted_read(
+        session, _channel_budget_query(tenant_id, platform, channel_id), reject_new=True
+    )
 
 
 async def get_channel_budget(
@@ -29,11 +48,7 @@ async def get_channel_budget(
     channel_id: str,
     persisted: bool = False,
 ) -> ChannelBudgetRow | None:
-    query = select(ChannelBudget).where(
-        ChannelBudget.tenant_id == tenant_id,
-        ChannelBudget.platform == platform,
-        ChannelBudget.channel_id == channel_id,
-    )
+    query = _channel_budget_query(tenant_id, platform, channel_id)
     if persisted:
         row = (await read_persisted_columns(session, query, reject_new=True)).one_or_none()
         return ChannelBudgetRow.model_validate(row) if row is not None else None

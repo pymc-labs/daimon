@@ -105,12 +105,13 @@ def require_session_driver(session: BetaManagedAgentsSession, auth: AuthIdentity
     """
     if (session.metadata or {}).get(MA_METADATA_KEY_AGENT_CHAT) != "true":
         raise ToolError(
-            "Only sessions opened through agent chat can be driven here. Open a new conversation."
+            "Only conversations opened through agent chat can be driven here. "
+            "Open a new conversation."
         )
     if (session.metadata or {}).get(MA_METADATA_KEY_ACCOUNT) != str(
         auth.account_id
     ) or hub_access_mode() == "read":
-        raise ToolError("session not found")
+        raise ToolError("conversation not found")
 
 
 async def gate(runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession) -> None:

@@ -43,15 +43,15 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
-from daimon.testing import ma_agent, ma_environment
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, list_response
-from daimon.testing.ma_transport import ScriptedTransport
+from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.membership import FixtureMembershipResolver
 from discord.http import HTTPClient
 from mux.contracts.config import BackendConfig, ConfigRevision
 from mux.contracts.ids import Provider, Scope
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import PostgresDsn, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import event
@@ -401,7 +401,7 @@ async def test_actual_error_path_mutations(
             bot_module, "THREAD_OPEN_FAILED_NOTICE", "Missing permission: Create Public Threads."
         )
     else:
-        from daimon.testing.ma_transport import ScriptedReply
+        from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
         ingress.native.replies.append(
             ScriptedReply(method="POST", path="/c4-mutant", response=httpx.Response(200, json={}))

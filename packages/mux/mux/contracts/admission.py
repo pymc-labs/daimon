@@ -99,3 +99,11 @@ def admit(config: ConfigRevision, profile: Profile) -> Admission:
         fallbacks=fallbacks,
         waived_core=waived,
     )
+
+
+__all__ = [
+    "Admission",
+    "FallbackApplied",
+    "UNWAIVABLE",
+    "admit",
+]

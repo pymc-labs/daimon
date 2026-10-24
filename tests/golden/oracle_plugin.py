@@ -23,7 +23,7 @@ import secrets
 import sys
 import time
 import uuid
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from datetime import UTC, datetime, tzinfo
 from decimal import ROUND_HALF_UP, Decimal
 from email.parser import BytesParser
@@ -44,10 +44,10 @@ from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.turn import approvals, driver, outcomes
 from daimon.testing import effect_recorder, turn_fakes
 from daimon.testing.effect_recorder import EffectRecorder, database_metadata, json_value
-from daimon.testing.ma import not_found_response
-from daimon.testing.ma_transport import Json, ScriptedReply, ScriptedTransport
 from http_turn import HttpTurnFixtures, synchronize_approval_poll, synchronize_cancel_timer
 from mutations import apply as apply_mutation
+from mux.testing.drivers.anthropic.ma import not_found_response
+from mux.testing.drivers.anthropic.ma_transport import Json, ScriptedReply, ScriptedTransport
 from runner import TURN_CONTROL_KWARGS
 from sqlalchemy import ColumnDefault, DateTime
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -60,9 +60,43 @@ RECORDER = EffectRecorder()
 PATCH = pytest.MonkeyPatch()
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 INSTRUMENTATION_ERRORS: list[str] = []
-RECOVERY_SCRIPT = ScriptedTransport()
 TEST_DSN = os.environ["DAIMON_DATABASE__TEST_URL"]
-OUTPUT = Path(os.environ["DAIMON_ORACLE_OUTPUT"])
+# One child process replays many scenarios. The manifest lists, per node id, the
+# output file and the optional production mutation for that scenario.
+MANIFEST = json.loads(Path(os.environ["DAIMON_ORACLE_MANIFEST"]).read_text())
+ENTRIES: dict[str, dict[str, str | None]] = {
+    entry["nodeid"]: entry for entry in MANIFEST["entries"]
+}
+OUTPUT_DIR = Path(MANIFEST["output_dir"])
+FAILURES: dict[str, str] = {}
+CONSISTENCY: dict[str, list[str]] = {}
+# Per scenario key: items collected, and items whose teardown report has been seen.
+EXPECTED: dict[str, int] = {}
+COMPLETED: dict[str, int] = {}
+
+
+def write_state() -> None:
+    """Publish progress after every report, so a killed child still leaves its record.
+
+    The runner trusts a scenario only when all its items completed and none failed.
+    """
+    target = OUTPUT_DIR / "state.json"
+    scratch = target.with_suffix(".tmp")
+    scratch.write_text(
+        json.dumps({"expected": EXPECTED, "completed": COMPLETED, "failures": FAILURES})
+    )
+    os.replace(scratch, target)
+
+
+def entry_for(nodeid: str) -> dict[str, str | None] | None:
+    """The manifest entry for a test. An unparametrized id also owns its parametrized variants.
+
+    Several variants write the same output file in order, so the last one wins, exactly as a
+    one-scenario-per-process replay of the bare id did.
+    """
+    return ENTRIES.get(nodeid) or ENTRIES.get(nodeid.partition("[")[0] if "[" in nodeid else "")
+
+
 COLLECTION_IDS = itertools.count(0x100000)
 HTTP_TURNS: list[HttpTurnFixtures] = []
 # Additive tables from 0077_neutral_state never allocate legacy host-control IDs.
@@ -79,7 +113,6 @@ NEUTRAL_STATE_TABLES = frozenset(
         "accounting_outbox",
     }
 )
-PATCH.setattr(uuid, "uuid4", lambda: uuid.UUID(int=next(COLLECTION_IDS)))
 
 
 TOKEN_COUNTERS: dict[str, int] = {}
@@ -101,8 +134,82 @@ def token_bytes(nbytes: int | None = None) -> bytes:
     return b"".join(blocks)[:size]
 
 
-PATCH.setattr(secrets, "token_bytes", token_bytes)
-PATCH.setattr(time, "time", lambda: NOW.timestamp())
+def collection_uuid4() -> uuid.UUID:
+    # One stable object: modules that did `from uuid import uuid4` hold this very
+    # function, and setup recognizes it by identity to swap in the per-scenario counter.
+    return uuid.UUID(int=next(COLLECTION_IDS))
+
+
+# Scenario-wide counters live in module state. SQLAlchemy and the ORM memoize the default
+# callables they see on first use, so every scenario must reach the same function objects;
+# only the counters behind them are reset.
+
+
+class ScenarioState:
+    """Per-scenario counters and side tables; replaced wholesale when a scenario starts."""
+
+    def __init__(self) -> None:
+        self.ids = itertools.count(1)
+        self.neutral_ids = itertools.count(1)
+        self.recovery = ScriptedTransport()
+        self.key: str | None = None
+
+
+STATE = ScenarioState()
+
+
+def next_uuid() -> uuid.UUID:
+    return uuid.UUID(int=next(STATE.ids))
+
+
+def fixed_uuid(context: Any) -> uuid.UUID:
+    return next_uuid()
+
+
+def fixed_neutral_uuid(context: Any) -> uuid.UUID:
+    return uuid.UUID(int=(1 << 120) + next(STATE.neutral_ids))
+
+
+def fixed_now(context: Any) -> datetime:
+    return NOW
+
+
+def install_static_patches() -> None:
+    """Process-wide determinism that must hold from collection to the last teardown.
+
+    PATCH.undo() after every scenario removes these too, so each scenario setup
+    installs them again before anything else runs.
+    """
+    PATCH.setattr(uuid, "uuid4", collection_uuid4)
+    PATCH.setattr(secrets, "token_bytes", token_bytes)
+    PATCH.setattr(time, "time", lambda: NOW.timestamp())
+
+
+def reset_scenario_state(key: str) -> None:
+    """Start a scenario from the recorder state a fresh process would have.
+
+    The id counters restart for every test, as they always did. Patches, recorder and side
+    tables restart per scenario, not per parametrized variant: variants of one bare node id
+    keep sharing one patch stack and one transcript, exactly as in a one-scenario process
+    (mcp_continue_turn's golden holds both variants, the second recorded through two
+    stacked HTTP wrappers).
+    """
+    STATE.ids = itertools.count(1)
+    STATE.neutral_ids = itertools.count(1)
+    if key == STATE.key:
+        return
+    if STATE.key is not None:
+        PATCH.undo()
+    STATE.key = key
+    install_static_patches()
+    RECORDER.effects = []
+    INSTRUMENTATION_ERRORS.clear()
+    HTTP_TURNS.clear()
+    TOKEN_COUNTERS.clear()
+    STATE.recovery = ScriptedTransport()
+
+
+install_static_patches()
 
 
 class Clock(datetime):
@@ -257,6 +364,7 @@ def wrap_async(cls: Any, name: str, *, result: bool = False) -> None:
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: Any) -> None:
+    reset_scenario_state(str(cast(Any, entry_for(item.nodeid))["key"]))
     PATCH.setattr(effect_recorder, "Normalizer", GoldenNormalizer)
 
     def fixed_sql_now(self: Any, compiler: Any, **kwargs: Any) -> str:
@@ -264,20 +372,19 @@ def pytest_runtest_setup(item: Any) -> None:
 
     PATCH.setattr(sql_now, "_compiler_dispatch", fixed_sql_now)
     PATCH.setattr(current_timestamp, "_compiler_dispatch", fixed_sql_now)
-    mutation = os.environ.get("DAIMON_ORACLE_MUTATION")
+    mutation = cast(Any, entry_for(item.nodeid))["mutation"]
     if mutation:
         apply_mutation(PATCH, mutation)
     importlib.import_module("parity.drivers.discord_driver")
     importlib.import_module("parity.drivers.slack_driver")
-    ids = itertools.count(1)
     original_uuid = uuid.uuid4
-
-    def next_uuid() -> uuid.UUID:
-        return uuid.UUID(int=next(ids))
 
     for module in tuple(sys.modules.values()):
         name = getattr(module, "__name__", "")
-        if not (name.startswith(("daimon.", "jwt.")) or name == item.module.__name__):
+        # mux.testing holds the MA fakes that used to live in daimon.testing.
+        if not (
+            name.startswith(("daimon.", "jwt.", "mux.testing.")) or name == item.module.__name__
+        ):
             continue
         if (
             getattr(module, "datetime", None) is datetime
@@ -290,17 +397,6 @@ def pytest_runtest_setup(item: Any) -> None:
         if getattr(module, "uuid4", None) is original_uuid:
             PATCH.setattr(module, "uuid4", next_uuid)
     PATCH.setattr(uuid, "uuid4", next_uuid)
-
-    def fixed_uuid(context: Any) -> uuid.UUID:
-        return next_uuid()
-
-    neutral_ids = itertools.count(1)
-
-    def fixed_neutral_uuid(context: Any) -> uuid.UUID:
-        return uuid.UUID(int=(1 << 120) + next(neutral_ids))
-
-    def fixed_now(context: Any) -> datetime:
-        return NOW
 
     metadata = database_metadata()
     for table in metadata.tables.values():
@@ -475,7 +571,7 @@ def pytest_runtest_setup(item: Any) -> None:
 
     recovery_path = "/v1/sessions/sess_dead_before_recovery/events"
     if "test_dead_session_recreates" in item.nodeid:
-        RECOVERY_SCRIPT.queue(
+        STATE.recovery.queue(
             ScriptedReply("GET", recovery_path, not_found_response("session gone"))
         )
     original_http = httpx.MockTransport.handle_async_request
@@ -494,11 +590,11 @@ def pytest_runtest_setup(item: Any) -> None:
             ],
         }
         try:
-            if RECOVERY_SCRIPT.replies and (request.method, request.url.path) == (
+            if STATE.recovery.replies and (request.method, request.url.path) == (
                 "GET",
                 recovery_path,
             ):
-                response = RECOVERY_SCRIPT.dispatch(request)
+                response = STATE.recovery.dispatch(request)
             else:
                 response = await original_http(self, request)
         except Exception as error:
@@ -637,13 +733,32 @@ async def database(schema: str) -> object:
         await engine.dispose()
 
 
+def consistency_problems() -> list[str]:
+    """Plugin self-checks on the scenario that just ran; each is a message, none raises."""
+    problems: list[str] = []
+    checks: list[Callable[[], None]] = [STATE.recovery.assert_consumed]
+    checks.extend(fixtures.assert_consumed for fixtures in HTTP_TURNS)
+    for check in checks:
+        try:
+            check()
+        except AssertionError as error:
+            problems.append(str(error))
+    if INSTRUMENTATION_ERRORS:
+        problems.append(f"Oracle instrumentation failed: {INSTRUMENTATION_ERRORS}")
+    return problems
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_call(item: Any) -> Generator[None]:
-    yield
-    RECOVERY_SCRIPT.assert_consumed()
-    for fixtures in HTTP_TURNS:
-        fixtures.assert_consumed()
-    assert not INSTRUMENTATION_ERRORS, f"Oracle instrumentation failed: {INSTRUMENTATION_ERRORS}"
+    outcome = yield
+    problems = consistency_problems()
+    if outcome.excinfo is not None:
+        # The scenario's own exception is the failure to show. Checks that only fail because
+        # the scenario stopped early (unconsumed replies) follow it, never replace it.
+        if problems:
+            CONSISTENCY[item.nodeid] = problems
+        return
+    assert not problems, "\n".join(problems)
     runner = item.funcargs.get("_session_scoped_runner")
     if runner is not None:
         runner.run(drain_boundaries())
@@ -653,8 +768,43 @@ def pytest_runtest_call(item: Any) -> Generator[None]:
         snapshot = runner.run(RECORDER.database(session))
     else:
         snapshot = asyncio.run(database(schema)) if schema else None
-    OUTPUT.write_text(RECORDER.transcript(database=snapshot, epoch=NOW))
+    (OUTPUT_DIR / f"{cast(Any, entry_for(item.nodeid))['key']}.json").write_text(
+        RECORDER.transcript(database=snapshot, epoch=NOW)
+    )
+
+
+def pytest_runtest_logreport(report: Any) -> None:
+    entry = entry_for(report.nodeid)
+    if report.failed and entry is not None:
+        # The scenario's own traceback first, then its captured output, then plugin checks.
+        text = report.longreprtext
+        for title, content in report.sections:
+            text += f"\n----- {title} -----\n{content}"
+        if report.when == "call" and report.nodeid in CONSISTENCY:
+            text += "\n----- oracle consistency checks (after the failure above) -----\n"
+            text += "\n".join(CONSISTENCY[report.nodeid])
+        FAILURES.setdefault(str(entry["key"]), text)
+    if entry is not None:
+        if report.when == "teardown":
+            COMPLETED[str(entry["key"])] = COMPLETED.get(str(entry["key"]), 0) + 1
+        write_state()
+
+
+def pytest_collection_modifyitems(items: list[Any]) -> None:
+    unknown = [item.nodeid for item in items if entry_for(item.nodeid) is None]
+    matched = {
+        cast(Any, entry_for(item.nodeid))["nodeid"] for item in items if item.nodeid not in unknown
+    }
+    missing = set(ENTRIES) - matched
+    assert not unknown and not missing, f"oracle manifest mismatch: {unknown} {sorted(missing)}"
+    order = {nodeid: index for index, nodeid in enumerate(ENTRIES)}
+    items.sort(key=lambda item: order[cast(Any, entry_for(item.nodeid))["nodeid"]])
+    for item in items:
+        key = str(cast(Any, entry_for(item.nodeid))["key"])
+        EXPECTED[key] = EXPECTED.get(key, 0) + 1
+    write_state()
 
 
 def pytest_sessionfinish() -> None:
+    write_state()
     PATCH.undo()

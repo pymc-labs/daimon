@@ -32,7 +32,7 @@ from daimon.core.config import (
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import ConfigError
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

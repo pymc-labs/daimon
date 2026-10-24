@@ -1,7 +1,7 @@
 """Pure Adaptive Card builders for the channel settings dialog. No I/O.
 
 The setup panel lives in the 1:1 chat, so the dialog first asks which
-channel, then shows that channel's environment and, for server admins, its
+channel, then shows that channel's environment and, for admins, its
 permissions and channel skills. Every submit names its `op` and the channel.
 """
 
@@ -18,6 +18,7 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
+from daimon.core.platform_words import words_for
 from daimon.core.stores.domain import ChannelSkillRow
 from microsoft_teams.cards import (
     Action,
@@ -33,7 +34,7 @@ from microsoft_teams.cards import (
 
 CHANNEL_DIALOG: Final = "channel_settings"
 MAX_CHANNEL_CHOICES: Final = 100
-"""Channels the picker lists; a server admin with more types the id instead."""
+"""Channels the picker lists; an admin with more types the id instead."""
 
 ChannelOp = Literal["pick", "environment", "rule", "skills"]
 RuleExtra = Literal["none", "copy", "release"]
@@ -43,14 +44,15 @@ RULE_EXTRAS: Final[Mapping[RuleExtra, str]] = {
     "release": "Release its agents",
 }
 PERMISSIONS_NOTE: Final = (
-    "Who can read it: anyone; only this channel, so only turns here read its messages and "
-    "conversations; or only its own agents, so also only agents kept here run and show here, "
+    "Who can read it: anyone; only this channel, so only conversations here can read "
+    "it; or only its own agents, so also only agents kept here run and show here, "
     "and nowhere else. Its default agent becomes one, or a copy of the agent answering now. "
     "Who can post: anyone; only its own agents; or nobody, daimon included. Releasing its "
     "agents lets them run elsewhere, bringing what they remembered here."
 )
+_ADMIN: Final = words_for("teams").admin
 CHANNEL_SKILLS_NOTE: Final = (
-    "These skills apply only here, from the next message.\n\nOnly server admins can change them."
+    f"These skills apply only here, from the next message.\n\nOnly {_ADMIN} can change them."
 )
 MAX_LISTED_SKILLS: Final = 20
 
@@ -64,9 +66,9 @@ class ChannelSettings:
     picker: EnvironmentPicker | None
     """None when there is nothing to pick, or the caller may not."""
     rule: ChannelRuleStatus | None
-    """None for a caller who is not a server admin."""
+    """None for a caller who is not an admin."""
     skills: tuple[ChannelSkillRow, ...] | None = None
-    """None for a caller who is not a server admin."""
+    """None for a caller who is not an admin."""
 
 
 def _text(
@@ -96,7 +98,7 @@ def channel_label(channel_id: str, name: str | None) -> str:
 def channel_picker_form(
     channels: Mapping[str, str | None], *, free_entry: bool, notice: str | None = None
 ) -> AdaptiveCard:
-    """Which channel to change: the ones the caller may, or (server admins) any id."""
+    """Which channel to change: the ones the caller may, or (admins) any id."""
     body: list[CardElement] = [_text(notice)] if notice else []
     shown = list(channels.items())[:MAX_CHANNEL_CHOICES]
     if shown:
@@ -187,7 +189,7 @@ def _skills_section(rows: Sequence[ChannelSkillRow]) -> list[CardElement]:
 
 def channel_settings_form(settings: ChannelSettings, *, notice: str | None = None) -> AdaptiveCard:
     """The channel's settings, each with its own save; permissions and skills for
-    server admins."""
+    admins."""
     body: list[CardElement] = [_text(notice)] if notice else []
     body.append(_text(settings.label, bold=True))
     environment, actions = _environment_section(settings)

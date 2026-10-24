@@ -223,7 +223,7 @@ def test_agent_editor_preselects_requested_repo_in_add_dialog(
     )
     dialog = page.body.decode().split('<dialog id="repo-picker"', 1)[1].split("</dialog>", 1)[0]
     assert ('class="gh-picker-toggle" type="checkbox" checked>' in dialog) is expected
-    assert ('data-name="acme/data"' in dialog) is not already_granted
+    assert ('class="gh-picker-choice" data-repo-id="1"' in dialog) is not already_granted
 
 
 def test_done_page_names_github_and_discord_with_marks() -> None:
@@ -1073,18 +1073,83 @@ def test_editor_stages_remove_undo_and_summarizes_every_change() -> None:
         missing_names=("lab/hidden",),
     ).body.decode()
     assert "lab/hidden" not in body
-    assert "A connected repo you cannot access" in body
+    assert "Hidden repo" in body
+    assert 'data-action="remove" aria-label="Remove Hidden repo"' in body
     assert 'data-action="remove" aria-label="Remove lab/visible"' in body
     assert 'data-action="undo" aria-label="Undo removal of lab/visible"' in body
-    assert "Will be removed when you save" in body
+    assert 'isRemoved ? "− To remove"' in body
     assert "removed.delete(id);" in body
-    assert '"Not saved yet: " + parts.join(", ")' in body
+    assert 'parts.length ? "Not saved yet" : "No changes to save"' in body
     assert 'parts.push("change working repo")' in body
     assert 'id="repo-count"' not in body
     assert "cancel.hidden = !!parts.length;" in body
     assert "save.hidden = !parts.length;" in body
     assert "Change working repo" in body
-    assert "<small>Already connected</small>" in body
+    assert 'data-action="working"' not in body
+    assert "✓ Added" in body
+
+
+def test_editor_hides_unlisted_private_grants_even_under_truncated_owner() -> None:
+    now = datetime.now(UTC)
+    grants = [
+        github_access.AgentRepo(
+            repo_id=repo_id,
+            full_name=name,
+            scope="agent",
+            max_access="write",
+            baseline_access="write",
+            ceiling_access="write",
+            staged=False,
+            status="active",
+            added_by_account_id=None,
+            added_at=now,
+            granted_by_account_id=None,
+            granted_at=now,
+            is_working_repo=repo_id == 2,
+        )
+        for repo_id, name in (
+            (1, "big/visible"),
+            (2, "big/private-other-person"),
+            (3, "lost/stale"),
+        )
+    ]
+    install = oauth_github._Installation(
+        id=7,
+        owner_id=5,
+        owner_login="big",
+        repository_selection="selected",
+        repos=(oauth_github._Repo(1, 5, 7, "big/visible", "admin"),),
+        truncated=True,
+    )
+    body = oauth_github._agent_editor_page(
+        root="https://mcp.test",
+        state="state",
+        invitation_hash="invitation",
+        secret="secret",
+        agent_name="ResearchBot",
+        workspace="Test Server",
+        platform="discord",
+        grants=grants,
+        installations=[install],
+        snapshot="snapshot",
+        cancel_url="https://mcp.test/cancel",
+        install_url="https://github.com/apps/sample-app/installations/new",
+    ).body.decode()
+    past_cap_row = body.split('data-repo-id="2"', 1)[1].split("</article>", 1)[0]
+    stale_row = body.split('data-repo-id="3"', 1)[1].split("</article>", 1)[0]
+    assert '<strong id="working-card-name">Hidden repo</strong>' in body
+    assert '<strong class="gh-row-name">Hidden repo</strong>' in past_cap_row
+    assert 'aria-label="Remove Hidden repo"' in past_cap_row
+    assert "Past the 2,000-repo limit, so you can only remove it here." in past_cap_row
+    assert 'gh-working-action"' not in past_cap_row
+    assert '<strong class="gh-row-name">Hidden repo</strong>' in stale_row
+    assert "You can't see this repo on GitHub." in stale_row
+    assert "big/private-other-person" not in body
+    assert "lost/stale" not in body
+    saved = oauth_github._saved_agent_page("ResearchBot", grants, visible_ids={1}).body.decode()
+    assert "big/private-other-person" not in saved
+    assert "lost/stale" not in saved
+    assert saved.count("Hidden repo") == 2
     assert 'data-repo-id="1"' not in body.split('<dialog id="repo-picker"', 1)[1]
 
 
@@ -1276,7 +1341,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         async def save(hidden: dict[str, str], **choices: object) -> httpx.Response:
             return await browser.post(
                 "/oauth/github/confirm",
-                data={**hidden, "access": "read", "working": "keep", **choices},
+                data={**hidden, "access": "write", "working": "keep", **choices},
             )
 
         state, hidden, rendered = await page()
@@ -1284,9 +1349,9 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         assert '<dialog id="repo-picker"' in rendered
         assert '<noscript><section class="gh-fallback">' in rendered
         assert (await save(hidden)).status_code == 200  # No-op keeps the invitation.
-        added = await save(hidden, repo=["101", "102"], access_101="read", access_102="write")
+        added = await save(hidden, repo=["101", "102"])
         assert added.status_code == 200
-        assert "Editor can use 2 repos." in added.text
+        assert "Editor can read and change these 2 repos." in added.text
         async with sessionmaker() as session:
             grants = await github_access.list_agent_repos(
                 session, tenant_id=tenant_id, agent_id=agent_id
@@ -1295,17 +1360,22 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
             101: "write",
             102: "write",
         }
-        replay = await save(hidden, repo=["101", "102"], access_101="read", access_102="write")
-        assert replay.status_code == 200 and "Editor can use 2 repos." in replay.text
+        replay = await save(hidden, repo=["101", "102"])
+        assert (
+            replay.status_code == 200 and "Editor can read and change these 2 repos." in replay.text
+        )
 
         state, hidden, rendered = await page()
-        assert "Repos for this agent" in rendered
+        assert "Can read and change" in rendered
         assert "Read only" not in rendered and "Read and write" not in rendered
-        assert (await save(hidden, repo="101", access_101="write")).status_code == 403
+        assert (await save(hidden, repo="101")).status_code == 403
         assert (await save(hidden, repo="103", access_103="admin")).status_code == 400
         assert (await save(hidden, repo="103", access_103=["read", "write"])).status_code == 400
         working = await save(hidden, working="101")
-        assert working.status_code == 200 and "Editor can use 2 repos." in working.text
+        assert (
+            working.status_code == 200
+            and "Editor can read and change these 2 repos." in working.text
+        )
 
         admin_ids.clear()
         with monkeypatch.context() as pending_patch:
@@ -1317,14 +1387,14 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
             _state, _hidden, unavailable = await page()
         assert "An editor owner must approve Daimon" in unavailable
         assert "editor/repo-101" not in unavailable and "editor/repo-102" not in unavailable
-        assert "A connected repo you cannot access" in unavailable
+        assert "Hidden repo" in unavailable
         assert "Open GitHub setup" in unavailable
         admin_ids.update({101, 102, 103})
 
         state, hidden, rendered = await page()
         admin_ids.remove(102)
         denied = await save(hidden, remove="102")
-        assert denied.status_code == 403
+        assert denied.status_code == 409
         admin_ids.add(102)
         removed = await save(hidden, remove="102")
         assert removed.status_code == 200
@@ -1333,11 +1403,13 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         state, hidden, rendered = await page()
         mixed = await save(hidden, repo="103", remove="101", working="103")
         assert mixed.status_code == 200
-        assert "repo-101" not in mixed.text and "Editor can use 1 repo." in mixed.text
+        assert "repo-101" not in mixed.text
+        assert "Editor can read and change this repo." in mixed.text
 
         state, hidden, rendered = await page()
         cleared = await save(hidden, working="clear")
-        assert cleared.status_code == 200 and "Editor can use 1 repo." in cleared.text
+        assert cleared.status_code == 200
+        assert "Editor can read and change this repo." in cleared.text
 
         state, hidden, rendered = await page()
         async with sessionmaker.begin() as session:
@@ -1485,6 +1557,8 @@ class _EditorEnv:
     listing_down: bool = False
     details_down: bool = False
     listing_delay: float = 0.0
+    multi_owners: bool = False
+    failed_owner_id: int | None = None
 
     async def open_editor(self) -> tuple[str, dict[str, str]]:
         """Run the connect flow and return the state plus the editor's hidden fields."""
@@ -1569,6 +1643,16 @@ async def editor_env(
 
     async def github_handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        owners = (
+            (
+                (77, 55, "editor", "User"),
+                (78, 56, "org-a", "Organization"),
+                (79, 57, "org-b", "Organization"),
+                (80, 58, "org-c", "Organization"),
+            )
+            if env.multi_owners
+            else ((77, 55, "editor", "User"),)
+        )
         if path.startswith(("/user/installations", "/app/installations")):
             env.github_calls.append(path)
         if path == "/login/oauth/access_token":
@@ -1583,40 +1667,54 @@ async def editor_env(
                 json={
                     "installations": [
                         {
-                            "id": 77,
-                            "account": {"id": 55, "login": "editor", "type": "User"},
+                            "id": installation_id,
+                            "account": {"id": owner_id, "login": login, "type": owner_type},
                             "repository_selection": "selected",
                         }
+                        for installation_id, owner_id, login, owner_type in owners
                     ]
                 },
             )
-        if path == "/user/installations/77/repositories":
+        if path.startswith("/user/installations/") and path.endswith("/repositories"):
+            installation_id = int(path.split("/")[3])
+            owner = next((item for item in owners if item[0] == installation_id), None)
+            if owner is None:
+                raise AssertionError(path)
             if env.listing_delay:
                 await asyncio.sleep(env.listing_delay)
-            if env.listing_down:
+            if env.listing_down or env.failed_owner_id == installation_id:
                 return httpx.Response(502)
+            repo_ids = (
+                (101, 102, 103)
+                if installation_id == 77 and not env.multi_owners
+                else (installation_id * 100 + 1,)
+            )
             return httpx.Response(
                 200,
                 json={
                     "repositories": [
                         {
                             "id": repo_id,
-                            "owner": {"id": 55},
-                            "full_name": f"editor/repo-{repo_id}",
+                            "owner": {"id": owner[1]},
+                            "full_name": f"{owner[2]}/repo-{repo_id}",
                             "permissions": {"admin": True},
                         }
-                        for repo_id in (101, 102, 103)
+                        for repo_id in repo_ids
                     ]
                 },
             )
-        if path == "/app/installations/77":
+        if path.startswith("/app/installations/"):
+            installation_id = int(path.split("/")[3])
+            owner = next((item for item in owners if item[0] == installation_id), None)
+            if owner is None:
+                raise AssertionError(path)
             if env.details_down:
                 return httpx.Response(502)
             return httpx.Response(
                 200,
                 json={
-                    "id": 77,
-                    "account": {"id": 55, "login": "editor", "type": "User"},
+                    "id": installation_id,
+                    "account": {"id": owner[1], "login": owner[2], "type": owner[3]},
                     "repository_selection": "selected",
                     "suspended_at": None,
                     "permissions": _INSTALLATION_WRITE,
@@ -1667,6 +1765,200 @@ async def _submit(
 async def _no_github_calls_after(env: _EditorEnv, marker: int) -> None:
     assert env.github_calls[marker:] == []
     assert await env.saved_repo_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_editor_add_preserves_unselected_stale_grant(editor_env: _EditorEnv) -> None:
+    env = editor_env
+    env.multi_owners = True
+    _, hidden = await env.open_editor()
+    first = await env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "write", "working": "keep", "repo": "7801"},
+    )
+    assert first.status_code == 200
+    assert await env.saved_repo_ids() == [7801]
+    async with env.sessionmaker.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE tenant_github_repos SET status = 'revoked' "
+                "WHERE tenant_id = :tenant_id AND repo_id = 7801"
+            ),
+            {"tenant_id": env.tenant_id},
+        )
+    env.failed_owner_id = 78
+    _, hidden = await env.open_editor()
+    added = await env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "write", "working": "keep", "repo": "7701"},
+    )
+    assert added.status_code == 200
+    assert await env.saved_repo_ids() == [7701, 7801]
+
+
+@pytest.mark.asyncio
+async def test_editor_mixed_owner_admission_error_rolls_back(
+    editor_env: _EditorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = editor_env
+    env.multi_owners = True
+    _, hidden = await env.open_editor()
+    original_budget = github_access.require_projected_grant_budget
+
+    def reject_second_owner(
+        repo_ids_by_installation: dict[int, set[int]],
+        *,
+        any_read_only: bool,
+        has_working_repo: bool,
+        agent_name: str,
+    ) -> None:
+        if len(repo_ids_by_installation) > 1:
+            raise github_access.InstallationLimitError("forced admission failure")
+        original_budget(
+            repo_ids_by_installation,
+            any_read_only=any_read_only,
+            has_working_repo=has_working_repo,
+            agent_name=agent_name,
+        )
+
+    monkeypatch.setattr(github_access, "require_projected_grant_budget", reject_second_owner)
+    refused = await env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "write", "working": "keep", "repo": ["7701", "7801"]},
+    )
+    assert refused.status_code == 400
+    assert "forced admission failure" in refused.text
+    assert await env.saved_repo_ids() == []
+    async with env.sessionmaker() as session:
+        status, _ = await github_connect.invitation_status(session, hidden["invitation"])
+        for repo_id in (7701, 7801):
+            assert (
+                await github_access.repo_for_agent(
+                    session, tenant_id=env.tenant_id, agent_id=env.agent_id, repo_id=repo_id
+                )
+                is None
+            )
+    assert status == "active"
+
+
+@pytest.mark.asyncio
+async def test_editor_mixed_owner_save_is_atomic_and_binds_each_installation(
+    editor_env: _EditorEnv,
+) -> None:
+    env = editor_env
+    env.multi_owners = True
+    _, hidden = await env.open_editor()
+    first = await env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "write", "working": "keep", "repo": "8001"},
+    )
+    assert first.status_code == 200
+    async with env.sessionmaker() as session:
+        first_grants = await github_access.list_agent_repos(
+            session, tenant_id=env.tenant_id, agent_id=env.agent_id
+        )
+        assert len(first_grants) == 1 and first_grants[0].is_working_repo
+    _, hidden = await env.open_editor()
+    mixed = await env.browser.post(
+        "/oauth/github/confirm",
+        data={
+            **hidden,
+            "access": "write",
+            "working": "7701",
+            "repo": ["7801", "7901", "7701"],
+            "remove": "8001",
+        },
+    )
+    assert mixed.status_code == 200
+    assert "Editor can read and change these 3 repos." in mixed.text
+    for owner in ("org-a", "org-b", "editor"):
+        assert owner in mixed.text
+    assert "org-c" not in mixed.text
+    assert await env.saved_repo_ids() == [7701, 7801, 7901]
+    async with env.sessionmaker() as session:
+        for repo_id, installation_id in ((7701, 77), (7801, 78), (7901, 79)):
+            repo = await github_access.repo_for_agent(
+                session, tenant_id=env.tenant_id, agent_id=env.agent_id, repo_id=repo_id
+            )
+            assert repo is not None and repo.installation_id == installation_id
+
+    _, hidden = await env.open_editor()
+    env.failed_owner_id = 78
+    stale = await env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "write", "working": "keep", "remove": "7901"},
+    )
+    assert stale.status_code == 409
+    assert await env.saved_repo_ids() == [7701, 7801, 7901]
+    state = hidden["state"]
+    refreshed = await env.browser.get("/oauth/github/confirm", params={"state": state})
+    assert refreshed.status_code == 200 and "Could not load repos." in refreshed.text
+    removed = await env.browser.post(
+        "/oauth/github/confirm",
+        data={
+            **_hidden_fields(refreshed.text),
+            "access": "write",
+            "working": "keep",
+            "remove": "7801",
+        },
+    )
+    assert removed.status_code == 200
+    assert await env.saved_repo_ids() == [7701, 7901]
+    env.failed_owner_id = None
+
+
+@pytest.mark.asyncio
+async def test_installation_lists_cap_each_owner_and_isolate_one_failure() -> None:
+    pages: list[tuple[int, int]] = []
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "installations": [
+                        {
+                            "id": installation_id,
+                            "account": {
+                                "id": installation_id,
+                                "login": f"owner-{installation_id}",
+                                "type": "Organization",
+                            },
+                        }
+                        for installation_id in (1, 2, 3)
+                    ]
+                },
+            )
+        installation_id = int(path.split("/")[3])
+        page = int(request.url.params["page"])
+        pages.append((installation_id, page))
+        if installation_id == 2:
+            return httpx.Response(502)
+        count = 100 if installation_id == 1 else 1
+        return httpx.Response(
+            200,
+            json={
+                "total_count": 4800 if installation_id == 1 else 1,
+                "repositories": [
+                    {
+                        "id": installation_id * 10_000 + (page - 1) * 100 + index,
+                        "owner": {"id": installation_id},
+                        "full_name": f"owner-{installation_id}/repo-{page}-{index}",
+                        "permissions": {"admin": True},
+                    }
+                    for index in range(count)
+                ],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(github_handler)) as client:
+        owners = await oauth_github._installations(client, "test-token")
+    assert len(owners[0].repos) == 2000
+    assert owners[0].total == 4800 and owners[0].truncated
+    assert owners[1].fetch_state == "error" and owners[1].repos == ()
+    assert owners[2].fetch_state == "ok" and len(owners[2].repos) == 1
+    assert (1, 20) in pages and (1, 21) not in pages
 
 
 @pytest.mark.asyncio
@@ -1731,6 +2023,69 @@ async def test_confirm_refuses_too_many_fields(editor_env: _EditorEnv) -> None:
     await _no_github_calls_after(editor_env, calls_before)
 
 
+def test_noscript_large_owner_list_uses_one_access_field() -> None:
+    installations = [
+        oauth_github._Installation(
+            id=owner,
+            owner_id=owner,
+            owner_login=f"org-{owner}",
+            repository_selection="selected",
+            repos=tuple(
+                oauth_github._Repo(
+                    owner * 10_000 + index,
+                    owner,
+                    owner,
+                    f"org-{owner}/repo-{index}",
+                    "admin",
+                )
+                for index in range(2000)
+            ),
+        )
+        for owner in range(1, 4)
+    ]
+    page = oauth_github._agent_editor_page(
+        root="https://mcp.test",
+        state="state",
+        invitation_hash="invitation",
+        secret="secret",
+        agent_name="Editor",
+        workspace="Test",
+        platform="discord",
+        grants=[],
+        installations=installations,
+        snapshot="snapshot",
+        cancel_url="https://mcp.test/cancel",
+        install_url="https://github.test/setup",
+        github_user_id=1,
+    ).body.decode()
+    fallback = page.split("<noscript><section", 1)[1].split("</noscript>", 1)[0]
+    assert fallback.count('name="repo"') == 6000
+    footer = page.split('<div class="gh-editor-footer"', 1)[1].split("</form>", 1)[0]
+    assert footer.startswith('><div class="gh-editor-footer-inner">')
+    assert (
+        '<button id="save-repos" class="gh-primary" type="submit">Save changes</button>' in footer
+    )
+    assert re.search(r'name="access_\d+"', fallback) is None
+    assert page.count('name="access" value="write"') == 1
+    # Every checkbox can be checked without parse_qs reaching max_num_fields.
+    assert 6000 + len(_hidden_pairs(page)) + fallback.count('name="remove"') + 1 < (
+        oauth_github._MAX_CONFIRM_FIELDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_editor_rejects_unknown_and_forged_scoped_fields(editor_env: _EditorEnv) -> None:
+    _, hidden = await editor_env.open_editor()
+    for extra in ({"forged": "write"}, {"access_103": "write"}):
+        response = await editor_env.browser.post(
+            "/oauth/github/confirm",
+            data={**hidden, "working": "keep", "repo": "103", **extra},
+        )
+        assert response.status_code == 400
+        assert "Selection could not be verified." in response.text
+    assert await editor_env.saved_repo_ids() == []
+
+
 @pytest.mark.asyncio
 async def test_confirm_stops_reading_a_chunked_body_past_the_cap(editor_env: _EditorEnv) -> None:
     state, hidden = await editor_env.open_editor()
@@ -1788,12 +2143,9 @@ async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
         "/oauth/github/confirm",
         data={
             **hidden,
-            "access": "read",
+            "access": "write",
             "working": "101",
             "repo": ["101", "102"],
-            "access_101": "read",
-            "access_102": "write",
-            "ignored": '"><script>alert(1)</script>',
         },
     )
 
@@ -1805,11 +2157,10 @@ async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
     # have been a state-less GET that lands on the expired page.
     assert form.group(1) == "https://mcp.test/oauth/github/confirm"
     assert "state=" not in form.group(1)
-    assert "<script>" not in failed.text and 'name="ignored"' not in failed.text
     carried = _hidden_pairs(failed.text)
     assert ("state", state) in carried
     assert [value for name, value in carried if name == "repo"] == ["101", "102"]
-    assert dict(carried)["access_102"] == "write"
+    assert dict(carried)["access"] == "write"
     assert dict(carried)["working"] == "101"
     assert dict(carried)["receipt"] == hidden["receipt"]
 
@@ -1817,7 +2168,7 @@ async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
     editor_env.details_down = False
     retried = await _submit(editor_env.browser, form.group(1), carried)
     assert retried.status_code == 200
-    assert "Editor can use 2 repos." in retried.text
+    assert "Editor can read and change these 2 repos." in retried.text
     assert await editor_env.saved_repo_ids() == [101, 102]
 
 
@@ -1828,16 +2179,16 @@ async def test_failed_get_keeps_a_try_again_link_with_state(editor_env: _EditorE
 
     failed = await editor_env.browser.get("/oauth/github/confirm", params={"state": state})
 
-    assert failed.status_code == 502
+    assert failed.status_code == 200
     assert f'href="https://mcp.test/oauth/github/confirm?state={state}"' in failed.text
-    assert "<form" not in failed.text
+    assert "Could not load repos." in failed.text
 
 
 @pytest.mark.asyncio
 async def test_listing_failure_on_save_returns_a_page_that_can_retry(
     editor_env: _EditorEnv,
 ) -> None:
-    """The listing runs again on every POST, so it needs the same retry as the details call."""
+    """An owner disappearing after render requires a fresh page before any save."""
     state, hidden = await editor_env.open_editor()
     editor_env.listing_down = True
 
@@ -1845,11 +2196,14 @@ async def test_listing_failure_on_save_returns_a_page_that_can_retry(
         "/oauth/github/confirm", data={**hidden, "access": "read", "working": "keep", "repo": "103"}
     )
 
-    assert failed.status_code == 502
-    carried = _hidden_pairs(failed.text)
-    assert ("repo", "103") in carried and ("state", state) in carried
+    assert failed.status_code == 409
+    assert await editor_env.saved_repo_ids() == []
     editor_env.listing_down = False
-    retried = await _submit(editor_env.browser, "/oauth/github/confirm", carried)
+    refreshed = await editor_env.browser.get("/oauth/github/confirm", params={"state": state})
+    retried = await editor_env.browser.post(
+        "/oauth/github/confirm",
+        data={**_hidden_fields(refreshed.text), "access": "read", "working": "keep", "repo": "103"},
+    )
     assert retried.status_code == 200
     assert await editor_env.saved_repo_ids() == [103]
 

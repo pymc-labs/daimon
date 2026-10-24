@@ -6,7 +6,18 @@ import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
-from daimon.core._models import Account, GitHubAccessRequest
+from daimon.core._models import (
+    Account,
+    AgentGitHubGrantDraft,
+    GitHubAccessRequest,
+    TenantGitHubRepo,
+)
+from daimon.core.stores import github_access
+from daimon.core.stores.github_access import (
+    InstallationLimitError,
+    ReadOnlyMultiInstallationError,
+    SessionVaultBudgetError,
+)
 from daimon.core.stores.github_access_requests import ready_and_continue
 from daimon.core.stores.github_links import account_link_status
 from daimon.core.stores.github_panel_grants import (
@@ -16,7 +27,53 @@ from daimon.core.stores.github_panel_grants import (
 )
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.task_continuations import record_continuation
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def lock_confirmed_request_repos(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    approved_by_account_id: uuid.UUID,
+    extra_repo_ids: set[int] | None = None,
+    pending_requests: list[GitHubAccessRequest] | None = None,
+) -> tuple[uuid.UUID, ...]:
+    """Prelock all repos a confirmation may activate before it locks agents."""
+    await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
+    requests = pending_requests
+    if requests is None:
+        requests = list(
+            await session.scalars(
+                select(GitHubAccessRequest).where(
+                    GitHubAccessRequest.tenant_id == tenant_id,
+                    GitHubAccessRequest.approved_by_account_id == approved_by_account_id,
+                    GitHubAccessRequest.status == "waiting_github",
+                    GitHubAccessRequest.expires_at > datetime.now(UTC),
+                )
+            )
+        )
+    names = {name.casefold() for request in requests for name in request.repo_names}
+    agent_ids = {request.agent_id for request in requests}
+    repo_ids = set(extra_repo_ids or ())
+    if names:
+        repos = await session.execute(
+            select(TenantGitHubRepo.repo_id, TenantGitHubRepo.repo_full_name).where(
+                TenantGitHubRepo.tenant_id == tenant_id
+            )
+        )
+        repo_ids.update(repo_id for repo_id, name in repos if name.casefold() in names)
+    if agent_ids:
+        repo_ids.update(
+            await session.scalars(
+                select(AgentGitHubGrantDraft.repo_id).where(
+                    AgentGitHubGrantDraft.tenant_id == tenant_id,
+                    AgentGitHubGrantDraft.agent_id.in_(agent_ids),
+                )
+            )
+        )
+    await github_access.lock_repo_grants_batch(session, tenant_id=tenant_id, repo_ids=repo_ids)
+    return tuple(request.id for request in requests)
 
 
 async def approve_connected_request(
@@ -27,9 +84,10 @@ async def approve_connected_request(
     account_id: uuid.UUID,
 ) -> bool:
     """Add every requested connected repo with today's limits, then resume once."""
+    await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
     actor = await session.get(Account, account_id)
     if actor is None or actor.tenant_id != tenant_id or actor.role != "admin":
-        raise ValueError("Only a server or workspace admin can approve this request.")
+        raise ValueError("Only an admin can approve this request.")
     request = await session.get(GitHubAccessRequest, request_id, with_for_update=True)
     if (
         request is None
@@ -53,6 +111,19 @@ async def approve_connected_request(
     ]
     if any(repo is None for repo in selected):
         raise ValueError("Connect the repo first.")
+    draft_ids = set(
+        await session.scalars(
+            select(AgentGitHubGrantDraft.repo_id).where(
+                AgentGitHubGrantDraft.tenant_id == tenant_id,
+                AgentGitHubGrantDraft.agent_id == request.agent_id,
+            )
+        )
+    )
+    await github_access.lock_repo_grants_batch(
+        session,
+        tenant_id=tenant_id,
+        repo_ids=draft_ids | {repo.repo_id for repo in selected if repo is not None},
+    )
     for repo in selected:
         assert repo is not None
         ceiling: Literal["write"] = "write"
@@ -119,9 +190,10 @@ async def approve_connection_request(
     account_id: uuid.UUID,
 ) -> bool:
     """Remember the one admin decision while GitHub confirmation is pending."""
+    await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
     actor = await session.get(Account, account_id)
     if actor is None or actor.tenant_id != tenant_id or actor.role != "admin":
-        raise ValueError("Only a server or workspace admin can connect repos.")
+        raise ValueError("Only an admin can connect repos.")
     request = await session.get(GitHubAccessRequest, request_id, with_for_update=True)
     if (
         request is None
@@ -153,20 +225,26 @@ async def finish_confirmed_requests(
     *,
     tenant_id: uuid.UUID,
     approved_by_account_id: uuid.UUID,
+    prelocked_request_ids: tuple[uuid.UUID, ...] | None = None,
 ) -> int:
     """After GitHub confirms, add approved repos with the confirmed abilities."""
-    from sqlalchemy import select
-
-    rows = await session.scalars(
-        select(GitHubAccessRequest)
-        .where(
-            GitHubAccessRequest.tenant_id == tenant_id,
-            GitHubAccessRequest.approved_by_account_id == approved_by_account_id,
-            GitHubAccessRequest.status == "waiting_github",
-            GitHubAccessRequest.expires_at > datetime.now(UTC),
-        )
-        .with_for_update(skip_locked=True)
+    await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
+    query = select(GitHubAccessRequest).where(
+        GitHubAccessRequest.tenant_id == tenant_id,
+        GitHubAccessRequest.approved_by_account_id == approved_by_account_id,
+        GitHubAccessRequest.status == "waiting_github",
+        GitHubAccessRequest.expires_at > datetime.now(UTC),
     )
+    if prelocked_request_ids is not None:
+        query = query.where(GitHubAccessRequest.id.in_(prelocked_request_ids))
+    rows = list(await session.scalars(query.with_for_update(skip_locked=True)))
+    if prelocked_request_ids is None:
+        await lock_confirmed_request_repos(
+            session,
+            tenant_id=tenant_id,
+            approved_by_account_id=approved_by_account_id,
+            pending_requests=rows,
+        )
     count = 0
     for row in rows:
         # A different confirmed ability or a still-missing repo needs a new decision.
@@ -181,6 +259,8 @@ async def finish_confirmed_requests(
                     account_id=approved_by_account_id,
                 ):
                     count += 1
+        except (InstallationLimitError, SessionVaultBudgetError, ReadOnlyMultiInstallationError):
+            raise
         except ValueError:
             continue
     return count

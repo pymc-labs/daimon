@@ -37,13 +37,11 @@ from daimon.core.config import (
 from daimon.core.defaults.loader import DeploymentDefault
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.testing import AGENT_ID, build_turn_router, ma_session
+from daimon.testing import AGENT_ID, build_turn_router
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
-from daimon.testing.ma import (
-    build_fake_anthropic,
-    session_response,
-)
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, session_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette

@@ -96,10 +96,11 @@ from daimon.core.stores.thread_agent_bindings import create_binding, update_life
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin, delete_origin, get_active_origin
 from daimon.core.stores.user_skills import upsert_user_skill
-from daimon.testing import ma_agent, ma_environment, ma_session, ma_session_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
@@ -107,7 +108,7 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
-from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
@@ -396,7 +397,7 @@ async def test_set_channel_rule_refuses_or_copies_and_releases(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime = await _world(committing_sessionmaker, keep_own=False)
-    with pytest.raises(ToolError, match="Only a server or workspace admin"):
+    with pytest.raises(ToolError, match="Only an admin"):
         await _set_channel_rule_impl(
             runtime, world.auth(admin=False), channel_id=ROOM, readers="own", writers="own"
         )
@@ -541,6 +542,8 @@ async def _setup_thread_origin(
             configuration_target_ma_agent_id="agent_local",
             configuration_target_name="local",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
             is_setup=responder == "shared",
@@ -826,6 +829,8 @@ async def _chat_turn_in_room(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
             chat_session_id="test-session",
@@ -1108,6 +1113,8 @@ async def test_turns_running_in_two_own_agents_channels_refuse_an_unnamed_call(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
             chat_session_id="test-session",

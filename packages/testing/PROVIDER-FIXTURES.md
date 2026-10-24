@@ -317,7 +317,7 @@ operator values. The same constructor guard runs for actual SDK `copy`,
 admission and copies of copies. Explicit SDK arguments alone cannot prevent the
 pinned SDK from discovering ambient custom headers.
 
-OpenAI and Gemini replays use the same `daimon.testing.isolated_sdk` factories as
+OpenAI and Gemini replays use the same `mux.testing.isolated_sdk` factories as
 the catalog's Anthropic sentinel. Both Gemini HTTP clients receive the scripted
 transport and are closed after replay; no default HTTP, TLS or proxy discovery
 path supplies a fallback. Ambient settings refuse before SDK or HTTP allocation,

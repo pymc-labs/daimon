@@ -28,7 +28,6 @@ from daimon.testing import channel_accounting
 from daimon.testing.channel_accounting import ChannelAccounting, ControlledTurnPricing
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_channel_budget, make_tenant
-from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import RecordingLifecycle
 from daimon.testing.turn_router import build_turn_router, turn_events
@@ -37,6 +36,7 @@ from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRe
 from mux.contracts.resources import ProviderBinding
 from mux.drivers.gemini.usage import observation_from_interaction
 from mux.drivers.openai.usage import observation as openai_observation
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import TypeAdapter
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -462,6 +462,8 @@ async def test_cancelled_host_turn_is_not_a_successful_first_turn(context):
     receipt = await context.run(cancel=cancel)
     assert not receipt.metered
     assert "HOST_TURN_NOT_SUCCESSFUL_SINGLE_ATTEMPT" in receipt.issues
+    if context.port is not None:
+        assert context.port.sends == [], "a pre-cancelled owner reconciles without new input"
     # The real driver reconciles any provider-reported usage even on failure.
     # Our native fixture has a measured replay snapshot: retain that genuine
     # charge, without mistaking the cancelled turn for completed NEW15 work.

@@ -4,12 +4,12 @@ from collections import deque
 
 import httpx
 import pytest
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import PageRequest, Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.walk import ResourceWalk
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 TENANT = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="grant"

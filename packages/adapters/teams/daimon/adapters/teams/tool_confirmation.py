@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.teams.activity_feed import ActivityFeed
+from daimon.adapters.teams.card import answer_message
 from daimon.adapters.teams.card_actions import (
     button,
     submitted_fields,
@@ -42,6 +43,7 @@ from daimon.core.posted_controls.confirmation import (
     confirmation_card_text,
 )
 from daimon.core.posted_controls.lifecycle import (
+    STILL_WAITING_MESSAGE,
     PostedConfirmations,
     check_confirmation_admin,
     edit_card_within,
@@ -57,6 +59,7 @@ from daimon.core.posted_controls.tool_rule_confirmation import (
     snapshot_tool_rule,
 )
 from microsoft_teams.api import (
+    Account,
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivityInput,
@@ -99,6 +102,10 @@ APPROVAL_NOTICE = "Waiting for your approval"
 #: Most time a card edit may take.
 EDIT_TIMEOUT_S = 2.0
 
+#: Most blocks the Details of one card use; Teams refuses a message over about 28 KB, and
+#: every block costs bytes of its own.
+MAX_DETAIL_BLOCKS = 12
+
 
 async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
     """A live admin check at a click: a revoked team ownership counts at once.
@@ -129,6 +136,19 @@ def _footer(
             return (card.footer.format(actor=answered_by or card.answered_by_platform_user_id),)
         return (f"by {answered_by or name}",)
     return ()
+
+
+def _detail_blocks(lines: tuple[str, ...]) -> list[CardElement]:
+    """Details as at most `MAX_DETAIL_BLOCKS` blocks, so a long body can't bloat the card.
+
+    A short list gets one block a line; a longer one is cut into runs of lines
+    that each share a block, with the line breaks kept.
+    """
+    run = -(-len(lines) // MAX_DETAIL_BLOCKS) or 1
+    return [
+        RichTextBlock(inlines=[TextRun(text="\n".join(lines[start : start + run]))])
+        for start in range(0, len(lines), run)
+    ]
 
 
 def confirmation_adaptive_card(
@@ -169,7 +189,7 @@ def confirmation_adaptive_card(
             Container(
                 id="approval-details",
                 is_visible=False,
-                items=[RichTextBlock(inlines=[TextRun(text=line)]) for line in detail_lines],
+                items=_detail_blocks(tuple(detail_lines)),
             )
         )
         body.append(
@@ -236,6 +256,7 @@ class TeamsConfirmationCards:
 
             if backend_selection_enabled(runtime.settings.turn):
                 from daimon.core.confirmation import backend_switch_callbacks
+                from mux.contracts.ids import ChannelRef
 
                 if tenant_id is None or account_id is None:
                     raise ValueError("Backend confirmation requires an admitted account and tenant")
@@ -265,6 +286,19 @@ class TeamsConfirmationCards:
                     tenant_id=tenant_id,
                     account_id=account_id,
                     current_admin=current_admin,
+                    answering_agent_name=(
+                        getattr(getattr(admission, "config", None), "agent_name", None)
+                    ),
+                    default_agent_name=runtime.deployment_default.agent_name,
+                    place_word="team",
+                    # A channel-pin card clears only the channel this turn runs in.
+                    pin_channel=ChannelRef(
+                        tenant_id=str(tenant_id),
+                        platform="teams",
+                        channel_id=admission.origin_channel_id,
+                    )
+                    if admission is not None and admission.origin_channel_id is not None
+                    else None,
                 )
 
         rule_factory = runtime.sessionmaker if runtime is not None else None
@@ -327,8 +361,35 @@ class TeamsConfirmationCards:
                 posted.retired.set()
                 await self._edit(posted, state)
 
+            async def remind() -> None:
+                # Once, after a while: a line in the conversation, and the
+                # requester's activity feed (what reaches them in Teams).
+                # An @mention of the requester, as the completion ping does.
+                requester = Account(
+                    id=prompt.requester_platform_user_id,
+                    name=prompt.requester_display_name or "you",
+                )
+                sent = await self._sender.send(
+                    conversation_id,
+                    answer_message(STILL_WAITING_MESSAGE, mention=requester),
+                    service_url=service_url,
+                )
+                if self._feed is not None:
+                    self._feed.notify(
+                        conversation_id,
+                        sent.id,
+                        recipient_id=prompt.requester_platform_user_id,
+                        text=STILL_WAITING_MESSAGE,
+                        preview=prompt.title,
+                        group_id=team_group_id,
+                    )
+
             result = await self._controls.confirm(
-                prompt, post=post, retire=retire, post_errors=TEAMS_SEND_ERRORS
+                prompt,
+                post=post,
+                retire=retire,
+                post_errors=TEAMS_SEND_ERRORS,
+                remind=remind,
             )
             if result == "approved" and posted_cards:
                 answered_posted = posted_cards[0]

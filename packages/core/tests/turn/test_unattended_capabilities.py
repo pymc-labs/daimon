@@ -35,11 +35,17 @@ from daimon.core.turn.unattended_capabilities import (
     restore_capabilities,
     unattended_entry_point,
 )
-from daimon.testing import ma_agent, ma_session
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, send_events_response
+from daimon.testing import ma_agent
+from daimon.testing.ma import MARouter
 from daimon.testing.ma_sessions import session_turn_sse
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma import (
+    build_fake_anthropic,
+    json_body,
+    ma_session,
+    send_events_response,
+)
 from pydantic import BaseModel
 
 from .conftest import make_status_idle
@@ -1493,3 +1499,64 @@ async def test_an_opted_in_routine_still_refuses_a_call_that_is_not_a_builtin(na
 
     assert decision.allow is False
     inner.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "kind,permission,refusal",
+    [
+        ("builtin", "auto", "Automatic sandbox or custom tools"),
+        ("custom", "auto", "Automatic sandbox or custom tools"),
+        ("mcp_toolset", "auto", "cannot inspect these tools"),
+        ("builtin", "ask", None),
+        ("custom", "ask", None),
+        (None, None, None),
+    ],
+)
+def test_native_unattended_tools_cannot_bypass_host_inspection(kind, permission, refusal):
+    from daimon.core.turn.unattended import require_native_unattended_capabilities
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, ToolSpec
+
+    spec = AgentSpec(
+        name="native-worker",
+        model=ModelRef(provider="openai", id="gpt-6-astra"),
+        tools=() if kind is None else (ToolSpec(name="bash", kind=kind, permission=permission),),
+    )
+    if refusal is not None:
+        with pytest.raises(AdmissionDenied, match=refusal):
+            require_native_unattended_capabilities(spec, profile_id="openai.conversation_only")
+    else:
+        require_native_unattended_capabilities(spec, profile_id="openai.conversation_only")
+    with pytest.raises(AdmissionDenied, match="tool configuration cannot be checked"):
+        require_native_unattended_capabilities(None, profile_id="openai.conversation_only")
+
+
+@pytest.mark.parametrize("capability", ["mcp", "provider_options"])
+def test_native_unattended_refuses_ungated_connections_and_provider_options(capability):
+    from daimon.core.turn.unattended import require_native_unattended_capabilities
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, MCPConnection
+
+    spec = AgentSpec(
+        name="native-worker",
+        model=ModelRef(
+            provider="openai",
+            id="gpt-6-astra",
+            options={"future_execution": True} if capability == "provider_options" else {},
+        ),
+        mcp_servers=(MCPConnection(name="remote", url="https://example.invalid/mcp"),)
+        if capability == "mcp"
+        else (),
+    )
+    with pytest.raises(AdmissionDenied, match="cannot inspect these tools"):
+        require_native_unattended_capabilities(spec, profile_id="openai.conversation_only")
+
+
+def test_native_hosted_bash_refuses_even_with_an_empty_agent_tool_readback():
+    from daimon.core.turn.unattended import require_native_unattended_capabilities
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec
+
+    spec = AgentSpec(name="hosted", model=ModelRef(provider="openai", id="gpt-6-astra"), tools=())
+    with pytest.raises(AdmissionDenied, match="Automatic sandbox or custom tools"):
+        require_native_unattended_capabilities(spec, profile_id="openai.persistent_workspace")

@@ -96,8 +96,9 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_session
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.turn_leg import turn_leg
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -116,13 +117,16 @@ _REACTIONS_ADD_PATTERN = re.compile(r"https://slack\.com/api/reactions\.add.*")
 _CONVERSATIONS_REPLIES_PATTERN = re.compile(r"https://slack\.com/api/conversations\.replies.*")
 
 _BALANCE_BLOCKED_TEXT = (
-    "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
+    "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
 )
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 
 
-def _register_slack_defaults(mock: AioResponsesMock) -> None:
+def _register_slack_defaults(mock: AioResponsesMock, *, team_id: str) -> None:
     """Canned ok=True responses for the Slack Web API methods a turn touches.
+
+    The requester is a member of `team_id`, the workspace the turn runs in: a
+    turn only runs for someone `users.info` places in the host workspace.
 
     Mirrors `packages/adapters/slack/tests/conftest.py`'s
     `_register_slack_defaults` -- duplicated here rather than imported since
@@ -133,8 +137,19 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
         _USERS_INFO_PATTERN,
         payload={
             "ok": True,
-            "user": {"is_admin": False, "is_owner": False, "is_primary_owner": False},
+            "user": {
+                "is_admin": False,
+                "is_owner": False,
+                "is_primary_owner": False,
+                "team_id": team_id,
+            },
         },
+        repeat=True,
+    )
+    # The channel is not shared with another organisation: a turn asks once.
+    mock.get(  # pyright: ignore[reportUnknownMemberType]
+        _CONVERSATIONS_INFO_PATTERN,
+        payload={"ok": True, "channel": {"id": "C_PARITY", "is_ext_shared": False}},
         repeat=True,
     )
     for method in _POST_JSON_METHODS:
@@ -234,7 +249,7 @@ _PANEL_ACTION_IDS: dict[str, str] = {
 }
 
 
-def _register_credential_defaults(mock: AioResponsesMock, *, channel_id: str) -> None:
+def _register_credential_defaults(mock: AioResponsesMock, *, channel_id: str, team_id: str) -> None:
     """Canned responses for every Slack call the card lifecycle makes.
 
     The requester is a full workspace admin and the channel is public, so
@@ -248,6 +263,7 @@ def _register_credential_defaults(mock: AioResponsesMock, *, channel_id: str) ->
         payload={
             "ok": True,
             "user": {
+                "team_id": team_id,
                 "is_admin": True,
                 "is_owner": False,
                 "is_primary_owner": False,
@@ -323,6 +339,7 @@ class SlackDriver:
     ) -> SlackRuntime:
         settings = MagicMock()
         settings.crypto.keys = (SecretStr(fernet_key),)
+        settings.turn = turn_leg()  # the selected leg, a real TurnSettings
         settings.slack = SlackSettings(
             signing_secret=SecretStr("parity-signing-secret"),
             app_token=SecretStr("xapp-parity-test"),
@@ -407,7 +424,7 @@ class SlackDriver:
             AioResponsesMock() as mock,
             patch("daimon.core.turn.prepare.create_session") as mock_create_session,
         ):
-            _register_slack_defaults(mock)
+            _register_slack_defaults(mock, team_id=workspace_id)
             mock_create_session.return_value = ma_session(
                 id="sess_parity_test",
                 agent_id="ag_parity_test",
@@ -636,13 +653,15 @@ class SlackDriver:
                 configuration_target_ma_agent_id=agent_id,
                 configuration_target_name=agent_name,
                 role=Role.ADMIN,
+                sender_foreign=False,
+                shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
                 chat_session_id="parity-card-session",
             )
 
         with AioResponsesMock() as mock:
-            _register_credential_defaults(mock, channel_id=channel_id)
+            _register_credential_defaults(mock, channel_id=channel_id, team_id=workspace_id)
             if kind == "env":
                 await _request_agent_key_impl(
                     runtime,
@@ -716,7 +735,7 @@ class SlackDriver:
             "actions": [{"action_id": SLACK_ACTION_ID, "value": token}],
         }
         with AioResponsesMock() as mock:
-            _register_credential_defaults(mock, channel_id=channel_id)
+            _register_credential_defaults(mock, channel_id=channel_id, team_id=workspace_id)
             await handle_credential_request_click(runtime, payload)
             self._record_cards(mock, _CHAT_UPDATE_URL)
             refusals = _bodies_for(mock, _CHAT_EPHEMERAL_URL)
@@ -762,7 +781,7 @@ class SlackDriver:
             # nothing was consumed, so there is no card edit to record.
             return
         with AioResponsesMock() as mock, _patched_file_download(file_bytes):
-            _register_credential_defaults(mock, channel_id=channel_id)
+            _register_credential_defaults(mock, channel_id=channel_id, team_id=workspace_id)
             if decision.kind == "env":
                 await run_env_credential_submission(
                     runtime,
@@ -863,7 +882,7 @@ class SlackDriver:
         )
 
     def _register_panel_defaults(
-        self, mock: AioResponsesMock, *, channel_id: str, is_admin: bool
+        self, mock: AioResponsesMock, *, channel_id: str, team_id: str, is_admin: bool
     ) -> None:
         """Every Slack call the panel makes, answered the way the scenario set it.
 
@@ -876,6 +895,7 @@ class SlackDriver:
             payload={
                 "ok": True,
                 "user": {
+                    "team_id": team_id,
                     "is_admin": is_admin,
                     "is_owner": False,
                     "is_primary_owner": False,
@@ -958,7 +978,9 @@ class SlackDriver:
         self._panel_aliases = {channel_id: _ALIAS_CHANNEL, user_id: _ALIAS_USER}
         runtime = self._panel_runtime(sessionmaker, router)
         with AioResponsesMock() as mock:
-            self._register_panel_defaults(mock, channel_id=channel_id, is_admin=is_admin)
+            self._register_panel_defaults(
+                mock, channel_id=channel_id, team_id=workspace_id, is_admin=is_admin
+            )
             await handle_agent_setup_command(
                 runtime,
                 {
@@ -1034,7 +1056,7 @@ class SlackDriver:
         runtime = self._panel_runtime(sessionmaker, router)
         with AioResponsesMock() as mock:
             self._register_panel_defaults(
-                mock, channel_id=channel_id, is_admin=self._panel_is_admin
+                mock, channel_id=channel_id, team_id=workspace_id, is_admin=self._panel_is_admin
             )
             await handle_agent_setup_action(runtime, payload)
             self._absorb_views(mock)
@@ -1092,7 +1114,7 @@ class SlackDriver:
         runtime = self._panel_runtime(sessionmaker, router)
         with AioResponsesMock() as mock:
             self._register_panel_defaults(
-                mock, channel_id=channel_id, is_admin=self._panel_is_admin
+                mock, channel_id=channel_id, team_id=workspace_id, is_admin=self._panel_is_admin
             )
             client = await resolve_web_client(runtime, team_id=workspace_id)
             if client is None:

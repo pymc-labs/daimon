@@ -109,7 +109,7 @@ SLACK_ACTION_ID: Final[str] = "credential_request"
 _KIND_LABEL_PREFIX: Final[dict[CredentialRequestKind, str]] = {
     "env": "Add key: ",
     "env_file": "Add keys from ",
-    "mcp": "Add MCP token: ",
+    "mcp": "Add connection token: ",
     "mcp_oauth": "Connect your account: ",
     "repo": "Set working repo: ",
     "skill_repo": "Import skills from: ",

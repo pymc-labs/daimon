@@ -391,3 +391,24 @@ class PlatformExport(Protocol):
     async def export(
         self, scope: Scope, *, resource_kinds: frozenset[str]
     ) -> Mapping[str, JsonValue]: ...
+
+
+__all__ = [
+    "Agents",
+    "Artifacts",
+    "Environments",
+    "EnvironmentsFork",
+    "Events",
+    "ManagedAgents",
+    "MemoryStores",
+    "Models",
+    "Multiagent",
+    "PlatformExport",
+    "SessionResources",
+    "Sessions",
+    "SkillVersions",
+    "Skills",
+    "Steering",
+    "Usage",
+    "Vaults",
+]

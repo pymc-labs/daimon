@@ -22,6 +22,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build_turn_place
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import private_routine_stamp
@@ -42,6 +43,7 @@ from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 BindingRefusal = Literal["agent_has_home", "agent_runs_elsewhere", "not_own_agent", "keeps_own"]
@@ -62,7 +64,7 @@ def render_binding_refusal(reason: BindingRefusal, *, agent_name: str | None) ->
             return f"{name} is another channel's own agent, so it can't be used here."
         case "agent_runs_elsewhere":
             return (
-                f"{name}'s agent rule names other channels, so it would refuse every turn here. "
+                f"{name}'s agent rule names other channels, so it would refuse every request here. "
                 "Pick another agent, or change its rule first."
             )
         case "not_own_agent":
@@ -340,7 +342,11 @@ async def load_rule_viewer(
     if is_admin:
         return None
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+    agents = (
+        await list_live_agent_facts(session, tenant_id=tenant_id)
+        if anthropic_disabled()
+        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+    )
     return RuleViewer(
         policy,
         home_of(policy, channel_id),

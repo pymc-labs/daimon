@@ -18,12 +18,12 @@ from daimon.core.workspace_transfer import (
     WorkspaceTransferRunner,
     as_prepared_replacement,
 )
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import ResourceBinding, SessionExport
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicWorkspaceTransfer
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 

@@ -17,11 +17,11 @@ from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.stores.direct_messages import DirectMessageRow
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.turn import session_identity
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic.core_admin import CoreAdmin
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

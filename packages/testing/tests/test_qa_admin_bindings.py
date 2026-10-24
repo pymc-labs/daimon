@@ -29,9 +29,9 @@ from daimon.testing.admin_bindings import (
     provision_admin_run,
 )
 from daimon.testing.db import build_test_engine, isolated_test_schema, require_owned_sessionmaker
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.ids import ChannelRef, Provider, Scope
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,

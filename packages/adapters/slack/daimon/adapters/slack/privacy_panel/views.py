@@ -94,7 +94,7 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     kept_text = (
         "📋 *What is intentionally kept elsewhere*\n\n"
         "• Usage records are retained for service integrity and cannot be erased on request.\n"
-        "• Uploaded skill files stay in Managed Agents; guild agents may keep using them.\n"
+        "• Uploaded skill files stay in Managed Agents; shared agents may keep using them.\n"
         "• The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications."
     )
@@ -306,21 +306,23 @@ def build_post_delete_view(
     rows: list[str] = []
     principals_total = result.db.platform_principals + result.db.cli_principals
     if principals_total > 0:
-        rows.append(f"• ✓ {principals_total} linked principal(s) removed")
+        rows.append(f"• ✓ {principals_total} linked account(s) removed")
     if result.db.routines > 0:
         rows.append(f"• ✓ {result.db.routines} routine(s) cancelled")
     if result.db.principal_links > 0:
-        rows.append(f"• ✓ {result.db.principal_links} principal link(s) removed")
+        rows.append(f"• ✓ {result.db.principal_links} link(s) between your accounts removed")
     if result.db.user_configs > 0:
-        rows.append(f"• ✓ {result.db.user_configs} user config row(s) removed")
+        rows.append(f"• ✓ {result.db.user_configs} saved setting(s) removed")
     if result.db.user_skills > 0:
-        rows.append(f"• ✓ {result.db.user_skills} synced skill ledger row(s) removed")
+        rows.append(f"• ✓ {result.db.user_skills} synced skill(s) forgotten")
     if result.db.github_user_links > 0:
-        rows.append(f"• ✓ {result.db.github_user_links} GitHub user link(s) removed")
+        rows.append(f"• ✓ {result.db.github_user_links} GitHub account(s) unlinked")
     if result.db.accounts > 0:
-        rows.append("• ✓ Account row removed")
+        rows.append("• ✓ Account removed")
     if result.sessions.deleted > 0:
-        rows.append(f"• ✓ {result.sessions.deleted} session transcript(s) deleted from Anthropic")
+        rows.append(
+            f"• ✓ {result.sessions.deleted} conversation transcript(s) deleted from Anthropic"
+        )
     if result.sessions.upstream_error:
         rows.append("• We could not confirm deletion of all chat transcripts from Anthropic.")
         rows.append(
@@ -336,7 +338,7 @@ def build_post_delete_view(
     rows += [
         "",
         "• Usage records are retained for service integrity and cannot be erased on request.",
-        "• Uploaded skill files stay in Managed Agents; guild agents may keep using them.",
+        "• Uploaded skill files stay in Managed Agents; shared agents may keep using them.",
         "• The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",
     ]

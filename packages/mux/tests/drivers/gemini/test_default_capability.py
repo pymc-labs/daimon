@@ -6,32 +6,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from daimon.testing.conformance.default_capability import (
-    BASH_RESULT,
-    DEFAULT_SKILLS,
-    DEFAULT_TOOLS,
-    FINAL_MESSAGE,
-    PROMPT,
-    DefaultCapabilityReplayEvents,
-    DefaultManifest,
-    NamedSkill,
-    check_turn,
-    request_metadata,
-    skill_text,
-)
-from daimon.testing.conformance.recording import Recorder, Replay, Tape
-from daimon.testing.conformance.runner import (
-    ConformanceFailure,
-    PendingKind,
-    replay_default_capability,
-    run_default_capability,
-)
-from daimon.testing.drivers.gemini.default_capability import (
-    BUILTIN_MAPPING,
-    PENDING,
-    PendingTransport,
-    adapter,
-)
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart, ToolUsePayload
 from mux.contracts.extensions import ExtensionConfig
@@ -48,6 +22,32 @@ from mux.drivers.gemini.bundles import MAX_BUNDLE_BYTES
 from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.transport import Object
 from mux.errors import UnsupportedCapability
+from mux.testing.conformance.default_capability import (
+    BASH_RESULT,
+    DEFAULT_SKILLS,
+    DEFAULT_TOOLS,
+    FINAL_MESSAGE,
+    PROMPT,
+    DefaultCapabilityReplayEvents,
+    DefaultManifest,
+    NamedSkill,
+    check_turn,
+    request_metadata,
+    skill_text,
+)
+from mux.testing.conformance.recording import Recorder, Replay, Tape
+from mux.testing.conformance.runner import (
+    ConformanceFailure,
+    PendingKind,
+    replay_default_capability,
+    run_default_capability,
+)
+from mux.testing.drivers.gemini.default_capability import (
+    BUILTIN_MAPPING,
+    PENDING,
+    PendingTransport,
+    adapter,
+)
 from pydantic import BaseModel, JsonValue
 
 pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
@@ -183,7 +183,7 @@ def test_authenticated_mcp_gap_is_driver_specific_not_native_mcp_unavailable() -
     spec = AgentSpec(name="daimon", model=ModelRef(provider="gemini", id="gemini-3.5-flash-lite"))
     request = compile_agent(spec.model_copy(update={"mcp_servers": (public,)}))
     assert request["tools"] == [
-        {"type": "mcp_server", "name": "daimon-mcp", "url": "https://daimon.invalid/mcp"}
+        {"type": "mcp_server", "name": "daimon_mcp", "url": "https://daimon.invalid/mcp"}
     ]
     private = public.model_copy(update={"credential_ref": "f1-account-mcp"})
     with pytest.raises(UnsupportedCapability):
@@ -317,7 +317,7 @@ async def test_native_builtin_turn_replays_all_six_routes_and_rejects_missing_ca
                     "type": "mcp_server_tool_call",
                     "id": name,
                     "name": name,
-                    "server_name": "daimon-mcp",
+                    "server_name": "daimon_mcp",
                     "arguments": {},
                 },
                 {"type": "mcp_server_tool_result", "call_id": name, "result": "read-only-ok"},
@@ -343,7 +343,7 @@ async def test_native_builtin_turn_replays_all_six_routes_and_rejects_missing_ca
     )
     assert transport.requests[0]["tools"] == [
         {"type": "code_execution"},
-        {"type": "mcp_server", "name": "daimon-mcp", "url": "https://daimon.invalid/mcp"},
+        {"type": "mcp_server", "name": "daimon_mcp", "url": "https://daimon.invalid/mcp"},
     ]
     assert len(transport.requests) == 1 and transport.read_requests == ["builtin-turn"]
     recorder = Recorder()

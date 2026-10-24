@@ -62,8 +62,17 @@ def test_routine_card_uses_schedule_words_and_status() -> None:
     assert " · " not in card
 
 
-def test_create_form_has_the_approved_labels_and_schedule_hint() -> None:
-    card = json.dumps(create_form(["daimon"], {}).model_dump())
-    assert '"Schedule"' in card
+def test_create_form_leads_with_the_plain_way_and_marks_cron_advanced() -> None:
+    form = create_form(["daimon"], {})
+    card = json.dumps(form.model_dump())
+    first = form.model_dump()["body"][0]["text"]
+    assert first.startswith('Easiest: ask me in a channel, like "every weekday at 9am')
+    assert "Schedule (advanced: cron, like 0 9 * * 1-5)" in card
     assert '"What to ask the agent"' in card
-    assert "Five fields: minute, hour, day of month, month, day of week." in card
+    assert "Five fields" not in card
+    assert " · " not in card
+
+
+def test_create_form_error_still_comes_before_the_hint() -> None:
+    form = create_form(["daimon"], {}, error="Nope.")
+    assert form.model_dump()["body"][0]["text"] == "Nope."

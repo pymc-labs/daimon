@@ -820,7 +820,7 @@ class McpCredentialModal(discord.ui.Modal):
 
         if not token_value.strip():
             await interaction.followup.send(
-                "MCP token cannot be empty — try again.", ephemeral=True
+                "Connection token cannot be empty — try again.", ephemeral=True
             )
             return
 
@@ -828,7 +828,7 @@ class McpCredentialModal(discord.ui.Modal):
         jwt_secret_setting = self._runtime.settings.mcp.jwt_secret
         if public_url_setting is None or jwt_secret_setting is None:
             await interaction.followup.send(
-                "This deployment is not finished being set up. Ask the operator to finish setup, "
+                "Daimon isn't fully set up yet. Ask the operator to finish setup, "
                 "then try again. Nothing was saved.",
                 ephemeral=True,
             )

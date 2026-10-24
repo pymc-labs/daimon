@@ -7,6 +7,7 @@ provisioning; these tests perform no GCS or provider writes.
 from __future__ import annotations
 
 import asyncio
+import functools
 import io
 import json
 import os
@@ -26,6 +27,7 @@ from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores import mux_state
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.tool_safety import confirmation_gated_tools
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini_deployment import GeminiPlan, build_gemini_runtime
 from daimon.core.turn.gemini_state import SQLiteGeminiStorage
@@ -39,6 +41,7 @@ from daimon.core.turn.runtime_manifest import (
 )
 from daimon.core.turn.runtimes import build_channel_runtime, scope_channel_runtimes
 from daimon.testing import f2_mcp_binding
+from daimon.testing.db import sibling_nullpool_engine
 from daimon.testing.f2_mcp_binding import AgentMCPAuthority, AgentMCPBinding
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import ConfigRevision
@@ -153,6 +156,30 @@ def archive(files):
     return stream.getvalue()
 
 
+@functools.cache
+def default_skill_bundles() -> tuple[tuple[str, SkillUpload, str, bytes], ...]:
+    """Read, validate and zip the checked-in default skills once per process.
+
+    Everything returned is immutable (frozen upload models, a version string and
+    zip bytes); the fixture writes the bytes to a per-test file, so no test can
+    change what another reads.
+    """
+    bundles = []
+    for item in CUSTOM:
+        name = item["skill_id"]
+        directory = ROOT / "defaults/skills" / name
+        files = {
+            p.relative_to(directory).as_posix(): p.read_bytes()
+            for p in sorted(directory.rglob("*"))
+            if p.is_file()
+        }
+        bundle = SkillUpload(
+            files=tuple(SkillUploadFile(path=p, content=b) for p, b in files.items())
+        )
+        bundles.append((name, bundle, validate_bundle(bundle, external=True), archive(files)))
+    return tuple(bundles)
+
+
 @pytest.fixture
 async def source_mcp(consent_request):
     """Actual verifier, identity narrowing and search collapse at the HTTP edge."""
@@ -232,20 +259,9 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
         ),
     )
     bundles, archives, deployments = [], [], []
-    for item in CUSTOM:
-        name = item["skill_id"]
-        directory = ROOT / "defaults/skills" / name
-        files = {
-            p.relative_to(directory).as_posix(): p.read_bytes()
-            for p in sorted(directory.rglob("*"))
-            if p.is_file()
-        }
-        bundle = SkillUpload(
-            files=tuple(SkillUploadFile(path=p, content=b) for p, b in files.items())
-        )
-        version = validate_bundle(bundle, external=True)
+    for name, bundle, version, data in default_skill_bundles():
         bundles.append(bundle)
-        data = archive(files)
+        # Each test gets its own archive file: tests overwrite it to model drift.
         path = tmp_path / f"{name}.zip"
         path.write_bytes(data)
         archives.append(path)
@@ -562,7 +578,12 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
     signer.chmod(0o600)
     auth_output = tmp_path / "after-ack"
     auth_output.mkdir(mode=0o700)
-    monkeypatch.setattr(f2_mcp_binding, "create_async_engine", lambda *_, **__: sessions.kw["bind"])
+    # The binding disposes its engine on close; give it a sibling, not the shared pool.
+    monkeypatch.setattr(
+        f2_mcp_binding,
+        "create_async_engine",
+        lambda *_, **__: sibling_nullpool_engine(sessions.kw["bind"]),
+    )
     redacted = []
     # The captured native read uses a service account. Canonical source pins
     # intentionally omit that transport account; the verified caller resource
@@ -737,7 +758,9 @@ async def test_full_default_preparation_and_fresh_followup_turns(full, request):
         assert token in json.dumps(body["tools"])
         remote = next(tool for tool in body["tools"] if tool["type"] == "mcp_server")
         expected_mcp = (
-            set(GATED_CATALOGUE) - {"add_skill"} if gated else {"search_tools", "call_tool"}
+            set(GATED_CATALOGUE) - confirmation_gated_tools()
+            if gated
+            else {"search_tools", "call_tool"}
         )
         assert set(remote["allowed_tools"][0]["tools"]) == expected_mcp
     assert token not in json.dumps(native) and token not in plan.model_dump_json()
@@ -760,18 +783,22 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
     assert isinstance(full, tuple), "gated source lost the whole MCP representation"
     request, plan, canonical, native, _, posts, *_ = full
     target = canonical.target_spec
-    marker = "mcp_tool:daimon-mcp:add_skill"
-    assert target.declared_drops == (marker, "memory", "sandbox")
-    assert marker in target.system
+    # No Gemini turn has a confirmation card: every gated or publishing tool in
+    # the catalogue is a declared loss, pinned row or template alike.
+    gated = sorted(set(GATED_CATALOGUE) & confirmation_gated_tools())
+    markers = tuple(f"mcp_tool:daimon-mcp:{name}" for name in gated)
+    assert {"add_skill", "publish_report"} <= set(gated)
+    assert target.declared_drops == (*markers, "memory", "sandbox")
+    assert all(marker in target.system for marker in markers)
     assert not {"tools", "skills", "mcp"}.intersection(target.declared_drops)
     assert len(target.skills) == len(native["base_environment"]["sources"]) == 11
-    allowed = set(GATED_CATALOGUE) - {"add_skill"}
+    allowed = set(GATED_CATALOGUE) - confirmation_gated_tools()
     assert set(target.mcp_servers[0].tool_policy["allowed_tools"]) == allowed
     remote = next(tool for tool in native["tools"] if tool["type"] == "mcp_server")
     assert remote["allowed_tools"] == [
         {"mode": "auto", "tools": list(target.mcp_servers[0].tool_policy["allowed_tools"])}
     ]
-    assert "add_skill" not in json.dumps(remote)
+    assert not any(name in json.dumps(remote) for name in gated)
     # Catalogue verification still covers the complete original source. The
     # provider execution allowlist is a reduction with its own consent marker.
     assert set(plan.source_capabilities.mcp_tools) == set(GATED_CATALOGUE)
@@ -781,7 +808,7 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
         target.model_copy(update={"declared_drops": ("memory", "sandbox")}),
         environment=source.representations[0].environment,
     )
-    assert marker in missing
+    assert set(markers) <= set(missing)
     assert not posts
 
 

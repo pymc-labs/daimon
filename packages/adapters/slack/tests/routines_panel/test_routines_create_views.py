@@ -24,13 +24,32 @@ def test_build_create_routine_modal_has_callback_id_and_submit() -> None:
 def test_build_create_routine_modal_has_four_input_blocks() -> None:
     view = build_create_routine_modal(team_id="T1", channel_id="C1", agent_names=["daimon"])
 
-    block_ids = {b["block_id"] for b in view["blocks"]}
+    block_ids = {b["block_id"] for b in view["blocks"] if b["type"] == "input"}
     assert block_ids == {
         "routines_create__agent",
         "routines_create__cron",
         "routines_create__timezone",
         "routines_create__message",
     }, "modal must carry the four expected input blocks"
+
+
+def test_build_create_routine_modal_leads_with_the_plain_way() -> None:
+    view = build_create_routine_modal(team_id="T1", channel_id="C1", agent_names=["daimon"])
+
+    first = view["blocks"][0]
+    assert first["type"] == "section"
+    assert first["text"]["text"].startswith(
+        'Easiest: ask me in a channel, like "every weekday at 9am, post the sales numbers".'
+    )
+
+
+def test_build_create_routine_modal_marks_cron_advanced() -> None:
+    view = build_create_routine_modal(team_id="T1", channel_id="C1", agent_names=["daimon"])
+
+    cron_block = next(b for b in view["blocks"] if b.get("block_id") == "routines_create__cron")
+    assert cron_block["label"]["text"] == "Schedule (advanced: cron, like 0 9 * * 1-5)"
+    assert "Five fields" not in cron_block["hint"]["text"]
+    assert " · " not in str(view)
 
 
 def test_build_create_routine_modal_agent_options_from_names() -> None:

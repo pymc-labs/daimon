@@ -13,17 +13,20 @@ MCP) use different field names for the same collaborators.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 
 import anthropic as anthropic_errors
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.defaults.reconcile_agents import reconcile_agent
-from daimon.core.defaults.report import ResourceOutcome
+from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agent
+from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import AgentNameCollision, DaimonError
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.permissions import without_agent_rules
@@ -44,6 +47,63 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _log = structlog.get_logger()
 
 
+async def create_user_agent(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession] | None,
+    *,
+    tenant_id: uuid.UUID,
+    spec: AgentSpec,
+    account_id: uuid.UUID,
+    public_url: str | None,
+    creator_account_id: uuid.UUID | None,
+    taken_message: str,
+) -> ResourceOutcome:
+    """Create a user-owned agent; refuse a name in use; the person who created it owns it.
+
+    Names are tenant-wide identity (reconcile dedup and the resolver key on
+    tenant and name only), so any existing agent with the name refuses it,
+    with `AgentNameCollision(taken_message)`. With a creator, the check and the
+    create run under the name lock, and the create never updates an agent that
+    took the name meanwhile, so nobody owns or rewrites someone else's agent.
+    `account_id` is the metadata stamp (the workspace account), not the owner.
+    `managed=False`: a seeded-looking agent would be swept by the next defaults
+    apply because it is not in the seeded spec list.
+    """
+    async with contextlib.AsyncExitStack() as stack:
+        if sessionmaker is not None and creator_account_id is not None:
+            await stack.enter_async_context(
+                agent_name_lock(sessionmaker, tenant_id=tenant_id, name=spec.name)
+            )
+        if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=spec.name):
+            raise AgentNameCollision(taken_message)
+        try:
+            outcome = await reconcile_agent(
+                anthropic,
+                spec,
+                tenant_id=tenant_id,
+                dry_run=False,
+                account_id=account_id,
+                public_url=public_url,
+                managed=False,
+                create_only=True,
+            )
+        except AgentNameTaken as exc:
+            raise AgentNameCollision(taken_message) from exc
+        if (
+            sessionmaker is not None
+            and creator_account_id is not None
+            and outcome.action == Action.CREATED
+            and outcome.anthropic_id is not None
+        ):
+            await record_agent_creator(
+                sessionmaker,
+                tenant_id=tenant_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=outcome.anthropic_id),
+                account_id=creator_account_id,
+            )
+    return outcome
+
+
 async def create_blank_agent(
     anthropic: AsyncAnthropic,
     *,
@@ -53,30 +113,26 @@ async def create_blank_agent(
     model: str,
     account_id: uuid.UUID,
     public_url: str | None,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    creator_account_id: uuid.UUID | None = None,
 ) -> ResourceOutcome:
     """Create an unrouted, user-owned agent from a panel's New agent form.
 
-    Names are tenant-wide identity (reconcile dedup and the resolver key on
-    tenant and name only), so any existing agent with `name` refuses it.
-    `managed=False`: a seeded-looking agent would be swept by the next
-    defaults apply because it is not in the seeded spec list.
+    The person who pressed New agent (`creator_account_id`) owns it.
     """
-    if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name):
-        raise AgentNameCollision(
-            f"This workspace already has an agent named {name}. Pick a different name."
-        )
     try:
         spec = AgentSpec.model_validate({"name": name, "model": model, "system": system})
     except ValidationError as err:
         raise DaimonError(f"Spec validation failed: {err}") from err
-    return await reconcile_agent(
+    return await create_user_agent(
         anthropic,
-        spec,
+        sessionmaker,
         tenant_id=tenant_id,
-        dry_run=False,
+        spec=spec,
         account_id=account_id,
         public_url=public_url,
-        managed=False,
+        creator_account_id=creator_account_id,
+        taken_message=f"There is already an agent named {name} here. Pick a different name.",
     )
 
 

@@ -21,14 +21,6 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, parse_jsonrpc_response
-from daimon.testing.conformance.default_capability import (
-    MCP_TOOLS,
-    DefaultCapabilityAdapter,
-    DefaultCapabilityReplayEvents,
-    DefaultManifest,
-)
-from daimon.testing.conformance.recording import Audit, Recorder, Replay
-from daimon.testing.conformance.runner import replay_default_capability, run_default_capability
 from daimon.testing.qa_mcp_host import (
     QA_SESSION_ID,
     Manifest,
@@ -46,6 +38,14 @@ from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
 from mux.errors import ScopeViolation
+from mux.testing.conformance.default_capability import (
+    MCP_TOOLS,
+    DefaultCapabilityAdapter,
+    DefaultCapabilityReplayEvents,
+    DefaultManifest,
+)
+from mux.testing.conformance.recording import Audit, Recorder, Replay
+from mux.testing.conformance.runner import replay_default_capability, run_default_capability
 from sqlalchemy import text as sql_text
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -142,7 +142,7 @@ class _Provider:
         return self.script.dispatch(request)
 
     async def _serve(self) -> None:
-        from daimon.testing.ma_transport import ScriptedReply
+        from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
         assert self.mounted and self.auth is not None
         deployed = self.script.deployed_agent

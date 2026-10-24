@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, cast
 
 from daimon.core.name_mentions import mentions_by_name
@@ -57,39 +57,56 @@ def is_plain_text_mention_event(event: dict[str, Any], *, bot_names: Iterable[st
     return mentions_by_name(_SLACK_TOKEN.sub(" ", text), bot_names)
 
 
-def is_slack_connect_external(event: dict[str, Any], *, team_id: str) -> bool:
-    """Return True if the event originates from a different Slack workspace.
+_EVENT_TEAM_KEYS = ("user_team", "user_team_id", "source_team")
+
+
+def foreign_event_team(event: Mapping[str, Any], *, team_id: str) -> str | None:
+    """The other workspace an event says its sender belongs to, or None.
 
     Slack Connect allows channels shared between workspaces.  The field that
     carries the sender's home workspace ID is ambiguous across SDK versions and
-    documentation (``user_team`` vs ``user_team_id`` vs
-    ``source_team``), so we defensively check all three.  Any present value
-    that differs from ``team_id`` indicates an external sender.
-
-    The listener, not this function, performs the ``chat_postEphemeral``
-    rejection.  This function is pure: no I/O, no error handling.
+    documentation (``user_team`` vs ``user_team_id`` vs ``source_team``), so we
+    check all three.  Only a non-empty team id that differs from ``team_id`` is
+    evidence of another workspace; an empty or odd value is not (see
+    `ambiguous_event_team`). Pure: no I/O.
     """
-    for key in ("user_team", "user_team_id", "source_team"):
+    for key in _EVENT_TEAM_KEYS:
         value = event.get(key)
-        if value is not None and value != team_id:
-            return True
-    return False
+        if isinstance(value, str) and value and value != team_id:
+            return value
+    return None
+
+
+def ambiguous_event_team(event: Mapping[str, Any]) -> bool:
+    """Whether an event team field is present but not a usable team id (not a string)."""
+    return any(
+        event.get(key) is not None and not isinstance(event.get(key), str)
+        for key in _EVENT_TEAM_KEYS
+    )
+
+
+def is_slack_connect_external(event: dict[str, Any], *, team_id: str) -> bool:
+    """Return True if the event originates from a different Slack workspace.
+
+    One input to the requester's organisation (`decide_requester_org`); an
+    event that omits the fields is not evidence of a host member.
+    """
+    return foreign_event_team(event, team_id=team_id) is not None
 
 
 def is_external_interactive(payload: dict[str, Any]) -> bool:
     """Return True if an interactive (block_actions) payload comes from a
     different workspace than the one hosting the app (Slack Connect).
 
-    STURN-04 gates app_mention via ``is_slack_connect_external``, but slash
-    commands and block actions bypassed it — an external member of a shared
-    channel could click a panel button and drive reads (roster, routine
-    output) resolved against the HOST tenant. block_actions carry the actor's
-    home workspace at ``user.team_id`` and the host at ``team.id``; when they
-    differ the actor is external.
+    An external member of a shared channel reaches only the controls
+    `external_access.external_action_allowed` names; block actions carry the
+    actor's home workspace at ``user.team_id`` and the host at ``team.id``, and
+    when they differ the actor is external. The payload fields are Slack's own
+    and optional: a click that omits them reads as the host's, which is why every
+    admin re-check also verifies host membership (`resolve_is_admin`).
 
     Slash commands are not covered here: their payload carries only the host
-    ``team_id`` (no sender-team field), and an external member generally cannot
-    invoke the host app's slash commands at all. Pure: no I/O.
+    ``team_id`` (no sender-team field). Pure: no I/O.
     """
     raw_user = payload.get("user")
     raw_team = payload.get("team")
@@ -100,3 +117,18 @@ def is_external_interactive(payload: dict[str, Any]) -> bool:
     sender_team: Any = user.get("team_id")
     host_team: Any = team.get("id")
     return sender_team is not None and host_team is not None and bool(sender_team != host_team)
+
+
+def payload_proves_host(payload: dict[str, Any]) -> bool:
+    """Whether an interactive payload positively says its user is in the host workspace.
+
+    Needs both ``user.team_id`` and ``team.id`` present and equal. A payload that
+    omits either proves nothing, so the caller verifies with ``users.info``.
+    """
+    raw_user = payload.get("user")
+    raw_team = payload.get("team")
+    if not isinstance(raw_user, dict) or not isinstance(raw_team, dict):
+        return False
+    sender: Any = cast("dict[str, Any]", raw_user).get("team_id")
+    host: Any = cast("dict[str, Any]", raw_team).get("id")
+    return isinstance(sender, str) and bool(sender) and sender == host

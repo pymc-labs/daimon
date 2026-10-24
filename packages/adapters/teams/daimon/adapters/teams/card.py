@@ -2,7 +2,9 @@
 
 The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
-elapsed time, the turn's tool lines, the latest draft, and a Stop button.
+elapsed time, then in `CARD_SECTIONS` order the last few draft lines, the
+agent's plan when progress plans are on and the turn's tool lines, and a Stop
+button.
 The answer replaces the card as Extended Markdown messages: a card TextBlock
 renders no code blocks or math, a message does. A card follows it with the
 summary line, 👍/👎 buttons (`vote_actions`, answered by `feedback`) and
@@ -21,16 +23,25 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.support_escalation import ASK_THE_TEAM, ESCALATE
 from daimon.core.teams_markdown import escape_dollars
 from daimon.core.turn.notices import TerminationNotice, fit_notice
+from daimon.core.turn.progress_plans import progress_plans_shown
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
+    SECTION_LABELS,
+    CardSection,
+    LabelledSection,
+    draft_log,
     format_draft,
     format_duration,
     format_headline,
+    format_plan_lines,
     format_tool_lines,
     has_running_tool,
+    in_card_order,
+    roll_draft,
 )
 from microsoft_teams.api import Account, Attachment, MentionEntity, MessageActivityInput
 from microsoft_teams.cards import (
@@ -53,6 +64,7 @@ INTERRUPTED_NOTICE = (
     "@mention Daimon with your request to try again."
 )
 CANCELLED_NOTICE = "Stopped.\nSend a message to start again."
+STOPPING_HEADLINE = "Stopping…"
 TOOLS_DONE_NOTICE = "Done."
 # A group chat closed mid-turn: no word of the turn's work.
 ASK_HUMAN = f"{ESCALATE} {ASK_THE_TEAM}"
@@ -69,18 +81,54 @@ class CardState:
     started_at: float
     is_working: bool = False
     tool_lines: tuple[str, ...] = ()
+    plan_lines: tuple[str, ...] = ()
+    """The agent's latest progress plan as a checklist; empty unless progress plans are on."""
     draft: str | None = None
+    """The latest draft line."""
+    earlier_drafts: tuple[str, ...] = ()
+    """The draft lines before ``draft`` that the card still shows, oldest first."""
+    # Stop was clicked: the turn is winding down, so the card offers no Stop.
+    stopping: bool = False
+
+
+def on_stop(state: CardState) -> CardState:
+    """Stop was clicked: every later render shows the stopping card."""
+    return dataclasses.replace(state, stopping=True)
 
 
 def on_message(state: CardState, text: str) -> CardState:
-    """The latest agent text becomes the draft; an empty one keeps the last."""
-    return dataclasses.replace(state, draft=format_draft(text)) if text else state
+    """A whole agent message joins the draft log; an empty one changes nothing."""
+    if not text:
+        return state
+    line = format_draft(scrub_other_platforms(text, "teams"))
+    earlier, latest = roll_draft(state.earlier_drafts, state.draft, line)
+    return dataclasses.replace(state, earlier_drafts=earlier, draft=latest)
+
+
+def on_draft(state: CardState, text: str) -> CardState:
+    """A provider's preview of the message in progress revises the latest draft line."""
+    if not text:
+        return state
+    return dataclasses.replace(state, draft=format_draft(scrub_other_platforms(text, "teams")))
 
 
 def on_activity(state: CardState, turn: TurnState) -> CardState:
-    """Fold the turn's tool calls into the card: Working while one runs, else Thinking."""
-    lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
-    return dataclasses.replace(state, is_working=has_running_tool(turn.content), tool_lines=lines)
+    """Fold the turn's tool calls into the card: Working while one runs, else Thinking.
+
+    With progress plans on for the turn, the latest plan update becomes the
+    checklist and leaves the tool lines.
+    """
+    plan_shown = progress_plans_shown()
+    lines = format_tool_lines(
+        turn.content, finished_ids=turn.finished_tool_ids, plan_shown=plan_shown
+    )
+    plan = format_plan_lines(turn.content) if plan_shown else ()
+    return dataclasses.replace(
+        state,
+        is_working=has_running_tool(turn.content),
+        tool_lines=tuple(scrub_other_platforms(line, "teams") for line in lines),
+        plan_lines=tuple(scrub_other_platforms(line, "teams") for line in plan),
+    )
 
 
 def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
@@ -88,39 +136,61 @@ def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
 
 
 def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActivityInput:
+    """The live card as a message. See `live_card`."""
+    return MessageActivityInput().add_card(live_card(state, now=now, cancel_key=cancel_key))
+
+
+def live_card(state: CardState, *, now: float, cancel_key: str) -> AdaptiveCard:
     """The live card. `cancel_key` routes a Cancel click to this turn.
 
+    Once Stop is clicked it reads "Stopping…" and has no Stop button; the
+    answer to the click is this card too (`handle_cancel`).
     A TextBlock renders no code fence and drops single line breaks, so the
-    tool lines are a monospace block with one paragraph each.
+    plan and the tool lines are monospace blocks with one paragraph each.
     """
     elapsed = now - state.started_at
-    headline = format_headline(
-        is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: f"**{word}**"
-    )
-    body: list[CardElement] = [TextBlock(text=headline, wrap=True)]
-    if state.tool_lines:
-        lines = "\n\n".join(state.tool_lines)
-        body.append(TextBlock(text="Details", size="Small", wrap=True))
-        body.append(TextBlock(text=lines, font_type="Monospace", size="Small", wrap=True))
-    if state.draft:
-        body.append(TextBlock(text=state.draft, is_subtle=True, wrap=True))
-    body.append(TextBlock(text=format_duration(elapsed), is_subtle=True, size="Small", wrap=True))
-    body.append(
-        ActionSet(
-            actions=[
-                ExecuteAction(
-                    title="Stop",
-                    verb=CANCEL_VERB,
-                    data={"action": CANCEL_VERB, "turn": cancel_key},
-                    style="destructive",
-                )
-            ]
+    if state.stopping:
+        headline = f"**{STOPPING_HEADLINE}**"
+        fallback = STOPPING_HEADLINE
+    else:
+        headline = format_headline(
+            is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: f"**{word}**"
         )
-    )
-    fallback = format_headline(
-        is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: word
-    )
-    return _card(body, fallback=fallback)
+        fallback = format_headline(
+            is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: word
+        )
+    body: list[CardElement] = [TextBlock(text=headline, wrap=True)]
+    # A TextBlock drops single line breaks: one paragraph per line in each section.
+    # The plan and the tool lines are drawn alike, monospace so their emoji look alike.
+    sections: dict[CardSection, list[CardElement]] = {}
+    if draft_lines := draft_log(state.earlier_drafts, state.draft):
+        sections["updates"] = [TextBlock(text="\n\n".join(draft_lines), is_subtle=True, wrap=True)]
+    labelled: dict[LabelledSection, tuple[str, ...]] = {
+        "plan": state.plan_lines,
+        "tools": state.tool_lines,
+    }
+    for name, lines in labelled.items():
+        if lines:
+            sections[name] = [
+                TextBlock(text=SECTION_LABELS[name], size="Small", wrap=True),
+                TextBlock(text="\n\n".join(lines), font_type="Monospace", size="Small", wrap=True),
+            ]
+    body.extend(element for section in in_card_order(sections) for element in section)
+    body.append(TextBlock(text=format_duration(elapsed), is_subtle=True, size="Small", wrap=True))
+    if not state.stopping:
+        body.append(
+            ActionSet(
+                actions=[
+                    ExecuteAction(
+                        title="Stop",
+                        verb=CANCEL_VERB,
+                        data={"action": CANCEL_VERB, "turn": cancel_key},
+                        style="destructive",
+                    )
+                ]
+            )
+        )
+    return AdaptiveCard(body=body, fallback_text=fallback)
 
 
 def termination_text(notice: TerminationNotice) -> str:

@@ -267,7 +267,7 @@ async def run_redeem_submission(
     )
     audited = False
     try:
-        is_admin = await resolve_is_admin(client, user_id=user_id)
+        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
         async with runtime.sessionmaker() as session, session.begin():
             principal = await get_or_create_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id

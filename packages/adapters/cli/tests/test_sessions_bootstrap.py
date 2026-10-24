@@ -15,9 +15,9 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, TenantScopeRef, UserScopeRef
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing import ma_environment
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_stub_anthropic, list_response
+from daimon.testing.ma_models import ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, build_stub_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

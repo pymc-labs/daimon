@@ -12,8 +12,8 @@ from daimon.core.session_ports_compat import add_session_file_record
 from daimon.core.session_update_ops import (
     _find_env_resource_id,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 
 SCOPE = Scope(

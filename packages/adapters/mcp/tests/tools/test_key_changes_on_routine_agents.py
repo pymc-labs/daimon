@@ -29,10 +29,10 @@ from daimon.adapters.mcp.tools.self_edit import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_files import get_agent_file, put_agent_file
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_routine, make_tenant, make_thread_session
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _MA_ID = "ag_routine"
@@ -124,7 +124,7 @@ async def test_self_delete_then_add_is_refused(
     tenant_id, me, agent_id = await _setup(db_session_factory, user=user)
     runtime, _agent_obj = _runtime(db_session_factory, tenant_id)
     auth = _member(tenant_id, me, agent_id)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs a server admin"):
         await _self_delete_file_impl(runtime, auth, key="GITLAB_TOKEN")
     with pytest.raises(ToolError, match="would replace GITLAB_TOKEN"):
         await _self_write_file_impl(runtime, auth, key="GLAB_TOKEN", content="attacker")
@@ -137,7 +137,7 @@ async def test_remove_agent_key_is_refused(
 ) -> None:
     tenant_id, me, agent_id = await _setup(db_session_factory, user=user)
     runtime, _agent_obj = _runtime(db_session_factory, tenant_id)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs a server admin"):
         await _remove_agent_key_impl(
             runtime,
             _member(tenant_id, me, None),

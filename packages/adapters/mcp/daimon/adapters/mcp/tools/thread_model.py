@@ -100,8 +100,7 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned
-        ``note`` back to the person; ``/model`` on Discord shows and changes
-        the same setting.
+        ``note`` back to the person.
         """  # noqa: E501
         return await _set_thread_model_impl(
             runtime, await _auth(ctx), origin_context_id=origin_context_id, model=model

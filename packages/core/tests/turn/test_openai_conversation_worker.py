@@ -2,260 +2,33 @@
 
 import asyncio
 import json
-from contextlib import aclosing
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 from uuid import UUID
 
-import httpx
 import pytest
-from daimon.core.authz import Subject
-from daimon.core.channel_backend import AgentBackendService, BackendActor
 from daimon.core.fleet import spawn_operation_key, worker_slot
 from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
-from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits, resolve_worker_spec
 from daimon.core.pricing import provider_prices
-from daimon.core.stores import fleet, tenant_ledger, tenants
+from daimon.core.stores import fleet
 from daimon.core.turn.openai_deployment import OpenAIDeployment
-from daimon.core.turn.outcomes import drain_outcomes
-from daimon.core.turn.runtime_manifest import read_frozen_root
 from daimon.core.turn.runtimes import build_channel_runtime
-from daimon.testing.isolated_sdk import build_async_openai
-from mux.contracts.resources import AgentSpec
-from mux.drivers.openai import deployment
-from mux.drivers.openai.transport import SDKTransport
 
+from .conversation_worker_support import (
+    DROPS,
+    PROFILE,
+)
+from .conversation_worker_support import (
+    ConversationWire as ConversationWire,
+)
+from .conversation_worker_support import (
+    conversation_root as conversation_root,
+)
 from .test_fleet_native_dispatch import _settled
-from .test_frozen_preparation import default_source_turn
-from .test_frozen_root import freeze, root_turn
-from .test_openai_host import SESSION_ID, Wire
+from .test_openai_host import SESSION_ID
 from .test_openai_worker_plan import db_preflight as db_preflight
 from .test_openai_worker_plan import owned_database_preflight as owned_database_preflight
-
-PROFILE = "openai.conversation_only"
-DROPS = ("mcp", "memory", "sandbox", "skills", "tools")
-
-
-class ConversationWire(Wire):
-    def __init__(self):
-        super().__init__()
-        self.expected_spend_limit = 1
-        self.agent = {}
-        self.posts = []
-        self.lose_ack = False
-        self.error = None
-
-    def session(self):
-        return {
-            **super().session(),
-            "environment": {"type": "none"},
-            "metadata": {"mux_tenant": self.agent["metadata"]["mux_tenant"]},
-        }
-
-    def handle(self, call):
-        path = call.url.path.removeprefix("/v1")
-        if call.method == "POST":
-            self.posts.append(call)
-        assert "environment" not in path and "skills" not in path and "vault" not in path
-        if path == "/agents" and call.method == "POST":
-            self.requests.append(call)
-            self.agent = {**json.loads(call.content), "id": "native-agent", "created_at": 0}
-            assert self.agent["tools"] == []
-            return httpx.Response(200, json=self.agent)
-        if path == "/agents/native-agent":
-            self.requests.append(call)
-            return httpx.Response(200, json=self.agent)
-        if path == "/agents/sessions" and call.method == "POST":
-            self.requests.append(call)
-            body = json.loads(call.content)
-            assert body["environment"] == {"type": "none"}
-            assert body["spend_control"] == {"limit": 1}
-            assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}
-            assert "vault_ids" not in body
-            text = body["input"][0]["content"][0]["text"]
-            # Exercise the same event/usage fixtures as the persistent host,
-            # with input accepted by create rather than a native events POST.
-            internal = httpx.Request(
-                "POST",
-                "https://openai.invalid/v1/agents/sessions/" + SESSION_ID + "/events",
-                headers={"OpenAI-Beta": "agents=v1", "Idempotency-Key": "fixture:send"},
-                json={"events": [{"type": "agent.session.input", "input": body["input"]}]},
-            )
-            Wire.handle(self, internal)
-            self.requests.remove(internal)
-            assert text in self.items[0]["content"][0]["text"]
-            if self.lose_ack:
-                raise httpx.ReadError("lost session-create acknowledgement", request=call)
-            return httpx.Response(200, json=self.session())
-        if path.endswith("/events") and call.method == "POST":
-            raise AssertionError("initial input must never be sent after creation")
-        result = super().handle(call)
-        if path.endswith("/events") and call.method == "GET":
-            self.sent.set()
-        return result
-
-
-@pytest.fixture
-async def conversation_root(
-    db_preflight, db_clean, db_nullpool_engine, monkeypatch, tmp_path, request
-):
-    async with aclosing(
-        root_turn.__wrapped__(db_preflight, db_nullpool_engine, live_root=True)
-    ) as roots:
-        updated, current, source = await default_source_turn(await anext(roots))
-        deps, prepared, _, intent, _, scope, _, transport = updated
-        if getattr(request, "param", None) == "memory_read_only":
-            admission = replace(prepared.admission, memory_read_only=True)
-            prepared = replace(
-                prepared,
-                admission=admission,
-                _preparation=replace(prepared._preparation, admission=admission),
-            )
-        deps = replace(
-            deps,
-            agent_backends=True,
-            channel_backends=True,
-            turn_runtime_factory=build_channel_runtime,
-        )
-        plan = json.loads(
-            (
-                Path(__file__).resolve().parents[1] / "fixtures/i7_r6_planned_fleet_grant.json"
-            ).read_text()
-        )
-        plan["grant"]["limits"]["deadline"] = current.expires_at.isoformat()
-        for backend, _ in plan["grant"]["choices"]:
-            if backend["backend"] == "openai":
-                backend["profile"] = PROFILE
-        if getattr(request, "param", None) != "recorded_caps":
-            # Attenuate only an unused sibling ceiling: the recorded ceilings
-            # total .585, which the existing .49 run-cap invariant refuses.
-            plan["grant"]["limits"]["provider_limits_usd"]["gemini"] = "0.395"
-        value = AgentFleetGrant.model_validate_json(json.dumps(plan["grant"]))
-        service = AgentBackendService(deps.sessionmaker, enabled=True)
-        actor = BackendActor(
-            source.tenant_id, prepared.admission.account_id, Subject(is_admin=True)
-        )
-        preview = await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
-        await service.set_fleet_grant(
-            source,
-            value,
-            preview.setting_revision,
-            actor,
-            expected_preview_digest=preview.digest,
-            now=datetime.now(UTC),
-        )
-        async with deps.sessionmaker.begin() as db:
-            await tenants.set_funding_mode(db, tenant_id=source.tenant_id, funding_mode="prepaid")
-            await tenant_ledger.insert_entry(
-                db,
-                tenant_id=source.tenant_id,
-                delta_usd=Decimal("10"),
-                reason="trial_credit",
-                idempotency_key=f"worker-credit:{source.tenant_id}",
-            )
-        await freeze((deps, prepared, *updated[2:]))
-        parent, policy = await read_frozen_root(
-            deps, scope, intent_id=intent.id, now=datetime.now(UTC)
-        )
-        assert len(parent.spec.tools) == 8
-        assert parent.environment is not None
-        assert (
-            parent.resources
-        )  # Captured root includes memory; the worker must explicitly drop it.
-        backend, model = next(pair for pair in value.choices if pair[0].backend == "openai")
-        spec = parent.spec.model_copy(
-            update={
-                "model": model,
-                "tools": (),
-                "skills": (),
-                "mcp_servers": (),
-                "extensions": None,
-                "declared_drops": DROPS,
-            }
-        )
-        if getattr(request, "param", None) == "fresh_spec":
-            # Fresh tool arguments omit optional workspace fields and ownership stamps.
-            spec = AgentSpec(
-                name="W2",
-                model=model,
-                system="Reject B: clones only narrow.",
-                declared_drops=("mcp", "memory", "model_controls", "sandbox", "skills", "tools"),
-            )
-        wire = ConversationWire()
-        manifest = tmp_path / "runtime.json"
-        authorized = OpenAIDeployment(
-            profile=PROFILE,
-            tenant_id=scope.tenant_id,
-            platform=parent.fleet.root.channel.platform,
-            channel_id=parent.fleet.root.channel.channel_id,
-            account_id=scope.account_id,
-            project="project",
-            api_key_env="CONVERSATION_OFFLINE_KEY",
-            worker_materialization=True,
-            source_agent_id=derive_agent_uuid(
-                tenant_id=source.tenant_id, ma_agent_id=source.source.ref.id
-            ),
-            source_agent_version=source.source.revision.local,
-            configuration_grant={
-                "profiles": [PROFILE],
-                "models": [model.id],
-                "thread_modes": [backend.thread_mode],
-                "requires": dict(backend.requires),
-            },
-        )
-        manifest.write_text(json.dumps([authorized.model_dump(mode="json")]))
-        monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
-        monkeypatch.setenv(authorized.api_key_env, "offline")
-
-        def transport_call(call):
-            try:
-                return wire.handle(call)
-            except BaseException as error:
-                wire.error = error
-                raise
-
-        async with build_async_openai(
-            transport=httpx.MockTransport(transport_call),
-            api_key="offline",
-            base_url="https://openai.invalid/v1",
-        ) as sdk:
-            monkeypatch.setattr(
-                deployment, "configured_transport", lambda **kwargs: SDKTransport(sdk)
-            )
-            ports = HostFleetPorts(
-                deps.sessionmaker,
-                prices=provider_prices(PROFILE),
-                markup=Decimal("1"),
-                deps=deps,
-                pool=fleet.WorkerPool(
-                    max_concurrent_workers=1, max_concurrent_workers_per_tenant=1
-                ),
-            )
-            try:
-                captured = await ports.capture_source(parent)
-                resolved = resolve_worker_spec(
-                    parent,
-                    spec,
-                    policy=policy,
-                    now=datetime.now(UTC),
-                    backend=backend,
-                    environment=None,
-                    resources=(),
-                    limits=WorkerLimits(
-                        budget_usd=Decimal("0.055"),
-                        deadline=parent.limits.deadline,
-                        max_turns=1,
-                        native_budget_usd=Decimal("0.01"),
-                    ),
-                    captured_source=captured,
-                )
-                yield deps, parent, policy, resolved, wire, ports, authorized, transport
-            finally:
-                await ports.close()
-                await drain_outcomes()
 
 
 def terms(parent, resolved):
@@ -296,6 +69,9 @@ async def test_recorded_root_freeze_retained_reader_dispatch_create_events_usage
         in json.loads(wire.posts[-1].content)["input"][0]["content"][0]["text"]
     )
     assert all(call.method == "GET" for call in transport.requests[before:])
+    operation_key = spawn_operation_key(worker.run_id, worker.ordinal)
+    assert wire.posts[0].headers["Idempotency-Key"] == operation_key + ":agent_create:0"
+    assert wire.posts[1].headers["Idempotency-Key"] == operation_key + ":send:0"
     binding = await deps.state_store.get_binding(
         worker_slot((await ports.read_run(parent.fleet.scope, parent.fleet.run_id))[0], worker)
     )
@@ -313,6 +89,16 @@ async def test_recorded_root_freeze_retained_reader_dispatch_create_events_usage
     assert operation.operation.status == "processed"
     events = await deps.state_store.read_events(SESSION_ID, after=-1)
     assert any(e.type == "session.turn_ended" for e in events)
+    # Create already carried the input. History can reconcile its answer
+    # before the stream delivers it; retain the actual provenance of either
+    # native path, with one stable normalized item ID.
+    assert any(
+        event.id == "openai:item:turn-1:answer"
+        and event.native.provider == "openai"
+        and event.native.event_id in {"turn-1:answer", "openai:item:turn-1:answer"}
+        for event in events
+        if event.type == "agent.message"
+    ), "the supported worker keeps the actual native stream or history provenance"
     assert any(e.type == "agent.message" for e in events)
     again = await owner.spawn(parent, policy, **kwargs)
     assert again["worker_id"] == first["worker_id"] and again["status"] == "succeeded"
@@ -376,13 +162,8 @@ async def test_missing_dispatch_host_runtime_refuses_before_native_allocation(
 
 @pytest.mark.parametrize("conversation_root", ["recorded_caps"], indirect=True)
 async def test_recorded_provider_ceilings_refuse_before_native_allocation(conversation_root):
-    from daimon.core.fleet_orchestration import FleetRefused
-
-    _, parent, policy, resolved, wire, ports, _, _ = conversation_root
-    with pytest.raises(FleetRefused, match="admission_evidence_invalid") as refused:
-        await FleetOrchestrator(ports).spawn(parent, policy, **terms(parent, resolved))
-    assert str(refused.value.__context__) == "provider limits exceed the retained run budget"
-    assert not wire.posts
+    """The recorded lines total .585 over a .49 run: refused at the grant preview."""
+    assert conversation_root is None
 
 
 @pytest.mark.parametrize("fault", ["environment", "tools", "mcp", "skills", "mount", "drop"])
@@ -411,6 +192,44 @@ async def test_conversation_worker_rejects_residual_authority_before_native_read
         changed = replace(resolved, spec=resolved.spec.model_copy(update=values[fault]))
     with pytest.raises(AdmissionDenied):
         plan.worker_environment(request, changed)
+    assert not wire.requests
+
+
+@pytest.mark.parametrize("had_skills", [False, True])
+async def test_a_conversation_worker_declares_losing_skills_only_if_its_source_had_them(
+    conversation_root, had_skills
+):
+    """J4 fleet-openai: a named agent with no skills has none to lose, so its worker
+    needs no declared skills drop; one whose source has skills still does."""
+    from daimon.core.turn.errors import AdmissionDenied
+    from mux.contracts.ids import SkillRef
+
+    _, parent, _, resolved, wire, ports, plan, _ = conversation_root
+    async with ports._load_preparation(parent) as root_request:
+        request = await root_request.for_worker(parent, resolved)
+    assert request.source is not None and request.source.effective_spec is not None
+    skills = (SkillRef(id="theirs", version="1"),) if had_skills else ()
+    request = replace(
+        request,
+        source=request.source.model_copy(
+            update={
+                "effective_spec": request.source.effective_spec.model_copy(
+                    update={"skills": skills}
+                )
+            }
+        ),
+    )
+    changed = replace(
+        resolved,
+        spec=resolved.spec.model_copy(
+            update={"declared_drops": tuple(d for d in DROPS if d != "skills")}
+        ),
+    )
+    if had_skills:
+        with pytest.raises(AdmissionDenied):
+            plan.worker_environment(request, changed)
+    else:
+        assert plan.worker_environment(request, changed) is None
     assert not wire.requests
 
 

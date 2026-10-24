@@ -18,13 +18,9 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.defaults.report import Action
 from daimon.core.errors import DefaultsError
-from daimon.testing.ma import (
-    MARouter,
-    json_body,
-    list_response,
-)
-from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, json_body, list_response
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _CREATED_AT = datetime(2026, 4, 21, 0, 0, 0, tzinfo=UTC)

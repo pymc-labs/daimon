@@ -24,6 +24,7 @@ from daimon.core._models import (
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import FleetWorker as FleetWorkerRow
 from daimon.core._models import ProviderBinding as BindingRow
+from daimon.core.channel_backend import set_channel_backend
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     ContinuationReasonUnavailable,
@@ -56,13 +57,14 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.task_continuations import record_continuation as insert_reader_fixture
 from daimon.testing.db import build_test_engine, isolated_test_schema, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic
+from mux.contracts.config import BackendConfig
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.drivers.anthropic.normalize import EventNormalizer
 from mux.state.journal import JournalEntry
 from mux.state.lease import Slot
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -680,14 +682,29 @@ async def _ready_root(pooled, provider="anthropic", *, binding_id=None):
         ),
         account_id=str(run.orchestrator_account_id),
     )
+    # Guard resolution validates the immutable revision, just as admission does.
+    async with pooled.begin() as db:
+        revision = await set_channel_backend(
+            db,
+            slot.thread.channel,
+            BackendConfig(
+                backend=provider,
+                profile={
+                    "anthropic": "anthropic.managed_agents",
+                    "openai": "openai.persistent_workspace",
+                    "gemini": "gemini.inline_reuse",
+                }[provider],
+                model="fixture-model",
+            ),
+        )
     binding = ProviderBinding(
         id=binding_id or run.orchestrator_binding_id,
         thread=slot.thread,
         provider=provider,
-        profile="fixture",
+        profile=revision.profile,
         native_refs={"session": run.orchestrator_session_id, "agent": f"{provider}-native-agent"},
         generation=1,
-        config_revision=1,
+        config_revision=revision.local,
         legacy_account_id=slot.account_id,
     )
     ref = ResourceRef(

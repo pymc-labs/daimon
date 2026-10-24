@@ -10,7 +10,7 @@ from daimon.core.stores.turn_usage import list_turn_usage, usage_by_channel
 from daimon.core.turn.outcomes import TurnObservation, drain_outcomes
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_model_usage
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 

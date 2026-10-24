@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -34,6 +35,9 @@ from daimon.testing.factories import make_account, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+#: "1:1" as the chat, not inside a time such as "21:15".
+_ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
 
 
 @pytest.mark.asyncio
@@ -184,6 +188,7 @@ async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
         responder_ma_agent_id="ma_daimon",
         parent_channel_id="19:c@thread.tacv2",
         thread_id="19:c@thread.tacv2;messageid=1",
+        sender_foreign=False,
     )
     agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
     monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
@@ -230,3 +235,11 @@ async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
             {"tenant": tenant.id},
         )
     assert live == 1, "the undelivered invitation should be revoked"
+
+    origin.sender_foreign = True  # a guest from another organisation has no 1:1 chat to open
+    guest = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4())
+    )
+    assert guest.status == "delivery_failed", "a guest's card cannot be delivered either"
+    assert "organisation that added Daimon" in guest.message, "the guest is told who it is for"
+    assert _ONE_TO_ONE.search(guest.message) is None and "chat" not in guest.message, guest.message

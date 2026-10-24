@@ -20,12 +20,12 @@ from .test_session_preparation import _NOW, _admission, _agent, _deps, _register
 
 @pytest.mark.parametrize("change", ["pin", "seal"])
 async def test_policy_change_during_transfer_is_applied_before_successor(
-    db_session, db_nullpool_engine, change
+    db_session, db_committing_engine, change
 ):
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     transport = _Transport()
     deps = _deps(factory, transport)
 

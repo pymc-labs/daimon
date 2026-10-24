@@ -82,11 +82,11 @@ async def test_the_agent_wide_token_is_never_overwritten_when_replace_is_not_all
 
 
 async def test_two_concurrent_member_first_writes_exactly_one_wins(
-    db_nullpool_engine, db_clean
+    db_committing_engine, db_clean
 ) -> None:
     import asyncio
 
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with sm() as session, session.begin():
         tenant = await make_tenant(session)
     fernet = MultiFernet([Fernet(Fernet.generate_key())])
@@ -122,7 +122,7 @@ async def test_attach_backstop_refuses_a_shared_token_for_a_url_attached_meanwhi
 
     import httpx
     from daimon.core.mcp_attach import attach_mcp_server_to_agent
-    from daimon.testing.ma import MARouter, build_fake_anthropic
+    from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 
     agent = _agent(uuid.uuid4(), servers=[{"name": "linear", "type": "url", "url": _URL}])
     updates: list[bytes] = []
@@ -153,13 +153,13 @@ async def test_attach_backstop_refuses_a_shared_token_for_a_url_attached_meanwhi
 
 
 async def test_concurrent_member_and_admin_first_writes_always_leave_the_admin_token(
-    db_nullpool_engine, db_clean
+    db_committing_engine, db_clean
 ) -> None:
     """Both writers take the same lock: member-then-admin is an allowed overwrite,
     admin-then-member refuses the member. Either way the admin's token stands."""
     import asyncio
 
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with sm() as session, session.begin():
         tenant = await make_tenant(session)
     fernet = MultiFernet([Fernet(Fernet.generate_key())])
@@ -218,7 +218,7 @@ def _stateful_ma(tenant_id: uuid.UUID):
     import re
 
     import httpx
-    from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+    from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
     state = {
         "agent": ma_agent(

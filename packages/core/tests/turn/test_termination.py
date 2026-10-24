@@ -32,7 +32,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_retry_status_retrying imp
 from daimon.core.config import RecruitmentSettings
 from daimon.core.errors import TurnError, TurnKind
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.turn import TerminationReason, run_turn, termination_reason
+from daimon.core.turn import TerminationReason, termination_reason
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
     AdmissionDenied,
@@ -44,7 +44,7 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.termination import denial_termination_reason
+from daimon.core.turn.termination import denial_termination_reason, normalized_termination_reason
 from daimon.testing.turn_fakes import (
     BlockForever,
     FakeAnthropic,
@@ -53,7 +53,10 @@ from daimon.testing.turn_fakes import (
     RaiseStatus,
     RecordingLifecycle,
     YieldEvent,
+    run_turn_on_leg,
 )
+from mux.contracts.ids import ResourceRef
+from mux.drivers.anthropic.normalize import EventNormalizer
 
 from .conftest import (
     make_agent_message,
@@ -195,7 +198,7 @@ async def test_every_driver_exit_sets_its_reason(case: _Case) -> None:
         if case.cancel_after_s is not None:
             tg.create_task(_cancel_later(case.cancel_after_s))
         final = await asyncio.wait_for(
-            run_turn(
+            run_turn_on_leg(
                 privacy=TurnPrivacy("discord", RecruitmentSettings()),
                 anthropic=cast(AsyncAnthropic, fa),
                 session_id="sess_1",
@@ -226,7 +229,7 @@ async def test_interrupt_before_the_stream_opens_is_interrupted() -> None:
     cancel.set()
     lc = RecordingLifecycle()
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
@@ -247,7 +250,7 @@ async def test_driver_ceiling_is_ceiling() -> None:
     fa.beta.sessions.events.stream_scripts = [[BlockForever()]]
     lc = RecordingLifecycle()
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
@@ -358,6 +361,35 @@ def test_a_denial_string_maps_like_the_exception_carrying_it(
     ), f"{denial} must record one member whichever way the refusal is reported"
 
 
+def test_a_neutral_refusal_end_maps_to_refused() -> None:
+    """The mux leg sees a refusal as an errored `turn_ended`; it must not read as upstream."""
+    session = ResourceRef(
+        id="sess_1",
+        kind="session",
+        provider="anthropic",
+        account_scope_id="workspace",
+        tenant_id="tenant",
+        account_id="account",
+    )
+    normalizer = EventNormalizer(session)
+    native = {"id": "e", "processed_at": "2026-10-09T00:00:00+00:00"}
+    normalizer.normalize({**native, "type": "session.status_running"}, observed_at=_FROZEN_NOW)
+    ended = normalizer.normalize(
+        {
+            **native,
+            "id": "ended",
+            "type": "session.status_idle",
+            "stop_reason": {"type": "end_turn"},
+            "stop_details": {"type": "refusal", "category": "cyber"},
+        },
+        observed_at=_FROZEN_NOW,
+    )
+    assert normalized_termination_reason(ended) is TerminationReason.REFUSED, ended.payload
+    # A free-form native reason can read "refusal" on a turn that still completed.
+    other = ended.model_copy(update={"payload": {**ended.payload, "outcome": "completed"}})
+    assert normalized_termination_reason(other) is TerminationReason.COMPLETED
+
+
 def test_only_completed_and_interrupted_are_not_failures() -> None:
     assert {r for r in TerminationReason if not r.is_failure} == {
         TerminationReason.COMPLETED,
@@ -374,7 +406,7 @@ async def test_a_terminated_session_with_no_terminal_event_is_not_completed() ->
     fa.beta.sessions.retrieve_statuses = ["terminated"]
     lc = RecordingLifecycle()
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
@@ -413,6 +445,7 @@ def test_the_value_set_is_pinned() -> None:
         "interrupt_timeout",
         "connection_lost",
         "upstream",
+        "refused",
         "rate_limited",
         "session_terminated",
         "mcp_degraded_empty",

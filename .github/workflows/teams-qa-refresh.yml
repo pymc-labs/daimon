@@ -1,0 +1,56 @@
+name: Teams QA token refresh
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      persona:
+        description: "Optional persona; empty refreshes all"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: teams-qa-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    # The service account and config secret are staging environment variables,
+    # which a job-level `if` can't read, so the steps check them instead.
+    if: github.repository == 'pymc-labs/daimon'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Skip when the Teams QA service account or config secret is unset
+        if: vars.GCP_TEAMS_QA_SA == '' || vars.TEAMS_QA_CONFIG_SECRET == ''
+        run: echo "::notice::GCP_TEAMS_QA_SA or TEAMS_QA_CONFIG_SECRET is unset on the staging environment; skipping."
+      - uses: actions/checkout@v4
+        if: vars.GCP_TEAMS_QA_SA != '' && vars.TEAMS_QA_CONFIG_SECRET != ''
+      - uses: astral-sh/setup-uv@v4
+        if: vars.GCP_TEAMS_QA_SA != '' && vars.TEAMS_QA_CONFIG_SECRET != ''
+        with:
+          enable-cache: true
+      - uses: google-github-actions/auth@v2
+        if: vars.GCP_TEAMS_QA_SA != '' && vars.TEAMS_QA_CONFIG_SECRET != ''
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_TEAMS_QA_SA }}
+      - name: Refresh Teams QA tokens
+        if: vars.GCP_TEAMS_QA_SA != '' && vars.TEAMS_QA_CONFIG_SECRET != ''
+        env:
+          CONFIG_SECRET: ${{ vars.TEAMS_QA_CONFIG_SECRET }}
+          PERSONA: ${{ inputs.persona }}
+        run: |
+          if [ -n "$PERSONA" ]; then
+            uv run python -m qa.live.teams refresh --persona "$PERSONA" --config-secret "$CONFIG_SECRET"
+          else
+            uv run python -m qa.live.teams refresh --all --config-secret "$CONFIG_SECRET"
+          fi

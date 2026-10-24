@@ -102,7 +102,10 @@ async def _publish_report_impl(
     # imprecision from ever reaching the core function as a signed cap.
     cap = Decimal(str(cap_usd))
     if runtime.settings.mcp.jwt_secret is None:
-        raise ToolError("report host not configured: DAIMON_MCP__JWT_SECRET is unset")
+        raise ToolError(
+            "Reports can't be published: this Daimon install has no signing key for its "
+            "report pages yet. Whoever runs this Daimon install must add one."
+        )
     jwt_secret = runtime.settings.mcp.jwt_secret.get_secret_value().encode()
     if auth is not None:
         await require_publishable(

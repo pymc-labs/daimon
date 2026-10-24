@@ -146,6 +146,7 @@ from microsoft_teams.cards import (
     ToggleVisibilityAction,
 )
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
@@ -340,6 +341,24 @@ async def channel_labels(
     return labels, listed
 
 
+async def named_channels(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    team_channels: TeamChannels | None,
+    *,
+    tenant_id: uuid.UUID,
+    team_ids: Sequence[str],
+    channel_ids: Sequence[str],
+    stored: Mapping[str, str],
+) -> dict[str, str]:
+    """Each channel's name (`channel_labels`), remembering every name the listings gave."""
+    labels, listed = await channel_labels(
+        team_channels, team_ids=team_ids, channel_ids=channel_ids, stored=stored
+    )
+    if listed:
+        remember_channel_names(sessionmaker, tenant_id=tenant_id, platform="teams", names=listed)
+    return labels
+
+
 async def _no_roster(_team_id: str, _user_id: str) -> str | None:
     return None
 
@@ -425,7 +444,7 @@ def _spenders(state: BillingPanelState) -> Container:
     return _titled(TOP_SPENDERS, *items)
 
 
-def _channel_label(channel_id: str, names: Mapping[str, str]) -> str:
+def channel_name_text(channel_id: str, names: Mapping[str, str]) -> str:
     """The channel's name as plain card text; never its id."""
     name = plain_name(names.get(channel_id) or "")
     return name or CHANNEL_NAME_UNAVAILABLE
@@ -436,7 +455,9 @@ def _channel_budgets(
 ) -> Container:
     """`Channel budgets` by channel name, most used first, five then a grey `+ N more`."""
     lines = [
-        channel_budget_line(status, label=_channel_label(status.budget.channel_id, names), now=now)
+        channel_budget_line(
+            status, label=channel_name_text(status.budget.channel_id, names), now=now
+        )
         for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
     ]
     items: list[CardElement] = _rows(*lines)
@@ -642,14 +663,14 @@ class BillingPanel:
         channel_ids: list[str],
         stored: dict[str, str],
     ) -> dict[str, str]:
-        labels, listed = await channel_labels(
-            self._team_channels, team_ids=team_ids, channel_ids=channel_ids, stored=stored
+        return await named_channels(
+            self._runtime.sessionmaker,
+            self._team_channels,
+            tenant_id=tenant_id,
+            team_ids=team_ids,
+            channel_ids=channel_ids,
+            stored=stored,
         )
-        if listed:
-            remember_channel_names(
-                self._runtime.sessionmaker, tenant_id=tenant_id, platform="teams", names=listed
-            )
-        return labels
 
     async def _act(self, activity: AdaptiveCardInvokeActivity) -> AdaptiveCardInvokeResponse:
         actor = await card_actor(self._runtime, activity)

@@ -18,7 +18,6 @@ from typing import cast
 
 from anthropic import AsyncAnthropic
 from daimon.core.config import RecruitmentSettings
-from daimon.core.turn import run_turn
 from daimon.core.turn.ceiling import CEILING_MESSAGE
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.privacy import TurnPrivacy
@@ -28,6 +27,7 @@ from daimon.testing.turn_fakes import (
     FakeAnthropic,
     RecordingLifecycle,
     YieldEvent,
+    run_turn_on_leg,
 )
 
 from .conftest import make_end_turn, make_status_idle
@@ -46,7 +46,7 @@ async def test_no_deadline_leaves_the_driver_unbounded() -> None:
     ]
     lc = RecordingLifecycle()
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -66,7 +66,7 @@ async def test_past_deadline_returns_a_ceiling_turn_error() -> None:
     fa.beta.sessions.events.stream_scripts = [[BlockForever()]]
     lc = RecordingLifecycle()
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -88,7 +88,7 @@ async def test_ceiling_breach_delivers_on_terminal_failure_exactly_once() -> Non
     fa.beta.sessions.events.stream_scripts = [[BlockForever()]]
     lc = RecordingLifecycle()
 
-    await run_turn(
+    await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -112,7 +112,7 @@ async def test_ceiling_breach_closes_the_opened_stream() -> None:
     fa.beta.sessions.events.stream_scripts = [[DelayThenYield(seconds=5.0, event=terminal)]]
     lc = RecordingLifecycle()
 
-    await run_turn(
+    await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -136,7 +136,7 @@ async def test_a_future_deadline_does_not_disturb_a_normal_turn() -> None:
     ]
     lc = RecordingLifecycle()
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
@@ -169,13 +169,13 @@ async def test_ceiling_breach_during_stream_open_leaks_no_task_and_no_stream() -
     ]
     original_stream = fa.beta.sessions.events.stream
 
-    async def _slow_stream(*, session_id: str, timeout: object = None):
+    async def _slow_stream(*, session_id: str, timeout: object = None, **kwargs: object):
         await asyncio.sleep(0.20)  # still in flight when the ceiling fires
-        return await original_stream(session_id=session_id, timeout=timeout)
+        return await original_stream(session_id=session_id, timeout=timeout, **kwargs)
 
     fa.beta.sessions.events.stream = _slow_stream  # type: ignore[assignment]
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",

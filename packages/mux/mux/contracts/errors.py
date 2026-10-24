@@ -135,6 +135,9 @@ class ProviderError(MuxError):
         retryable: bool,
         native_code: str | None = None,
         operation_id: str | None = None,
+        native_message: str | None = None,
+        native_error_code: str | None = None,
+        native_param: str | None = None,
     ) -> None:
         super().__init__(
             f"provider error: {category}" + (f" ({native_code})" if native_code else "")
@@ -143,3 +146,22 @@ class ProviderError(MuxError):
         self.retryable = retryable
         self.native_code = native_code
         self.operation_id = operation_id
+        self.native_message = native_message
+        self.native_error_code = native_error_code
+        self.native_param = native_param
+
+
+__all__ = [
+    "BindingConflict",
+    "ContinuityLost",
+    "ExtensionVersionError",
+    "InvalidConfig",
+    "MigrationUnsupported",
+    "MuxError",
+    "OperationConflict",
+    "PROVIDER_ERROR_CATEGORIES",
+    "ProviderError",
+    "ProviderErrorCategory",
+    "ScopeViolation",
+    "UnsupportedCapability",
+]

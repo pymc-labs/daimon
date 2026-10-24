@@ -24,9 +24,7 @@ from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderActionRequester
 from daimon.core.turn.run import _turn_port_kwargs
-from daimon.testing.isolated_sdk import build_async_openai
-from daimon.testing.ma_transport import ScriptedTransport
-from daimon.testing.turn_fakes import deps_for as deps_for
+from daimon.testing.turn_fakes import deps_for_pinned_mux as deps_for_pinned_mux
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -36,6 +34,8 @@ from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.isolated_sdk import build_async_openai
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conformance_support import (
@@ -237,7 +237,7 @@ async def test_preparation_dispatches_before_any_anthropic_binding(
 
     monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, PROFILE, hook)
     async with transport.client() as client:
-        deps = deps_for(client, db_session_factory)
+        deps = deps_for_pinned_mux(client, db_session_factory)
         result = await bind_session_impl(
             deps,
             admission(),
@@ -275,7 +275,8 @@ async def test_missing_preparation_fails_before_native_binding(
     transport = ScriptedTransport()
     async with transport.client() as client:
         deps = replace(
-            deps_for(client, db_session_factory), turn_path=cast(Literal["legacy", "mux"], path)
+            deps_for_pinned_mux(client, db_session_factory),
+            turn_path=cast(Literal["legacy", "mux"], path),
         )
         with pytest.raises(AdmissionDenied, match="backend_unsupported"):
             await bind_session_impl(
@@ -333,7 +334,7 @@ async def test_foreign_provider_preparation_is_refused(
     async with transport.client() as client:
         with pytest.raises(ScopeViolation):
             await bind_session_impl(
-                deps_for(client, db_session_factory),
+                deps_for_pinned_mux(client, db_session_factory),
                 admission(),
                 tenant_id=TENANT,
                 platform="slack",
@@ -421,7 +422,7 @@ async def test_preparation_ceiling_keeps_the_host_failure_contract(
     async with transport.client() as client:
         with pytest.raises(TurnError) as error:
             await bind_session_impl(
-                deps_for(client, db_session_factory),
+                deps_for_pinned_mux(client, db_session_factory),
                 admission(),
                 tenant_id=TENANT,
                 platform="slack",
@@ -512,7 +513,7 @@ async def test_injected_backend_cannot_bypass_default_channel_admission(
 
     async with transport.client() as client:
         deps = replace(
-            deps_for(client, db_session_factory),
+            deps_for_pinned_mux(client, db_session_factory),
             backend=openai_backend,
             backend_session_ref=native_session,
         )
@@ -530,7 +531,13 @@ async def test_application_runtime_is_lazy_scoped_and_carried_into_execution(
     lookup: bool,
     injected: bool,
 ) -> None:
-    from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
+    from daimon.core.config import (
+        AnthropicSettings,
+        DatabaseSettings,
+        FleetSettings,
+        Settings,
+        TurnSettings,
+    )
     from daimon.core.turn.deps import build_turn_deps
     from pydantic import PostgresDsn, SecretStr
 
@@ -563,6 +570,7 @@ async def test_application_runtime_is_lazy_scoped_and_carried_into_execution(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
         turn=TurnSettings(path="mux", channel_backends=True),
+        fleet=FleetSettings(enabled=False),
     )
     transport = ScriptedTransport()
     async with transport.client() as client:
@@ -617,7 +625,7 @@ async def test_missing_runtime_constructor_refuses_without_provider_or_key_acces
     transport = ScriptedTransport()
     async with transport.client() as client:
         deps = replace(
-            deps_for(client, db_session_factory),
+            deps_for_pinned_mux(client, db_session_factory),
             channel_backends=True,
             turn_runtime_factory=runtime_module.build_channel_runtime,
         )
@@ -651,7 +659,7 @@ async def test_channel_runtime_refuses_invalid_admission_before_constructor(
     )
     transport = ScriptedTransport()
     async with transport.client() as client:
-        deps = replace(deps_for(client, db_session_factory), channel_backends=True)
+        deps = replace(deps_for_pinned_mux(client, db_session_factory), channel_backends=True)
         selected = admission()
         scope = SCOPE
         if invalid == "no-config":
@@ -707,7 +715,7 @@ async def test_scoped_runtime_lookup_never_shares_a_profile_between_channel_revi
 
     transport = ScriptedTransport()
     async with transport.client() as client:
-        deps = deps_for(client, db_session_factory)
+        deps = deps_for_pinned_mux(client, db_session_factory)
         lookups: list[runtime_module.ScopedTurnRuntimes] = []
         for revision in (REVISION, REVISION.model_copy(update={"local": 2, "digest": "second"})):
             selected = replace(admission(), backend_revision=revision)
@@ -763,7 +771,7 @@ async def test_runtime_mapping_cardinality_is_lazy_and_keeps_injected_profiles(
     transport = ScriptedTransport()
     async with transport.client() as client:
         deps = replace(
-            deps_for(client, db_session_factory),
+            deps_for_pinned_mux(client, db_session_factory),
             turn_runtimes={injected: runtime} if injected is not None else {},
         )
         request = ProviderPreparationRequest(
@@ -789,3 +797,67 @@ async def test_runtime_mapping_cardinality_is_lazy_and_keeps_injected_profiles(
             assert lookup[injected] is runtime
         assert lookup.resolved is (runtime if selected and injected == PROFILE else None)
     assert not transport.requests
+
+
+@pytest.mark.parametrize("host_notice", [False, True])
+async def test_selfhosted_factory_injects_persisted_session_cursor(monkeypatch, host_notice):
+    from mux.contracts.events import Event, NativeProvenance
+    from mux.contracts.ports import Agents, Environments
+    from mux.contracts.resources import ProjectionSnapshot
+    from mux.drivers.selfhosted.transport import DirectTransport
+
+    ref = SESSION.model_copy(update={"provider": "selfhosted"})
+    binding = ProviderBinding(
+        id="selfhosted-owner",
+        thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+        provider="selfhosted",
+        profile="selfhosted.loop",
+        native_refs={"session": ref.id},
+        generation=1,
+        config_revision=REVISION.local,
+        legacy_account_id=SCOPE.account_id,
+    )
+    store = MemoryStateStore()
+    store.data.projections[ref.id] = ProjectionSnapshot(
+        session=ref,
+        cursor="host-notice" if host_notice else "13",
+        state="idle",
+        taken_at=NOW,
+    )
+    if host_notice:
+        store.data.events[ref.id] = [
+            Event(
+                id="persisted-usage",
+                session_id=ref.id,
+                sequence=0,
+                type="native.selfhosted.usage",
+                payload={},
+                observed_at=NOW,
+                authority="record",
+                native=NativeProvenance(
+                    provider="selfhosted", api_revision="daimon-harness/0", cursor="13"
+                ),
+            )
+        ]
+    from types import SimpleNamespace
+
+    from daimon.core.turn.selfhosted_host import driver
+
+    async with httpx.AsyncClient() as http:
+        runtime = SimpleNamespace(
+            transport_factory=lambda revision, scope: DirectTransport(
+                http, base_url="https://harness.example", token="offline"
+            ),
+            account_scope_id=ref.account_scope_id,
+            agents=cast(Agents, object()),
+            environments=cast(Environments, object()),
+            authorization=lambda scope, target: True,
+            model="gpt-6-luna",
+            max_tool_calls=100,
+            deadline_s=300,
+            tools_resolver=None,
+        )
+        backend = driver(runtime, REVISION, SCOPE, binding, store=store.restart())
+        assert await backend.events.cursor(ref) == 13
+        with pytest.raises(ScopeViolation):
+            await backend.events.cursor(ref.model_copy(update={"id": "foreign"}))

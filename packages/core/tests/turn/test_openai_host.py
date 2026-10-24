@@ -19,6 +19,7 @@ from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai, runt
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import ProviderPreparationRequest
+from daimon.core.turn_hold import TurnHold
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, ThreadRef
@@ -31,7 +32,15 @@ from mux.state.memory import MemoryStateStore
 from mux.state.operations import request_digest
 from openai import AsyncOpenAI
 
-from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission, deps_for
+from .test_provider_dispatch import (
+    ACCOUNT,
+    PROFILE,
+    REVISION,
+    SCOPE,
+    TENANT,
+    admission,
+    deps_for_pinned_mux,
+)
 
 SESSION_ID = "native-openai-session"
 
@@ -70,6 +79,23 @@ class Stream(httpx.AsyncByteStream):
         self.closed = True
 
 
+def openai_native_spend_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests of the native-cap path: an OpenAI project that honours `spend_control`.
+
+    Ours answers it with HTTP 400 (Ref Y7D94P), so the profiles declare it
+    unsupported and production never compiles it; these tests keep the
+    compile/echo machinery honest for a project that does.
+    """
+    from mux import profiles
+    from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
+
+    for profile in (PERSISTENT_WORKSPACE, CONVERSATION_ONLY):
+        native = {**profile.support, "session_spend_control": "native"}
+        monkeypatch.setitem(
+            profiles.PROFILES, profile.profile_id, profile.model_copy(update={"support": native})
+        )
+
+
 class Wire:
     def __init__(self, *, session_id: str | None = None) -> None:
         self.session_id = SESSION_ID if session_id is None else session_id
@@ -79,6 +105,8 @@ class Wire:
         self.sent = asyncio.Event()
         self.sources: list[Stream] = []
         self.fail_create = False
+        # An HTTP status the next session create is answered with, if any.
+        self.reject_create: int | None = None
         self.bad_model = False
         self.cancelled = False
         self.deleted = False
@@ -137,6 +165,19 @@ class Wire:
                 assert body["spend_control"] == {"limit": self.expected_spend_limit}
             if self.fail_create:
                 raise httpx.ReadError("offline lost acknowledgment")
+            if self.reject_create is not None:
+                # The staging answer to a session create carrying `spend_control`.
+                return httpx.Response(
+                    self.reject_create,
+                    json={
+                        "error": {
+                            "message": "Unknown parameter: 'spend_control'.",
+                            "type": "invalid_request_error",
+                            "param": "spend_control",
+                            "code": "unknown_parameter",
+                        }
+                    },
+                )
             return httpx.Response(200, json=self.session())
         assert path.startswith("/agents/sessions/" + self.session_id)
         if path.endswith("/events"):
@@ -268,7 +309,7 @@ async def composed(request, db_session_factory, db_clean, monkeypatch):
             ),
         )
         deps = replace(
-            deps_for(None, db_session_factory),
+            deps_for_pinned_mux(None, db_session_factory),
             channel_backends=True,
             state_store=store,
             turn_runtimes={PROFILE: runtime},
@@ -297,7 +338,7 @@ def test_explicit_luna_registration_and_unchanged_default():
 
     assert resolve_default(BackendConfig()).profile == "anthropic.managed_agents"
     with pytest.raises(channel_backend.BackendUnsupported):
-        channel_backend.check_backend(REVISION.model_copy(update={"model": "gpt-6-astra"}))
+        channel_backend.check_backend(REVISION.model_copy(update={"model": "gpt-6-uncatalogued"}))
 
 
 async def test_native_preparation_binding_and_reuse(composed):
@@ -331,6 +372,55 @@ async def test_creation_unknown_is_never_resent(composed):
     assert len([r for r in wire.requests if r.method == "POST"]) == 1
 
 
+async def test_a_rejected_creation_lets_the_next_turn_create(composed):
+    """A definite 400 created no session, so it never wedges the thread (Ref 4F7RXA)."""
+    request, wire, _, _, _ = composed
+    wire.reject_create = 400
+    from mux.errors import ProviderError
+
+    with pytest.raises(ProviderError) as rejected:
+        await prepare_openai(request)
+    assert rejected.value.native_code == "400"
+    wire.reject_create = None
+    prepared = await prepare_openai(request)
+    assert prepared.session_ref is not None and prepared.session_ref.id == SESSION_ID
+    assert len([r for r in wire.requests if r.method == "POST"]) == 2
+
+
+async def test_a_rejected_creation_then_a_changed_config_creates(composed):
+    """The fix for a rejection changes the plan (here: no native cap); it still creates."""
+    request, wire, _, _, runtime = composed
+    wire.reject_create = 400
+    from mux.errors import ProviderError
+
+    with pytest.raises(ProviderError):
+        await prepare_openai(request)
+    wire.reject_create, wire.expected_spend_limit = None, None
+    changed = replace(
+        runtime, controls=runtime.controls.model_copy(update={"spend_limit_usd_cents": None})
+    )
+    request = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: changed}))
+    prepared = await prepare_openai(request)
+    assert prepared.session_ref is not None and prepared.session_ref.id == SESSION_ID
+    posts = [r for r in wire.requests if r.method == "POST"]
+    assert len(posts) == 2 and "spend_control" not in json.loads(posts[1].content)
+
+
+@pytest.mark.parametrize("status", [409, 429])
+async def test_an_uncertain_creation_answer_is_never_resent(composed, status):
+    """A 409 or 429 may follow a create OpenAI accepted: it stays outcome_unknown."""
+    request, wire, _, _, _ = composed
+    wire.reject_create = status
+    from mux.errors import ProviderError
+
+    with pytest.raises(ProviderError):
+        await prepare_openai(request)
+    wire.reject_create = None
+    with pytest.raises(UncertainSend):
+        await prepare_openai(request)
+    assert len([r for r in wire.requests if r.method == "POST"]) == 1
+
+
 async def test_wrong_native_model_cannot_run(composed):
     request, wire, _, _, _ = composed
     wire.bad_model = True
@@ -341,7 +431,7 @@ async def test_wrong_native_model_cannot_run(composed):
 async def test_model_refusal_before_transport_or_plan(composed):
     request, wire, _, _, runtime = composed
     with pytest.raises(UnsupportedCapability):
-        runtime_for(runtime, REVISION.model_copy(update={"model": "gpt-6-astra"}))
+        runtime_for(runtime, REVISION.model_copy(update={"model": "gpt-6-uncatalogued"}))
     assert wire.requests == []
 
 
@@ -786,6 +876,7 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
         ("source_sealed", True),
         ("asks_before_publishing", True),
         ("daimon_rules_need_driver", True),
+        ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
     ],
 )
 async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy, value):
@@ -1126,7 +1217,7 @@ async def test_host_runtime_allows_omitted_optional_spend_control(composed):
     wire.expected_spend_limit = None
     request = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: runtime}))
     prepared = await prepare_openai(request)
-    assert prepared.session_ref.id == SESSION_ID
+    assert prepared.session_ref is not None and prepared.session_ref.id == SESSION_ID
     body = json.loads(next(r.content for r in wire.requests if r.method == "POST"))
     assert "spend_control" not in body
     assert body["agent"] == {"model": "gpt-6-luna", "multi_agent": {"enabled": False}}

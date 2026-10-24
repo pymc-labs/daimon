@@ -78,5 +78,7 @@ def rejected_token_message(rejection: TokenRejection) -> str:
         "Check the token and try the form again.",
     ]
     if rejection.supports_sign_in:
-        lines.append("This server also lets you sign in. Ask the agent to connect your account.")
+        lines.append(
+            "This connection also lets you sign in. Ask the agent to connect your account."
+        )
     return "\n\n".join(lines)

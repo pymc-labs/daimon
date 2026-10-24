@@ -9,7 +9,7 @@ from daimon.testing.db import require_owned_sessionmaker
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.runtime import DiscordRuntime
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 
 def require_discord_runtime_capture(runtime: DiscordRuntime, native: ScriptedTransport) -> None:

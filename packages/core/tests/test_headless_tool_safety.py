@@ -23,15 +23,17 @@ from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.privacy import TurnPrivacy
-from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
 from daimon.testing.ma_models import (
     ma_agent,
     ma_environment,
-    ma_session,
     with_coordinator,
     with_hidden_capability,
 )
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import HttpUrl
+
+from .turn_path_support import HeadlessIdentity, TurnIOSpy, TurnPath
 
 _NOW = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC)
 
@@ -151,7 +153,9 @@ def _confirmations(sends: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [e for body in sends for e in body["events"] if e["type"] == "user.tool_confirmation"]
 
 
-async def test_routine_write_is_denied_when_the_policy_is_on() -> None:
+async def test_routine_write_is_denied_when_the_policy_is_on(
+    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
+) -> None:
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
     client = build_fake_anthropic(_router(creates=creates, sends=sends).dispatch)
@@ -163,8 +167,12 @@ async def test_routine_write_is_denied_when_the_policy_is_on() -> None:
         environment_id="env_x",
         trigger_message="file tonight's bugs",
         tool_safety=ToolSafetyPolicy(enabled=True),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
+        turn_path=turn_path,
     )
 
+    turn_io_used.assert_ran(turn_path)
     assert tail == "I could not file it."
     (created,) = creates
     agent = created["agent"]
@@ -180,8 +188,9 @@ async def test_routine_write_is_denied_when_the_policy_is_on() -> None:
     assert "linear/create_issue" in sent["deny_message"]
 
 
-async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
-    """Created as the agent is; the unattended gate still makes every call pause."""
+async def test_routine_session_is_unchanged_when_the_policy_is_off(
+    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
+) -> None:
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
@@ -194,8 +203,12 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
         environment_id="env_x",
         trigger_message="file tonight's bugs",
         tool_safety=OPEN_TOOL_SAFETY,
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
+        turn_path=turn_path,
     )
 
+    turn_io_used.assert_ran(turn_path)
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
     # The fake keeps serving the frozen snapshot, so every gate rewrites it.
     assert updates
@@ -269,7 +282,7 @@ async def test_without_a_daimon_endpoint_the_reserved_name_is_gated_like_any_ser
 
 @pytest.mark.parametrize("trusted", [("linear",), ()], ids=["trusted", "untrusted"])
 async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
-    monkeypatch: pytest.MonkeyPatch, trusted: tuple[str, ...]
+    monkeypatch: pytest.MonkeyPatch, trusted: tuple[str, ...], headless_identity: HeadlessIdentity
 ) -> None:
     """The production wiring: a routine's decider reads a trusted server's
     catalogue, so a noun-first read the server marks `readOnlyHint` runs where
@@ -347,6 +360,8 @@ async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
         environment_id="env_x",
         trigger_message="list the flags",
         tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
     )
 
     (sent,) = _confirmations(sends)
@@ -449,8 +464,8 @@ def test_no_production_signature_defaults_the_policy() -> None:
 
 async def test_run_turn_without_a_policy_is_a_type_error() -> None:
     with pytest.raises(TypeError, match="tool_safety"):
-        await run_turn(  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
-            privacy=TurnPrivacy("test"),
+        await run_turn(
+            privacy=TurnPrivacy("test"),  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
             anthropic=build_fake_anthropic(MARouter().dispatch),
             agent_id="ag",
             environment_id="env",
@@ -459,7 +474,9 @@ async def test_run_turn_without_a_policy_is_a_type_error() -> None:
 
 
 @pytest.mark.parametrize("enabled", [False, True], ids=["off", "on"])
-async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(enabled: bool) -> None:
+async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(
+    enabled: bool, headless_identity: HeadlessIdentity
+) -> None:
     """Design §3 routines row: the one unattended decider, never AutoApprove; the
     session asks on Daimon's card-only actions and the routine refuses them."""
     daimon = {"name": "daimon-mcp", "type": "url", "url": _PUBLIC_URL}
@@ -482,6 +499,8 @@ async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(enabled: bo
         trigger_message="mail the summary",
         mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
         tool_safety=ToolSafetyPolicy(enabled=enabled),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
     )
     (created,) = creates
     (toolset,) = created["agent"]["tools"]
@@ -507,6 +526,7 @@ _BUILTINS: dict[str, object] = {
 async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
     enabled: bool,
     unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession],
+    headless_identity: HeadlessIdentity,
 ) -> None:
     """The roster cannot be removed from a live session, so nothing is sent."""
     creates: list[dict[str, Any]] = []
@@ -523,12 +543,16 @@ async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
             environment_id="env_x",
             trigger_message="file tonight's bugs",
             tool_safety=ToolSafetyPolicy(enabled=enabled),
+            tenant_id=headless_identity.tenant_id,
+            account_id=headless_identity.account_id,
         )
 
     assert sends == []
 
 
-async def test_a_routine_disables_its_sandbox_before_sending() -> None:
+async def test_a_routine_disables_its_sandbox_before_sending(
+    headless_identity: HeadlessIdentity,
+) -> None:
     """Routines cannot generate files using sandbox tools."""
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
@@ -545,6 +569,8 @@ async def test_a_routine_disables_its_sandbox_before_sending() -> None:
         environment_id="env_x",
         trigger_message="write the report",
         tool_safety=ToolSafetyPolicy(enabled=True),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
     )
 
     assert updates, "the unattended gate rewrites the MCP toolset before the message"
@@ -555,7 +581,9 @@ async def test_a_routine_disables_its_sandbox_before_sending() -> None:
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-async def test_a_routines_own_daimon_tools_pause_for_the_decider(enabled: bool) -> None:
+async def test_a_routines_own_daimon_tools_pause_for_the_decider(
+    enabled: bool, headless_identity: HeadlessIdentity
+) -> None:
     """Trusted is not unasked: Daimon's ordinary tools pause, and the decider allows them."""
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
@@ -579,6 +607,8 @@ async def test_a_routines_own_daimon_tools_pause_for_the_decider(enabled: bool) 
         trigger_message="list them",
         tool_safety=ToolSafetyPolicy(enabled=enabled),
         mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
+        tenant_id=headless_identity.tenant_id,
+        account_id=headless_identity.account_id,
     )
 
     toolset = updates[-1]["agent"]["tools"][0]

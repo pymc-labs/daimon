@@ -14,7 +14,6 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsAgentToolResultEvent,
     BetaManagedAgentsUserCustomToolResultEvent,
 )
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.actions import NativeInput, UserMessage, UserToolConfirmation, UserToolResult
 from mux.contracts.events import Event, TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -25,6 +24,7 @@ from mux.drivers.anthropic.normalize import EventNormalizer
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.turn import AnthropicEvents
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 SCOPE = Scope(
@@ -665,6 +665,40 @@ def test_retries_exhausted_records_an_errored_turn_with_native_reason():
         "outcome": "errored",
         "native_reason": "retries_exhausted",
     }
+
+
+def test_refusal_idle_records_an_errored_turn_with_refusal_reason():
+    # The API ends a refused turn with a plain end_turn idle; only stop_details differs.
+    normalizer = EventNormalizer(SESSION)
+    normalizer.normalize(native("session.status_running", "root"), observed_at=NOW)
+    event = normalizer.normalize(
+        native(
+            "session.status_idle",
+            "ended",
+            stop_reason={"type": "end_turn"},
+            stop_details={"type": "refusal", "category": "cyber", "explanation": "x"},
+        ),
+        observed_at=NOW,
+    )
+    assert event.type == "session.turn_ended"
+    assert event.payload == {
+        "root_turn_id": "root",
+        "outcome": "errored",
+        "native_reason": "refusal",
+    }, "a refusal is not a completed turn"
+
+
+@pytest.mark.parametrize("details", [{}, "refusal", ["refusal"]], ids=str)
+def test_malformed_stop_details_ends_the_turn_as_completed(details):
+    normalizer = EventNormalizer(SESSION)
+    normalizer.normalize(native("session.status_running", "root"), observed_at=NOW)
+    event = normalizer.normalize(
+        native(
+            "session.status_idle", "ended", stop_reason={"type": "end_turn"}, stop_details=details
+        ),
+        observed_at=NOW,
+    )
+    assert event.payload["outcome"] == "completed", "an odd shape must not fail the turn"
 
 
 @pytest.mark.parametrize("permission", ["ask", "allow", "deny", None])

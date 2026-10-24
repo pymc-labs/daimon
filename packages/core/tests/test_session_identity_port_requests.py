@@ -10,10 +10,10 @@ import httpx
 import pytest
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.turn import session_identity
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

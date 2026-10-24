@@ -43,9 +43,9 @@ from daimon.core.stores.access_policy import load_access_policy, set_access_poli
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
@@ -143,7 +143,7 @@ async def test_add_list_and_remove_a_channel_skill_audited(
     args = {"rt": rt, "console": console, "platform": "slack", "workspace_id": "T1"}
 
     await channels_skills_add(**args, channel_id="C1:1717.5", skill="pdf-tools")
-    with pytest.raises(DaimonError, match="No skill of this workspace"):
+    with pytest.raises(DaimonError, match="No skill here"):
         await channels_skills_add(**args, channel_id="C1", skill="missing")
     json_console = _console()
     await channels_skills_list(**{**args, "console": json_console}, channel_id=None, as_json=True)
@@ -494,7 +494,9 @@ async def test_rule_set_keeps_a_thread_rule_to_the_thread_flag(
     thread = "C01AB:1700000000.000200"
     with pytest.raises(typer.BadParameter, match="--thread takes only --readers inside or any"):
         await channels_rule_set(**args, channel_id=thread, readers="own", thread=True)
-    with pytest.raises(typer.BadParameter, match="not a Slack channel_id:thread_ts"):
+    with pytest.raises(
+        typer.BadParameter, match="not a thread id of the form channel_id:thread_ts"
+    ):
         await channels_rule_set(**args, channel_id="C01AB", readers="inside", thread=True)
     await channels_rule_set(**args, channel_id=thread, readers="inside", thread=True)
     await channels_rule_set(**args, channel_id="C02CD:1700000000.000300", writers="none")
@@ -545,7 +547,7 @@ async def test_agents_rule_set_limits_where_an_agent_runs(
     console = _console()
     await agents_rule_set(**args, console=console, runs_in=[CHANNEL])
     assert f"shared runs only in {CHANNEL}" in _out(console), _out(console)
-    assert "still set to answer outside" in _out(console), "it is OTHER_CHANNEL's default"
+    assert "still the default outside" in _out(console), "it is OTHER_CHANNEL's default"
     async with db_session_factory() as s:
         policy = await load_access_policy(s, tenant_id=tenant_id)
     assert policy.agent_rules == {"shared": AgentRule(runs_in=(CHANNEL,))}

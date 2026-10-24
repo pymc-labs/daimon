@@ -28,7 +28,7 @@ reuse, distinct new-thread and caller bindings, current-config refusal without
 provider writes, and a mutation of the real adapter `reuse_existing` argument
 that breaks the independent binding oracle. No keys or live requests are used.
 
-SDK fixture construction uses `daimon.testing.isolated_sdk.build_async_anthropic`
+SDK fixture construction uses `mux.testing.isolated_sdk.build_async_anthropic`
 with the original synthetic key, endpoint, retry count and timeout. Ambient SDK
 configuration is refused before construction and on SDK copies. Boundary controls
 exercise the real fixture, copy/with_options and actual scripted HTTP requests.

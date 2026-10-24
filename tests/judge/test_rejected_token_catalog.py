@@ -29,11 +29,11 @@ from daimon.core.stores.domain import CredentialRequestRow
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.discord_credential_conformance import LoopbackRejectingProbe
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.isolated_sdk import build_async_anthropic
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.provider_fixtures import FixtureGap
 from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import Provider
+from mux.testing.isolated_sdk import build_async_anthropic
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 from . import headless_executor as executor

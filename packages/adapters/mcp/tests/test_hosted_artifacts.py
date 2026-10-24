@@ -17,7 +17,7 @@ from daimon.adapters.mcp.hosted_artifacts import (
 )
 from daimon.core.artifacts import StoredArtifact
 from daimon.core.config import ArtifactsSettings
-from daimon.testing.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from PIL import Image
 
 _NOW = dt.datetime(2026, 8, 23, 12, 0, tzinfo=dt.UTC)

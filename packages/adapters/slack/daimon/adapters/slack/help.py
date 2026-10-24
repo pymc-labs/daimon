@@ -4,8 +4,7 @@ Pure `build_help_blocks()` returns raw Block Kit section dicts listing the
 app's slash commands and the @bot configure-by-chat entrypoint.
 
 `handle_help_command` posts an ephemeral message (no modal, no trigger_id).
-Text constants ported verbatim from the Discord `commands/help.py` and adapted
-to Slack mrkdwn syntax.
+The command list comes from `platform_words`, the same table Discord and Teams read.
 
 No slack_sdk.models.blocks types — raw dicts only (S4 project convention).
 """
@@ -20,23 +19,20 @@ from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
 from daimon.core.errors import DaimonError
+from daimon.core.platform_words import DESCRIPTIONS, WORDS
 from slack_sdk.errors import SlackApiError
 
 log = structlog.get_logger()
 
-# Static text constants ported from discord/commands/help.py (_BODY / _CONVERSATIONAL).
-# Slack mrkdwn: *bold* instead of **bold**; -# (Discord small text) replaced by plain text.
-_BODY = """\
-/here         Who answers here and what it can use
-/agent-setup  Your agents and where they answer
-/github       Connect GitHub repos
-/memory       What the agent remembers
-/routines     Scheduled jobs
-/dm-me        Continue privately (an admin turns it on)
-/billing      Your usage and credit
-/privacy      See, export or delete your data
-/help         This list\
-"""
+
+def _body() -> str:
+    """One line per Slack command, in the shared table's order."""
+    rows = [
+        (command.word, DESCRIPTIONS[action]) for action, command in WORDS["slack"].commands.items()
+    ]
+    width = max(len(word) for word, _ in rows) + 2
+    return "\n".join(f"{word.ljust(width)}{description}" for word, description in rows)
+
 
 _CONVERSATIONAL = """\
 💬 Or just ask
@@ -58,7 +54,7 @@ def build_help_blocks(*, display_name: str = "daimon") -> list[dict[str, Any]]:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": _BODY.format(display_name=escape_mrkdwn(display_name)),
+                "text": _body(),
             },
         },
         {"type": "divider"},

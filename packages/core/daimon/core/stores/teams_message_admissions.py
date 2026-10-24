@@ -5,7 +5,8 @@ replay and a redelivery) never both win: `claim_teams_message` admits once or
 reclaims a dead owner's unhandled row; `finish_teams_messages` is the fence
 before a turn starts or any answer is sent; `mark_restart_notice` lets a drain
 notice go out once; `reclaim_teams_messages` hands a boot what a dead process
-left unhandled. Owner liveness is the process's advisory lock, as for Discord.
+left unhandled; `list_recent_teams_channels` names where a restart may have
+missed some. Owner liveness is the process's advisory lock, as for Discord.
 """
 
 from __future__ import annotations
@@ -230,6 +231,22 @@ async def reclaim_teams_messages(
     return taken
 
 
+async def list_recent_teams_channels(
+    session: AsyncSession, *, tenant_id: uuid.UUID, since: datetime, limit: int
+) -> list[str]:
+    """The channels and chats with a message admitted since `since`, newest activity first."""
+    ids = await session.scalars(
+        select(TeamsMessageAdmission.channel_id)
+        .where(
+            TeamsMessageAdmission.tenant_id == tenant_id, TeamsMessageAdmission.created_at >= since
+        )
+        .group_by(TeamsMessageAdmission.channel_id)
+        .order_by(func.max(TeamsMessageAdmission.created_at).desc())
+        .limit(limit)
+    )
+    return list(ids)
+
+
 async def prune_teams_messages(
     session: AsyncSession, *, tenant_id: uuid.UUID, before: datetime, owner_key: int
 ) -> int:
@@ -252,14 +269,22 @@ async def prune_teams_messages(
     return cast(CursorResult[Any], result).rowcount
 
 
-async def delete_teams_messages_for_user(
+async def forget_teams_messages_for_user(
     session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
 ) -> int:
-    """Forget one person's admitted messages in one tenant. Idempotent."""
+    """Forget one person in one tenant's admission rows. Idempotent.
+
+    The row stays as a content-free receipt (handled, no words, no sender) until
+    the 24 h prune: it is the key that keeps a catch-up or a redelivery from
+    running the same message again, which would write the erased words back.
+    An unhandled message of theirs is dropped, not replayed.
+    """
     result = await session.execute(
-        delete(TeamsMessageAdmission).where(
+        update(TeamsMessageAdmission)
+        .where(
             TeamsMessageAdmission.tenant_id == tenant_id, TeamsMessageAdmission.user_id == user_id
         )
+        .values(user_id=None, message=None, handled=True)
     )
     await session.flush()
     return cast(CursorResult[Any], result).rowcount
@@ -268,7 +293,7 @@ async def delete_teams_messages_for_user(
 async def count_teams_messages_for_user(
     session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
 ) -> int:
-    """How many rows `delete_teams_messages_for_user` would delete."""
+    """How many rows `forget_teams_messages_for_user` would clear."""
     stmt = (
         select(func.count())
         .select_from(TeamsMessageAdmission)

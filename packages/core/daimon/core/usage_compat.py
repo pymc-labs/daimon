@@ -6,7 +6,7 @@ No provider requests. Remove when turn and adapter callers supply observations.
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
 from mux.contracts.ids import ResourceRef
 from mux.contracts.usage import UsageObservation
-from mux.drivers.anthropic.usage import observation_from_event
+from mux.drivers.anthropic import observation_from_event
 
 
 def event_observation(

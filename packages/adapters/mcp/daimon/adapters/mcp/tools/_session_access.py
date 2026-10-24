@@ -22,7 +22,6 @@ from daimon.core.defaults.metadata import (
     is_private_routine_stamp,
 )
 from daimon.core.native_admins import read_stored_admin
-from daimon.core.permissions import any_readers_limited
 from daimon.core.session_seal import session_facts
 from daimon.core.stores.thread_sessions import thread_ids_for_sessions
 from fastmcp.exceptions import ToolError
@@ -239,6 +238,8 @@ def _seal_allows(
             session=_session_facts(
                 session.metadata or {}, owned=True, legacy_thread_id=legacy_thread_id
             ),
+            # A held credential reads only the sessions that ran in its channel.
+            hold=read.hold,
         )
     )
 
@@ -250,7 +251,7 @@ async def _legacy_threads(
     sessions: Sequence[BetaManagedAgentsSession],
 ) -> dict[str, str]:
     unstamped = [s.id for s in sessions if MA_METADATA_KEY_CHANNEL not in (s.metadata or {})]
-    if not unstamped or not any_readers_limited(read.policy):
+    if not unstamped or not read.withholds_hits:
         return {}
     async with runtime.session_factory() as db:
         return await thread_ids_for_sessions(db, tenant_id=auth.tenant_id, ma_session_ids=unstamped)

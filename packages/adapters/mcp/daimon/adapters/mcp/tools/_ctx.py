@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
+from daimon.adapters.mcp.tools._words import admin_noun, space_noun
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
@@ -28,8 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
-# How MCP refusals name the tenant, matching the invoker allowlist refusal below.
-_REFUSAL_NOUNS = RefusalNouns(scope="workspace", admin="a workspace admin", billing="/billing")
+
+def _refusal_nouns(auth: AuthIdentity) -> RefusalNouns:
+    """How a refusal names the caller's tenant, admin and commands; neutral for a caller
+    with no chat platform."""
+    return RefusalNouns.for_caller(auth.platform)
 
 
 async def _auth(ctx: Context) -> AuthIdentity:  # pyright: ignore[reportUnusedFunction]
@@ -52,7 +56,7 @@ def _require_admin(auth: AuthIdentity) -> None:  # pyright: ignore[reportUnusedF
     """
     if not auth.is_admin:
         raise ToolError(
-            "This operation requires a workspace or server admin. Tell the caller who can "
+            f"This operation requires {admin_noun(auth.platform)}. Tell the caller who can "
             "make the change and give them a sentence the admin can say, preserving "
             "the requested action and target from the conversation. They are not available "
             "to this permission check; do not invent missing details. Do not retry the mutation."
@@ -237,8 +241,8 @@ async def _policy_gate(
         )
         refused(TerminationReason.ADMISSION_DENIED)
         raise ToolError(
-            "TERMINAL ERROR: You aren't on this workspace's list of people who can "
-            "use daimon. A workspace admin can add you."
+            f"TERMINAL ERROR: You aren't on this {space_noun(auth.platform)}'s list of "
+            f"people who can use daimon. {admin_noun(auth.platform).capitalize()} can add you."
         )
     return owner
 
@@ -347,9 +351,10 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             gate="balance",
         )
         refused(TerminationReason.ADMISSION_BALANCE_DEPLETED)
+        nouns = _refusal_nouns(auth)
         raise ToolError(
-            "TERMINAL ERROR: This server's daimon credit is depleted. "
-            "An admin can top up with /billing."
+            f"TERMINAL ERROR: This {nouns.scope}'s daimon credit is depleted. "
+            f"An admin can top up with {nouns.billing}."
         )
 
     if await is_over_cap(
@@ -367,7 +372,9 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
             gate="cap",
         )
         refused(TerminationReason.ADMISSION_CAP_EXCEEDED)
-        raise ToolError(f"TERMINAL ERROR: {admission_refusal_text('cap_exceeded', _REFUSAL_NOUNS)}")
+        raise ToolError(
+            f"TERMINAL ERROR: {admission_refusal_text('cap_exceeded', _refusal_nouns(auth))}"
+        )
 
     if await is_over_channel_budget(
         sessionmaker=sessionmaker,

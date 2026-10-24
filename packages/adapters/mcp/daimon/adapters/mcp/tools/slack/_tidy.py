@@ -65,7 +65,10 @@ async def _check_place(
 ) -> None:
     """The caller's access, the escalation guard and the tenant write guard."""
     await _validate_channel_access(
-        client, channel_id=channel_id, requester_id=_require_slack_identity(auth)
+        client,
+        channel_id=channel_id,
+        requester_id=_require_slack_identity(auth),
+        is_client=auth.client,
     )
     require_not_escalation_channel(runtime, channel_id=channel_id)
     await require_channel_writable(runtime, auth, channel_id=channel_id, origin=ctx.origin)

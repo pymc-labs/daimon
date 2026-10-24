@@ -32,6 +32,7 @@ from daimon.core.permissions import (
     session_homes,
     session_readable_from,
 )
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope, ThreadRef
 
 
@@ -166,6 +167,9 @@ class Subject:
     via_agent_key: bool = False
     role_ids: tuple[str, ...] = ()
     verified_membership: bool | None = None
+    # The requester belongs to another organisation (or the platform could not
+    # say): never an admin, and refused everything outside the held channel.
+    client: bool = False
 
 
 @dataclass(frozen=True)
@@ -271,6 +275,8 @@ class AgentReach:
 
     managed: bool = False
     reachable: bool = False
+    # The caller is the agent's recorded owner (`daimon.core.stores.agent_owners`).
+    owned: bool = False
 
 
 DenyReason = Literal[
@@ -289,6 +295,12 @@ DenyReason = Literal[
     "managed_agent",
     "own_agents_only",
     "needs_approval",
+    # The requester is from another organisation: the action is not theirs to take.
+    "client_requester",
+    # The target lies outside the channel the turn is held to.
+    "outside_hold",
+    # A client's call named no origin channel to be held to.
+    "origin_required",
 ]
 
 
@@ -338,6 +350,100 @@ class Request:
     # verified (`daimon.core.publish_gate`).
     approved: bool = False
     fleet: FleetFacts | None = None
+    # The channel the calling turn is held to; None for an unheld call.
+    hold: TurnHold | None = None
+
+
+#: What a client requester may never do, whatever its place or surface.
+_CLIENT_REFUSED_ACTIONS = frozenset(
+    {
+        Action.DIRECT_MESSAGE,
+        Action.SAVE_ROUTINE,
+        Action.ACT_FOR_CREATOR,
+        Action.CREATE_AGENT,
+        Action.CONFIGURE,
+        Action.CHANGE_SHARED_AGENT,
+        Action.FORK,
+        Action.BIND_CHANNEL_DEFAULT,
+        Action.MINT_CODING_TOKEN,
+        Action.SET_CHANNEL_ENVIRONMENT,
+        Action.SET_CHANNEL_RULE,
+        Action.SET_AGENT_RULE,
+        Action.SET_CHANNEL_BUDGET,
+        Action.SET_CHANNEL_SKILLS,
+        Action.SET_AGENT_TOOL_RULE,
+        Action.SET_CHANNEL_AGENT_TOOL_RULE,
+        Action.ARCHIVE_CHANNEL_COPY,
+        Action.SPAWN_WORKER,
+    }
+)
+
+#: Surfaces a client may never start a turn or run an agent on: everything but a channel.
+_CLIENT_REFUSED_SURFACES = frozenset(
+    {Surface.DM, Surface.HUB, Surface.AGENT_CHAT, Surface.ROUTINE, Surface.FLEET}
+)
+
+#: What a held turn may not do at all, client or not.
+_HOLD_REFUSED_ACTIONS = frozenset(
+    {Action.DIRECT_MESSAGE, Action.SAVE_ROUTINE, Action.CREATE_AGENT, Action.SPAWN_WORKER}
+)
+
+
+#: What a client may do only from a named origin channel, so it needs a hold.
+_ORIGIN_BOUND_ACTIONS = frozenset(
+    {Action.READ_CHANNEL, Action.POST, Action.READ_SESSION, Action.CONTINUE_SESSION}
+)
+
+
+def _inside_hold(hold: TurnHold, at: Place) -> bool:
+    return not at.own_dm and hold.contains(at.channel_id, at.parent_channel_id)
+
+
+def _session_inside_hold(hold: TurnHold, facts: SessionFacts) -> bool:
+    if facts.private:
+        return False
+    if facts.thread is not None:
+        return hold.contains(facts.thread, facts.channel)
+    return hold.contains(facts.channel if facts.channel is not None else facts.legacy_thread_id)
+
+
+def _client_refusal(req: Request) -> Decision | None:
+    if req.action in _CLIENT_REFUSED_ACTIONS:
+        return _deny("client_requester")
+    if req.action in (Action.START_TURN, Action.RUN_AGENT) and (
+        req.surface in _CLIENT_REFUSED_SURFACES
+    ):
+        return _deny("client_requester")
+    if req.action is Action.PUBLISH and not req.approved:
+        return _deny("needs_approval")
+    if req.hold is None and req.action in _ORIGIN_BOUND_ACTIONS:
+        return _deny("origin_required")
+    return None
+
+
+def _hold_refusal(req: Request, hold: TurnHold) -> Decision | None:
+    if req.action in _HOLD_REFUSED_ACTIONS:
+        return _deny("outside_hold")
+    if req.action in (Action.READ_CHANNEL, Action.POST):
+        return None if _inside_hold(hold, req.place) else _deny("outside_hold")
+    if req.action is Action.PUBLISH and not req.approved:
+        return _deny("needs_approval")
+    if req.action in (Action.READ_SESSION, Action.CONTINUE_SESSION):
+        facts = req.session or SessionFacts()
+        return None if _session_inside_hold(hold, facts) else _deny("outside_hold")
+    return None
+
+
+def _held_refusal(req: Request) -> Decision | None:
+    """A client's or a held turn's refusal, decided before any admin exemption
+    and before every no-rules ALLOW, so no policy can relax it."""
+    if req.subject.client:
+        refused = _client_refusal(req)
+        if refused is not None:
+            return refused
+    if req.hold is not None:
+        return _hold_refusal(req, req.hold)
+    return None
 
 
 def _outside_rule(agent: AgentRef, place: Place) -> bool:
@@ -408,26 +514,36 @@ def _decide_shared_agent_change(req: Request) -> Decision:
     """The shared-agent mutation table (`daimon.core.operation_policy`).
 
     A posted-token write always passes. A spec edit refuses a managed agent even
-    for an admin, then passes an admin; an attachment write passes an admin
-    before the managed check. Every other target needs an admin.
+    for an admin, then passes an admin or the agent's owner; an attachment write
+    passes an admin before the managed check, then the owner. Every other target
+    needs an admin.
     """
     reach = req.reach or AgentReach()
+    owner = reach.owned and not req.subject.via_agent_key and not req.subject.client
     if req.operation_family == "posted_token":
         return ALLOW
     if req.operation_family == "spec":
         if reach.managed:
             return _deny("managed_agent")
-        if req.subject.is_admin:
+        if req.subject.is_admin or owner:
             return ALLOW
     else:
         if req.subject.is_admin:
             return ALLOW
         if reach.managed:
             return _deny("managed_agent")
+        if owner:
+            return ALLOW
     return _deny("admin_required")
 
 
 def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
+    if req.subject.client or req.hold is not None:
+        # No administrator authority applies to a client or a held request.
+        req = replace(req, subject=replace(req.subject, is_admin=False))
+        refused = _held_refusal(req)
+        if refused is not None:
+            return refused
     subject, agent, place = req.subject, req.agent, req.place
     admin_only_surface = req.surface in _ADMIN_ONLY_SURFACES
 
@@ -736,12 +852,17 @@ def build_subject(
     via_agent_key: bool = False,
     role_ids: tuple[str, ...] = (),
     verified_membership: bool | None = None,
+    client: bool = False,
 ) -> Subject:
-    """Who is acting. The one place a caller's identity becomes a `Subject`."""
+    """Who is acting. The one place a caller's identity becomes a `Subject`.
+
+    A client is never an admin, whatever the caller passed.
+    """
     return Subject(
-        is_admin=is_admin,
+        is_admin=is_admin and not client,
         platform_user_id=platform_user_id,
         via_agent_key=via_agent_key,
+        client=client,
         role_ids=role_ids,
         verified_membership=verified_membership,
     )
@@ -817,6 +938,7 @@ def authorize(
     recorded_seal_ids: frozenset[str] = frozenset(),
     approved: bool = False,
     fleet: FleetFacts | None = None,
+    hold: TurnHold | None = None,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -841,6 +963,7 @@ def authorize(
             recorded_seal_ids=recorded_seal_ids,
             approved=approved,
             fleet=fleet,
+            hold=hold,
         ),
     )
 

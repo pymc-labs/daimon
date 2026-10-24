@@ -45,10 +45,22 @@ elif not config.get_main_option("sqlalchemy.url") and "connection" not in config
 target_metadata = Base.metadata
 
 LEGACY_REVISIONS = {
-    "0110_cold_dm_agent": "0111_cold_dm_agent",
-    "0111_routine_dm_destination": "0112_routine_dm_destination",
-    "0112_unattended_turn_provenance": "0113_unattended_turn_provenance",
-    "0113_microsoft_accounts": "0113_unattended_turn_provenance",
+    "0111_cold_dm_agent": "0134_cold_dm_agent",
+    "0112_routine_dm_destination": "0135_routine_dm_destination",
+    "0113_unattended_turn_provenance": "0136_unattended_turn_provenance",
+    "0114_turn_attendance": "0137_turn_attendance",
+    "0115_origin_session_grants": "0138_origin_session_grants",
+    "0116_thread_model_settings": "0139_thread_model_settings",
+    "0117_clear_legacy_routine_output": "0140_clear_legacy_routine_output",
+    "0118_lead_intake": "0141_lead_intake",
+    "0119_watches": "0142_watches",
+    "0120_watch_polling": "0143_watch_polling",
+    "0121_routine_sandbox_tools": "0144_routine_sandbox_tools",
+    "0122_recruitment": "0145_recruitment",
+    "0110_cold_dm_agent": "0134_cold_dm_agent",
+    "0111_routine_dm_destination": "0135_routine_dm_destination",
+    "0112_unattended_turn_provenance": "0136_unattended_turn_provenance",
+    "0113_microsoft_accounts": "0136_unattended_turn_provenance",
 }
 
 
@@ -135,29 +147,71 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 def _normalize_preview_revision(connection: Connection) -> None:
-    """Translate deployed preview stamps to the main-authoritative chain atomically.
+    """Install missing main DDL and translate a historical stamp in one transaction.
 
-    The old preview chain applied the DM/provenance changes before Microsoft
-    accounts. Install that missing predecessor before translating its stamp;
-    never replay the DM migrations, which would lose data or duplicate columns.
-    S1's old head already includes Microsoft accounts and needs only an alias.
-    This runs inside Alembic's transaction, including for downgrade commands.
+    Preview DDL already represented by the stored stamp must never be replayed.
+    The usage index is built without CONCURRENTLY here because its canonical
+    migration's autocommit block would commit a partially completed repair.
     """
     migration_context = context.get_context()
     revisions = migration_context.get_current_heads()
-    for old_revision in revisions:
-        new_revision = LEGACY_REVISIONS.get(old_revision)
-        if new_revision is None:
-            continue
-        if old_revision != "0113_microsoft_accounts":
-            microsoft = ScriptDirectory.from_config(config).get_revision("0110_microsoft_accounts")
-            assert microsoft is not None
-            with Operations.context(migration_context):
-                microsoft.module.upgrade()
-        connection.execute(
-            text("UPDATE alembic_version SET version_num = :new WHERE version_num = :old"),
-            {"new": new_revision, "old": old_revision},
+    legacy = [revision for revision in revisions if revision in LEGACY_REVISIONS]
+    if not legacy:
+        return
+    if len(revisions) != 1:
+        raise util.CommandError(
+            "Cannot repair a multi-head legacy preview state; expected one stamp."
         )
+    old_revision = legacy[0]
+    scripts = ScriptDirectory.from_config(config)
+    predecessors = [
+        "0111_turn_origin_foreign_sender",
+        "0112_selfhosted_resources",
+        "0113_selfhosted_skill_catalog",
+        "0114_selfhosted_skill_pins",
+        "0115_progress_plan_scopes",
+        "0116_shared_channel_facts",
+        "0117_agent_channel_memory_store",
+        "0118_agent_backend_model",
+        "0119_agent_owner_settings",
+        "0120_mcp_token_surface",
+        "0121_refused_turn_outcome",
+        "0122_thread_provider_release",
+        "0123_tenant_backends_explicit",
+        "0128_fleet_run_end_notice",
+    ]
+    if old_revision in {
+        "0110_cold_dm_agent",
+        "0111_routine_dm_destination",
+        "0112_unattended_turn_provenance",
+    }:
+        predecessors.insert(0, "0110_microsoft_accounts")
+    with Operations.context(migration_context):
+        for revision in predecessors:
+            script = scripts.get_revision(revision)
+            assert script is not None
+            script.module.upgrade()
+        # Match 0131's index and invalid-index retry semantics, atomically.
+        invalid = connection.scalar(
+            text(
+                "SELECT NOT indisvalid FROM pg_index "
+                "WHERE indexrelid = to_regclass('ix_usage_observation_tenant_id')"
+            )
+        )
+        if invalid:
+            connection.execute(text("DROP INDEX ix_usage_observation_tenant_id"))
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_usage_observation_tenant_id "
+                "ON usage_observation (tenant_id)"
+            )
+        )
+    result = connection.execute(
+        text("UPDATE alembic_version SET version_num = :new WHERE version_num = :old"),
+        {"new": LEGACY_REVISIONS[old_revision], "old": old_revision},
+    )
+    if result.rowcount != 1:
+        raise util.CommandError("Legacy preview repair expected exactly one version row.")
 
 
 async def run_migrations_online() -> None:

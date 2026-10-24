@@ -8,6 +8,7 @@ from uuid import UUID
 
 import discord
 import pytest
+import structlog
 from daimon.adapters.discord import views
 from daimon.adapters.discord.views import (
     CancelView,
@@ -33,6 +34,26 @@ def _mock_interaction(*, user_id: int) -> MagicMock:
     interaction.response.send_message = AsyncMock()
     interaction.response.edit_message = AsyncMock()
     interaction.response.defer = AsyncMock()
+    return interaction
+
+
+def _member_interaction(
+    *,
+    user_id: int,
+    owner: bool = False,
+    administrator: bool = False,
+    manage_guild: bool = False,
+) -> MagicMock:
+    """A guild click by a member whose live permissions are as given."""
+    interaction = _mock_interaction(user_id=user_id)
+    member = MagicMock(spec=discord.Member)
+    member.id = user_id
+    member.guild_permissions = discord.Permissions(
+        administrator=administrator, manage_guild=manage_guild
+    )
+    member.guild = MagicMock(spec=discord.Guild)
+    member.guild.owner_id = user_id if owner else 999
+    interaction.user = member
     return interaction
 
 
@@ -156,6 +177,58 @@ class TestCancelView:
         result = await view.interaction_check(interaction)
         assert result is False, "wrong user should be rejected"
         assert not cancel.is_set(), "cancel event should NOT be set"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("owner", "administrator", "manage_guild"),
+        [(True, False, False), (False, True, False), (False, False, True)],
+    )
+    async def test_a_current_server_admin_can_stop_anyones_reply(
+        self, owner: bool, administrator: bool, manage_guild: bool
+    ) -> None:
+        cancel = asyncio.Event()
+        view = CancelView(allowed_user_id=123, cancel=cancel)
+        interaction = _member_interaction(
+            user_id=456, owner=owner, administrator=administrator, manage_guild=manage_guild
+        )
+        assert await view.interaction_check(interaction) is True
+        with structlog.testing.capture_logs() as logs:
+            await _find_button(view, "Stop").callback(interaction)
+        assert cancel.is_set(), "an owner, Administrator or Manage Server member stops it"
+        assert [entry for entry in logs if entry["event"] == "turn.stop_pressed"] == [
+            {
+                "event": "turn.stop_pressed",
+                "log_level": "info",
+                "platform": "discord",
+                "turn_id": None,
+                "requester_id": "123",
+                "pressed_by": "456",
+                "by_admin": True,
+            }
+        ], "the stop is recorded with who pressed it"
+        interaction.response.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_another_member_is_told_who_can_stop_it(self) -> None:
+        cancel = asyncio.Event()
+        view = CancelView(allowed_user_id=123, cancel=cancel)
+        interaction = _member_interaction(user_id=456)
+        assert await view.interaction_check(interaction) is False
+        interaction.response.send_message.assert_called_once_with(
+            "Only the person who asked, or someone with Manage Server, can stop this reply.",
+            ephemeral=True,
+        )
+        assert not cancel.is_set()
+
+    @pytest.mark.asyncio
+    async def test_an_admin_click_after_the_stop_is_already_handled(self) -> None:
+        view = CancelView(allowed_user_id=123, cancel=asyncio.Event())
+        await _find_button(view, "Stop").callback(_mock_interaction(user_id=123))
+        interaction = _member_interaction(user_id=456, administrator=True)
+        assert await view.interaction_check(interaction) is False
+        interaction.response.send_message.assert_called_once_with(
+            "Already handled.", ephemeral=True
+        )
 
     def test_timeout_is_none(self) -> None:
         cancel = asyncio.Event()

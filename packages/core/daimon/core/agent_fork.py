@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
@@ -29,6 +29,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from daimon.core import agent_lifecycle
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
+from daimon.core.agent_ownership import record_agent_creator
 from daimon.core.authz import Action, Subject, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import (
     download_skill_version,
@@ -54,6 +55,7 @@ from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
 from daimon.core.skills.ownership import AttachedSkillOwnership, partition_copy_skills
 from daimon.core.specs import merge_default_agent_toolset
+from daimon.core.stores import agent_owners
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import UserSkillRow
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
@@ -206,6 +208,29 @@ async def _copy_own_skills(
     return copied, failed
 
 
+async def _record_copy_owner(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    source_id: str,
+    copy_id: str,
+    owner: uuid.UUID | Literal["source"] | None,
+) -> None:
+    if owner == "source":
+        async with sessionmaker() as session:
+            owner = await agent_owners.owner_of(
+                session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=source_id)
+            )
+    if owner is None:
+        return
+    await record_agent_creator(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=copy_id),
+        account_id=owner,
+    )
+
+
 async def copy_agent(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -217,18 +242,21 @@ async def copy_agent(
     subject: Subject,
     default_agent_name: str | None,
     extra_metadata: Mapping[str, str] | None = None,
+    owner: uuid.UUID | Literal["source"] | None = None,
 ) -> AgentCopy:
     """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not.
 
     `extra_metadata` is stamped on the copy too (an isolation copy's channel).
     `default_agent_name` is the deployment default, which gets no face.
+    `owner` is who owns the copy: the person who made it, or `"source"` to keep
+    the source agent's owner (a channel's copy); None leaves it admin-only.
     """
     async with sessionmaker() as session:
         try:
             policy = await load_access_policy(session, tenant_id=tenant_id)
         except AccessPolicyUnreadable as exc:
             raise UserFacingError(
-                "The access policy can't be read. Ask an admin to check it."
+                "The access settings can't be read. Ask an admin to check them."
             ) from exc
     source_name = source.metadata.get(MA_METADATA_KEY_NAME) or source.name
     decision = authorize(
@@ -243,7 +271,7 @@ async def copy_agent(
             "This agent has an agent rule limiting where it runs, so it can't be copied."
         )
     if not decision:
-        raise UserFacingError("Only a workspace or server admin can copy an agent.")
+        raise UserFacingError("Only an admin can copy an agent.")
     source_ma = await retrieve_agent(
         anthropic, source.id, scope=resource_scope(tenant_id=str(tenant_id))
     )
@@ -284,6 +312,9 @@ async def copy_agent(
         fork_params["skills"] = split.kept
     created = await create_agent(
         anthropic, fork_params, scope=resource_scope(tenant_id=str(tenant_id))
+    )
+    await _record_copy_owner(
+        sessionmaker, tenant_id=tenant_id, source_id=str(source.id), copy_id=created.id, owner=owner
     )
     queue_agent_face(
         sessionmaker,
@@ -331,6 +362,7 @@ async def fork_agent(
     subject: Subject,
     default_agent_name: str | None,
     extra_metadata: Mapping[str, str] | None = None,
+    owner: uuid.UUID | Literal["source"] | None = None,
 ) -> AgentCopy:
     """Copy the agent named `source_name` to `new_name`; raise `DaimonError` if either is wrong."""
     if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=new_name):
@@ -348,6 +380,7 @@ async def fork_agent(
         subject=subject,
         default_agent_name=default_agent_name,
         extra_metadata=extra_metadata,
+        owner=owner,
     )
 
 
@@ -374,7 +407,7 @@ async def fork_host_agent(
                 policy = await load_access_policy(session, tenant_id=tenant_id)
             except AccessPolicyUnreadable as exc:
                 raise UserFacingError(
-                    "The access policy can't be read. Ask an admin to check it."
+                    "The access settings can't be read. Ask an admin to check them."
                 ) from exc
         decision = authorize(
             policy,
@@ -387,7 +420,7 @@ async def fork_host_agent(
                 "This agent has an agent rule limiting where it runs, so it can't be copied."
             )
         if not decision:
-            raise UserFacingError("Only a workspace or server admin can copy an agent.")
+            raise UserFacingError("Only an admin can copy an agent.")
 
     await recheck(source.revision.agent)
     made = await host.fork(

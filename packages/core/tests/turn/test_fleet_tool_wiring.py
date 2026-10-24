@@ -18,14 +18,16 @@ from daimon.core.turn.runtime_manifest import capture_preparation_source
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance, TextPart
 from mux.contracts.resources import AgentPatch, AgentSpec
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from ..test_fleet_budget import POLICY, setup, tariffs
 from ..test_fleet_budget import sm as sm
+from .conversation_worker_support import conversation_root as conversation_root
+from .conversation_worker_support import safe_claimed_openai_worker as safe_claimed_openai_worker
+from .test_fleet_native_dispatch import worker_root as worker_root
 from .test_native_session_receipts import native_worker as native_worker
 from .test_native_session_receipts import source_read_only as source_read_only
 from .test_openai_worker_plan import application as application
-from .test_openai_worker_plan import claimed_openai_worker as claimed_openai_worker
 from .test_openai_worker_plan import db_preflight as db_preflight
 from .test_openai_worker_plan import db_session_factory as db_session_factory
 from .test_openai_worker_plan import owned as owned
@@ -33,16 +35,38 @@ from .test_openai_worker_plan import owned_database_preflight as owned_database_
 from .test_openai_worker_plan import provider as provider
 
 
+async def _ensure_principal(request, root):
+    async with request.deps.sessionmaker.begin() as db:
+        current = await db.scalar(
+            select(PlatformPrincipal.account_id).where(
+                PlatformPrincipal.tenant_id == request.tenant_id,
+                PlatformPrincipal.platform == request.platform,
+                PlatformPrincipal.external_id == request.external_user_id,
+            )
+        )
+        if current is not None:
+            assert current == root.fleet.account_id
+        else:
+            db.add(
+                PlatformPrincipal(
+                    tenant_id=request.tenant_id,
+                    account_id=root.fleet.account_id,
+                    platform=request.platform,
+                    external_id=request.external_user_id,
+                )
+            )
+
+
 async def test_real_worker_journal_collect_refuses_absent_required_review(
-    claimed_openai_worker, monkeypatch
+    safe_claimed_openai_worker, monkeypatch
 ):
-    request, root, worker, prices, _, _, wire = claimed_openai_worker
+    request, root, worker, prices, _, _, wire = safe_claimed_openai_worker
     native_handle = wire.handle
     full_text = "authoritative input " * 300
 
     def handle(call):
         response = native_handle(call)
-        if call.method == "POST" and call.url.path.endswith("/events"):
+        if call.method == "POST" and call.url.path.endswith("/sessions"):
             wire.items[-1]["content"][0]["text"] = full_text
         return response
 
@@ -56,15 +80,7 @@ async def test_real_worker_journal_collect_refuses_absent_required_review(
             .values(result_contract={"format": "text", "review_required": True})
         )
     worker = replace(worker, result_contract={"format": "text", "review_required": True})
-    async with request.deps.sessionmaker.begin() as db:
-        db.add(
-            PlatformPrincipal(
-                tenant_id=request.tenant_id,
-                account_id=root.fleet.account_id,
-                platform=request.platform,
-                external_id=request.external_user_id,
-            )
-        )
+    await _ensure_principal(request, root)
     root = replace(root, subject=replace(root.subject, platform_user_id=request.external_user_id))
     request = replace(
         request,
@@ -255,18 +271,10 @@ async def test_unsupported_contract_refuses_spawn_before_funding(sm, contract):
 
 
 async def test_same_backend_review_preserves_real_primary_journal_without_admission(
-    claimed_openai_worker,
+    safe_claimed_openai_worker,
 ):
-    request, root, worker, prices, owned, calls, primary_wire = claimed_openai_worker
-    async with request.deps.sessionmaker.begin() as db:
-        db.add(
-            PlatformPrincipal(
-                tenant_id=request.tenant_id,
-                account_id=root.fleet.account_id,
-                platform=request.platform,
-                external_id=request.external_user_id,
-            )
-        )
+    request, root, worker, prices, owned, calls, primary_wire = safe_claimed_openai_worker
+    await _ensure_principal(request, root)
     root = replace(root, subject=replace(root.subject, platform_user_id=request.external_user_id))
     request = replace(
         request,
@@ -287,7 +295,7 @@ async def test_same_backend_review_preserves_real_primary_journal_without_admiss
         policy=POLICY,
         now=request.now(),
         backend=request.worker.backend,
-        limits=root.limits.model_copy(update={"budget_usd": Decimal("0.25")}),
+        limits=request.worker.limits,
         captured_source=source,
     )
     request = replace(
@@ -300,7 +308,7 @@ async def test_same_backend_review_preserves_real_primary_journal_without_admiss
             .where(WorkerRow.id == worker.id)
             .values(
                 result_contract=contract,
-                budget_usd=Decimal("0.25"),
+                budget_usd=worker.budget_usd,
                 spec=resolved_primary.spec.model_dump(mode="json"),
                 spec_digest=resolved_primary.digest,
             )
@@ -308,7 +316,7 @@ async def test_same_backend_review_preserves_real_primary_journal_without_admiss
     worker = replace(
         worker,
         result_contract=contract,
-        budget_usd=Decimal("0.25"),
+        budget_usd=worker.budget_usd,
         spec=resolved_primary.spec.model_dump(mode="json"),
         spec_digest=resolved_primary.digest,
     )
@@ -347,8 +355,8 @@ async def test_same_backend_review_preserves_real_primary_journal_without_admiss
                     include=set(BackendConfig.model_fields)
                 )
             ),
-            limits=root.limits.model_copy(update={"budget_usd": Decimal("0.25")}),
-            agent=root.spec.model_copy(update={"name": "reviewer", "declared_drops": ("memory",)}),
+            limits=request.worker.limits,
+            agent=request.worker.spec.model_copy(update={"name": "reviewer"}),
             reviewer_of=primary.id,
             captured_source=source,
         )
@@ -364,25 +372,31 @@ async def test_same_backend_review_preserves_real_primary_journal_without_admiss
     }
 
 
+@pytest.mark.parametrize("row", ("pinned", "template"))
 @pytest.mark.parametrize("verdict", ("approved", "refused", "wrong_digest", "wrong_contract"))
 async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
-    native_worker, monkeypatch, tmp_path, verdict
+    native_worker, monkeypatch, tmp_path, verdict, row
 ):
     from datetime import timedelta
 
     import httpx
+    import mux.drivers.openai as deployment
     from daimon.core._models import FleetRun as RunRow
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.neutral_resources import WorkerLimits
     from daimon.core.pricing import provider_prices
     from daimon.core.stores import mux_state
+
+    from .test_openai_host import openai_native_spend_cap
+
+    # The review worker carries a native budget: a project that honours it.
+    openai_native_spend_cap(monkeypatch)
     from daimon.core.turn.openai_deployment import OpenAIDeployment
     from daimon.core.turn.runtimes import build_channel_runtime
-    from daimon.testing.isolated_sdk import build_async_openai
     from mux.contracts.config import ConfigRevision, resolve_default
     from mux.contracts.ids import ModelRef
-    from mux.drivers.openai import deployment
     from mux.drivers.openai.transport import SDKTransport
+    from mux.testing.isolated_sdk import build_async_openai
 
     from .test_openai_conversation_worker import ConversationWire
 
@@ -455,19 +469,24 @@ async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
             return response
 
     wire = ReviewWire()
+    # A worker TEMPLATE ("*" source, any channel/account) serves the same worker
+    # as a row pinned to this agent version and channel.
+    template = row == "template"
     plan = OpenAIDeployment(
         profile=backend.profile,
         tenant_id=root.fleet.scope.tenant_id,
-        platform=request.platform,
-        channel_id=root.fleet.root.channel.channel_id,
-        account_id=root.fleet.scope.account_id,
+        platform="*" if template else request.platform,
+        channel_id="*" if template else root.fleet.root.channel.channel_id,
+        account_id="*" if template else root.fleet.scope.account_id,
         project="offline-project",
         api_key_env="I4_OFFLINE_OPENAI_KEY",
         worker_materialization=True,
-        source_agent_id=derive_agent_uuid(
-            tenant_id=request.tenant_id, ma_agent_id=captured.source.ref.id
-        ),
-        source_agent_version=captured.source.revision.local,
+        source_agent_id="*"  # pyright: ignore[reportArgumentType]
+        if template
+        else derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=captured.source.ref.id),
+        source_agent_version="*"  # pyright: ignore[reportArgumentType]
+        if template
+        else captured.source.revision.local,
         configuration_grant={
             "profiles": [backend.profile],
             "models": [model.id],
@@ -593,8 +612,10 @@ async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
         with pytest.raises(FleetRefused, match="review_digest_mismatch"):
             await owner.collect(root, policy, run_id=primary.run_id)
     else:
-        result = await owner.collect(root, policy, run_id=primary.run_id)
+        result = dict(await owner.collect(root, policy, run_id=primary.run_id))
         if verdict == "approved":
+            assert str(result.pop("cost")).startswith("This cost "), "the reply's cost line"
+            result.pop("cost_usd")
             assert result == {
                 "run_id": str(primary.run_id),
                 "status": "ready",
@@ -628,7 +649,7 @@ async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
 
 @pytest.mark.parametrize("rollback", (False, True))
 async def test_real_worker_result_and_completion_wake_share_the_transaction(
-    claimed_openai_worker, monkeypatch, rollback
+    safe_claimed_openai_worker, monkeypatch, rollback
 ):
     from uuid import uuid4
 
@@ -637,7 +658,7 @@ async def test_real_worker_result_and_completion_wake_share_the_transaction(
     from daimon.core.fleet import FleetConflict
     from daimon.core.stores.task_continuations import list_pending_continuations
 
-    request, root, worker, prices, _, _, _ = claimed_openai_worker
+    request, root, worker, prices, _, _, _ = safe_claimed_openai_worker
     run, _ = await fleet.run_status(
         request.deps.sessionmaker, tenant_id=request.tenant_id, run_id=worker.run_id
     )

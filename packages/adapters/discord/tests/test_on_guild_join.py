@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -93,6 +94,11 @@ async def test_fifty_joins_seed_after_skills_api_429() -> None:
                 ),
             ),
             patch("daimon.adapters.discord.bot.set_provision_status", new_callable=AsyncMock),
+            patch(
+                "daimon.adapters.discord.bot.get_prepaid_balance",
+                new_callable=AsyncMock,
+                return_value=Decimal("0"),
+            ),
         ):
             for guild in guilds:
                 await _dispatch_guild_join(bot, guild)
@@ -101,9 +107,10 @@ async def test_fifty_joins_seed_after_skills_api_429() -> None:
     assert peak_active == 2, "fresh joins must use the boot sweep's seed bound"
     assert attempts == 60, "429 responses should be retried until all 50 joins seed"
     for guild in guilds:
-        embeds = [call.kwargs["embed"] for call in guild.system_channel.send.await_args_list]
+        embeds = guild.system_channel.shown
+        assert guild.system_channel.send.await_count == 1, "one message per install, edited"
         assert len(embeds) == 2, "each guild needs a welcome and terminal follow-up"
-        assert "setting up" in (embeds[0].description or "").lower()
+        assert "setting up" in (embeds[0].title or "").lower()
         assert "ready" in ((embeds[1].title or "") + (embeds[1].description or "")).lower()
 
 
@@ -112,8 +119,6 @@ def _make_runtime(
     *,
     mcp_public_url: str | None = None,
 ) -> DiscordRuntime:
-    from decimal import Decimal
-
     settings = MagicMock()
     settings.mcp.public_url = mcp_public_url
     settings.defaults_root = MagicMock()
@@ -164,7 +169,21 @@ def _make_guild(
         perms = MagicMock()
         perms.send_messages = sendable
         ch.permissions_for = MagicMock(return_value=perms)
-        ch.send = AsyncMock()
+        # Everything a reader saw, in order: each post, then each edit of it.
+        shown: list[discord.Embed] = []
+
+        async def send(*, embed: discord.Embed) -> MagicMock:
+            shown.append(embed)
+            message = MagicMock(spec=discord.Message)
+
+            async def edit(*, embed: discord.Embed) -> None:
+                shown.append(embed)
+
+            message.edit = AsyncMock(side_effect=edit)
+            return message
+
+        ch.shown = shown
+        ch.send = AsyncMock(side_effect=send)
         return ch
 
     if system_channel_sendable:
@@ -231,13 +250,13 @@ async def test_on_guild_join_provisions_pending_then_seeds_ready(
 
     # Immediate welcome embed posted with 'setting up' copy.
     welcome_ch = guild.system_channel
-    assert welcome_ch.send.await_count >= 1, "immediate welcome must be posted"
-    welcome_embed = welcome_ch.send.await_args_list[0].kwargs["embed"]
+    assert len(welcome_ch.shown) >= 1, "immediate welcome must be posted"
+    welcome_embed = welcome_ch.shown[0]
     welcome_text = (welcome_embed.title or "") + (welcome_embed.description or "")
     assert "setting up" in welcome_text.lower(), "welcome embed must say 'setting up'"
 
     # Follow-up "Ready" embed posted after the bg task.
-    followup_embed = welcome_ch.send.await_args_list[-1].kwargs["embed"]
+    followup_embed = welcome_ch.shown[-1]
     followup_text = (followup_embed.title or "") + (followup_embed.description or "")
     assert "ready" in followup_text.lower(), "terminal follow-up must say 'Ready'"
 
@@ -393,7 +412,7 @@ async def test_on_guild_join_failed_posts_snag_followup(
     )
 
     welcome_ch = guild.system_channel
-    followup_embed = welcome_ch.send.await_args_list[-1].kwargs["embed"]
+    followup_embed = welcome_ch.shown[-1]
     followup_text = (followup_embed.title or "") + (followup_embed.description or "")
     assert "snag" in followup_text.lower(), "failed seed must post the 'snag' follow-up"
     assert "failed" not in followup_text.lower(), "'failed' must never be shown to users"
@@ -422,8 +441,8 @@ async def test_on_guild_join_welcome_channel_fallback(
 
     first_ch, second_ch = guild.text_channels
     first_ch.send.assert_not_called()
-    assert second_ch.send.await_count >= 1, "welcome must fall back to the first sendable channel"
-    welcome_embed = second_ch.send.await_args_list[0].kwargs["embed"]
+    assert len(second_ch.shown) >= 1, "welcome must fall back to the first sendable channel"
+    welcome_embed = second_ch.shown[0]
     welcome_text = (welcome_embed.title or "") + (welcome_embed.description or "")
     assert "setting up" in welcome_text.lower()
 
@@ -457,12 +476,8 @@ async def test_seed_pre_write_exception_flips_failed_and_posts_snag(
 
     # Snag embed posted on the failure path.
     welcome_ch = guild.system_channel
-    assert welcome_ch.send.await_count >= 2, "at least welcome + snag embed expected"  # pyright: ignore[reportUnknownMemberType]
-    embed_texts = [
-        (c.kwargs["embed"].title or "") + (c.kwargs["embed"].description or "")
-        for c in welcome_ch.send.await_args_list
-        if "embed" in c.kwargs
-    ]
+    assert len(welcome_ch.shown) >= 2, "at least welcome + snag embed expected"  # pyright: ignore[reportUnknownMemberType]
+    embed_texts = [(e.title or "") + (e.description or "") for e in welcome_ch.shown]
     assert any("snag" in t.lower() for t in embed_texts), (
         "pre-write failure must post the snag embed so the operator is informed"
     )
@@ -486,13 +501,11 @@ async def test_seed_pre_write_exception_never_shows_failed_word(
         await _drain_bg_tasks(bot)
 
     welcome_ch = guild.system_channel
-    for call in welcome_ch.send.await_args_list:  # pyright: ignore[reportUnknownMemberType]
-        if "embed" in call.kwargs:
-            embed = call.kwargs["embed"]
-            embed_text = (embed.title or "") + (embed.description or "")
-            assert "failed" not in embed_text.lower(), (
-                f"'failed' must never be shown to users; embed text was: {embed_text!r}"
-            )
+    for embed in welcome_ch.shown:
+        embed_text = (embed.title or "") + (embed.description or "")
+        assert "failed" not in embed_text.lower(), (
+            f"'failed' must never be shown to users; embed text was: {embed_text!r}"
+        )
 
 
 async def test_on_guild_join_rejoin_clears_archived_at(
@@ -584,12 +597,8 @@ async def test_seed_unexpected_oserror_flips_failed_and_posts_snag(
 
     # Snag embed posted; word 'failed' must never appear in guild-visible embed text.
     welcome_ch = guild.system_channel
-    assert welcome_ch.send.await_count >= 2, "at least welcome + snag embed expected"  # pyright: ignore[reportUnknownMemberType]
-    embed_texts = [
-        (c.kwargs["embed"].title or "") + (c.kwargs["embed"].description or "")
-        for c in welcome_ch.send.await_args_list
-        if "embed" in c.kwargs
-    ]
+    assert len(welcome_ch.shown) >= 2, "at least welcome + snag embed expected"  # pyright: ignore[reportUnknownMemberType]
+    embed_texts = [(e.title or "") + (e.description or "") for e in welcome_ch.shown]
     assert any("snag" in t.lower() for t in embed_texts), (
         "unexpected seed failure must post the snag embed so the operator is informed"
     )
@@ -635,12 +644,8 @@ async def test_seed_unexpected_sqlalchemyerror_flips_failed_and_posts_snag(
     )
 
     welcome_ch = guild.system_channel
-    assert welcome_ch.send.await_count >= 2, "at least welcome + snag embed expected"  # pyright: ignore[reportUnknownMemberType]
-    embed_texts = [
-        (c.kwargs["embed"].title or "") + (c.kwargs["embed"].description or "")
-        for c in welcome_ch.send.await_args_list
-        if "embed" in c.kwargs
-    ]
+    assert len(welcome_ch.shown) >= 2, "at least welcome + snag embed expected"  # pyright: ignore[reportUnknownMemberType]
+    embed_texts = [(e.title or "") + (e.description or "") for e in welcome_ch.shown]
     assert any("snag" in t.lower() for t in embed_texts), (
         "unexpected seed failure must post the snag embed so the operator is informed"
     )
@@ -697,11 +702,7 @@ async def test_seed_catchall_flip_failure_is_best_effort_and_logged(
 
     # Snag embed still posted despite the flip failure.
     welcome_ch = guild.system_channel
-    embed_texts = [
-        (c.kwargs["embed"].title or "") + (c.kwargs["embed"].description or "")
-        for c in welcome_ch.send.await_args_list  # pyright: ignore[reportUnknownMemberType]
-        if "embed" in c.kwargs
-    ]
+    embed_texts = [(e.title or "") + (e.description or "") for e in welcome_ch.shown]
     assert any("snag" in t.lower() for t in embed_texts), (
         "snag embed must still be posted even when the status flip fails"
     )
@@ -752,11 +753,7 @@ async def test_seed_typed_branch_flip_failure_is_best_effort_and_logged(
 
     # Snag embed still posted despite the flip failure.
     welcome_ch = guild.system_channel
-    embed_texts = [
-        (c.kwargs["embed"].title or "") + (c.kwargs["embed"].description or "")
-        for c in welcome_ch.send.await_args_list  # pyright: ignore[reportUnknownMemberType]
-        if "embed" in c.kwargs
-    ]
+    embed_texts = [(e.title or "") + (e.description or "") for e in welcome_ch.shown]
     assert any("snag" in t.lower() for t in embed_texts), (
         "snag embed must still be posted even when the typed-branch flip fails"
     )

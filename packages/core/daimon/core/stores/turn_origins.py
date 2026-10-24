@@ -8,6 +8,8 @@ from typing import Any, cast
 
 from daimon.core._models import TurnOrigin
 from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.mux_state import require_lease
+from mux.state.lease import Lease
 from sqlalchemy import CursorResult, delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +29,8 @@ async def create_origin(
     role: Role,
     expires_at: datetime,
     now: datetime,
+    sender_foreign: bool,
+    shared_channel: bool,
     is_setup: bool = False,
     attended: bool = True,
     chat_session_id: str | None = None,
@@ -37,6 +41,8 @@ async def create_origin(
         is_setup=is_setup,
         attended=attended,
         chat_session_id=chat_session_id,
+        sender_foreign=sender_foreign,
+        shared_channel=shared_channel,
         created_at=now,
         tenant_id=tenant_id,
         account_id=account_id,
@@ -153,9 +159,12 @@ async def bind_origin_session(
     origin_id: uuid.UUID,
     chat_session_id: str | None,
     attended: bool | None = None,
+    lease: Lease | None = None,
 ) -> None:
     """Bind the live execution to its server-prepared session's signed grant."""
     if chat_session_id is not None:
+        if lease is not None:
+            await require_lease(session, lease)
         # Session reuse after a crashed turn must not retain its attended origin.
         # Serialize binders for the grant so two origins cannot both gain it.
         await session.execute(

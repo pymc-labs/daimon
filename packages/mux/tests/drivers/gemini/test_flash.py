@@ -4,28 +4,15 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import pytest
-from daimon.testing.drivers.gemini.fake import FakeTransport
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.resources import Agent, AgentSpec
-from mux.drivers.gemini.flash import FLASH_MODELS, FLASH_PRIMARY, FlashAttempt, FlashTransport
+from mux.drivers.gemini.flash import FLASH_MODELS, FLASH_PRIMARY, FlashTransport
 from mux.drivers.gemini.transport import object_value
 from mux.errors import ProviderError
-from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+from mux.testing.drivers.gemini.accounting import Accounting
+from mux.testing.drivers.gemini.fake import FakeTransport
 from pydantic import JsonValue
-
-
-class Accounting:
-    def __init__(self) -> None:
-        self.held: list[ModelRef] = []
-        self.receipts: list[FlashAttempt] = []
-
-    async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
-        assert attempt == len(self.held) + 1
-        self.held.append(model)
-
-    async def after_attempt(self, *, receipt: FlashAttempt) -> None:
-        assert receipt.model == self.held[-1]
-        self.receipts.append(receipt)
 
 
 def request() -> Mapping[str, JsonValue]:
@@ -197,3 +184,380 @@ async def test_bounded_worker_pins_counted_model_and_never_falls_back():
         await transport.create(body)
     assert len(source.requests) == len(accounting.held) == 1
     assert accounting.held[0].id == FLASH_PRIMARY
+
+
+def argon_request() -> Mapping[str, JsonValue]:
+    return {"agent_config": {"type": "antigravity", "model": ARGON_MODEL}, "input": []}
+
+
+@pytest.mark.parametrize("overloaded", (False, True))
+async def test_argon_primary_is_one_attempt_and_never_falls_back_to_flash(
+    overloaded: bool,
+) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(
+        ProviderError("overloaded", retryable=True, native_code="503")
+        if overloaded
+        else {"id": "argon", "status": "completed"}
+    )
+    source.responses.append({"id": "flash", "status": "completed"})
+    policy = FlashTransport(source, accounting, primary=ARGON_MODEL)
+    if overloaded:
+        with pytest.raises(ProviderError):
+            await policy.create(argon_request())
+        assert accounting.receipts[0].outcome == "refused"
+    else:
+        await policy.create(argon_request())
+        assert policy.model_for_interaction("argon") == ModelRef(provider="gemini", id=ARGON_MODEL)
+    assert source.requests == [argon_request()]
+    assert accounting.held == [ModelRef(provider="gemini", id=ARGON_MODEL)]
+
+
+async def test_argon_and_flash_primaries_refuse_each_others_requests() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    with pytest.raises(ProviderError, match="flash_primary_required"):
+        await FlashTransport(source, accounting, primary=ARGON_MODEL).create(request())
+    with pytest.raises(ProviderError, match="flash_primary_required"):
+        await FlashTransport(source, accounting).create(argon_request())
+    assert not source.requests and not accounting.held
+
+
+@pytest.mark.parametrize("primary", (WORKER_MODEL, "gemini-4-argon-preview", "gemini-pro"))
+def test_transport_primary_is_flash_or_argon_only(primary: str) -> None:
+    with pytest.raises(ValueError):
+        FlashTransport(FakeTransport(), Accounting(), primary=primary)
+
+
+@pytest.mark.parametrize("overloaded", (False, True))
+async def test_bounded_argon_worker_runs_argon_only_and_never_falls_back(overloaded: bool) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(
+        ProviderError("overloaded", retryable=True, native_code="503")
+        if overloaded
+        else {"id": "argon", "status": "in_progress"}
+    )
+    capped: Mapping[str, JsonValue] = {
+        "model": ARGON_MODEL,
+        "tools": [],
+        "generation_config": {"max_output_tokens": 4096},
+        "input": [{"type": "text", "text": "task"}],
+    }
+    policy = FlashTransport(source, accounting, bounded_worker=True, primary=ARGON_MODEL)
+    if overloaded:
+        with pytest.raises(ProviderError):
+            await policy.create(capped)
+    else:
+        await policy.create(capped)
+    assert [r["model"] for r in source.requests] == [ARGON_MODEL]
+    assert accounting.held == [ModelRef(provider="gemini", id=ARGON_MODEL)]
+
+
+async def test_bounded_worker_refuses_an_uncapped_argon_request() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    uncapped: Mapping[str, JsonValue] = {
+        "agent_config": {"type": "antigravity", "model": ARGON_MODEL},
+        "input": [],
+    }
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting, bounded_worker=True, primary=ARGON_MODEL).create(
+            uncapped
+        )
+    assert not source.requests and not accounting.held
+
+
+def http(category: str, status: int, *, code: str | None = None) -> ProviderError:
+    """What `transport.normalize_error` yields for an HTTP status on create."""
+    return ProviderError(
+        category,  # type: ignore[arg-type]
+        retryable=status == 429 or status >= 500,
+        native_code=code,
+        native_error_code=f"http_{status}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (http("invalid_request", 400), 400),
+        (http("auth", 401), 401),
+        (http("permission", 403), 403),
+        (http("not_found", 404), 404),
+        (http("invalid_request", 422), 422),
+    ],
+)
+async def test_definite_4xx_on_create_is_a_refusal_that_never_falls_back(
+    error: ProviderError, status: int
+) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([error, {"id": "unexpected", "status": "completed"}])
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    assert len(source.requests) == len(accounting.held) == 1
+    (receipt,) = accounting.receipts
+    assert (receipt.outcome, receipt.http_status, receipt.interaction_id) == (
+        "refused",
+        status,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        http("upstream", 500),
+        http("upstream", 408),
+        http("rate_limited", 429),
+        http("conflict", 409),
+        http("overloaded", 500, code="high_demand"),
+        ProviderError("transient_network", retryable=True),
+        # A local check after a 200 (Google accepted): no provider status.
+        ProviderError("permission", retryable=False, native_code="gcs_token_echo"),
+        ProviderError("invalid_request", retryable=False, native_code="explicit_tools_required"),
+    ],
+)
+async def test_maybe_accepted_create_failures_stay_unknown(error: ProviderError) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([error, {"id": "unexpected", "status": "completed"}])
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    assert len(source.requests) == 1
+    assert [(r.outcome, r.http_status) for r in accounting.receipts] == [("unknown", None)]
+
+
+CREATED = "2026-10-23T11:39:56Z"
+
+
+INPUT: JsonValue = [{"type": "user_input"}]
+
+
+def cancelled(**extra: JsonValue) -> dict[str, JsonValue]:
+    # Cancelled before it ever ran, as Gemini reads it back: unbilled, only the input step.
+    return {
+        "id": "native",
+        "status": "cancelled",
+        "created": CREATED,
+        "updated": CREATED,
+        "steps": INPUT,
+        **extra,
+    }
+
+
+class Releasing(Accounting):
+    def __init__(self) -> None:
+        super().__init__()
+        self.released: list[str] = []
+
+    async def release_unbilled(self, *, interaction_id: str) -> bool:
+        self.released.append(interaction_id)
+        return True
+
+
+@pytest.mark.parametrize("via", ["cancel", "get"])
+async def test_a_cancelled_interaction_without_usage_releases_its_hold(via: str) -> None:
+    source, accounting = FakeTransport(), Releasing()
+    source.responses.append({"id": "native", "status": "in_progress"})
+    policy = FlashTransport(source, accounting)
+    await policy.create(request())
+    source.reads["native"] = [cancelled()]
+    await getattr(policy, via)("native")
+    assert accounting.released == ["native"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        cancelled(usage={"total_tokens": 9}),
+        # It ran before the cancel landed (the GET -> cancel race): keep the hold.
+        cancelled(steps=[{"type": "user_input"}, {"type": "thought"}]),
+        cancelled(steps="malformed"),
+        {**cancelled(), "status": "in_progress"},
+        {**cancelled(), "status": "completed"},
+    ],
+    ids=["billed", "ran", "malformed-steps", "live", "completed"],
+)
+async def test_billed_or_live_interactions_keep_their_hold(reply: Mapping[str, JsonValue]) -> None:
+    source, accounting = FakeTransport(), Releasing()
+    source.responses.append({"id": "native", "status": "in_progress"})
+    policy = FlashTransport(source, accounting)
+    await policy.create(request())
+    source.reads["native"] = [reply]
+    await policy.cancel("native")
+    assert accounting.released == []
+
+
+async def test_another_transports_cancel_still_releases_the_hold() -> None:
+    # A deadline cleanup or later poll runs on a fresh transport with no model map.
+    source, accounting = FakeTransport(), Releasing()
+    source.saved["native"] = cancelled()
+    await FlashTransport(source, accounting).get("native")
+    assert accounting.released == ["native"]
+
+
+async def test_a_failed_release_never_breaks_the_call() -> None:
+    class Failing(Releasing):
+        async def release_unbilled(self, *, interaction_id: str) -> bool:
+            raise RuntimeError("ledger down")
+
+    source, accounting = FakeTransport(), Failing()
+    source.responses.append({"id": "native", "status": "in_progress"})
+    policy = FlashTransport(source, accounting)
+    await policy.create(request())
+    source.reads["native"] = [cancelled()]
+    assert (await policy.cancel("native"))["status"] == "cancelled"
+
+
+@pytest.mark.parametrize(
+    ("native_code", "rejected"),
+    [("quota_zero", 429), ("quota_exhausted", 429), (None, None)],
+)
+def test_a_429_naming_its_quota_is_a_definite_rejection(
+    native_code: str | None, rejected: int | None
+) -> None:
+    """Google refused a QuotaFailure before any interaction: its hold frees at once.
+    A bare 429 may still have been accepted, so it stays unknown."""
+    from mux.drivers.gemini.flash import definite_rejection
+
+    error = ProviderError(
+        "rate_limited",
+        retryable=native_code != "quota_zero",
+        native_code=native_code,
+        native_error_code="http_429",
+    )
+    assert definite_rejection(error) == rejected
+
+
+class Interrupted(FakeTransport):
+    """A create that ends without any answer from Google (a timeout or a cancel)."""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+    async def create(self, request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        self.requests.append(dict(request))
+        raise self.error
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), __import__("asyncio").CancelledError()])
+async def test_an_interrupted_create_still_publishes_one_unknown_receipt(
+    error: BaseException,
+) -> None:
+    accounting = Accounting()
+    with pytest.raises(type(error)):
+        await FlashTransport(Interrupted(error), accounting).create(request())
+    # Google may have accepted it: kept as unknown, never silently dropped.
+    assert [(r.outcome, r.sent) for r in accounting.receipts] == [("unknown", True)]
+
+
+async def test_a_malformed_acceptance_still_publishes_one_unknown_receipt() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append({"id": "", "status": "in_progress"})
+    with pytest.raises(ValueError):
+        await FlashTransport(source, accounting).create(request())
+    assert [r.outcome for r in accounting.receipts] == ["unknown"]
+
+
+async def test_a_create_whose_connection_never_opened_is_refused_as_unsent() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(
+        ProviderError("transient_network", retryable=True, native_code="connect_failed")
+    )
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    (receipt,) = accounting.receipts
+    assert (receipt.outcome, receipt.sent, receipt.http_status) == ("refused", False, None)
+
+
+async def test_a_network_failure_after_the_send_stays_unknown() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(ProviderError("transient_network", retryable=True))
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    assert [(r.outcome, r.sent) for r in accounting.receipts] == [("unknown", True)]
+
+
+async def test_the_503_chain_still_publishes_one_receipt_per_attempt() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend(
+        [
+            ProviderError("overloaded", retryable=True, native_code="503"),
+            {"id": "interaction", "status": "completed"},
+        ]
+    )
+    await FlashTransport(source, accounting).create(request())
+    assert [r.outcome for r in accounting.receipts] == ["refused", "accepted"]
+
+
+def test_only_a_failed_connection_is_classified_as_never_sent() -> None:
+    import httpx
+    from mux.drivers.gemini.transport import normalize_error
+
+    url = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/interactions")
+    assert (
+        normalize_error(httpx.ConnectError("refused", request=url)).native_code == "connect_failed"
+    )
+    assert (
+        normalize_error(httpx.ConnectTimeout("slow", request=url)).native_code == "connect_failed"
+    )
+    wrapped = httpx.HTTPError("wrapped")
+    wrapped.__cause__ = httpx.ConnectError("refused", request=url)
+    assert normalize_error(wrapped).native_code == "connect_failed"
+    # The request may have been sent: a read timeout or a dropped reply is unknown.
+    assert normalize_error(httpx.ReadTimeout("slow", request=url)).native_code is None
+    assert normalize_error(httpx.RemoteProtocolError("dropped", request=url)).native_code is None
+
+
+def test_write_and_pool_timeouts_after_the_send_may_have_reached_google() -> None:
+    import httpx
+    from mux.drivers.gemini.transport import normalize_error
+
+    url = httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/interactions")
+    for error in (httpx.WriteTimeout("slow", request=url), httpx.PoolTimeout("busy", request=url)):
+        assert normalize_error(error).native_code is None
+    # An implicit context is not a cause: a connect error being handled elsewhere
+    # never makes an unrelated later failure "never sent".
+    later = httpx.ReadTimeout("slow", request=url)
+    later.__context__ = httpx.ConnectError("old", request=url)
+    assert normalize_error(later).native_code is None
+
+
+async def test_a_really_cancelled_create_task_still_publishes_its_receipt() -> None:
+    import asyncio
+
+    started = asyncio.Event()
+
+    class Hanging(FakeTransport):
+        async def create(self, request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    accounting = Accounting()
+    task = asyncio.create_task(FlashTransport(Hanging(), accounting).create(request()))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [(r.outcome, r.sent) for r in accounting.receipts] == [("unknown", True)]
+
+
+async def test_a_failed_receipt_never_replaces_the_cancel_in_flight() -> None:
+    import asyncio
+
+    started = asyncio.Event()
+
+    class Hanging(FakeTransport):
+        async def create(self, request: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    class Broken(Accounting):
+        async def after_attempt(self, *, receipt):  # type: ignore[no-untyped-def]
+            raise RuntimeError("ledger write failed")
+
+    task = asyncio.create_task(FlashTransport(Hanging(), Broken()).create(request()))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

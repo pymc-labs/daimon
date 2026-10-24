@@ -7,8 +7,11 @@ see or clear anyone else's.
 
 Command grammar, the same on Discord, Slack and Teams (`parse_memory_args`):
 
-- `memory` / `memory <path>`: the shared store, as before.
+- `memory` / `memory <path>`: the shared store, as before; in a held place (the
+  channel is shared with another organisation, or the person asking is from one)
+  the channel's own store, the only memory a turn there mounts.
 - `memory mine` / `memory mine <path>`: the caller's personal store.
+  In a held place personal memory is not used, so both answer that and touch nothing.
 - `memory forget-mine`: shows what would be deleted and a confirmation code.
 - `memory forget-mine <code>`: deletes exactly the memories that were shown,
   only when the code still matches the store as listed (ids, paths and
@@ -34,12 +37,15 @@ from daimon.core.rule_views import is_memory_hidden
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_memory_stores import (
+    get_channel_memory_store_id,
     get_memory_store_id,
     get_personal_memory_store_id,
 )
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
+from daimon.core.stores.shared_channels import is_channel_shared
+from daimon.core.turn_hold import RequesterOrg, TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -52,6 +58,41 @@ class ChannelAgent:
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     account_id: uuid.UUID
+    # The place is held (`daimon.core.turn_hold`): its memory is the channel's
+    # own and personal memory is not used there.
+    hold: TurnHold | None = None
+
+
+async def held_place(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    foreign_home_id: str | None,
+    requester_org: RequesterOrg,
+    channel_shared: bool | None,
+) -> TurnHold | None:
+    """The hold a turn here would get; None only when the place is proven unheld.
+
+    Unheld needs all of: the platform vouched the asker is a member of the
+    workspace (`RequesterOrg.HOST`), nothing records them as from another
+    organisation, the platform's live signal does not say the channel is shared
+    (None is no signal) and the channel is not recorded as shared. Anything
+    else, an unknown asker included, is held: reading memory fails closed.
+    Nothing is recorded here, so an `UNKNOWN` asker marks nothing.
+    `channel_id` is the parent channel.
+    """
+    client = requester_org is not RequesterOrg.HOST or foreign_home_id is not None
+    if (
+        client
+        or channel_shared is True
+        or await is_channel_shared(
+            session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+        )
+    ):
+        return TurnHold(platform, channel_id, client)
+    return None
 
 
 async def resolve_channel_agent(
@@ -63,6 +104,8 @@ async def resolve_channel_agent(
     user_id: str,
     channel_id: str,
     default: DeploymentDefault,
+    requester_org: RequesterOrg,
+    channel_shared: bool | None,
     thread_id: str | None = None,
 ) -> ChannelAgent | None:
     """The agent answering in `channel_id` (or `thread_id` under it) for `user_id`.
@@ -85,6 +128,15 @@ async def resolve_channel_agent(
         )
         config = await resolve_config(session, context=scope, default=default)
         policy = await load_access_policy(session, tenant_id=tenant_id)
+        hold = await held_place(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            foreign_home_id=principal.foreign_home_id,
+            requester_org=requester_org,
+            channel_shared=channel_shared,
+        )
     if config.agent_name is None:
         return None
     agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=config.agent_name)
@@ -103,7 +155,26 @@ async def resolve_channel_agent(
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
         account_id=principal.account_id,
+        hold=hold,
     )
+
+
+async def get_shared_memory_store_id(
+    sessionmaker: async_sessionmaker[AsyncSession], agent: ChannelAgent
+) -> str | None:
+    """The store a `memory` command shows: the held channel's own, else the agent-wide one."""
+    async with sessionmaker() as session:
+        if agent.hold is not None:
+            return await get_channel_memory_store_id(
+                session,
+                tenant_id=agent.tenant_id,
+                agent_id=agent.agent_id,
+                platform=agent.hold.platform,
+                channel_id=agent.hold.channel_id,
+            )
+        return await get_memory_store_id(
+            session, tenant_id=agent.tenant_id, agent_id=agent.agent_id
+        )
 
 
 async def get_channel_memory_store(
@@ -115,12 +186,18 @@ async def get_channel_memory_store(
     user_id: str,
     channel_id: str,
     default: DeploymentDefault,
+    requester_org: RequesterOrg,
+    channel_shared: bool | None,
     thread_id: str | None = None,
 ) -> tuple[str, str] | None:
-    """`(agent_name, memory_store_id)` of the shared store for the agent answering in `channel_id`.
+    """`(agent_name, memory_store_id)` of the store shown for the agent answering in `channel_id`.
+
+    The agent-wide store, or in a held place that channel's own store.
 
     With `thread_id`, the agent answering in that thread under it, so a thread
     bound to another agent shows that agent's memory.
+    `requester_org` and `channel_shared` are the live facts the adapter has about the
+    asker and the channel (`held_place`); a place not proven unheld is held.
     None when no agent is configured there, it has no memory store yet, or its
     pin or channel isolation hides it from that place.
     Raises DaimonError when the configured agent is missing on the MA side.
@@ -133,12 +210,13 @@ async def get_channel_memory_store(
         user_id=user_id,
         channel_id=channel_id,
         default=default,
+        requester_org=requester_org,
+        channel_shared=channel_shared,
         thread_id=thread_id,
     )
     if agent is None:
         return None
-    async with sessionmaker() as session:
-        store_id = await get_memory_store_id(session, tenant_id=tenant_id, agent_id=agent.agent_id)
+    store_id = await get_shared_memory_store_id(sessionmaker, agent)
     return None if store_id is None else (agent.agent_name, store_id)
 
 
@@ -148,7 +226,10 @@ async def get_own_personal_memory_store(
     """The personal store of the person who asked, for this agent, or None.
 
     Keyed only by `agent.account_id`, the invoking principal's own account.
+    None in a held place, which mounts no personal memory.
     """
+    if agent.hold is not None:
+        return None
     async with sessionmaker() as session:
         return await get_personal_memory_store_id(
             session, tenant_id=agent.tenant_id, agent_id=agent.agent_id, account_id=agent.account_id
@@ -263,13 +344,24 @@ async def personal_memory_reply(
     request: MemoryRequest,
     command: str,
     scope: Scope | None = None,
+    held: bool = False,
 ) -> PersonalMemoryReply:
     """Answer a `mine` or `forget-mine` request against the caller's own store.
 
     `store_id` must be the caller's own (`get_own_personal_memory_store`).
     `command` is how the platform spells the command (`/memory`, `memory`).
     `scope` is the caller's tenant scope for the provider reads and deletes.
+    `held` says the place is held: personal memory is not used there, so nothing
+    is read or deleted whatever the request.
     """
+    if held:
+        return PersonalMemoryReply(
+            "Personal memory isn't used in this channel.",
+            hint=(
+                f"Run {command} to see this channel's memory. Everyone in the channel "
+                "sees it, so the agent keeps nothing personal there."
+            ),
+        )
     empty = PersonalMemoryReply(f"You have no personal memory with {agent_name}.")
     if store_id is None:
         return empty

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 137 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 153 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -17,6 +17,7 @@ tool is hidden by default and restored only for a matching caller.
 - **admin only** — carries the `admin` tag.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
+- **fleet orchestrator turns** — carries the `fleet` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
@@ -87,6 +88,8 @@ Agent tools: list / get / create / update / fork / archive.
 | `fork_agent` | all callers | Make a copy of Daimon or another agent that you can edit under a new name. |
 | `get_agent` | all callers | Show what an agent can access: attached MCP servers and skills. |
 | `list_agents` | all callers | List agents visible here, including their attached ``mcp_servers`` and ``skills``. |
+| `request_agent_backend_switch` | all callers | Preview a requested agent backend switch, then Confirm in this chat. |
+| `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
 | `update_agent` | all callers | Change an agent's system prompt or switch its model; add existing skills such as build-models. |
 
 ## `channel_budgets`
@@ -97,7 +100,7 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 | --- | --- | --- |
 | `clear_channel_budget` | admin only, operator tokens with channels:write | Remove a channel's spending budget, so only the balance and caps apply. |
 | `get_channel_budget` | Discord callers, Slack callers, Teams callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
-| `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this server or workspace with its spend. |
+| `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this workspace with its spend. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
 ## `channel_copies`
@@ -143,8 +146,8 @@ Shared channel MCP tools with per-platform dispatch.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `create_thread` | Discord callers, Slack callers, Teams callers | Create a new thread and post content as its first message. |
-| `get_message` | Discord callers, Slack callers, Teams callers | Fetch a single message by channel and message id (Slack: the message ts). |
-| `list_channels` | Discord callers, Slack callers, Teams callers | List channels in this server/workspace that you can view. |
+| `get_message` | Discord callers, Slack callers, Teams callers | Fetch a single message by channel and message id. |
+| `list_channels` | Discord callers, Slack callers, Teams callers | List the channels here that you can view. |
 | `list_threads` | Discord callers, Teams callers | List active and archived public threads for a channel. |
 | `parse_link` | Discord callers, Slack callers, Teams callers | Extract IDs from a channel or message link. |
 | `read_channel` | Discord callers, Slack callers, Teams callers | Read channel messages, oldest-first, with pagination metadata. |
@@ -152,7 +155,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `rename_thread` | Discord callers | Rename a Discord thread; ``name`` is the new title (1-100 characters). |
 | `replace_channel_file` | Teams callers | Save an edited file over a Teams channel file as its new version. |
 | `search_messages` | Discord callers, Slack callers, Teams callers | Search messages with server-side filters. |
-| `send_direct_message` | Discord callers, Slack callers, Teams callers | Privately message one human member of the current server/workspace. |
+| `send_direct_message` | Discord callers, Slack callers, Teams callers | Privately message one human member of the current workspace. |
 | `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |
 | `set_display_identity` | Discord callers | Change how Daimon appears in this Discord server: its display name, its avatar, or both. |
 
@@ -171,7 +174,7 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `request_agent_key` | Discord callers, Slack callers, Teams callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
-| `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion, Slack or Atlassian. |
+| `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear through an MCP endpoint with a bearer token, not browser OAuth. |
 
 ## `environments`
@@ -185,6 +188,30 @@ Environment tools: list / get / create / update / archive.
 | `get_environment` | all callers | Return one environment by name. |
 | `list_environments` | operator tokens with tenant:read | List environments in the tenant pool. |
 | `update_environment` | admin only | Patch-update an environment. |
+
+## `fleet`
+
+Fleet tools (on by default) over the authorized host orchestration service.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `fleet_agents` | fleet orchestrator turns | List what this fleet run's workers can be: on-server agents, and models. |
+| `fleet_collect` | fleet orchestrator turns | Collect verified outputs only after contracts and required reviews pass. |
+| `fleet_cross_review` | fleet orchestrator turns | Spawn a reviewer of verified journal evidence through the same worker path. |
+| `fleet_kill` | fleet orchestrator turns | Request a scoped stop; acknowledgement is not proof the worker stopped. |
+| `fleet_resume` | fleet orchestrator turns | Reconcile and explicitly resume under original ceilings and current authority. |
+| `fleet_spawn` | fleet orchestrator turns | Start one worker in this turn's fleet run. |
+| `fleet_status` | fleet orchestrator turns | Read the run's durable worker status; do not start work. |
+
+## `fleet_config`
+
+Chat configuration over the fleet-grant and tenant-provider service owners.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `request_channel_pin_clear` | admin only | Show or clear THIS channel's model-provider pin, with admin confirmation. |
+| `request_fleet_config` | all callers | Configure this agent's fleet of worker agents, with owner/admin confirmation. |
+| `request_provider_allowlist` | admin only | Preview and confirm the server's allowed model providers. |
 
 ## `github_app`
 
@@ -216,7 +243,7 @@ Turn-bound GitHub access requests and private admin delivery.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `request_github_access` | Discord callers, Slack callers, Teams callers | Ask for token access to a repo needed for this agent's current request. |
+| `request_github_access` | Discord callers, Slack callers | Ask for token access to a repo needed for this agent's current request. |
 
 ## `github_working_repo`
 
@@ -232,7 +259,7 @@ Current-place status tool with short text and complete structured facts.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `where_am_i` | all callers | Return short /here text and full structured facts. |
+| `where_am_i` | all callers | Return the short who-answers-here text and the full structured facts. |
 
 ## `lead_intake`
 
@@ -269,6 +296,14 @@ Register connect_microsoft and the Microsoft Graph tools (Teams only).
 | `microsoft_send` | Teams callers | Send an email or a calendar invite from the person's Microsoft account. |
 | `microsoft_write` | Teams callers | Change the person's files or notes through Microsoft Graph, as them. |
 
+## `models`
+
+``list_models``: the models an agent here can be set to, by name, with list prices.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `list_models` | all callers | List the models an agent here can run on: plain name, id, provider and list price. |
+
 ## `notebook`
 
 Notebook MCP tools.
@@ -289,13 +324,24 @@ Plain-text mention tools: let a typed "@<bot name>" start a turn, workspace-wide
 | `get_plain_text_mentions` | all callers | Report whether a typed "@<your name>" in a channel or thread starts a reply here. |
 | `set_plain_text_mentions` | admin only | Let a typed "@<your name>" in a channel or thread start a reply. |
 
+## `progress_plans`
+
+Progress-plan tools: the switch (`set_progress_plans`, `get_progress_plans`) and the
+plan.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_progress_plans` | Discord callers, Slack callers, Teams callers | Report whether progress plans are on for a thread or channel, and which tier decided it. |
+| `set_progress_plans` | Discord callers, Slack callers, Teams callers | Turn progress plans on or off where you are asked to. |
+| `update_plan` | Discord callers, Slack callers, Teams callers | Show the task's plan as a checklist on the progress card. |
+
 ## `promo_codes`
 
 Promo code tools: redeem an operator-issued code for the caller's server or workspace.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem a promo code for credit on this server or workspace. |
+| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem a promo code for credit on this workspace. |
 
 ## `promo_issuing`
 
@@ -303,7 +349,7 @@ Promo code issuing for operator tokens: create, list and revoke deployment-wide 
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_promo_code` | operator tokens with promo:create | Create a promo code any server or workspace can redeem for credit. |
+| `create_promo_code` | operator tokens with promo:create | Create a promo code any workspace can redeem for credit. |
 | `list_promo_codes` | operator tokens with promo:create | List every promo code on this deployment, newest first. |
 | `revoke_promo_code` | operator tokens with promo:create | Stop a promo code from being redeemed again. |
 
@@ -315,7 +361,7 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 | --- | --- | --- |
 | `clear_agent_default` | admin only, operator tokens with channels:write | Stop an agent answering in a channel by clearing its default routing. |
 | `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers, the environment it runs in, and which routing tier decided each. |
-| `set_agent_default` | admin only, operator tokens with channels:write | Make an agent answer in a channel or become the whole server/workspace default. |
+| `set_agent_default` | admin only, operator tokens with channels:write | Make an agent answer in a channel or become the whole workspace's default. |
 
 ## `publish`
 
@@ -337,7 +383,7 @@ Routines tools: create / list / get / update / delete, and an admin's sandbox op
 | `get_routine` | all callers | Get a routine by id. |
 | `list_routines` | all callers | List your routines (admins may see other owners' available routines). |
 | `set_routine_sandbox_tools` | admin only | Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off for one routine's own scheduled runs. |
-| `update_routine` | all callers | PATCH-update a routine, including owner-only Discord DM delivery. |
+| `update_routine` | all callers | PATCH-update a routine, including owner-only DM delivery where supported. |
 
 ## `self_edit`
 
@@ -402,7 +448,7 @@ Tenant summary: the balance, funding mode and every configured channel in one re
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_tenant_summary` | admin only, operator tokens with tenant:read | Summarize this server or workspace: balance, funding mode and each channel. |
+| `get_tenant_summary` | admin only, operator tokens with tenant:read | Summarize this workspace: balance, funding mode and each channel. |
 
 ## `thread_model`
 
@@ -419,8 +465,8 @@ Thread-participation tools: follow a thread (or a channel, or the workspace).
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_thread_participation` | all callers | Report whether you follow a thread or channel, and which tier decided it. |
-| `set_thread_participation` | all callers | Start or stop replying in a thread without being addressed each time. |
+| `get_thread_participation` | Discord callers, Teams callers | Report whether you follow a thread or channel, and which tier decided it. |
+| `set_thread_participation` | Discord callers, Teams callers | Start or stop replying in a thread without being addressed each time. |
 
 ## `tidy`
 
@@ -429,7 +475,7 @@ Channel tidy tools: edit_message, delete_message, archive_thread, delete_thread.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `archive_thread` | Discord callers | Archive a Discord thread you opened, with create_thread or from a mention. |
-| `delete_message` | Discord callers, Slack callers, Teams callers | Delete one message you posted, or on Discord one of your replies or status cards. |
+| `delete_message` | Discord callers, Slack callers, Teams callers | Delete one message you posted, or one of your replies or status cards. |
 | `delete_thread` | Discord callers, Slack callers | Remove your own messages from a thread you opened. |
 | `edit_message` | Discord callers, Slack callers, Teams callers | Replace the text of a message you posted. |
 
@@ -466,13 +512,13 @@ Owner-bound watch management.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_watch` | all callers | Watch an OS page event or a reviewed OS read tool from this conversation. |
-| `delete_watch` | all callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
-| `list_watches` | all callers | List your watches in this workspace, including paused imports and expiry; no signing secrets. |
-| `pause_watch` | all callers | Pause your watch and cancel its queued wakes. |
-| `resume_watch` | all callers | Resume your paused watch from an attended owner turn after fresh access checks. |
-| `rotate_watch_key` | all callers | Rotate an OS page signing key, revoke the old key and cancel queued wakes. |
-| `show_watch` | all callers | Show your watch's immutable destination, source, status and expiry. |
+| `create_watch` | Discord callers | Watch an OS page event or a reviewed OS read tool from this conversation. |
+| `delete_watch` | Discord callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
+| `list_watches` | Discord callers | List your watches in this workspace, including paused imports and expiry; no signing secrets. |
+| `pause_watch` | Discord callers | Pause your watch and cancel its queued wakes. |
+| `resume_watch` | Discord callers | Resume your paused watch from an attended owner turn after fresh access checks. |
+| `rotate_watch_key` | Discord callers | Rotate an OS page signing key, revoke the old key and cancel queued wakes. |
+| `show_watch` | Discord callers | Show your watch's immutable destination, source, status and expiry. |
 
 ## `wizard`
 

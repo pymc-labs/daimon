@@ -13,11 +13,11 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord import startup_replay
 from daimon.core.stores.domain import ThreadSessionRow
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_router import turn_events
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 FIXTURE = Path(__file__).parent / "fixtures/startup_replay_main.py"
 SPEC = importlib.util.spec_from_file_location("startup_replay_main_oracle", FIXTURE)
@@ -236,3 +236,20 @@ async def test_read_authorizes_only_the_mapping_session_and_uses_its_tenant(
     assert scope.authorization_id == "discord:completed_orphan_text"
     assert not scope.is_platform and not scope.is_legacy_host_authorized
     assert resources == frozenset({("session", "session-N7")})
+
+
+async def test_a_recovered_answer_never_names_another_chat_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        startup_replay,
+        "extract_final_response",
+        lambda _content: "Moved to Slack or Microsoft Teams, still on Discord.",  # pyright: ignore[reportUnknownLambdaType]
+    )
+    transport = ScriptedTransport()
+    transport.queue(*replies({"status": "idle"}, scenario="current"))
+    async with transport.client() as client:
+        assert (
+            await startup_replay.completed_orphan_text(client, row())
+            == "Moved to another app, still on Discord."
+        )

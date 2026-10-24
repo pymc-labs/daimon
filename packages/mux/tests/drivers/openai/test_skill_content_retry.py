@@ -7,7 +7,6 @@ import zipfile
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.errors import ProviderError
 from mux.contracts.ids import Scope, SkillRef
 from mux.contracts.resources import SkillUpload, SkillUploadFile
@@ -15,6 +14,7 @@ from mux.drivers.openai._common import Context
 from mux.drivers.openai.skill_bindings import resolve_pins
 from mux.drivers.openai.skills import bundle_digest
 from mux.drivers.openai.transport import SDKTransport
+from mux.testing.isolated_sdk import build_async_openai
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="human", authorization_id="grant"

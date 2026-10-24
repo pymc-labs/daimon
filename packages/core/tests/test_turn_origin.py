@@ -54,6 +54,8 @@ async def test_queued_message_cannot_settle_preview_created_during_running_turn(
         responder_ma_agent_id="agent",
         responder_name="Agent",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     )
     async with (
         turn_origin(
@@ -147,6 +149,8 @@ async def test_a_github_grant_proposal_is_approved_only_by_a_whole_message_yes(
         responder_ma_agent_id="agent",
         responder_name="Agent",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     )
     grant = dict(
         tenant_id=tenant.id,
@@ -195,6 +199,8 @@ async def test_simultaneous_origins_keep_separate_snapshots_and_cleanup(
             configuration_target_ma_agent_id="agent_specialist",
             configuration_target_name="specialist",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as first,
         turn_origin(
             db_session_factory,
@@ -208,6 +214,8 @@ async def test_simultaneous_origins_keep_separate_snapshots_and_cleanup(
             configuration_target_ma_agent_id="agent_specialist",
             configuration_target_name="specialist",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as second,
     ):
         assert first.id != second.id, "each simultaneous execution needs distinct authority"
@@ -266,6 +274,8 @@ async def test_failed_turn_removes_origin(
             responder_ma_agent_id="agent_daimon",
             responder_name="Daimon",
             role=Role.ADMIN,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             origin_id = origin.id
             raise RuntimeError("failed execution")
@@ -488,3 +498,142 @@ def test_controls_omit_the_account_and_its_instruction_when_none_is_supplied() -
     assert "responder.mention" not in rendered, (
         "the account sentence points at fields that are not rendered"
     )
+
+
+_TEAMS_CHANNEL = "19:abc@thread.tacv2"
+_TEAMS_GROUP = "19:grp@thread.v2"
+_TEAMS_ONE_TO_ONE = "a:1xyz"
+
+
+@pytest.mark.parametrize(
+    ("label", "ids", "setup", "fresh_start"),
+    [
+        (
+            "teams channel",
+            {
+                "platform": "teams",
+                "parent_channel_id": _TEAMS_CHANNEL,
+                "thread_id": f"{_TEAMS_CHANNEL};messageid=17",
+            },
+            "send `setup` in a 1:1 chat with Daimon",
+            "start a new post",
+        ),
+        (
+            "teams targeted channel root post",
+            {
+                "platform": "teams",
+                "parent_channel_id": _TEAMS_CHANNEL,
+                "thread_id": _TEAMS_CHANNEL,
+            },
+            "send `setup` in a 1:1 chat with Daimon",
+            "start a new post",
+        ),
+        (
+            "teams 1:1 chat",
+            {
+                "platform": "teams",
+                "parent_channel_id": _TEAMS_ONE_TO_ONE,
+                "thread_id": _TEAMS_ONE_TO_ONE,
+            },
+            "send `setup`",
+            "send `new`",
+        ),
+        (
+            "teams group chat",
+            {
+                "platform": "teams",
+                "parent_channel_id": _TEAMS_GROUP,
+                "thread_id": _TEAMS_GROUP,
+            },
+            "send `setup` in a 1:1 chat with Daimon",
+            "send `new`",
+        ),
+        (
+            "discord dm",
+            {"platform": "discord", "parent_channel_id": "555", "thread_id": "dm:abc"},
+            "run `/agent-setup` in a server channel",
+            "ask me to start fresh",
+        ),
+        (
+            "discord thread",
+            {"platform": "discord", "parent_channel_id": "555", "thread_id": "777"},
+            "run `/agent-setup`",
+            "start a new thread",
+        ),
+        (
+            "slack channel",
+            {"platform": "slack", "parent_channel_id": "C0123", "thread_id": "C0123:1.2"},
+            "run `/agent-setup`",
+            "start a new thread",
+        ),
+        (
+            "slack dm",
+            {"platform": "slack", "parent_channel_id": "D0123", "thread_id": "D0123:1.2"},
+            "run `/agent-setup`",
+            "ask me to start fresh",
+        ),
+    ],
+)
+def test_controls_carry_the_words_for_this_platform_and_place(
+    label: str, ids: dict[str, str], setup: str, fresh_start: str
+) -> None:
+    rendered = render_turn_origin(_origin(**ids))
+
+    words = _controls(rendered)["words"]
+    assert isinstance(words, dict)
+    assert words["setup"] == setup, label
+    assert words["fresh_start"] == fresh_start, label
+    assert "words" in rendered.split("\n")[2], "the prose tells the model to use them"
+    assert "Never name or hint at another chat app, and never say Daimon works in one." in rendered
+
+
+#: Where Daimon works on each platform, as the rule lists it: it never denies these.
+_PLACES = {
+    "discord": "In Discord, Daimon works in other servers, channels, threads and DMs.",
+    "slack": "In Slack, Daimon works in other channels, DMs and workspaces it's installed in.",
+    "teams": (
+        "In Teams, Daimon works wherever it has been added: other teams, channels, "
+        "group chats and 1:1 chats."
+    ),
+}
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+def test_each_platforms_controls_list_the_places_daimon_works_there(platform: str) -> None:
+    rendered = render_turn_origin(_origin(platform=platform, thread_id="a:1"))
+    prose = rendered.split("\n", 2)[2].lower()
+
+    assert _PLACES[platform] in rendered
+    assert "only place" not in prose
+    assert 'put "another app" in place of another app\'s name' in rendered, (
+        "a quote swaps another app's name for a marker rather than dropping it, "
+        "so the meaning survives"
+    )
+    for other in {"discord", "slack", "teams"} - {platform}:
+        assert other not in prose, f"{platform} controls name {other}"
+
+
+def test_each_platforms_words_name_only_its_own_commands_and_admin() -> None:
+    teams = _controls(render_turn_origin(_origin(platform="teams", thread_id="a:1")))["words"]
+    discord = _controls(render_turn_origin(_origin(platform="discord")))["words"]
+    slack = _controls(render_turn_origin(_origin(platform="slack")))["words"]
+
+    assert "/" not in json.dumps(teams), "Teams has no slash commands"
+    assert isinstance(discord, dict) and "Manage Server" in discord["admin"]
+    assert isinstance(slack, dict) and "Manage Server" not in slack["admin"]
+    assert discord["space"] == "server" and slack["space"] == "workspace"
+
+
+def test_words_follow_the_controls_they_belong_to_in_a_fixed_order() -> None:
+    state = SessionState(state="updated", applied=())
+    controls = _controls(render_turn_origin(_origin(), session_state=state))
+
+    keys = list(controls)
+    assert keys.index("configuration_target") < keys.index("words") < keys.index("session_state")
+
+
+def test_controls_for_a_platform_with_no_chat_commands_carry_no_words() -> None:
+    rendered = render_turn_origin(_origin(platform="cli"))
+
+    assert "words" not in _controls(rendered)
+    assert "another chat app" not in rendered

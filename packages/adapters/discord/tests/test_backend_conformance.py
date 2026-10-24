@@ -25,6 +25,7 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
+    FleetSettings,
     Settings,
     ThreadNamingSettings,
     TurnSettings,
@@ -36,20 +37,20 @@ from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import PreparedTurn
-from daimon.testing import ma_session
 from daimon.testing.adapters.discord.backend_conformance import (
     BackendTurnEnvelope,
     backend_selection_turn,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.isolated_sdk import (
+from daimon.testing.turn_router import build_turn_router
+from mux.contracts.config import BackendConfig, ConfigRevision
+from mux.testing.drivers.anthropic.ma import json_body, make_fake_memory_store_handler
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.isolated_sdk import (
     SDK_ENV_VARS,
     AmbientSDKConfigurationError,
     build_async_anthropic,
 )
-from daimon.testing.ma import json_body, make_fake_memory_store_handler
-from daimon.testing.turn_router import build_turn_router
-from mux.contracts.config import BackendConfig, ConfigRevision
 from pydantic import PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -158,7 +159,11 @@ async def setup(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         discord=DiscordSettings(bot_token=SecretStr("offline")),
         thread_naming=ThreadNamingSettings(enabled=False),
-        turn=TurnSettings(channel_backends=True),
+        # The legacy path these conformance cases were written for. On mux an
+        # existing thread keeps its bound backend after a channel change; that is
+        # test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted.
+        turn=TurnSettings(path="legacy", channel_backends=True, agent_backends=False),
+        fleet=FleetSettings(enabled=False),
     )
     runtime = dataclasses.replace(
         runtime,
@@ -297,7 +302,7 @@ async def test_mutation_of_production_reuse_breaks_the_binding_oracle(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     app, dispatch, wire = await setup(db_session, db_session_factory)
-    method = type(app)._orchestrate_observed  # pyright: ignore[reportPrivateUsage]
+    method = type(app)._orchestrate_observed_guarded  # pyright: ignore[reportPrivateUsage]
     tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
     mutations = 0
     for node in ast.walk(tree):
@@ -320,7 +325,9 @@ async def test_mutation_of_production_reuse_breaks_the_binding_oracle(
     )
     try:
         first = await dispatch(THREAD, USER)
-        with patch.object(type(app), "_orchestrate_observed", namespace["_orchestrate_observed"]):
+        with patch.object(
+            type(app), "_orchestrate_observed_guarded", namespace["_orchestrate_observed_guarded"]
+        ):
             broken = await dispatch(THREAD, USER)
         with pytest.raises(AssertionError):
             assert broken.ma_session_id == first.ma_session_id and broken.reused
@@ -462,3 +469,60 @@ async def test_actual_fixture_refuses_ambient_sdk_settings(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://n7-poison.invalid")
     with pytest.raises(AmbientSDKConfigurationError):
         await setup(db_session, db_session_factory)
+
+
+async def test_default_path_refuses_a_new_thread_pinned_outside_the_allowlist(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """On the shipped defaults, a channel pin to a provider the tenant hasn't allowed refuses."""
+    app, dispatch, wire = await setup(db_session, db_session_factory)
+    app.runtime = dataclasses.replace(
+        app.runtime,
+        turn_deps=dataclasses.replace(
+            app.runtime.turn_deps, turn_path="mux", channel_backends=True, agent_backends=True
+        ),
+    )
+    try:
+        first = await dispatch(THREAD, USER)
+        async with db_session_factory.begin() as session:
+            await set_channel_backend(
+                session,
+                channel_ref(tenant_id_from(first), "discord", CHANNEL),
+                BackendConfig(
+                    backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"
+                ),
+            )
+        before = len(wire.requests)
+        with pytest.raises(AdmissionDenied) as denied:
+            await dispatch(NEW_THREAD, USER)
+        assert denied.value.reason == "backend_unsupported"
+        assert not any(request.method != "GET" for request in wire.requests[before:])
+    finally:
+        await app.runtime.anthropic.close()
+
+
+async def test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    app, dispatch, wire = await setup(db_session, db_session_factory)
+    app.runtime = dataclasses.replace(
+        app.runtime, turn_deps=dataclasses.replace(app.runtime.turn_deps, turn_path="mux")
+    )
+    try:
+        first = await dispatch(THREAD, USER)
+        async with db_session_factory.begin() as session:
+            await set_channel_backend(
+                session,
+                channel_ref(tenant_id_from(first), "discord", CHANNEL),
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
+            )
+        second = await dispatch(THREAD, USER)
+        assert second.reused
+        assert second.ma_session_id == first.ma_session_id
+        assert revision_of(second) == revision_of(first)
+        assert wire.stream_hits == [first.ma_session_id, first.ma_session_id]
+        await persisted(db_session_factory, second, THREAD)
+    finally:
+        await app.runtime.anthropic.close()

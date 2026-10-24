@@ -15,6 +15,7 @@ from daimon.adapters.teams.budget_notice import with_budget_notifier
 from daimon.adapters.teams.deployment_admins import (
     STALE_OWNERS_S,
     AdminTeamReads,
+    admin_team_name,
     admin_team_owners,
     boot_owner_ids,
     demoting_owner_reads,
@@ -22,19 +23,26 @@ from daimon.adapters.teams.deployment_admins import (
     deployment_role,
     is_deployment_admin,
     live_admin_ids,
+    with_admin_team,
+    with_admin_team_if_asked,
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.team_owners import team_owner_lookup
 from daimon.core.config import TeamsSettings
 from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import GroupLookupFailed, GroupMembersCache
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.turn.deps import TurnDeps
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AAD_OBJECT_ID, ENTRA_TENANT_ID, OTHER_AAD_OBJECT_ID, teams_settings
+
+NAME_TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 
 TEAM = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
 REMOVED_OWNER = str(uuid.UUID(int=4))
@@ -252,3 +260,77 @@ async def test_a_failed_read_is_logged_even_when_a_channel_grant_made_it() -> No
         assert not await _is_admin(runtime, _settings(), AAD_OBJECT_ID), "fails closed"
     failed = [log for log in logs if log["event"] == "teams.admin_team.lookup_failed"]
     assert len(failed) == 1 and graph.reads == 1, f"one read, logged once: {logs}"
+
+
+REFUSAL = "Only an admin can change this."
+
+
+async def _named_runtime(
+    db_factory: async_sessionmaker[AsyncSession],
+    *,
+    installs: dict[str, str | None],
+    team: str | None = TEAM,
+) -> MagicMock:
+    """A runtime whose installed teams are `installs` (Entra group id -> name)."""
+    await provision_tenant(db_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_factory.begin() as session:
+        for number, (group_id, name) in enumerate(installs.items()):
+            await record_teams_installation(
+                session,
+                tenant_id=NAME_TENANT,
+                team_id=f"19:team{number}@thread.tacv2",
+                group_id=group_id,
+                name=name,
+            )
+    runtime = MagicMock(sessionmaker=db_factory)
+    runtime.settings.teams = _settings(team=team)
+    return runtime
+
+
+async def test_a_refusal_names_the_admin_team_from_its_stored_name(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _named_runtime(
+        db_session_factory, installs={str(uuid.uuid4()): "Lab", TEAM.upper(): "  Leads\n Team "}
+    )
+    assert await admin_team_name(runtime) == "Leads Team"
+    assert await with_admin_team(runtime, REFUSAL) == (
+        f"{REFUSAL}\n\nAdmins are the owners of the Leads Team team."
+    )
+
+
+@pytest.mark.parametrize(
+    ("installs", "team"),
+    [
+        pytest.param({str(uuid.uuid4()): "Lab"}, TEAM, id="admin team not recorded"),
+        pytest.param({TEAM: None}, TEAM, id="recorded without a name"),
+        pytest.param({TEAM: "Leads"}, None, id="no admin team configured"),
+    ],
+)
+async def test_a_refusal_adds_no_line_when_the_admin_team_name_is_unknown(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    installs: dict[str, str | None],
+    team: str | None,
+) -> None:
+    runtime = await _named_runtime(db_session_factory, installs=installs, team=team)
+    assert await admin_team_name(runtime) is None
+    assert await with_admin_team(runtime, REFUSAL) == REFUSAL
+
+
+async def test_a_database_failure_leaves_the_refusal_as_it_was() -> None:
+    def broken() -> object:
+        raise SQLAlchemyError("down")
+
+    runtime = MagicMock(sessionmaker=broken)
+    runtime.settings.teams = _settings()
+    assert await with_admin_team(runtime, REFUSAL) == REFUSAL
+
+
+async def test_only_a_text_that_asks_for_an_admin_gets_the_line(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = await _named_runtime(db_session_factory, installs={TEAM: "Leads"})
+    asked = await with_admin_team_if_asked(runtime, "Daimon can't reply here.\n\nAsk an admin.")
+    assert asked.endswith("\n\nAdmins are the owners of the Leads team.")
+    for text in ("Too many chats at once right now.", "Cancelling the administration."):
+        assert await with_admin_team_if_asked(runtime, text) == text

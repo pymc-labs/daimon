@@ -17,7 +17,7 @@ from daimon.adapters.discord.agent_setup import add_skill
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.testing.ma_models import ma_agent
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 
 async def test_a_foreign_reread_keeps_the_existing_refusal_and_does_not_upload() -> None:
@@ -137,7 +137,10 @@ async def test_imported_skill_attachment_keeps_requests_retry_limit_and_notice(
                 await old.beta.agents.update(
                     "agent1",
                     version=fresh.version,
-                    skills=[*initial_payload, {"type": "custom", "skill_id": "existing"}],
+                    skills=[
+                        *initial_payload,
+                        {"type": "custom", "skill_id": "existing", "version": "9"},
+                    ],
                 )
             except ConflictError:
                 assert status == "exhausted"

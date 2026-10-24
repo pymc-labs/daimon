@@ -8,27 +8,27 @@ from pathlib import Path
 
 import pytest
 import yaml
-from daimon.testing.conformance.default_capability import (
+from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
+from mux.drivers.openai.normalize import EventNormalizer
+from mux.drivers.openai.transport import Object, object_json
+from mux.testing.conformance.default_capability import (
     BASH_RESULT,
     FINAL_MESSAGE,
     DefaultManifest,
     NamedSkill,
     skill_text,
 )
-from daimon.testing.conformance.recording import Audit, Recorder
-from daimon.testing.conformance.runner import replay_default_capability, run_default_capability
-from daimon.testing.drivers.openai.default_capability import (
+from mux.testing.conformance.recording import Audit, Recorder
+from mux.testing.conformance.runner import replay_default_capability, run_default_capability
+from mux.testing.drivers.openai.default_capability import (
     BUILTIN_MAPPING,
     MODEL,
     OpenAIDefaultCapabilityFactory,
 )
-from daimon.testing.isolated_sdk import build_async_openai
-from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
-from mux.drivers.openai.normalize import EventNormalizer
-from mux.drivers.openai.transport import Object, object_json
+from mux.testing.isolated_sdk import build_async_openai
 
 ROOT = Path(__file__).resolve().parents[5]
-TAPE = ROOT / "tests/conformance/recordings/openai/F1-scripted.json"
+TAPE = Path(__file__).resolve().parents[2] / "fixtures/openai/recordings/F1-scripted.json"
 
 
 @pytest.fixture

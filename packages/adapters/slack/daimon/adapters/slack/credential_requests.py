@@ -88,8 +88,8 @@ _WRONG_WORKSPACE = (
 
 
 _UNCONFIGURED_OAUTH = (
-    "This deployment cannot sign you in yet. Ask the operator to finish the daimon-mcp "
-    "setup, then ask again. Nothing was saved."
+    "Sign-in isn't set up yet. Ask whoever runs Daimon to finish it, "
+    "then ask again. Nothing was saved."
 )
 
 
@@ -272,6 +272,7 @@ async def handle_credential_request_click(runtime: SlackRuntime, payload: dict[s
         runtime,
         client,
         tenant_id=row.tenant_id,
+        team_id=team_id,
         agent_id=row.agent_id,
         channel_id=channel_id,
         user_id=user_id,

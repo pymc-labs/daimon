@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from daimon.core.config import McpSettings
+from daimon.core.errors import SessionRetired
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.shared_threads import (
@@ -26,7 +27,6 @@ from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import Event, NativeProvenance
@@ -37,6 +37,7 @@ from mux.errors import ScopeViolation
 from mux.state.lease import Slot
 from mux.state.memory import MemoryStateStore
 from mux.state.store import binding_slot
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
@@ -138,7 +139,10 @@ async def test_private_prepared_binding_reuses_ids_and_advances_only_for_replace
         assert second.binding.id == first.binding.id and second.binding.generation == 2
         assert second.binding.native_refs["session"] == "second"
         assert second.operation_key == "turn:second:message"
-        with pytest.raises(ScopeViolation):
+        # A late turn on the replaced session is inside the caller's scope, so it
+        # is told the conversation moved (as legacy's `require_writable_session`
+        # says), and it does not touch the replacement binding.
+        with pytest.raises(SessionRetired):
             await prepared_persistence(
                 dependencies,
                 admitted,
@@ -365,9 +369,9 @@ async def test_prepared_driver_wires_state_only_on_mux_and_reuses_explicit_root_
 
     from daimon.core.turn.prepare import PreparedTurn
     from daimon.core.turn.run import run_prepared_turn
-    from daimon.testing.ma import list_response, send_events_response
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from daimon.testing.turn_fakes import RecordingLifecycle
+    from mux.testing.drivers.anthropic.ma import list_response, send_events_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     from .conftest import make_agent_message, make_status_idle
 

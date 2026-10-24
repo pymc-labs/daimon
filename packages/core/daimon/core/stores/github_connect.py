@@ -41,13 +41,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 PINNED_AGENT_MESSAGE = "Connect this repository directly for the pinned agent."
 CHANNEL_LIMITED_REPO_MESSAGE = (
-    "This agent only works in some channels, so it can't use the server's shared repos. "
-    "Ask whoever runs Daimon for this server to connect repos for it."
+    "This agent only works in some channels, so it can't use the shared repos. "
+    "Ask whoever runs Daimon here to connect repos for it."
 )
 
 
 class PinnedAgentConnectionError(ValueError):
     """A pinned agent cannot use a repository connected server-wide."""
+
+
+class GrantReassignmentError(ValueError):
+    """A confirmed installation move would invalidate an existing agent grant set."""
 
 
 async def require_app_eligible_agent(
@@ -352,10 +356,16 @@ async def activate_confirmed_agent(
     *,
     invitation: Invitation,
     repos: list[RepoConfirmation],
+    repo_locks_held: bool = False,
 ) -> ConfirmedActivation | None:
     """Grant confirmed repositories immediately to the selected agent."""
+    await github_access.lock_tenant_grants(session, tenant_id=invitation.tenant_id)
     if invitation.agent_id is None:
         return None
+    if not repo_locks_held:
+        await github_access.lock_repo_grants_batch(
+            session, tenant_id=invitation.tenant_id, repo_ids={repo.repo_id for repo in repos}
+        )
     await require_app_eligible_agent(
         session,
         tenant_id=invitation.tenant_id,
@@ -390,6 +400,7 @@ async def activate_confirmed_agent(
                 existing.is_working_repo if existing is not None and existing.app_visible else False
             ),
             agent_name=invitation.agent_name,
+            repo_lock_held=True,
         )
         granted = True
     if not granted:
@@ -922,6 +933,122 @@ async def agent_repo_snapshot(
     return json.dumps(values, separators=(",", ":"))
 
 
+async def _require_reassignment_admission(
+    session: AsyncSession,
+    *,
+    invitation: GitHubConnectInvitation,
+    repos: list[RepoConfirmation],
+) -> None:
+    """Validate every affected agent before changing any confirmed repo row."""
+    github_access.assert_tenant_grants_locked(session, tenant_id=invitation.tenant_id)
+    repo_by_id = {repo.repo_id: repo for repo in repos}
+    await github_access.lock_repo_grants_batch(
+        session, tenant_id=invitation.tenant_id, repo_ids=set(repo_by_id)
+    )
+    agent_ids = await session.scalars(
+        select(AgentGitHubGrant.agent_id)
+        .where(
+            AgentGitHubGrant.tenant_id == invitation.tenant_id,
+            AgentGitHubGrant.repo_id.in_(repo_by_id),
+            AgentGitHubGrant.app_visible.is_(True),
+        )
+        .distinct()
+    )
+    affected = sorted(set(agent_ids), key=str)
+    for agent_id in affected:
+        await github_access.lock_agent_grants(
+            session, tenant_id=invitation.tenant_id, agent_id=agent_id
+        )
+    failures: list[str] = []
+    for agent_id in affected:
+        by_installation: dict[int, set[int]] = {}
+        any_read_only = False
+        has_working_repo = False
+        moved: list[RepoConfirmation] = []
+        for grant in await github_access.list_agent_grants(
+            session, tenant_id=invitation.tenant_id, agent_id=agent_id
+        ):
+            current = await github_access.repo_for_agent(
+                session, tenant_id=invitation.tenant_id, repo_id=grant.repo_id, agent_id=agent_id
+            )
+            proposed = repo_by_id.get(grant.repo_id)
+            applies = proposed is not None and (
+                invitation.agent_id == agent_id
+                or (
+                    invitation.agent_id is None
+                    and (current is None or current.scope_agent_id is None)
+                )
+            )
+            installation_id = (
+                proposed.installation_id
+                if applies and proposed is not None
+                else current.installation_id
+                if current is not None
+                else None
+            )
+            if installation_id is None:
+                continue
+            by_installation.setdefault(installation_id, set()).add(grant.repo_id)
+            any_read_only |= grant.ceiling_access != "write" or (
+                current is not None and current.max_access != "write" and not applies
+            )
+            has_working_repo |= grant.is_working_repo
+            if (
+                applies
+                and proposed is not None
+                and (current is None or current.installation_id != proposed.installation_id)
+            ):
+                moved.append(proposed)
+        if not moved:
+            continue
+        name = (
+            invitation.agent_name
+            if invitation.agent_id == agent_id and invitation.agent_name
+            else await session.scalar(
+                select(GitHubConnectInvitation.agent_name)
+                .where(
+                    GitHubConnectInvitation.tenant_id == invitation.tenant_id,
+                    GitHubConnectInvitation.agent_id == agent_id,
+                    GitHubConnectInvitation.agent_name.is_not(None),
+                )
+                .order_by(GitHubConnectInvitation.used_at.desc().nullslast())
+                .limit(1)
+            )
+        ) or f"agent {agent_id}"
+        try:
+            github_access.require_projected_grant_budget(
+                by_installation,
+                any_read_only=any_read_only,
+                has_working_repo=has_working_repo,
+                agent_name=name,
+            )
+        except (
+            github_access.InstallationLimitError,
+            github_access.SessionVaultBudgetError,
+            github_access.ReadOnlyMultiInstallationError,
+        ) as exc:
+            moved_repo = moved[0]
+            owner = moved_repo.full_name.split("/", 1)[0]
+            if isinstance(exc, github_access.ReadOnlyMultiInstallationError):
+                remedy = (
+                    "would have read-only GitHub repos across accounts or orgs. "
+                    "Make them read-write or remove them first, then reconnect."
+                )
+            elif isinstance(exc, github_access.InstallationLimitError):
+                remedy = (
+                    "would exceed 12 GitHub accounts or orgs. "
+                    "Remove a repo or an account first, then reconnect."
+                )
+            else:
+                remedy = (
+                    "would exceed the 15-credential limit for one conversation. "
+                    "Remove a repo or an account first, then reconnect."
+                )
+            failures.append(f"{moved_repo.full_name} moved to {owner}. {name} {remedy}")
+    if failures:
+        raise GrantReassignmentError(" ".join(failures))
+
+
 async def confirm(
     session: AsyncSession,
     *,
@@ -938,7 +1065,17 @@ async def confirm(
     link needs the caller to have checked again, in this transaction, that the
     requester still manages the agent (`requester_manages_agent`).
     """
-    flow = await session.get(GitHubConnectFlow, digest(state), with_for_update=True)
+    flow = await session.get(GitHubConnectFlow, digest(state))
+    if flow is None:
+        return False
+    invitation = await session.get(GitHubConnectInvitation, flow.invitation_hash)
+    if invitation is None:
+        return False
+    await github_access.lock_tenant_grants(session, tenant_id=invitation.tenant_id)
+    github_access.assert_tenant_grants_locked(session, tenant_id=invitation.tenant_id)
+    flow = await session.get(
+        GitHubConnectFlow, digest(state), with_for_update=True, populate_existing=True
+    )
     if (
         flow is None
         or flow.cookie_hash != digest(cookie)
@@ -947,7 +1084,7 @@ async def confirm(
     ):
         return False
     invitation = await session.get(
-        GitHubConnectInvitation, flow.invitation_hash, with_for_update=True
+        GitHubConnectInvitation, flow.invitation_hash, with_for_update=True, populate_existing=True
     )
     if (
         invitation is None
@@ -961,6 +1098,9 @@ async def confirm(
     assert account is not None
     if account.role != "admin" and not requester_manages_agent:
         return False
+    if len({repo.repo_id for repo in repos}) != len(repos):
+        return False
+    await _require_reassignment_admission(session, invitation=invitation, repos=repos)
     if expected_agent_snapshot is not None:
         if invitation.agent_id is None:
             return False
@@ -972,8 +1112,6 @@ async def confirm(
         )
         if current != expected_agent_snapshot:
             raise StaleAgentReposError("The agent's repos changed. Reload and try again.")
-    if len({repo.repo_id for repo in repos}) != len(repos):
-        return False
     now = datetime.now(UTC)
     scope = invitation.agent_id
     for repo in repos:

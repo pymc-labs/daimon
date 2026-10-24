@@ -41,10 +41,10 @@ from daimon.core.thread_handoff import (
     hand_over_thread,
     switch_thread_on_request,
 )
-from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -542,3 +542,45 @@ async def test_a_hand_over_click_by_an_admin_is_audited(
     assert [(e.tool_name, e.outcome, e.reason) for e in events] == [row], (
         "one panel row per admin-tier click"
     )
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("agent_id", ["sh_agent_test", "agt_old_button"])
+async def test_selfhosted_handover_click_refuses_before_anthropic(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    platform: str,
+    agent_id: str,
+) -> None:
+    from typing import cast
+
+    from anthropic import AsyncAnthropic
+    from daimon.core.channel_backend import channel_ref, set_channel_backend
+    from mux.contracts.config import BackendConfig
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"handover touched Anthropic.{name}")
+
+    tenant = await make_tenant(db_session, platform=platform)
+    await set_channel_backend(
+        db_session,
+        channel_ref(tenant.id, platform, "channel"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
+    )
+    await db_session.commit()
+    result = await switch_thread_on_request(
+        cast(AsyncAnthropic, NoAnthropic()),
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform=platform,
+        parent_channel_id="channel",
+        thread_id="thread",
+        ma_agent_id=agent_id,
+        caller=AdminCaller(platform_user_id="user", is_server_admin=True),
+        default=_DEFAULT,
+        channel="this channel",
+        now=_NOW,
+    )
+    assert not result.switched
+    assert "self-hosted" in result.text and "Nothing was changed" in result.text

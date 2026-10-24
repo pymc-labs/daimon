@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Literal
 
+import pytest
 from daimon.adapters.slack.blockkit import (
     EmbedEvent,
     State,
@@ -66,15 +67,15 @@ class TestUpdate:
         assert result.text_preview == "hello there", "message text becomes the draft"
         assert result.phase == TurnPhase.TOOL_RUNNING, "the phase comes from the turn state only"
 
-    def test_message_event_with_400_char_label_caps_preview_at_300_plus_ellipsis(
+    def test_message_event_with_400_char_label_caps_preview_at_120_plus_ellipsis(
         self,
     ) -> None:
-        """A 400-char message label is capped to 300 chars + '…'."""
+        """A 400-char message label is capped to 120 chars + '…'."""
         state = _make_state()
         long_label = "x" * 400
         result = update(state, EmbedEvent(kind="message", label=long_label))
         assert result.text_preview is not None
-        assert len(result.text_preview) == 301, "300 chars + ellipsis == 301 total"
+        assert len(result.text_preview) == 121, "120 chars + ellipsis == 121 total"
         assert result.text_preview.endswith("…")
 
     def test_message_event_with_empty_label_keeps_the_draft(self) -> None:
@@ -83,6 +84,26 @@ class TestUpdate:
         assert result.text_preview == "prior preview", (
             "empty message label must not clear or change the preview"
         )
+
+    def test_message_events_build_a_log_of_the_last_three_lines_oldest_first(self) -> None:
+        state = _make_state()
+        for line in ("one", "two", "three", "four", "five"):
+            state = update(state, EmbedEvent(kind="message", label=line))
+        assert state.earlier_drafts == ("three", "four")
+        assert state.text_preview == "five"
+
+    def test_a_long_message_is_cut_in_the_log_too(self) -> None:
+        state = update(_make_state(), EmbedEvent(kind="message", label="short"))
+        state = update(state, EmbedEvent(kind="message", label="y" * 400))
+        assert state.earlier_drafts == ("short",)
+        assert state.text_preview == "y" * 120 + "…"
+
+    def test_a_draft_event_revises_the_latest_line_without_growing_the_log(self) -> None:
+        state = update(_make_state(), EmbedEvent(kind="message", label="one"))
+        state = update(state, EmbedEvent(kind="draft", label="two"))
+        state = update(state, EmbedEvent(kind="draft", label="two, longer"))
+        assert state.earlier_drafts == ()
+        assert state.text_preview == "two, longer"
 
     def test_done_event_transitions_to_done(self) -> None:
         result = update(_make_state(), EmbedEvent(kind="done"))
@@ -162,7 +183,7 @@ class TestToBlocks:
     def test_running_state_with_tool_lines_has_escaped_code_block(self) -> None:
         state = _make_state(
             phase=TurnPhase.TOOL_RUNNING,
-            tool_lines=("✔️ Read a file", "🖋️ Q&A sync"),
+            tool_lines=("☑️ Read a file", "⏳ Q&A sync"),
             started_at=1.0,
         )
         blocks = to_blocks(state, now=66.0)
@@ -170,7 +191,7 @@ class TestToBlocks:
         assert sections[0]["text"]["text"] == "*Working on it…*"
         contexts = _find_blocks_by_type(blocks, "context")
         assert contexts[0]["elements"][0]["text"] == (
-            "*Details*\n`✔️ Read a file`\n`🖋️ Q&amp;A sync`"
+            "*Details*\n`☑️ Read a file`\n`⏳ Q&amp;A sync`"
         )
 
     def test_tool_line_markdown_stays_in_inline_code(self) -> None:
@@ -193,6 +214,54 @@ class TestToBlocks:
             "the draft is quoted and entity-escaped"
         )
         assert draft.get("expand") is True, "the draft must not fold behind 'see more'"
+
+    @pytest.mark.parametrize("count", [1, 3, 5])
+    def test_running_state_quotes_the_last_three_draft_lines(self, count: int) -> None:
+        state = _make_state(phase=TurnPhase.TOOL_RUNNING)
+        for number in range(1, count + 1):
+            state = update(state, EmbedEvent(kind="message", label=f"🔍 **step** {number} <x>"))
+        draft = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]
+        shown = range(max(1, count - 2), count + 1)
+        assert draft["text"]["text"] == "\n".join(f"> 🔍 **step** {n} &lt;x&gt;" for n in shown)
+        assert draft.get("expand") is True
+
+    def test_three_worst_case_escaped_lines_fit_a_slack_section(self) -> None:
+        state = _make_state(phase=TurnPhase.TOOL_RUNNING)
+        for _ in range(3):
+            state = update(state, EmbedEvent(kind="message", label="&" * 400 + "x"))
+            state = update(state, EmbedEvent(kind="message", label="<" * 400))
+        draft = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]
+        assert len(draft["text"]["text"]) <= 3000
+
+    def test_the_plan_is_drawn_like_the_details_and_before_them(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.TOOL_RUNNING),
+            plan_lines=("☑️ Load *data*", "⏳ Fit <model>"),
+            tool_lines=("🔍 Reading a file",),
+        )
+        blocks = to_blocks(state, now=None)
+        assert blocks[1]["type"] == "context", "the plan is a context block like the details"
+        assert blocks[1]["elements"][0]["text"] == (
+            "*Plan*\n`☑️ Load *data*`\n`⏳ Fit &lt;model&gt;`"
+        ), "a Plan header, then one escaped line of code per step"
+        assert blocks[2]["elements"][0]["text"].startswith("*Details*"), "details follow"
+
+    def test_a_draft_log_over_the_section_limit_loses_its_oldest_lines_first(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.TOOL_RUNNING),
+            earlier_drafts=("&" * 400, "&" * 400),
+            text_preview="&" * 400,
+        )
+        text = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]["text"]["text"]
+        assert len(text) <= 3000
+        assert text.endswith("&amp;" * 400)
+        assert text.count("\n") < 2, "an oldest line was dropped to fit"
+
+    def test_one_line_over_the_section_limit_is_cut_after_escaping(self) -> None:
+        state = replace(_make_state(phase=TurnPhase.TOOL_RUNNING), text_preview="&" * 900)
+        text = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]["text"]["text"]
+        assert len(text) <= 3000
+        assert text.endswith("&amp;…")
 
     def test_done_state_has_no_cancel_button(self) -> None:
         """DONE (terminal) state must not have an actions block."""
@@ -280,7 +349,7 @@ class TestToBlocks:
         """No block dict anywhere must contain a 'color' key."""
         state = _make_state(
             phase=TurnPhase.THINKING,
-            tool_lines=("🖋️ Tool",),
+            tool_lines=("⏳ Tool",),
             text_preview="preview",
         )
         blocks = to_blocks(state, now=5.0)

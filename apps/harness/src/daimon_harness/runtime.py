@@ -1,0 +1,480 @@
+"""Turn context, workspace tools, and mounted Agent Skills."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal, cast
+from uuid import uuid4
+
+from mux.drivers.selfhosted.wire import (
+    TURN_SKILLS_MAX_BYTES,
+    ActionRequest,
+    EventType,
+    InlineSkill,
+    TurnRequest,
+)
+from pydantic import JsonValue
+
+from .credentials import redact
+from .errors import HarnessError
+from .isolation import can_switch_uid, tool_identity
+from .journal import identifier
+
+
+async def discard_event(kind: EventType, data: dict[str, JsonValue]) -> None:
+    """No-op event sink for standalone workspace probes."""
+
+
+@dataclass
+class TurnContext:
+    request: TurnRequest
+    home: Path
+    emit: Callable[[EventType, dict[str, JsonValue]], Awaitable[None]]
+    pending: dict[str, asyncio.Future[ActionRequest]] = field(
+        default_factory=dict[str, asyncio.Future[ActionRequest]]
+    )
+    decisions: dict[str, ActionRequest] = field(default_factory=dict[str, ActionRequest])
+    tool_calls: int = 0
+    credentials: dict[str, str] = field(default_factory=dict[str, str], repr=False)
+
+    credential_bindings: dict[str, str] | None = None
+    tool_uid: int = 10001
+    state_dir: Path | None = None
+    model_input: list[JsonValue] = field(default_factory=list[JsonValue], repr=False)
+    process_groups: set[int] = field(default_factory=set[int], repr=False)
+    workers: set[asyncio.Task[JsonValue]] = field(
+        default_factory=set[asyncio.Task[JsonValue]], repr=False
+    )
+    stopping: bool = False
+
+    def __post_init__(self) -> None:
+        tool_identity(self.home, self.tool_uid)
+
+    def permission(self, name: str) -> Literal["auto", "ask", "deny"]:
+        exact = self.request.tool_policy.get(name)
+        if exact is not None:
+            return exact
+        if "/" in name:
+            return self.request.tool_policy.get(name.split("/", 1)[0] + "/*", "auto")
+        return "auto"
+
+    async def tool(
+        self,
+        call_id: str,
+        name: str,
+        arguments: dict[str, JsonValue],
+        execute: Callable[[], Awaitable[JsonValue]],
+        *,
+        mcp: bool = False,
+    ) -> JsonValue:
+        """Own SDK tool workers even if the SDK abandons its invocation task."""
+        if self.stopping:
+            raise HarnessError("turn_stopped", "Turn no longer accepts tools")
+        worker = asyncio.create_task(self._tool(call_id, name, arguments, execute, mcp=mcp))
+        self.workers.add(worker)
+
+        def finished(task: asyncio.Task[JsonValue]) -> None:
+            self.workers.discard(task)
+            if not task.cancelled():
+                task.exception()  # Retrieve failures even if the SDK abandoned its caller.
+
+        worker.add_done_callback(finished)
+        return await worker
+
+    async def stop_workers(self) -> None:
+        """Drain workers before publishing a terminal event or reusing a session."""
+        self.stopping = True
+        workers = set(self.workers)
+        for worker in workers:
+            worker.cancel()
+        pending: set[asyncio.Task[JsonValue]]
+        if workers:
+            _, pending = await asyncio.wait(workers, timeout=2)
+        else:
+            pending = set()
+        self.stop_processes()
+        if pending:
+            _, pending = await asyncio.wait(pending, timeout=5)
+        if pending:
+            # Do not journal turn_ended: the durable active claim blocks reuse.
+            raise HarnessError(
+                "workers_active", "Tool cleanup did not finish; session remains sealed"
+            )
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    async def _tool(
+        self,
+        call_id: str,
+        name: str,
+        arguments: dict[str, JsonValue],
+        execute: Callable[[], Awaitable[JsonValue]],
+        *,
+        mcp: bool,
+    ) -> JsonValue:
+        """Observe and authorize tools before any side effect, including MCP calls."""
+        self.tool_calls += 1
+        result_sent = False
+
+        async def result(output: JsonValue, is_error: bool = False) -> JsonValue:
+            nonlocal result_sent
+            result_sent = True
+            output = redact(output, self.credentials)
+            await self.emit(
+                "tool_result", {"call_id": call_id, "output": output, "is_error": is_error}
+            )
+            return output
+
+        await self.emit(
+            "tool_use",
+            {
+                "call_id": call_id,
+                "name": name,
+                "input": arguments,
+                "executor": "mcp" if mcp else "agent",
+            },
+        )
+        if self.tool_calls > self.request.limits.max_tool_calls:
+            await result("Maximum tool calls exceeded", True)
+            raise HarnessError("tool_limit", "Maximum tool calls exceeded")
+        if self.permission(name) == "deny":
+            return await result("Tool execution denied by policy", True)
+        try:
+            if self.permission(name) == "ask":
+                action_id = str(uuid4())
+                future: asyncio.Future[ActionRequest] = asyncio.get_running_loop().create_future()
+                self.pending[action_id] = future
+                try:
+                    await self.emit(
+                        "requires_action",
+                        {
+                            "action_id": action_id,
+                            "kind": "tool_confirmation",
+                            "call_id": call_id,
+                            "name": name,
+                            "input": arguments,
+                        },
+                    )
+                    decision = await future
+                finally:
+                    self.pending.pop(action_id, None)
+                if decision.decision == "deny":
+                    return await result("Tool execution denied", True)
+                if decision.decision == "result":
+                    return await result(decision.result)
+            output = await execute()
+        except asyncio.CancelledError:
+            if not result_sent:
+                await result("Tool interrupted; side effects may have occurred", True)
+            raise
+        except Exception as exc:
+            return await result(f"Tool failed: {type(exc).__name__}", True)
+        return await result(output)
+
+    @property
+    def work(self) -> Path:
+        path = self.home / "work"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def path(self, name: str) -> Path:
+        path = (self.work / name).resolve()
+        if not path.is_relative_to(self.work.resolve()):
+            raise ValueError("path is outside workspace")
+        return path
+
+    async def bash(self, command: str) -> str:
+        uid, gid, groups = tool_identity(self.home, self.tool_uid)
+        spawn = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                str(Path(__file__).with_name("sandbox_exec.py")),
+                str(max(1, min(300, math.ceil(self.request.limits.deadline_s)))),
+                str(4 * 1024 * 1024 * 1024),
+                "1024" if uid is not None else "16384",
+                command,
+                user=uid,
+                group=gid,
+                extra_groups=groups,
+                cwd=self.home,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+                # Model and harness credentials must not be visible in child processes.
+                env={
+                    "HOME": str(self.work),
+                    "TMPDIR": str(self.home / "tmp"),
+                    "PYTHONUSERBASE": str(self.work / ".local"),
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "LANG": "C.UTF-8",
+                },
+            )
+        )
+        process: asyncio.subprocess.Process | None = None
+        reader: asyncio.Task[None] | None = None
+        tail = bytearray()
+        truncated = False
+
+        async def drain() -> None:
+            nonlocal truncated
+            assert process is not None and process.stdout is not None
+            while chunk := await process.stdout.read(65_536):
+                tail.extend(chunk)
+                if len(tail) > 262_144:
+                    truncated = True
+                    del tail[:-262_144]
+
+        async def cleanup() -> None:
+            # Creation may already have launched children when cancellation is
+            # delivered. Resolve the shielded spawn before killing the tool UID.
+            child = await spawn
+            self.process_groups.add(child.pid)
+            try:
+                self.stop_processes()
+            finally:
+                transport = cast(
+                    asyncio.SubprocessTransport,
+                    getattr(cast(object, child), "_transport"),  # noqa: B009 - absent from typeshed
+                )
+                try:
+                    if reader is not None:
+                        async with asyncio.timeout(2):
+                            await reader
+                except TimeoutError:
+                    pass
+                finally:
+                    transport.close()
+                    if reader is not None:
+                        reader.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await reader
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(child.communicate(), timeout=2)
+                    self.process_groups.discard(child.pid)
+
+        try:
+            child = await asyncio.shield(spawn)
+            process = child
+            self.process_groups.add(child.pid)
+            reader = asyncio.create_task(drain())
+            async with asyncio.timeout(min(300, self.request.limits.deadline_s)):
+                # Process.wait() can also wait for inherited stdout pipes. The
+                # return code is set at SIGCHLD independently of pipe closure.
+                while child.returncode is None:
+                    await asyncio.sleep(0.01)
+        finally:
+            finalization = asyncio.create_task(cleanup())
+            interrupted = False
+            while not finalization.done():
+                try:
+                    await asyncio.shield(finalization)
+                except asyncio.CancelledError:
+                    interrupted = True
+            await finalization
+            if interrupted:
+                raise asyncio.CancelledError
+        assert process is not None
+        marker = "[output truncated]\n" if truncated else ""
+        return f"exit_code={process.returncode}\n{marker}{tail.decode(errors='replace')}"
+
+    def stop_processes(self) -> None:
+        if can_switch_uid():
+            # Trusted bootstrap drops all root UIDs/caps before broadcasting as
+            # the session's real UID; protected effective UID prevents ptrace.
+            # kill(-1) excludes the caller and reaches setsid descendants.
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(Path(__file__).with_name("kill_uid.py")),
+                    str(self.tool_uid),
+                ],
+                user=0,
+                group=0,
+                extra_groups=[],
+                env={},
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=True,
+            )
+        else:
+            for pid in self.process_groups:
+                with suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGKILL)
+
+    async def async_file_operation(
+        self, operation: str, path: str, *, content: str = "", old: str = "", new: str = ""
+    ) -> str:
+        """Use a cancellable helper process instead of an unkillable file thread."""
+        if self.stopping:
+            raise HarnessError("turn_stopped", "Turn no longer accepts file operations")
+        uid, gid, groups = tool_identity(self.home, self.tool_uid)
+        spawn = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                str(Path(__file__).with_name("file_exec.py")),
+                str(self.home),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                user=uid,
+                group=gid,
+                extra_groups=groups,
+                cwd=self.home,
+                start_new_session=True,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": str(self.work),
+                    "TMPDIR": str(self.home / "tmp"),
+                    "LANG": "C.UTF-8",
+                },
+            )
+        )
+        reader: asyncio.Task[tuple[bytes, bytes]] | None = None
+
+        async def cleanup() -> None:
+            child = await spawn
+            try:
+                with suppress(ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
+                if reader is not None:
+                    await reader
+                await child.wait()
+            finally:
+                self.process_groups.discard(child.pid)
+
+        try:
+            child = await asyncio.shield(spawn)
+            self.process_groups.add(child.pid)
+            payload = json.dumps(
+                {"operation": operation, "path": path, "content": content, "old": old, "new": new}
+            ).encode()
+            reader = asyncio.create_task(child.communicate(payload))
+            async with asyncio.timeout(5):
+                output, _ = await asyncio.shield(reader)
+            if child.returncode != 0:
+                raise ValueError("File operation refused or failed")
+            value: object = json.loads(output).get("output")
+            if not isinstance(value, str):
+                raise ValueError("Invalid file operation response")
+            return value
+        finally:
+            finalization = asyncio.create_task(cleanup())
+            interrupted = False
+            while not finalization.done():
+                try:
+                    await asyncio.shield(finalization)
+                except asyncio.CancelledError:
+                    interrupted = True
+            await finalization
+            if interrupted:
+                raise asyncio.CancelledError
+
+    def file_operation(
+        self, operation: str, path: str, *, content: str = "", old: str = "", new: str = ""
+    ) -> str:
+        uid, gid, groups = tool_identity(self.home, self.tool_uid)
+        result = subprocess.run(
+            [sys.executable, "-I", str(Path(__file__).with_name("file_exec.py")), str(self.home)],
+            input=json.dumps(
+                {"operation": operation, "path": path, "content": content, "old": old, "new": new}
+            ),
+            text=True,
+            capture_output=True,
+            timeout=5,
+            user=uid,
+            group=gid,
+            extra_groups=groups,
+            cwd=self.home,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.work),
+                "TMPDIR": str(self.home / "tmp"),
+                "LANG": "C.UTF-8",
+            },
+        )
+        if result.returncode != 0:
+            raise ValueError("File operation refused or failed")
+        output: object = json.loads(result.stdout).get("output")
+        if not isinstance(output, str):
+            raise ValueError("Invalid file operation response")
+        return output
+
+    def read(self, path: str) -> str:
+        return self.file_operation("read", path)
+
+    def write(self, path: str, content: str) -> str:
+        return self.file_operation("write", path, content=content)
+
+    def edit(self, path: str, old: str, new: str) -> str:
+        return self.file_operation("edit", path, old=old, new=new)
+
+    async def skills(self) -> str:
+        descriptions: list[str] = []
+        root = self.home / "skills"
+        if root.is_symlink():
+            raise ValueError("skills root must not be a symlink")
+        root.mkdir(parents=True, exist_ok=True)
+        total = 0
+        for skill in self.request.skills:
+            if isinstance(skill, InlineSkill):
+                # Recheck decoded caps/digest at the materialisation boundary.
+                bundle = InlineSkill.model_validate(skill.model_dump())
+            else:
+                raise ValueError("URL skills are not supported; send an inline bundle")
+            files = bundle.decoded_files()
+            total += sum(map(len, files.values()))
+            if total > TURN_SKILLS_MAX_BYTES:
+                raise ValueError("turn skills exceed 24 MiB decoded bytes")
+            if "SKILL.md" not in files:
+                raise ValueError("skill requires SKILL.md")
+            instructions = files["SKILL.md"].decode("utf-8")
+            directory = root / identifier(bundle.name)
+            if directory.is_symlink():
+                raise ValueError("skill directory must not be a symlink")
+            cache = (self.state_dir or self.home / ".daimon") / "skills"
+            if cache.is_symlink() or cache.parent.is_symlink():
+                raise ValueError("skill cache must not be a symlink")
+            cache.mkdir(parents=True, exist_ok=True)
+            marker = cache / (bundle.name + ".sha256")
+            if marker.is_symlink():
+                raise ValueError("skill cache marker must not be a symlink")
+            stored = marker.read_text() if marker.exists() else None
+            if stored != bundle.sha256 or not directory.is_dir():
+                # Stage a complete bundle before replacing it; stale files disappear.
+                staged = Path(tempfile.mkdtemp(prefix=".skill-", dir=root))
+                staged.chmod(0o755)
+                try:
+                    for name, content in files.items():
+                        path = staged / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(content)
+                    if directory.exists():
+                        shutil.rmtree(directory)
+                    staged.rename(directory)
+                    temporary_marker = marker.with_suffix(".tmp")
+                    if temporary_marker.is_symlink():
+                        raise ValueError("skill cache marker must not be a symlink")
+                    temporary_marker.write_text(bundle.sha256)
+                    temporary_marker.replace(marker)
+                finally:
+                    if staged.exists():
+                        shutil.rmtree(staged)
+            descriptions.append(f"Skill {bundle.name}: {directory / 'SKILL.md'}\n{instructions}")
+        return "\n\n".join(descriptions)

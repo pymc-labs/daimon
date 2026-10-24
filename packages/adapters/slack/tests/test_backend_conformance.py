@@ -25,6 +25,7 @@ from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
     DatabaseSettings,
+    FleetSettings,
     Settings,
     SlackSettings,
     TurnSettings,
@@ -39,20 +40,20 @@ from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import PreparedTurn
-from daimon.testing import ma_session
 from daimon.testing.adapters.slack.backend_conformance import (
     BackendTurnEnvelope,
     backend_selection_turn,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.isolated_sdk import (
+from daimon.testing.turn_router import build_turn_router
+from mux.contracts.config import BackendConfig, ConfigRevision
+from mux.testing.drivers.anthropic.ma import json_body, make_fake_memory_store_handler
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.isolated_sdk import (
     SDK_ENV_VARS,
     AmbientSDKConfigurationError,
     build_async_anthropic,
 )
-from daimon.testing.ma import json_body, make_fake_memory_store_handler
-from daimon.testing.turn_router import build_turn_router
-from mux.contracts.config import BackendConfig, ConfigRevision
 from pydantic import PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -161,7 +162,11 @@ async def setup(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         slack=SlackSettings(signing_secret=SecretStr("offline"), app_token=SecretStr("offline")),
         crypto=CryptoSettings(keys=(SecretStr(key),)),
-        turn=TurnSettings(channel_backends=True),
+        # The legacy path these conformance cases were written for. On mux an
+        # existing thread keeps its bound backend after a channel change; that is
+        # test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted.
+        turn=TurnSettings(path="legacy", channel_backends=True, agent_backends=False),
+        fleet=FleetSettings(enabled=False),
     )
     runtime = build_slack_runtime(key, db_session_factory, anthropic=client)
     resolver_cache = new_resolver_cache()
@@ -303,7 +308,7 @@ async def test_mutation_of_production_reuse_breaks_the_binding_oracle(
     fake_slack_web_client: FakeSlackWebClient,
 ) -> None:
     app, dispatch, wire = await setup(db_session, db_session_factory)
-    method = type(app)._run_thread_turn_observed  # pyright: ignore[reportPrivateUsage]
+    method = type(app)._run_thread_turn_observed_guarded  # pyright: ignore[reportPrivateUsage]
     tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
     mutations = 0
     for node in ast.walk(tree):
@@ -327,7 +332,9 @@ async def test_mutation_of_production_reuse_breaks_the_binding_oracle(
     try:
         first = await dispatch(THREAD, USER)
         with patch.object(
-            type(app), "_run_thread_turn_observed", namespace["_run_thread_turn_observed"]
+            type(app),
+            "_run_thread_turn_observed_guarded",
+            namespace["_run_thread_turn_observed_guarded"],
         ):
             broken = await dispatch(THREAD, USER)
         with pytest.raises(AssertionError):
@@ -448,3 +455,30 @@ async def test_actual_fixture_refuses_ambient_sdk_settings(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://n7-poison.invalid")
     with pytest.raises(AmbientSDKConfigurationError):
         await setup(db_session, db_session_factory)
+
+
+async def test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: FakeSlackWebClient,
+) -> None:
+    app, dispatch, wire = await setup(db_session, db_session_factory)
+    app.runtime = dataclasses.replace(
+        app.runtime, turn_deps=dataclasses.replace(app.runtime.turn_deps, turn_path="mux")
+    )
+    try:
+        first = await dispatch(THREAD, USER)
+        async with db_session_factory.begin() as session:
+            await set_channel_backend(
+                session,
+                channel_ref(tenant_id_from(first), "slack", CHANNEL),
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
+            )
+        second = await dispatch(THREAD, USER)
+        assert second.reused
+        assert second.ma_session_id == first.ma_session_id
+        assert revision_of(second) == revision_of(first)
+        assert wire.stream_hits == [first.ma_session_id, first.ma_session_id]
+        await persisted(db_session_factory, second, THREAD)
+    finally:
+        await app.runtime.anthropic.close()

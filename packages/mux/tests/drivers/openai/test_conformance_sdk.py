@@ -4,12 +4,8 @@ import json
 import os
 from datetime import UTC, datetime, timedelta
 
-import daimon.testing.drivers.openai.conformance_sdk as conformance_sdk
+import mux.testing.drivers.openai.conformance_sdk as conformance_sdk
 import pytest
-from daimon.testing.conformance.runner import PendingKind, run_fixture
-from daimon.testing.drivers.openai.conformance_sdk import OpenAISDKScript, offline_sdk_adapter
-from daimon.testing.drivers.openai.offline_sdk import build_offline_sdk
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.ids import ModelRef, PageRequest, ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, DeletionReceipt, StopObservation
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec, WorkspaceSource
@@ -18,6 +14,10 @@ from mux.drivers.openai.sessions import OpenAISessions
 from mux.drivers.openai.turn import OpenAIEvents
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.testing.conformance.runner import PendingKind, run_fixture
+from mux.testing.drivers.openai.conformance_sdk import OpenAISDKScript, offline_sdk_adapter
+from mux.testing.drivers.openai.offline_sdk import build_offline_sdk
+from mux.testing.isolated_sdk import build_async_openai
 
 _INHERITED_SETTINGS = (
     "OPENAI_ADMIN_KEY",

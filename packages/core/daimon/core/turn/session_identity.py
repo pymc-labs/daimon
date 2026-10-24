@@ -13,7 +13,7 @@ from daimon.core.session_ports_compat import session_scope
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.thread_sessions import update_agent_identity
 from daimon.core.turn.errors import SessionAgentMismatch
-from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+from mux.drivers.anthropic import SessionReads
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = ["SessionIdentity", "check_session_agent"]

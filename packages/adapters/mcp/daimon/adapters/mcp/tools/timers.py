@@ -21,6 +21,7 @@ from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.continuity import timers
 from daimon.core.continuity.timers import TimerError
 from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
+from daimon.core.stores.task_continuations import get_continuation
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
@@ -104,8 +105,15 @@ async def _list_timers_impl(runtime: McpRuntime, auth: AuthIdentity) -> list[Tim
     return [
         _timer(row)
         for row in rows
-        if caller.sees(row.target_name) and caller.sees_place(row.parent_channel_id)
+        if caller.sees(row.target_name)
+        and caller.sees_place(row.parent_channel_id)
+        and _inside_hold(auth, row)
     ]
+
+
+def _inside_hold(auth: AuthIdentity, row: TaskContinuationRow) -> bool:
+    """A held credential's timers are the ones set inside its own channel."""
+    return auth.hold is None or auth.hold.contains(row.thread_id, row.parent_channel_id)
 
 
 async def _cancel_timer_impl(
@@ -115,6 +123,11 @@ async def _cancel_timer_impl(
         key = uuid.UUID(timer_id)
     except ValueError as exc:
         raise ToolError("timer not found") from exc
+    if auth.hold is not None:
+        async with runtime.session_factory() as session:
+            row = await get_continuation(session, idempotency_key=key)
+        if row is None or row.tenant_id != auth.tenant_id or not _inside_hold(auth, row):
+            raise ToolError("timer not found, already fired, or already cancelled")
     cancelled = await timers.cancel_timer(
         runtime.session_factory,
         tenant_id=auth.tenant_id,

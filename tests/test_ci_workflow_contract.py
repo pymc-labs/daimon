@@ -2,8 +2,10 @@
 
 import glob
 import os
+import re
 import shlex
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -13,19 +15,40 @@ import yaml
 _WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 _ROOT = _WORKFLOWS.parents[1]
 
+#: deploy.yml appends this to every step after its freshness check
+#: (tests/test_deploy_superseded.py proves it); a step's own condition is the rest.
+_FRESHNESS = " && steps.fresh.outputs.superseded != 'true'"
+
+
+def without_freshness(condition: str) -> str:
+    own = condition.removesuffix(_FRESHNESS)
+    return own[1:-1] if own != condition and own.startswith("(") and own.endswith(")") else own
+
 
 def _workflow(name: str) -> dict[str, Any]:
     return yaml.safe_load((_WORKFLOWS / name).read_text())
+
+
+def _pytest_commands(job: dict[str, Any]) -> list[str]:
+    """Every `uv run pytest` command of a job, once per matrix leg with the leg's values filled in."""
+    legs: list[dict[str, Any]] = job.get("strategy", {}).get("matrix", {}).get("include") or [{}]
+    commands: list[str] = []
+    for leg in legs:
+        for step in job.get("steps", []):
+            command = " ".join(step.get("run", "").split())
+            if "uv run pytest" not in command:
+                continue
+            for key, value in leg.items():
+                command = command.replace(f"${{{{ matrix.{key} }}}}", str(value))
+            commands.append(command)
+    return commands
 
 
 def test_ci_pytest_commands_collect_top_level_and_performance_tests() -> None:
     """Expand the paths passed to pytest, so newly added tests remain selected."""
     selected: set[Path] = set()
     for job in _workflow("ci.yml")["jobs"].values():
-        for step in job.get("steps", []):
-            command = step.get("run", "")
-            if "uv run pytest" not in command:
-                continue
+        for command in _pytest_commands(job):
             tokens = shlex.split(command)
             paths = tokens[tokens.index("pytest") + 1 :]
             for token in paths:
@@ -49,27 +72,50 @@ def test_ci_pytest_commands_collect_top_level_and_performance_tests() -> None:
 def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     jobs = _workflow("ci.yml")["jobs"]
     deploy = jobs["deploy-gcp"]
-    assert jobs["pytest-core"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
-    assert jobs["pytest-mcp"]["strategy"]["matrix"]["shard"] == [0, 1]
-    for job_name in ("pytest-core", "pytest-mcp"):
-        job = jobs[job_name]
-        shards = job["strategy"]["matrix"]["shard"]
-        command = next(
-            step["run"] for step in job["steps"] if "uv run pytest" in step.get("run", "")
-        )
-        assert f"--ci-shard-count={len(shards)}" in command
+    legs = jobs["pytest-db"]["strategy"]["matrix"]["include"]
+    discord_legs = jobs["pytest-discord"]["strategy"]["matrix"]["include"]
+    for suite, count in (("core", 6), ("mcp", 2), ("discord", 2)):
+        suite_legs = [leg for leg in legs + discord_legs if leg["suite"] == suite]
+        shards = [leg["shard"] for leg in suite_legs]
+        assert shards == list(range(count)), f"{suite} must run every shard exactly once"
+        assert {leg["shards"] for leg in suite_legs} == {count}
+    # The sharded legs of one suite select the same paths, or a shard would skip tests.
+    for suite in {leg["suite"] for leg in legs + discord_legs}:
+        assert len({leg["paths"] for leg in legs + discord_legs if leg["suite"] == suite}) == 1
+    assert {leg["suite"] for leg in legs} == {"core", "mcp", "slack", "teams", "parity"}
+    assert {leg["suite"] for leg in discord_legs} == {"discord"}
+    for name in ("pytest-db", "pytest-discord"):
+        shard_options = [
+            " ".join(step["run"].split())
+            for step in jobs[name]["steps"]
+            if "uv run pytest" in step.get("run", "")
+        ]
+        assert len(shard_options) == 1
+        assert "-p daimon.testing.ci_shard" in shard_options[0]
+        assert "--ci-shard-index=${{ matrix.shard }}" in shard_options[0]
+        assert "--ci-shard-count=${{ matrix.shards }}" in shard_options[0]
+        assert "--ci-shard-by=file" in shard_options[0]
+        assert "--ci-shard-suite=${{ matrix.suite }}" in shard_options[0]
     assert set(deploy["needs"]) == {
         "lint",
-        "pytest-core",
-        "pytest-mcp",
+        "shard-check",
+        # The production default path (mux) gates the deploy.
+        "pytest-mux-leg",
+        "pytest-db",
         "pytest-discord",
-        "pytest-slack",
-        "pytest-teams",
-        "pytest-parity",
+        "pytest-light",
+        "mux-standalone",
         "pytest-notebook-host",
-        "pytest-report-host",
-        "pytest-mux",
+        "pytest-staging-config",
+        # A red offline journey (J1-J10) blocks the staging deploy.
+        "journeys-offline",
         "docker-publish-candidate",
+    }
+    assert {leg["suite"] for leg in jobs["pytest-light"]["strategy"]["matrix"]["include"]} == {
+        "report-host",
+        "mux",
+        "harness",
+        "harness-conformance",
     }
     # No status override: GitHub's default needs gate skips after failure/skip.
     assert not any(status in deploy["if"] for status in ("always()", "failure()", "cancelled()"))
@@ -77,6 +123,123 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     assert "refs/heads/main" in jobs["docker-publish-candidate"]["if"]
     assert "vars.GCP_WIF_PROVIDER == ''" in jobs["docker-build"]["if"]
     assert "docker-publish-candidate" not in jobs["docker-build"].get("needs", [])
+
+
+def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
+    jobs = _workflow("ci.yml")["jobs"]
+    pytest_jobs = {name: job for name, job in jobs.items() if _pytest_commands(job)}
+    assert set(pytest_jobs) == {
+        "pytest-db",
+        "pytest-discord",
+        "pytest-mux-leg",
+        "pytest-staging-config",
+        "pytest-light",
+        "pytest-notebook-host",
+        "journeys-offline",
+    }
+    for name, job in pytest_jobs.items():
+        for command in _pytest_commands(job):
+            assert "-n auto" not in command
+            if name in (
+                "pytest-discord",
+                "pytest-mux-leg",
+                "pytest-staging-config",
+                "journeys-offline",
+            ):
+                assert " -n 2 " in command
+            elif "-m slow" not in command:
+                assert " -n 4 --dist worksteal " in command
+            if "-m slow" not in command:
+                assert "--durations=20" in command
+                assert "--junitxml=" in command
+
+
+def test_core_legs_check_out_full_history() -> None:
+    """Core's credential-equivalence and native-bounds tests need old commits and branches.
+
+    In a GitHub expression `0` is falsy, so `cond && 0 || 1` quietly yields 1; the depth
+    therefore comes from an explicit per-leg key.
+    """
+    job = _workflow("ci.yml")["jobs"]["pytest-db"]
+    checkout = next(step for step in job["steps"] if "actions/checkout" in step.get("uses", ""))
+    assert checkout["with"]["fetch-depth"] == "${{ matrix.fetch-depth }}"
+    legs = job["strategy"]["matrix"]["include"]
+    core = [leg for leg in legs if leg["suite"] == "core"]
+    assert len(core) == 6
+    assert all(leg["fetch-depth"] == 0 for leg in core), "core must fetch every branch and commit"
+    assert all(isinstance(leg["fetch-depth"], int) for leg in legs)
+
+
+@pytest.mark.parametrize("name", ["ci.yml", "contract.yml", "docs.yml", "formal-models.yml"])
+def test_no_fetch_depth_uses_a_falsy_zero_in_an_expression(name: str) -> None:
+    for line in (_WORKFLOWS / name).read_text().splitlines():
+        if "fetch-depth" in line and "${{" in line:
+            assert not re.search(r"&&\s*0\s*\|\|", line), line
+
+
+def test_shard_check_runs_the_checker_against_the_matrix() -> None:
+    steps = _workflow("ci.yml")["jobs"]["shard-check"]["steps"]
+    assert any(step.get("run") == "uv run python scripts/check_ci_shards.py" for step in steps)
+
+
+def test_every_sharded_job_loads_the_plugin_the_checker_discovers() -> None:
+    """check_ci_shards.py proves the jobs whose pytest loads the plugin; a matrix
+    with `shards` but no plugin would run every test on every leg, unchecked."""
+    jobs = _workflow("ci.yml")["jobs"]
+    with_plugin = {
+        name
+        for name, job in jobs.items()
+        if any("-p daimon.testing.ci_shard" in command for command in _pytest_commands(job))
+    }
+    with_shards = {
+        name
+        for name, job in jobs.items()
+        if any(
+            "shards" in leg for leg in job.get("strategy", {}).get("matrix", {}).get("include", [])
+        )
+    }
+    assert (
+        with_plugin
+        == with_shards
+        == {
+            "pytest-db",
+            "pytest-discord",
+            "pytest-mux-leg",
+        }
+    )
+
+
+def test_every_discord_leg_keeps_the_hang_diagnostics() -> None:
+    job = _workflow("ci.yml")["jobs"]["pytest-discord"]
+    assert job["strategy"]["fail-fast"] is False
+    pytest_step = next(step for step in job["steps"] if step.get("id") == "discord-pytest")
+    assert pytest_step["env"]["DAIMON_PYTEST_HANG_DIR"] == "${{ runner.temp }}"
+    assert "-o faulthandler_timeout=300" in pytest_step["run"]
+    assert "discord-postgres-diagnostics.sh" in pytest_step["run"]
+    diagnostics = next(
+        step for step in job["steps"] if step.get("name") == "Discord hang diagnostics"
+    )
+    assert diagnostics["if"] == "always() && steps.discord-pytest.outcome != 'success'"
+
+
+@pytest.mark.parametrize("name", ["ci.yml", "contract.yml", "docs.yml", "formal-models.yml"])
+def test_third_party_actions_are_pinned_to_commit_shas(name: str) -> None:
+    text = (_WORKFLOWS / name).read_text()
+    uses = re.findall(r"^\s*(?:-\s+)?uses:\s*(\S+)", text, flags=re.MULTILINE)
+    assert uses
+    for action in uses:
+        if action.startswith("./"):
+            continue
+        assert re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", action), action
+
+
+def test_main_pushes_and_deploys_are_never_cancelled() -> None:
+    concurrency = _workflow("ci.yml")["concurrency"]
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+    # Only a pull request shares a group (its ref) with the run it supersedes.
+    assert concurrency["group"] == (
+        "ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}"
+    )
 
 
 def test_candidate_is_not_promotable_until_staging_gates_pass() -> None:
@@ -111,7 +274,7 @@ def test_candidate_is_not_promotable_until_staging_gates_pass() -> None:
     assert "gcloud artifacts tags create" in script
     assert "gcloud artifacts docker tags add" not in script
     assert script.rfind("steps.tags.outputs.daimon") > script.rfind("steps.tags.outputs.report")
-    assert deploy[promotable]["if"] == "steps.images.outputs.prebuilt == 'true'"
+    assert without_freshness(deploy[promotable]["if"]) == "steps.images.outputs.prebuilt == 'true'"
 
 
 def test_defaults_verify_qa_exception_is_staging_only() -> None:
@@ -139,7 +302,7 @@ def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
     assert "gcloud artifacts docker images describe" in select["run"]
     for step in steps:
         if step.get("name", "").startswith("Build + push"):
-            assert step["if"] == "steps.images.outputs.prebuilt != 'true'"
+            assert without_freshness(step["if"]) == "steps.images.outputs.prebuilt != 'true'"
     promote = _workflow("promote.yml")["jobs"]
     assert promote["deploy"]["needs"] == "validate"
     assert promote["deploy"]["with"]["environment"] == "production"
@@ -317,3 +480,136 @@ def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
     else:
         assert second.returncode == 0 and clock.read_text() == "1000"
         assert len((tmp_path / "updates").read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize("environment", ["production", "staging"])
+def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
+    tmp_path: Path, environment: str
+) -> None:
+    """Prod keeps today's stops until a promote is approved; staging runs code defaults."""
+    import json
+
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    step = next(step for step in steps if step.get("id") == "mcp_minters")
+    assert step["env"]["DEPLOY_ENVIRONMENT"] == "${{ inputs.environment }}"
+    receipt = {"spec": {"template": {"spec": {"timeoutSeconds": 300, "containers": [{}]}}}}
+    (tmp_path / "service.json").write_text(json.dumps(receipt))
+    gcloud = tmp_path / "gcloud"
+    gcloud.write_text(
+        '#!/bin/sh\nif [ "$3" = describe ]; then cat "$RUNNER_TEMP/service.json"; '
+        'else echo "$*" >> "$RUNNER_TEMP/updates"; fi\n'
+    )
+    gcloud.chmod(0o700)
+    script = (
+        step["run"]
+        .replace("${{ vars.GCP_AR_REPO }}", "offline")
+        .replace("${{ steps.images.outputs.daimon }}", "offline/image")
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(tmp_path / "outputs"),
+            "REGION": "offline",
+            "DEPLOY_ENVIRONMENT": environment,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    updates = (tmp_path / "updates").read_text()
+    pins = (
+        "DAIMON_TURN__PATH=legacy",
+        "DAIMON_TURN__CHANNEL_BACKENDS=false",
+        "DAIMON_TURN__AGENT_BACKENDS=false",
+        "DAIMON_FLEET__ENABLED=false",
+    )
+    if environment == "production":
+        assert all(pin in updates for pin in pins), updates
+    else:
+        assert "TURN__" not in updates and "FLEET__" not in updates, updates
+
+
+def test_production_worker_refresh_pins_the_old_turn_behaviour() -> None:
+    """The prod worker env gets the four stops after every env refresh, staging none."""
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    script = next(
+        step["run"]
+        for step in steps
+        if step.get("name") == "Refresh worker VM containers (recreate in place)"
+    )
+    refresh = script.index("sudo /usr/local/bin/daimon-refresh-env")
+    pin = script.index('if [ "${{ inputs.environment }}" = production ]; then', refresh)
+    assert pin < script.index("docker compose -f compose.worker.yml pull"), "before recreate"
+    block = script[pin : script.index("fi", pin)]
+    for line in (
+        "DAIMON_TURN__PATH=legacy",
+        "DAIMON_TURN__CHANNEL_BACKENDS=false",
+        "DAIMON_TURN__AGENT_BACKENDS=false",
+        "DAIMON_FLEET__ENABLED=false",
+    ):
+        assert line in block
+    assert "tee -a /etc/daimon/daimon.env" in block
+
+
+def test_mux_leg_is_a_blocking_ratchet_inside_the_deploy_gate() -> None:
+    """The mux leg selects mux through the environment and ratchets its known failures."""
+    jobs = _workflow("ci.yml")["jobs"]
+    job = jobs["pytest-mux-leg"]
+    assert not job.get("continue-on-error")
+    assert job["env"]["DAIMON_TURN__PATH"] == "mux"
+    assert job["env"]["DAIMON_TURN__CHANNEL_BACKENDS"] == "true"
+    assert all("-p daimon.testing.mux_leg_known" in c for c in _pytest_commands(job))
+    # Production defaults to mux, so a mux failure holds back the staging deploy.
+    assert "pytest-mux-leg" in jobs["deploy-gcp"]["needs"]
+    assert (_ROOT / "tests" / "mux_leg_known_failures.txt").is_file()
+    # The other legs never load the ratchet or select a path: the root addopts run
+    # them on the emergency-stop leg (daimon.testing.stop_leg_default).
+    addopts = tomllib.loads((_ROOT / "pyproject.toml").read_text())["tool"]["pytest"][
+        "ini_options"
+    ]["addopts"]
+    assert "-p daimon.testing.stop_leg_default" in addopts
+    for name in ("pytest-db", "pytest-discord"):
+        assert "mux_leg_known" not in " ".join(_pytest_commands(jobs[name]))
+        assert "DAIMON_TURN__PATH" not in jobs[name]["env"]
+
+
+def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> None:
+    jobs = _workflow("ci.yml")["jobs"]
+    job = jobs["pytest-staging-config"]
+    assert "pytest-staging-config" in jobs["deploy-gcp"]["needs"]
+    assert not job.get("continue-on-error")
+    legs = job["strategy"]["matrix"]["include"]
+    assert legs == [
+        {
+            "configuration": "enabled",
+            "path": "mux",
+            "channel_backends": "true",
+            "agent_backends": "true",
+            "fleet_enabled": "true",
+        },
+        {
+            "configuration": "legacy-off",
+            "path": "legacy",
+            "channel_backends": "false",
+            "agent_backends": "false",
+            "fleet_enabled": "false",
+        },
+    ]
+    for flag, matrix_key in (
+        ("DAIMON_TURN__PATH", "path"),
+        ("DAIMON_TURN__CHANNEL_BACKENDS", "channel_backends"),
+        ("DAIMON_TURN__AGENT_BACKENDS", "agent_backends"),
+        ("DAIMON_FLEET__ENABLED", "fleet_enabled"),
+        ("DAIMON_CI_CONFIGURATION", "configuration"),
+    ):
+        assert job["env"][flag] == f"${{{{ matrix.{matrix_key} }}}}"
+    command = " ".join(_pytest_commands(job))
+    for selected in (
+        "test_turn_runs_on_the_selected_leg",
+        "packages/core/tests/turn/test_staging_configuration_paths.py",
+    ):
+        assert selected in command

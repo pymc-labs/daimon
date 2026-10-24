@@ -1,0 +1,909 @@
+"""Conformance cases from the pinned matrix; store/host gaps remain explicit."""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime, timedelta
+from typing import cast
+
+from mux.contracts.actions import NativeInput, UserMessage
+from mux.contracts.config import CapabilityRequirement, ConfigRevision, ResolvedBackend
+from mux.contracts.errors import (
+    ContinuityLost,
+    ExtensionVersionError,
+    MigrationUnsupported,
+    ProviderError,
+    ScopeViolation,
+    UnsupportedCapability,
+)
+from mux.contracts.events import (
+    AgentMessagePayload,
+    Event,
+    RequiresActionPayload,
+    TextPart,
+    ToolResultPayload,
+    TurnEndedPayload,
+)
+from mux.contracts.extensions import ExtensionConfig
+from mux.contracts.ids import PageRequest
+from mux.contracts.ports import ManagedAgents, Steering
+from mux.contracts.resources import Artifact, SkillUpload, SkillUploadFile
+from mux.profiles import PROFILES
+from mux.state.store import StateStore
+from mux.testing.conformance.runner import ConformanceFailure, Result, ScriptedTransport, require
+from mux.testing.conformance.state_fixtures import c03, c04, c07, c13
+
+Probe = Callable[[ManagedAgents, StateStore | None, ScriptedTransport], Awaitable[Result]]
+
+
+def passed(id_: str, *evidence: str) -> Result:
+    return Result(id_, "pass", evidence)
+
+
+def pending(id_: str, reason: str) -> Result:
+    return Result(id_, "pending", (reason,))
+
+
+async def c01(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    return pending(
+        "C01",
+        "N4/N10 host multi-human attribution, queue/batching and workspace binding seam pending",
+    )
+
+
+async def c02(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    s = await t.arrange("C02")
+    artifacts = await ma.artifacts.list(s.scope, s.session.ref, page=PageRequest())
+    require(artifacts.data, "C02: scenario must contain a binary workspace artifact")
+    before = b"".join(
+        [chunk async for chunk in ma.artifacts.download(s.scope, artifacts.data[0].ref)]
+    )
+    require(before == bytes(range(256)), "C02: exact seeded binary bytes must survive")
+    for index in range(2):
+        await ma.events.send(
+            s.scope,
+            s.session.ref,
+            (UserMessage(content=(TextPart(text=f"persistence-turn-{index}"),)),),
+            key=f"turn-{index}",
+        )
+        journal = [event async for event in ma.events.stream(s.scope, s.session.ref)]
+        require(
+            any(e.type == "session.turn_ended" for e in journal),
+            "C02: turn must have an authoritative end event",
+        )
+        current = b"".join(
+            [chunk async for chunk in ma.artifacts.download(s.scope, artifacts.data[0].ref)]
+        )
+        require(current == before, "C02: workspace bytes changed between turns")
+    history = await ma.events.list(s.scope, s.session.ref, page=PageRequest())
+    require(
+        sum(e.type == "user.message" for e in history.data) == 2,
+        "C02: both turn inputs must survive in history",
+    )
+    expiry_evidence: tuple[str, ...] | None = None
+    for fault in ("expiry", "unexpected_loss"):
+        t.fault(fault)
+        writes = t.mutation_count
+        try:
+            await ma.sessions.retrieve(s.scope, s.session.ref)
+        except ContinuityLost as exc:
+            if fault == "expiry":
+                require(
+                    any("expir" in item.lower() for item in exc.evidence),
+                    "C02: expiry must be disclosed explicitly",
+                )
+                expiry_evidence = exc.evidence
+            else:
+                require(
+                    exc.evidence != expiry_evidence,
+                    "C02: unexpected loss must be distinguished from expiry",
+                )
+            require(
+                exc.binding_id == s.session.binding.id and exc.evidence,
+                "C02: continuity loss must identify the binding and provide evidence",
+            )
+        else:
+            raise ConformanceFailure("loss must not silently start a fresh workspace")
+        require(
+            t.mutation_count == writes, "C02: continuity loss must not create provider resources"
+        )
+    return passed(
+        "C02", "256 binary bytes preserved", "expiry and unexpected loss typed and visible"
+    )
+
+
+async def c05(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    s = await t.arrange("C05")
+    # Adapter scripts disconnect, overlapping saved pages, a lost domain and child-first end.
+    buffered = [e async for e in ma.events.stream(s.scope, s.session.ref, previews=True)]
+    running = await ma.sessions.retrieve(s.scope, s.session.ref)
+    if running.state != "running" or running.active_root_turn != "root":
+        raise ConformanceFailure("child completion or EOF prematurely released the root turn")
+    projection = await ma.events.reconcile(s.scope, s.session.ref)
+    events: list[Event] = []
+    cursor = None
+    cursors: set[str] = set()
+    for _ in range(100):
+        page = await ma.events.list(
+            s.scope, s.session.ref, page=PageRequest(cursor=cursor, limit=2)
+        )
+        events.extend(page.data)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+        require(cursor not in cursors, "C05: pagination cursor loop")
+        cursors.add(cursor)
+    else:
+        raise ConformanceFailure("pagination exceeded bound")
+    require(
+        len({e.id for e in events}) == len(events),
+        "C05: journal entries must have unique IDs",
+    )
+    messages = [e.typed_payload() for e in events if e.type == "agent.message"]
+    require(
+        messages and all(isinstance(m, AgentMessagePayload) for m in messages),
+        "C05: saved journal must contain typed messages",
+    )
+    ids = [m.item_id for m in messages if isinstance(m, AgentMessagePayload)]
+    require(len(set(ids)) == len(ids), "C05: saved/buffered item duplicated")
+    require(len(messages) == 1, "C05: expected exactly one saved message")
+    message = messages[0]
+    if not (isinstance(message, AgentMessagePayload)):
+        raise ConformanceFailure("C05: message payload must be typed")
+    require(
+        message.item_id == s.saved_message_item_id and message.content == (TextPart(text="done"),),
+        "C05: saved message identity or text was altered",
+    )
+    require(message.complete, "C05: saved final message must preserve complete content")
+    results: dict[tuple[str | None, str], ToolResultPayload] = {}
+    for event in events:
+        if event.type != "agent.tool_result":
+            continue
+        payload = event.typed_payload()
+        if not (isinstance(payload, ToolResultPayload)):
+            raise ConformanceFailure("C05: tool result payload must be typed")
+        identity = (event.thread_id, payload.call_id)
+        require(identity not in results, "C05: saved/buffered tool result duplicated")
+        results[identity] = payload
+    require(set(results) == {(None, "call")}, "C05: scripted tool result missing or altered")
+    require(
+        results[(None, "call")].content == (TextPart(text="result"),),
+        "C05: saved tool result content was altered",
+    )
+    require(
+        not results[(None, "call")].is_error, "C05: scripted successful tool result became an error"
+    )
+    ends = [e for e in events if e.type == "session.turn_ended" and e.thread_id is None]
+    require(
+        len(ends) == 1 and ends[0].authority in ("record", "reconciled"),
+        "C05: expected one authoritative root-turn end",
+    )
+    end = ends[0].typed_payload()
+    require(
+        isinstance(end, TurnEndedPayload)
+        and end.root_turn_id == "root"
+        and end.outcome == "completed",
+        "C05: authoritative root outcome must be completed",
+    )
+    require(
+        projection.state == "idle" and projection.active_root_turn is None,
+        "C05: observed root end must release occupancy",
+    )
+    require(
+        projection.gaps and any(e.type == "session.history_gap" for e in events),
+        "C05: unrecoverable history loss must have an explicit gap",
+    )
+    saved_ids = {m.item_id for m in messages if isinstance(m, AgentMessagePayload)}
+    for event in buffered:
+        if event.type == "agent.message":
+            payload = event.typed_payload()
+            if not isinstance(payload, AgentMessagePayload) or payload.item_id not in saved_ids:
+                raise ConformanceFailure("streamed message missing from reconciled saved items")
+    return passed(
+        "C05", "paged journal has unique items, explicit gap and one authoritative root outcome"
+    )
+
+
+async def c06(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    s = await t.arrange("C06")
+    receipt = await ma.events.cancel(s.scope, s.session.ref, turn_id="root", key="cancel")
+    require(receipt.status == "requested", "C06: cancel receipt must acknowledge only the request")
+    stop = await ma.events.wait_stopped(
+        s.scope, receipt, deadline=datetime.now(UTC) + timedelta(seconds=5)
+    )
+    require(not stop.stopped and stop.outcome is None, "C06: EOF is not observed termination")
+    session = await ma.sessions.retrieve(s.scope, s.session.ref)
+    require(
+        session.state == "running" and session.active_root_turn == "root",
+        "C06: cancel request without stop must hold root occupancy",
+    )
+    t.fault("observed_stop")
+    stop = await ma.events.wait_stopped(
+        s.scope, receipt, deadline=datetime.now(UTC) + timedelta(seconds=5)
+    )
+    require(
+        stop.stopped and stop.outcome == "interrupted",
+        "C06: interrupted outcome must be observed before release",
+    )
+    session = await ma.sessions.retrieve(s.scope, s.session.ref)
+    require(
+        session.state == "idle" and session.active_root_turn is None,
+        "C06: observed stop must release root occupancy",
+    )
+    return passed("C06", "cancel receipt/EOF held occupancy until observed interrupted outcome")
+
+
+async def c08(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    s = await t.arrange("C08")
+    plan = await ma.sessions.plan_update(s.scope, s.session.ref, s.desired)
+    require(
+        plan.action == "next_turn" and plan.operations,
+        "C08: tool/mount mutation must be planned for the next turn",
+    )
+    before = await ma.sessions.retrieve(s.scope, s.session.ref)
+    t.fault("mount_add_failed_after_delete")
+    try:
+        receipt = await ma.sessions.apply_update(
+            s.scope, plan, expected=before.effective_revision, key="update"
+        )
+    except ProviderError:
+        pass
+    else:
+        require(receipt.status == "failed", "C08: partial required mount cannot report success")
+    after = await ma.sessions.retrieve(s.scope, s.session.ref)
+    require(
+        after.effective_revision == before.effective_revision,
+        "C08: partial mutation must not advance the effective revision",
+    )
+    require(after.state == "provisioning", "C08: partial failure must block preparation")
+    t.fault("mount_reconciled")
+    await ma.events.reconcile(s.scope, s.session.ref)
+    after = await ma.sessions.retrieve(s.scope, s.session.ref)
+    require(
+        after.effective_revision.local > before.effective_revision.local and after.state == "idle",
+        "C08: reconciled required mounts must advance revision and unblock preparation",
+    )
+    return passed(
+        "C08", "failed add retained effective revision and blocked preparation until reconciliation"
+    )
+
+
+async def c09(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    s = await t.arrange("C09")
+    artifacts: list[Artifact] = []
+    cursor = None
+    cursors: set[str] = set()
+    for _ in range(100):
+        page = await ma.artifacts.list(
+            s.scope, s.session.ref, page=PageRequest(cursor=cursor, limit=1)
+        )
+        artifacts.extend(page.data)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+        require(cursor not in cursors, "C09: artifact pagination cursor loop")
+        cursors.add(cursor)
+    else:
+        raise ConformanceFailure("artifact pagination exceeded bound")
+    require(
+        len(artifacts) == 2 and len({a.ref.id for a in artifacts}) == 2,
+        "C09: artifact discovery must return both unique files",
+    )
+    body = b"".join([chunk async for chunk in ma.artifacts.download(s.scope, artifacts[0].ref)])
+    require(
+        hashlib.sha256(body).digest() == hashlib.sha256(bytes(range(256))).digest(),
+        "C09: downloaded binary checksum must match seeded bytes",
+    )
+    t.fault("download_interrupted")
+    try:
+        resumed = b"".join(
+            [chunk async for chunk in ma.artifacts.download(s.scope, artifacts[0].ref)]
+        )
+    except ProviderError as exc:
+        require(
+            exc.category == "transient_network",
+            "C09: interrupted download must return a typed network failure",
+        )
+    else:
+        require(resumed == body, "C09: resumed download truncated, duplicated or corrupted bytes")
+    require(s.shared_resources, "C09: scenario must seed a shared channel resource")
+    deletion = await ma.sessions.delete(s.scope, s.session.ref, key="delete")
+    require(
+        all(ref in deletion.retained for ref in s.shared_resources),
+        "C09: receipt must retain the exact seeded shared resources",
+    )
+    require(
+        all(ref not in t.deleted_resources for ref in s.shared_resources),
+        "C09: provider must not actually delete shared resources",
+    )
+    require(
+        s.session.ref in deletion.deleted, "C09: deletion receipt must name the deleted session"
+    )
+    require(
+        any(r.kind == "vault" for r in deletion.retained),
+        "C09: shared vault must be retained",
+    )
+    require(
+        all(r.kind != "vault" for r in deletion.deleted),
+        "C09: shared vault must not be deleted",
+    )
+    return passed(
+        "C09", "all artifact pages, exact resume or typed download failure, shared vault retained"
+    )
+
+
+async def c10(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    s = await t.arrange("C10")
+    writes = t.mutation_count
+    for support in ("unsupported", "unknown"):
+        t.fault(f"admission_{support}")
+        profile = ma.capabilities()
+        config = ConfigRevision.create(
+            s.session.binding.thread.channel,
+            1,
+            ResolvedBackend(
+                backend=profile.provider,
+                profile=profile.profile_id,
+                model="fixture",
+                requires={"memory_stores": CapabilityRequirement(level="required")},
+            ),
+        )
+        try:
+            ma.admit(config)
+        except UnsupportedCapability as exc:
+            require(
+                "memory_stores" in exc.missing,
+                "C10: admission refusal must name the unmet capability",
+            )
+        else:
+            raise ConformanceFailure("unsupported/unknown requirement admitted")
+    offered = ma.capabilities().extensions
+    if offered:
+        try:
+            ma.extension(Steering, namespace=offered[0].namespace, version=999)
+        except ExtensionVersionError:
+            pass
+        else:
+            raise ConformanceFailure("invalid extension version admitted")
+    try:
+        await ma.sessions.retrieve(s.foreign_scope, s.session.ref)
+    except ScopeViolation:
+        pass
+    else:
+        raise ConformanceFailure("foreign tenant reference admitted")
+    require(t.mutation_count == writes, "C10: capability and scope rejection must precede writes")
+    return passed(
+        "C10",
+        "unknown/unsupported requirements and foreign refs refused before mutation",
+        "invalid extension version refused"
+        if offered
+        else "extension version check not applicable: profile offers no extensions",
+    )
+
+
+async def c11(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    s = await t.arrange("C11")
+    bundle = SkillUpload(
+        display_title="fixture",
+        files=(SkillUploadFile(path="SKILL.md", content=b"fixture", media_type="text/markdown"),),
+    )
+    uploads_before = len(t.skill_uploads)
+    deployed = await ma.skills.create(s.scope, bundle, key="skill-deploy")
+    require(
+        t.skill_uploads[uploads_before:] == (bundle,),
+        "C11: upstream must receive the exact inline skill bundle bytes",
+    )
+    pinned = deployed.latest_version
+    if pinned is None or pinned.version is None:
+        raise ConformanceFailure("C11: uploaded bundle must return a pinned skill version")
+    require(
+        pinned.id == deployed.id,
+        "C11: uploaded skill record and version must identify the same skill",
+    )
+    agent = await ma.agents.retrieve(s.scope, s.desired.agent)
+    skills = agent.spec.skills
+    if skills is None or len(skills) != 1:
+        raise ConformanceFailure("C11: deployed agent must bind exactly one pinned skill")
+    skill = await ma.skills.retrieve(s.scope, pinned.id)
+    require(
+        skill.id == pinned.id and skill.latest_version is not None,
+        "C11: retrieved skill record must preserve the deployed pin",
+    )
+    retrieved = skill.latest_version
+    if retrieved is None:
+        raise ConformanceFailure("C11: retrieved skill must contain a version")
+    pins = (pinned, skills[0], retrieved)
+    require(
+        all((ref.id, ref.version) == (pinned.id, pinned.version) for ref in pins),
+        "C11: deployed agent and retrieved record must preserve skill identity and version",
+    )
+    require(
+        len({ref.source for ref in pins if ref.source is not None}) <= 1,
+        "C11: provided skill sources must agree",
+    )
+    require(
+        len({ref.digest for ref in pins if ref.digest is not None}) <= 1,
+        "C11: provided skill digests must agree",
+    )
+    if not (agent.spec.mcp_servers and s.desired.environment is not None):
+        raise ConformanceFailure("C11: deployed MCP and environment bindings are required")
+    environment = await ma.environments.retrieve(s.scope, s.desired.environment)
+    require(
+        any(source.kind == "repository" for source in (environment.spec.sources or ())),
+        "C11: required repository mount must be present",
+    )
+    journal = [e async for e in ma.events.stream(s.scope, s.session.ref)]
+    actions = [e.typed_payload() for e in journal if e.type == "session.requires_action"]
+    require(
+        actions and all(isinstance(a, RequiresActionPayload) and a.actions for a in actions),
+        "C11: unavailable execution must surface typed required actions",
+    )
+    require(
+        not any(
+            e.type == "session.turn_ended" and e.payload.get("outcome") == "completed"
+            for e in journal
+        ),
+        "C11: unavailable execution must not claim successful completion",
+    )
+    session = await ma.sessions.retrieve(s.scope, s.session.ref)
+    require(
+        session.state == "requires_action" and session.required_actions,
+        "C11: session must stay occupied by the unavailable action",
+    )
+    return passed(
+        "C11", "pinned bundle, MCP and repository mounts observed; unavailable action explicit"
+    )
+
+
+async def c12(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    from collections.abc import Mapping
+    from decimal import Decimal
+    from typing import cast
+
+    # Optional host hook supplies database facts, never a pass/fail verdict.
+    # The reference has no host ledger and remains explicitly uncertified.
+    hook = getattr(t, "host_accounting_evidence", None)
+    if hook is None or store is None:
+        return pending("C12", "a host accounting evidence hook and StateStore are required")
+    require(callable(hook), "C12: host evidence hook must be callable")
+    evidence = await cast(Callable[[], Awaitable[object]], hook)()
+    require(isinstance(evidence, Mapping), "C12: host proof must supply accounting facts")
+    facts = cast(Mapping[str, object], evidence)
+
+    # A snapshot is (legacy usage rows, (ledger key, exact Decimal) rows).
+    # Usage tuples start (session, event, model, input, output). IDs/time and
+    # all other legacy columns must remain in the host's equality comparison.
+    def tuple_value(value: object) -> tuple[object, ...]:
+        require(isinstance(value, tuple), "C12: host accounting rows must be tuples")
+        return cast(tuple[object, ...], value)
+
+    def snapshot(
+        name: str,
+    ) -> tuple[tuple[tuple[object, ...], ...], tuple[tuple[str, Decimal], ...]]:
+        value = tuple_value(facts.get(name))
+        require(
+            len(value) == 2,
+            "C12: host snapshots must contain usage and ledger rows",
+        )
+        usage = tuple(tuple_value(row) for row in tuple_value(value[0]))
+        ledger = tuple(tuple_value(row) for row in tuple_value(value[1]))
+        require(
+            all(
+                len(row) == 12
+                and all(isinstance(v, str) and v for v in row[:3])
+                and all(type(v) is int and v >= 0 for v in row[3:7])
+                and row[9] is not None
+                and isinstance(row[10], datetime)
+                and row[11] is not None
+                for row in usage
+            )
+            and all(
+                len(row) == 2 and isinstance(row[0], str) and isinstance(row[1], Decimal)
+                for row in ledger
+            ),
+            "C12: host snapshots require real identities, counts and Decimal amounts",
+        )
+        return usage, cast(tuple[tuple[str, Decimal], ...], ledger)
+
+    history = snapshot("history_before")
+    require(
+        len(history[0]) == len(history[1]) == 1
+        and history[0][0][4] == 100
+        and history[1][0] == (f"turn:{history[0][0][0]}:{history[0][0][1]}", Decimal("-0.001000"))
+        and snapshot("history_after") == history,
+        "C12: replaying seeded historical usage must add zero rows and preserve the turn key",
+    )
+    corrected = snapshot("corrections")
+    require(
+        len(corrected[0]) == 1 and corrected[0][0][4] == 110,
+        "C12: the projected correction must account for exactly 110 units",
+    )
+    session_id, event_id = corrected[0][0][:2]
+    binding_id = facts.get("binding_id")
+    require(isinstance(binding_id, str) and binding_id, "C12: a durable binding is required")
+    require(
+        len(corrected[1]) == 3
+        and dict(corrected[1])
+        == {
+            f"turn:{session_id}:{event_id}": Decimal("-0.001000"),
+            f"adjust:{binding_id}:{event_id}:2": Decimal("-0.000200"),
+            f"adjust:{binding_id}:{event_id}:3": Decimal("0.000100"),
+        }
+        and facts.get("correction_channel_spend") == Decimal("0.001100"),
+        "C12: 100→120→110 must debit/refund once and leave channel spend at 110 units",
+    )
+    overlap = snapshot("overlap_before")
+    require(
+        overlap[0]
+        and overlap[1]
+        and snapshot("overlap_after") == overlap
+        and facts.get("aggregate_grains") == ("session", "turn")
+        and facts.get("aggregate_covers") == ((event_id,), (event_id,)),
+        "C12: overlapping session/turn totals must remain recorded without another charge",
+    )
+    crashed = snapshot("crash_before")
+    require(
+        len(crashed[0]) == len(crashed[1]) == 1
+        and crashed[0][0][4] == 100
+        and facts.get("projection_at_failure") == 120
+        and snapshot("crash_after_failure") == crashed
+        and facts.get("pending_before_failure") == facts.get("pending_after_failure") == 1,
+        "C12: failure between usage and debit must roll back both writes and the outbox claim",
+    )
+    restarted = snapshot("crash_after_restart")
+    crash_session, crash_event = crashed[0][0][:2]
+    require(
+        len(restarted[0]) == 1
+        and restarted[0][0][4] == 120
+        and len(restarted[1]) == 2
+        and dict(restarted[1])
+        == {
+            f"turn:{crash_session}:{crash_event}": Decimal("-0.001000"),
+            f"adjust:{binding_id}:{crash_event}:2": Decimal("-0.000200"),
+        }
+        and facts.get("pending_after_restart") == 0,
+        "C12: restart must apply the pending correction once with its exact stored key",
+    )
+    return passed(
+        "C12",
+        "host ledger: historical replay, signed corrections, overlap and crash/restart verified",
+    )
+
+
+async def _host_evidence(fid: str, t: ScriptedTransport, name: str) -> Mapping[str, object] | None:
+    hook = getattr(t, name, None)
+    if hook is None:
+        return None
+    require(callable(hook), f"{fid}: host evidence hook must be callable")
+    facts = await cast(Callable[[], Awaitable[object]], hook)()
+    if facts is None:
+        return None
+    require(isinstance(facts, Mapping), f"{fid}: host evidence must contain observed facts")
+    return cast(Mapping[str, object], facts)
+
+
+def _host_tuple(facts: Mapping[str, object], key: str, fid: str) -> tuple[object, ...]:
+    value = facts.get(key)
+    if not isinstance(value, tuple):
+        raise ConformanceFailure(f"{fid}: {key} facts are absent or malformed")
+    return cast(tuple[object, ...], value)
+
+
+def _host_identity(facts: Mapping[str, object], key: str) -> tuple[object, ...]:
+    identity = _host_tuple(facts, key, "C14")
+    require(
+        len(identity) == 4
+        and type(identity[1]) is int
+        and identity[1] > 0
+        and all(isinstance(identity[i], str) and identity[i] for i in (0, 2, 3)),
+        "C14: prepared and persisted native identities must be present and well typed",
+    )
+    return identity
+
+
+async def c14(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    facts = await _host_evidence("C14", t, "host_backend_selection_evidence")
+    if facts is None:
+        return pending(
+            "C14", "N4/N10 existing/new-thread backend selection and registry seam pending"
+        )
+    original = _host_tuple(facts, "original_config", "C14")
+    changed = _host_tuple(facts, "changed_config", "C14")
+    require(len(original) == 2, "C14: original config is absent")
+    require(len(changed) == 2, "C14: changed config is absent")
+    require(
+        original[0] != changed[0]
+        and type(original[1]) is int
+        and type(changed[1]) is int
+        and 0 < original[1] < changed[1],
+        "C14: channel must actually change profile/revision",
+    )
+    first = _host_identity(facts, "first")
+    existing = _host_identity(facts, "existing")
+    new = _host_identity(facts, "new_thread")
+    first_binding = _host_identity(facts, "first_binding")
+    existing_binding = _host_identity(facts, "existing_binding")
+    new_binding = _host_identity(facts, "new_binding")
+    require(
+        first == existing == first_binding == existing_binding,
+        "C14: existing thread must retain original native binding and revision",
+    )
+    require(
+        first[:2] == original and new[:2] == changed and new == new_binding,
+        "C14: new thread must bind the changed profile and revision",
+    )
+    for config, identities in (
+        (original, (first, existing, first_binding, existing_binding)),
+        (changed, (new, new_binding)),
+    ):
+        profile = PROFILES.get(cast(str, config[0]))
+        require(
+            profile is not None
+            and all(
+                identity[0] == profile.profile_id and identity[3] == profile.provider
+                for identity in identities
+            ),
+            "C14: selected profile provider must agree with prepared and persisted identities",
+        )
+    require(
+        facts.get("missing_original_refusal") == "backend_unsupported"
+        and type(facts.get("missing_original_mutations")) is int
+        and facts.get("missing_original_mutations") == 0,
+        "C14: absent original driver must refuse visibly before provider mutation",
+    )
+    return passed(
+        "C14",
+        "host backend selection retains persisted bindings and refuses a missing original driver",
+    )
+
+
+async def c15(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    s = await t.arrange("C15")
+    before = await ma.sessions.retrieve(s.scope, s.session.ref)
+    profile = ma.capabilities()
+    target = ConfigRevision.create(
+        before.binding.thread.channel,
+        2,
+        ResolvedBackend(backend=profile.provider, profile=profile.profile_id, model="fixture"),
+    )
+    writes = t.mutation_count
+    try:
+        await ma.sessions.migrate(
+            s.scope, s.session.ref, target, expected=before.binding.generation, key="migrate"
+        )
+    except MigrationUnsupported:
+        pass
+    else:
+        raise ConformanceFailure("migration unexpectedly supported")
+    require(
+        (await ma.sessions.retrieve(s.scope, s.session.ref)).binding == before.binding,
+        "C15: rejected migration must leave the binding unchanged",
+    )
+    require(t.mutation_count == writes, "C15: unsupported migration must not write to the provider")
+    return passed("C15", "migration typed unsupported, binding unchanged, no provider writes")
+
+
+async def c16(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    s = await t.arrange("C16")
+    for target in (ma, ma.events, ma.sessions):
+        for name in ("client", "raw_client", "sdk", "raw"):
+            try:
+                value = getattr(target, name, None)
+            except UnsupportedCapability:
+                continue
+            require(value is None, "C16: raw provider handle is public")
+    writes = t.mutation_count
+    before = await ma.events.list(s.scope, s.session.ref, page=PageRequest())
+    try:
+        ma.extension(Steering, namespace=f"{ma.capabilities().provider}.bypass", version=1)
+    except UnsupportedCapability:
+        pass
+    else:
+        raise ConformanceFailure("undeclared extension admitted")
+    try:
+        await ma.events.send(
+            s.scope,
+            s.session.ref,
+            (
+                NativeInput(
+                    extension=ExtensionConfig(
+                        namespace=f"{ma.capabilities().provider}.bypass", version=1, value={}
+                    )
+                ),
+            ),
+            key="bypass",
+        )
+    except UnsupportedCapability:
+        pass
+    else:
+        raise ConformanceFailure("native input bypassed extension admission")
+    require(
+        t.mutation_count == writes, "C16: rejected extension bypass must not write to the provider"
+    )
+    after = await ma.events.list(s.scope, s.session.ref, page=PageRequest())
+    require(after == before, "C16: rejected extension changed journal")
+    return passed(
+        "C16",
+        "no public raw handle, undeclared namespace/native-input bypass refused before writes",
+    )
+
+
+async def c17(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    facts = await _host_evidence("C17", t, "host_wake_evidence")
+    if facts is None:
+        return pending(
+            "C17",
+            "N5 host wake generation adapter pending; StateStore fencing alone is not a wake probe",
+        )
+    before, current = facts.get("before_generation"), facts.get("current_generation")
+    require(
+        type(before) is int
+        and type(current) is int
+        and 0 < before < current
+        and type(facts.get("replacement_generation")) is int
+        and current == before + 1 == facts.get("replacement_generation"),
+        "C17: wake must run on the next persisted binding generation",
+    )
+    require(
+        facts.get("stale_binding_refused") is True
+        and type(facts.get("stale_pump_calls")) is int
+        and facts.get("stale_pump_calls") == 0
+        and facts.get("stale_wake_started") is False
+        and facts.get("stale_wake_settled") is False,
+        "C17: both superseded wake owner and stale binding must be fenced before effects",
+    )
+    require(
+        facts.get("wake_started") is True
+        and facts.get("wake_settled") is True
+        and facts.get("wake_status") == "delivered"
+        and type(facts.get("pump_calls")) is int
+        and facts.get("pump_calls") == 1
+        and facts.get("lease_released") is True
+        and facts.get("journal_event_present") is True
+        and isinstance(facts.get("current_session"), str)
+        and bool(facts.get("current_session")),
+        "C17: exactly one actual host wake must journal under its lease and release/settle",
+    )
+    return passed(
+        "C17", "durable wake takeover, binding generation, host journal and lease release verified"
+    )
+
+
+async def c18(ma: ManagedAgents, store: StateStore | None, t: ScriptedTransport) -> Result:
+    facts = await _host_evidence("C18", t, "host_termination_evidence")
+    if facts is None:
+        return pending(
+            "C18",
+            "N4/N8 host TerminationReason/outcome-row adapter pending; mux cannot import daimon",
+        )
+    required = _host_tuple(facts, "required_reasons", "C18")
+    raw_rows = _host_tuple(facts, "terminations", "C18")
+    require(
+        bool(required)
+        and all(isinstance(x, str) and x for x in required)
+        and len(set(required)) == len(required),
+        "C18: independently declared reachable reasons are required",
+    )
+    require(
+        {"completed", "interrupted", "upstream", "session_terminated"} <= set(required),
+        "C18: reachable declaration must include all four normalized root outcomes",
+    )
+    require(
+        bool(raw_rows) and all(isinstance(row, Mapping) for row in raw_rows),
+        "C18: observed host outcomes are absent",
+    )
+    rows = cast(tuple[Mapping[str, object], ...], raw_rows)
+    require(
+        set(required) <= {row.get("expected_reason") for row in rows},
+        "C18: every declared reachable termination reason needs an executed host case",
+    )
+    require(
+        len({row.get("case") for row in rows}) == len(rows)
+        and all(isinstance(row.get("case"), str) and bool(row.get("case")) for row in rows),
+        "C18: termination cases must be uniquely named",
+    )
+    require(
+        all(isinstance(row.get("outcome_id"), str) and row["outcome_id"] for row in rows)
+        and len({row.get("outcome_id") for row in rows}) == len(rows),
+        "C18: each case needs its own observed outcome identity",
+    )
+    required_fields = (
+        "case",
+        "outcome_id",
+        "persisted_rows",
+        "expected_reason",
+        "actual_reason",
+        "persisted_reason",
+        "expected_error_class",
+        "actual_error_class",
+        "persisted_error_class",
+        "expected_session",
+        "actual_session",
+        "persisted_session",
+        "expected_account",
+        "persisted_account",
+        "expected_tenant",
+        "persisted_tenant",
+        "expected_platform",
+        "persisted_platform",
+        "expected_recovered",
+        "actual_recovered",
+        "persisted_recovered",
+    )
+    for row in rows:
+        require(
+            all(key in row for key in required_fields),
+            "C18: observed termination snapshot is incomplete",
+        )
+        require(
+            type(row["persisted_rows"]) is int and row["persisted_rows"] == 1,
+            "C18: each fresh observation must have exactly one committed outcome row",
+        )
+        require(
+            row["expected_reason"] in required,
+            "C18: each executed case must use an independently declared reachable reason",
+        )
+        require(
+            row["expected_reason"] == row["actual_reason"] == row["persisted_reason"],
+            "C18: normalized scenario, actual host reason and committed outcome must agree",
+        )
+        error_class = row["expected_error_class"]
+        require(
+            (error_class is None or isinstance(error_class, str) and bool(error_class))
+            and error_class == row["actual_error_class"] == row["persisted_error_class"],
+            "C18: actual and committed error classes must match the independent case",
+        )
+        session = row["expected_session"]
+        require(
+            row["expected_reason"] != "completed" or isinstance(session, str) and bool(session),
+            "C18: a completed turn ran on a native session and must retain it",
+        )
+        require(
+            row["expected_reason"] != "session_terminated"
+            or isinstance(session, str)
+            and bool(session),
+            "C18: a terminated session must retain native session identity",
+        )
+        require(
+            (session is None or isinstance(session, str) and bool(session))
+            and session == row["actual_session"] == row["persisted_session"],
+            "C18: actual and committed outcomes must retain the authorized native session",
+        )
+        require(
+            all(
+                isinstance(row[expected], str)
+                and bool(row[expected])
+                and row[expected] == row[persisted]
+                for expected, persisted in (
+                    ("expected_account", "persisted_account"),
+                    ("expected_tenant", "persisted_tenant"),
+                    ("expected_platform", "persisted_platform"),
+                )
+            ),
+            "C18: committed outcomes must retain the authorized account, tenant and platform",
+        )
+        require(
+            all(
+                type(row[key]) is bool
+                for key in ("expected_recovered", "actual_recovered", "persisted_recovered")
+            )
+            and row["expected_recovered"] == row["actual_recovered"] == row["persisted_recovered"],
+            "C18: actual and committed recovery flags must match the independent case",
+        )
+    require(
+        any(isinstance(row["expected_session"], str) and row["expected_session"] for row in rows),
+        "C18: at least one case must prove native session retention",
+    )
+    return passed(
+        "C18", "actual host terminal reasons match committed rows for declared reachable coverage"
+    )
+
+
+FIXTURES: dict[str, Probe] = {
+    f"C{i:02}": probe
+    for i, probe in enumerate(
+        (c01, c02, c03, c04, c05, c06, c07, c08, c09, c10, c11, c12, c13, c14, c15, c16, c17, c18),
+        1,
+    )
+}

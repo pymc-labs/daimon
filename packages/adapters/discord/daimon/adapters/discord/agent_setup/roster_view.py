@@ -50,7 +50,7 @@ _TIER_HINTS: Final[Mapping[ConfigTier, str]] = {
     "thread": "this thread",
     "channel": "channel setting",
     "tenant": "server default",
-    "deployment": "deployment default",
+    "deployment": "Daimon-wide default",
 }
 
 # Channels named in the admin webhook note before the rest collapse to a count.

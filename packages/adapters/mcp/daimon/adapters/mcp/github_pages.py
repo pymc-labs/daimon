@@ -31,6 +31,6 @@ def github_page(
         f"{heading}{body_html}</div>",
         status=status,
         context="GitHub",
-        wide=kind == "picker",
-        card=kind != "picker",
+        wide=kind in {"picker", "saved"},
+        card=kind not in {"picker", "saved"},
     )

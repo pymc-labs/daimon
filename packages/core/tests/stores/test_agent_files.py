@@ -7,10 +7,13 @@ import uuid
 import pytest
 import sqlalchemy as sa
 from daimon.core._models import AgentFile
+from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.errors import StoreError
+from daimon.core.session_snapshot import hash_env_bytes
 from daimon.core.stores.agent_files import (
     delete_agent_file,
     get_agent_file,
+    list_agent_file_revisions,
     list_agent_files,
     put_agent_file,
     put_agent_file_if_unchanged,
@@ -160,6 +163,120 @@ async def test_list_agent_files_returns_keys_ordered_when_multiple_present(
         )
     rows = await list_agent_files(db_session, tenant_id=tenant.id, agent_id=agent_id)
     assert [r.key for r in rows] == ["a", "b", "c"], "list should be ordered by key"
+
+
+# Keys whose order differs between byte order and glibc's en_US collation:
+# mixed case ("B" before "a"), and an underscore against a letter ("API_KEY" vs
+# "APIKEY", "a_b" vs "ab"). Stored out of order on purpose.
+_COLLATION_SENSITIVE_KEYS = ("ab", "API_KEY", "a", "B", "APIKEY", "a_b")
+_CODEPOINT_ORDER = ("APIKEY", "API_KEY", "B", "a", "a_b", "ab")
+
+
+async def _store_collation_sensitive_keys(
+    db_session: AsyncSession,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    tenant = await make_tenant(db_session)
+    agent_id = uuid.uuid4()
+    for key in _COLLATION_SENSITIVE_KEYS:
+        await put_agent_file(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            key=key,
+            content="1",
+            set_by_account_id=None,
+        )
+    return tenant.id, agent_id
+
+
+@pytest.mark.asyncio
+async def test_list_agent_files_orders_by_codepoint_whatever_the_database_collation(
+    db_session: AsyncSession,
+) -> None:
+    """AF-06b: musl, glibc en_US and ICU would each order these differently."""
+    tenant_id, agent_id = await _store_collation_sensitive_keys(db_session)
+
+    rows = await list_agent_files(db_session, tenant_id=tenant_id, agent_id=agent_id)
+
+    assert tuple(r.key for r in rows) == _CODEPOINT_ORDER, (
+        "list_agent_files must order by codepoint, not by the database's collation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_agent_file_revisions_orders_by_codepoint_whatever_the_database_collation(
+    db_session: AsyncSession,
+) -> None:
+    """AF-06c: the revisions read has the same ordering contract as the file list."""
+    tenant_id, agent_id = await _store_collation_sensitive_keys(db_session)
+
+    revisions = await list_agent_file_revisions(db_session, tenant_id=tenant_id, agent_id=agent_id)
+
+    assert tuple(key for key, _ in revisions) == _CODEPOINT_ORDER, (
+        "list_agent_file_revisions must order by codepoint, not by the database's collation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_env_bytes_and_hash_follow_codepoint_key_order(
+    db_session: AsyncSession,
+) -> None:
+    """AF-06d: the `.env` bytes, and so `env_sha256`, must not move with the collation."""
+    tenant_id, agent_id = await _store_collation_sensitive_keys(db_session)
+
+    rows = await list_agent_files(db_session, tenant_id=tenant_id, agent_id=agent_id)
+
+    expected = b"APIKEY=1\nAPI_KEY=1\nB=1\na=1\na_b=1\nab=1\n"
+    assert assemble_env_bytes(rows) == expected, "the .env lines must be in codepoint key order"
+    assert (
+        hash_env_bytes(assemble_env_bytes(rows))
+        == "d85c1a15324e795ad6b1c751c937019177444e97747f937b50d76e3a85d168c2"
+    ), "env_sha256 for this key set is pinned so a reorder is a visible change"
+
+
+_ICU_COLLATION = "en-US-x-icu"
+
+
+@pytest.mark.asyncio
+@pytest.mark.fresh_schema
+async def test_listings_order_by_codepoint_under_a_non_codepoint_column_collation(
+    db_session: AsyncSession,
+) -> None:
+    """AF-06e: force the collation, so a database that already sorts by codepoint can't hide it.
+
+    CI's musl Postgres orders `en_US` by codepoint, which makes AF-06b/c/d pass
+    without `COLLATE "C"`. This test gives `agent_files.key` an ICU collation
+    itself. The ALTER is DDL on the private `fresh_schema` and is rolled back
+    with the test's transaction.
+    """
+    available = await db_session.scalar(
+        sa.text("SELECT 1 FROM pg_collation WHERE collname = :name"), {"name": _ICU_COLLATION}
+    )
+    if available is None:
+        pytest.skip(f"this Postgres has no {_ICU_COLLATION} collation (built without ICU)")
+    await db_session.execute(
+        sa.text(f'ALTER TABLE agent_files ALTER COLUMN "key" TYPE text COLLATE "{_ICU_COLLATION}"')
+    )
+    tenant_id, agent_id = await _store_collation_sensitive_keys(db_session)
+
+    under_column_collation = (
+        await db_session.scalars(
+            sa.select(AgentFile.key).where(AgentFile.agent_id == agent_id).order_by(AgentFile.key)
+        )
+    ).all()
+    assert tuple(under_column_collation) != _CODEPOINT_ORDER, (
+        "precondition: the forced collation must order these keys differently from codepoint"
+    )
+
+    rows = await list_agent_files(db_session, tenant_id=tenant_id, agent_id=agent_id)
+    revisions = await list_agent_file_revisions(db_session, tenant_id=tenant_id, agent_id=agent_id)
+
+    assert tuple(r.key for r in rows) == _CODEPOINT_ORDER, (
+        "list_agent_files must override the column's collation with codepoint order"
+    )
+    assert tuple(key for key, _ in revisions) == _CODEPOINT_ORDER, (
+        "list_agent_file_revisions must override the column's collation with codepoint order"
+    )
 
 
 @pytest.mark.asyncio

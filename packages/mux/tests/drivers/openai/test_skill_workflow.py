@@ -4,7 +4,6 @@ import json
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.ids import ModelRef, Revision, Scope, SkillRef
@@ -15,6 +14,7 @@ from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ContinuityLost
+from mux.testing.isolated_sdk import build_async_openai
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="human", authorization_id="grant"

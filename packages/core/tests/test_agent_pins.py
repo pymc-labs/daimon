@@ -15,8 +15,8 @@ from daimon.core.agent_pins import (
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import CredentialRequestRow, Role
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_models import ma_agent
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 

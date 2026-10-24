@@ -6,7 +6,7 @@ import asyncio
 import sys
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 import anthropic
 import typer
@@ -22,12 +22,14 @@ from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import discover_tenant
 from daimon.core.config import Settings, load_settings, load_turn_settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
+from daimon.core.errors import UserFacingError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.mux_backend import platform_scope, resource_scope
 from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.thread_sessions import session_owner_tenants
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.outcomes import current_outcome, observe_turn
@@ -40,6 +42,25 @@ from daimon.core.turn.unattended import (
     unattended_posture,
 )
 from mux.errors import ScopeViolation
+from sqlalchemy.ext.asyncio import AsyncSession
+
+TurnPath = Literal["legacy", "mux"]
+
+
+class SessionTenantMismatch(UserFacingError):
+    """`daimon run` was pointed at a session that another tenant owns (mux path).
+
+    The CLI acts as its own tenant's operator. It never mints a principal or
+    account inside another tenant to reach that tenant's session.
+    """
+
+    def __init__(self, session_id: str, owner_tenant_id: uuid.UUID) -> None:
+        super().__init__(
+            f"session {session_id} belongs to tenant {owner_tenant_id}; "
+            "run it from that tenant, not the local CLI tenant"
+        )
+        self.session_id = session_id
+        self.owner_tenant_id = owner_tenant_id
 
 
 def run_command(
@@ -67,11 +88,18 @@ def run_command(
     user_message = _resolve_user_message(raw_message)
 
     settings = load_settings()
-    exit_code = asyncio.run(_run_with_defaults(settings, session, user_message))
+    path = load_turn_settings().path
+    try:
+        exit_code = asyncio.run(_run_with_defaults(settings, session, user_message, path=path))
+    except SessionTenantMismatch as err:
+        print(f"✗ {err}", file=sys.stderr)
+        raise typer.Exit(code=1) from err
     raise typer.Exit(code=exit_code)
 
 
-async def _run_with_defaults(settings: Settings, session: str, user_message: str) -> int:
+async def _run_with_defaults(
+    settings: Settings, session: str, user_message: str, *, path: TurnPath | None = None
+) -> int:
     """Gate the operator's session, then run the turn under the unattended rules.
 
     Nobody answers a card here, so this is an unattended turn: before the
@@ -79,11 +107,18 @@ async def _run_with_defaults(settings: Settings, session: str, user_message: str
     policy (`gate_session_snapshot`), whatever it was created with, and every
     pause is decided by `unattended_posture`.
     """
+    path = path if path is not None else load_turn_settings().path
     async with build_runtime(settings) as rt:
         public_url = str(settings.mcp.public_url) if settings.mcp.public_url is not None else None
         scope = platform_scope("CLI operator run gate")
         snapshot = await retrieve_session_record(rt.anthropic, session, scope=scope)
         tenant_id, platform = await _session_tenant(rt, snapshot)
+        if path == "mux":
+            async with rt.sessionmaker() as db:
+                local_tenant = await discover_tenant(db)
+                if tenant_id != local_tenant:
+                    raise SessionTenantMismatch(session, tenant_id)
+                await _refuse_foreign_session(db, session_id=session, tenant_id=local_tenant)
         gate = session_gate(
             rt.anthropic,
             session,
@@ -104,6 +139,7 @@ async def _run_with_defaults(settings: Settings, session: str, user_message: str
                 rt=rt,
                 session_id=session,
                 user_message=user_message,
+                path=path,
                 tool_confirmation=unattended_posture(
                     settings.tool_safety,
                     session=snapshot,
@@ -151,6 +187,7 @@ async def run_conversation(
     rt: CliRuntime,
     session_id: str,
     user_message: str,
+    path: TurnPath,
     deadline: datetime | None = None,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
 ) -> int:
@@ -159,6 +196,7 @@ async def run_conversation(
             rt=rt,
             session_id=session_id,
             user_message=user_message,
+            path=path,
             deadline=deadline,
             tool_confirmation=tool_confirmation,
         )
@@ -169,6 +207,7 @@ async def run_conversation_observed(
     rt: CliRuntime,
     session_id: str,
     user_message: str,
+    path: TurnPath,
     deadline: datetime | None = None,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
 ) -> int:
@@ -184,13 +223,15 @@ async def run_conversation_observed(
     # without the core ceiling.
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
 
-    path = load_turn_settings().path
     scope = None
     if path == "mux":
         # The operator's existing CLI identity supplies the opt-in turn scope.
         # Legacy raw-session runs keep their current database/provider work.
         async with rt.sessionmaker() as db:
             tenant_id = await discover_tenant(db)
+            # Before any principal is minted: a session another tenant owns is
+            # refused, never reached by creating a CLI identity in that tenant.
+            await _refuse_foreign_session(db, session_id=session_id, tenant_id=tenant_id)
             principal = await get_or_create_cli_principal(
                 db, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
             )
@@ -236,6 +277,20 @@ async def run_conversation_observed(
     if (observation := current_outcome.get()) is not None:
         observation.finish(state=state)
     return 0 if state.error is None else 1
+
+
+async def _refuse_foreign_session(
+    db: AsyncSession, *, session_id: str, tenant_id: uuid.UUID
+) -> None:
+    """Raise `SessionTenantMismatch` when a tenant other than `tenant_id` owns the session.
+
+    A session nothing records is allowed: `daimon sessions create` makes
+    exactly that, an ephemeral session with no tenant stamp and no row
+    (docs/billing.md), and it is the session `daimon run` normally targets.
+    """
+    for owner in sorted(await session_owner_tenants(db, ma_session_id=session_id)):
+        if owner != tenant_id:
+            raise SessionTenantMismatch(session_id, owner)
 
 
 def _emit_failed_terminal(

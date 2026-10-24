@@ -159,7 +159,7 @@ def still_attached_message(
     if attachments.agents:
         shown = sorted({a.name for a in attachments.agents if viewer is None or a.tenant == viewer})
         hidden = sum(1 for a in attachments.agents if viewer is not None and a.tenant != viewer)
-        parts = list(shown) + ([f"{hidden} agent(s) in another workspace"] if hidden else [])
+        parts = list(shown) + ([f"{hidden} agent(s) elsewhere"] if hidden else [])
         places.append(f"agent(s) {', '.join(parts)}")
     if attachments.channels:
         shown_rules = [
@@ -168,7 +168,7 @@ def still_attached_message(
             if viewer is None or str(row.tenant_id) == viewer
         ]
         hidden = len(attachments.channels) - len(shown_rules)
-        parts = shown_rules + ([f"{hidden} channel(s) in another workspace"] if hidden else [])
+        parts = shown_rules + ([f"{hidden} channel(s) elsewhere"] if hidden else [])
         places.append(f"channel rule(s) on {', '.join(parts)}")
     steps: list[str] = []
     if attachments.agents:
@@ -177,7 +177,7 @@ def still_attached_message(
         steps.append(channel_detach)
     message = (
         f"skill {name!r} is still attached to {' and '.join(places)}; deleting it would "
-        "fail every turn that uses it. First " + "; ".join(steps) + "."
+        "break every conversation that uses it. First " + "; ".join(steps) + "."
     )
     if force_hint is not None:
         message += f" {force_hint}"

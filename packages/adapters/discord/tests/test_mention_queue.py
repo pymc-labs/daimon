@@ -259,7 +259,7 @@ async def test_a_full_tenant_queue_refuses_with_the_plain_notice(queued_bot: Dai
     await queued_bot.on_message(message)
 
     message.channel.send.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        "This server has too many chats in flight right now — try again in a moment."
+        "This server has too many chats at once right now — try again in a moment."
     )
 
 
@@ -644,6 +644,40 @@ async def test_handle_mention_catches_unexpected_exception_from_orchestrate(
     message.channel.send.assert_called_once()  # type: ignore[attr-defined]
     error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
     assert "rid:" not in error_text, "trace ids stay in logs"
+
+
+@pytest.mark.asyncio
+async def test_handle_mention_renders_a_neutral_provider_error_as_a_provider_card(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A mux ProviderError (e.g. Gemini's) is a provider failure, not an unexpected bug.
+
+    F2-G r12: a `permission (gcs_token_echo)` escaped as turn.failed.unexpected
+    and the user read "Something went wrong on our side".
+    """
+    from mux.errors import ProviderError
+    from structlog.testing import capture_logs
+
+    tenant_id = uuid.uuid4()
+    runtime = _make_runtime(tenant_id, db_session_factory)
+    bot = make_bot(runtime)
+
+    async def _raise_provider_error(*args: object, **kwargs: object) -> None:
+        raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
+
+    bot._orchestrate = _raise_provider_error  # type: ignore[method-assign]
+
+    message = _make_channel_message()
+
+    with capture_logs() as logs:
+        await bot._handle_mention(message, "123456", tenant_id)  # pyright: ignore[reportPrivateUsage]
+
+    events = [entry["event"] for entry in logs]
+    assert "turn.failed" in events and "turn.failed.unexpected" not in events
+    message.channel.send.assert_called_once()  # type: ignore[attr-defined]
+    error_text: str = message.channel.send.call_args[0][0]  # type: ignore[attr-defined]
+    assert error_text.startswith("Daimon's AI service couldn't accept the request.")
+    assert "gcs_token_echo" not in error_text
 
 
 @pytest.mark.asyncio

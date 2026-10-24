@@ -10,9 +10,11 @@ modules.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from daimon.testing.db import db_clean as db_clean
@@ -91,3 +93,20 @@ async def qa_shared_host(
     finally:
         await shared.engine.dispose()
         await cleanup(shared.manifest.path(root), database_url=database_url)
+
+
+_RUNNER_PATH = Path(__file__).resolve().parents[1] / "golden" / "runner.py"
+
+
+@pytest.fixture(scope="session")
+def golden_replays(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """Every golden scenario, replayed once per turn path and shared by all xdist workers."""
+    spec = importlib.util.spec_from_file_location("oracle_runner", _RUNNER_PATH)
+    assert spec is not None and spec.loader is not None
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    base = tmp_path_factory.getbasetemp()
+    shared = base.parent if os.environ.get("PYTEST_XDIST_WORKER") else base
+    replays = runner.SharedReplays(shared / "golden-replays")
+    replays.runner = runner
+    return replays

@@ -406,7 +406,7 @@ as a file on disk. Fetch it, then attach it to the workspace:
 ```
 # User (with sales.csv attached): "load this CSV and plot column A"
 # [attachment] `sales.csv` (1024 bytes), uploaded by the user with this message.
-#   Signed Discord CDN URL, expires ~24h: https://cdn.discordapp.com/... — curl it
+#   Signed URL, expires ~24h: https://... — curl it
 #   to disk, then read it. To use it in a notebook you publish, upload it via the
 #   create_attachment_upload_url tool.
 ```

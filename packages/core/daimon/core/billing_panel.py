@@ -421,8 +421,8 @@ def more_spenders(row_count: int, over_cap_count: int) -> int:
 
 
 def turns_phrase(turns: int) -> str:
-    """What a top-up buys, under its amount: `about 1,250 turns`."""
-    return f"about {turns:,} turns"
+    """What a top-up buys, under its amount: `about 1,250 answers`."""
+    return f"about {turns:,} answers"
 
 
 def estimate_turns(amount_usd: float, *, guild_spend: float, guild_turns: int) -> int:

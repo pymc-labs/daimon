@@ -13,8 +13,7 @@ from mux.contracts.actions import UserMessage
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef
 from mux.contracts.resources import Session
-from mux.drivers.openai.transport import object_json
-from mux.drivers.openai.turn import merge_history
+from mux.drivers.openai import merge_history, object_json
 from mux.errors import ScopeViolation
 from mux.state.operations import request_digest
 from pydantic import JsonValue

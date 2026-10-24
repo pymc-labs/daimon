@@ -65,27 +65,31 @@ from daimon.core.workspace_transfer import (
     as_prepared_replacement,
     transfer_workspace,
 )
-from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_sessions import (
+    FakeSessionsState,
+    make_fake_sessions_handler,
+    session_turn_sse,
+)
+from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     build_fake_anthropic,
     combine_handlers,
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
-from daimon.testing.ma_models import ma_model_usage
-from daimon.testing.ma_sessions import (
-    FakeSessionsState,
-    make_fake_sessions_handler,
-    session_turn_sse,
-)
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .turn_path_support import TurnIOSpy, TurnPath
+
 NOW = datetime(2026, 9, 13, 9, 0, 0, tzinfo=UTC)
 TRANSFER_ID = UUID("0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60")
 TENANT_ID = UUID("11111111-2222-3333-4444-555555555555")
+ACCOUNT_ID = UUID("66666666-7777-8888-9999-000000000000")
 DEADLINE = NOW + timedelta(seconds=180)
 TARBALL = b"\x1f\x8b\x08fake gzip bytes for the handoff bundle"
 
@@ -212,7 +216,10 @@ def _checkpoint_instruction(state: FakeSessionsState) -> str:
 
 
 async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    env_turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The happy path end to end: the checkpoint turn runs, its archive is
     found in the outputs listing, and the bytes are re-hosted as a standalone
@@ -233,6 +240,8 @@ async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=env_turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -263,10 +272,60 @@ async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
     assert [row.file_id for row in due] == [outcome.transfer_file_id], (
         "the re-hosted bundle must be queued for deletion, not left forever"
     )
+    turn_io_used.assert_ran(env_turn_path)
+
+
+async def test_a_checkpoint_without_the_callers_account_runs_on_legacy_and_is_refused_on_mux(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
+) -> None:
+    """The checkpoint executes the old session, so on mux it needs the account of
+    the caller who is authorized to; without one the turn is refused before it
+    sends anything. Legacy keeps running an accountless checkpoint."""
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    _script_checkpoint_reply(state, old_session, "ok")
+    state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
+
+    async def transfer() -> object:
+        return await transfer_workspace(
+            client,
+            db_session_factory,
+            old_session_id=old_session,
+            old_snapshot=_snapshot(),
+            tenant_id=TENANT_ID,
+            account_id=None,
+            turn_path=turn_path,
+            external_user_id="U123",
+            transfer_id=TRANSFER_ID,
+            markup=Decimal("1.0"),
+            checkpoint_deadline=DEADLINE,
+            from_agent_name="analysis-bot",
+            sleep=_no_sleep,
+            now=_now,
+            privacy=TurnPrivacy("test"),
+            tool_safety=OPEN_TOOL_SAFETY,
+            public_url=None,
+            platform="test",
+        )
+
+    if turn_path == "mux":
+        with pytest.raises(ScopeViolation, match="authorized scope"):
+            await transfer()
+        assert state.sent_batches == [], "a refused checkpoint must not reach the old session"
+        assert turn_io_used.classes == []
+    else:
+        assert isinstance(await transfer(), FullHandoff)
+        turn_io_used.assert_ran("legacy")
 
 
 async def test_transfer_records_a_repository_commit_it_could_not_prevent(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The checkpoint prompt forbids committing and echoes HEAD on both sides
     of the archive step. Two different hashes mean the session committed
@@ -292,6 +351,8 @@ async def test_transfer_records_a_repository_commit_it_could_not_prevent(
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -306,10 +367,13 @@ async def test_transfer_records_a_repository_commit_it_could_not_prevent(
 
     assert isinstance(outcome, FullHandoff)
     assert outcome.unpreserved == ("the agent committed to the repository during checkpoint",)
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_checkpoint_prompt_names_every_excluded_path(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The exclusions are the caller-isolation boundary: credential mounts, the agent's
     memory store and the platform skills belong to the destination, never to
@@ -333,6 +397,8 @@ async def test_checkpoint_prompt_names_every_excluded_path(
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -354,10 +420,14 @@ async def test_checkpoint_prompt_names_every_excluded_path(
     for excluded in CHECKPOINT_EXCLUDED_PATHS:
         assert excluded.strip("/") in prompt, f"{excluded} must be excluded from the archive"
     assert "NEVER RUN GIT COMMIT" in prompt, "the prompt must forbid changing the repository"
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_transfer_bills_the_checkpoint_at_the_old_model_as_a_checkpoint_debit(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The checkpoint is real model work and the tenant pays for it — at the
     model the OLD session froze, not whatever the agent points at now, and
@@ -366,6 +436,7 @@ async def test_transfer_bills_the_checkpoint_at_the_old_model_as_a_checkpoint_de
     from daimon.core._models import TenantLedger, UsageEvent
 
     tenant = await make_tenant(db_session, workspace_id="guild-checkpoint")
+    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -398,6 +469,8 @@ async def test_transfer_bills_the_checkpoint_at_the_old_model_as_a_checkpoint_de
         old_session_id=old_session,
         old_snapshot=_snapshot(model_id="claude-haiku-4-5"),
         tenant_id=tenant.id,
+        account_id=account.id,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -419,14 +492,16 @@ async def test_transfer_bills_the_checkpoint_at_the_old_model_as_a_checkpoint_de
     assert [row.reason for row in ledger] == ["checkpoint_debit"]
     assert ledger[0].delta_usd < 0, "a checkpoint is a debit"
 
-
-# ---------------------------------------------------------------------------
-# Rung 2: transcript only
-# ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # Rung 2: transcript only
+    # ---------------------------------------------------------------------------
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """A session with no `agent.message` produced nothing worth paying to
     save, and its one user message is already being replayed into the
@@ -443,6 +518,8 @@ async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -459,10 +536,13 @@ async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
     assert outcome.gap_reason == "not_worth_checkpointing"
     assert "hierarchical model" in outcome.transcript, "the user's own words still cross"
     assert state.sent_batches == [], "no events were sent, so no turn was billed"
+    assert turn_io_used.classes == [], "no checkpoint turn was driven, so no turn I/O was built"
 
 
 async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
     db_session_factory: async_sessionmaker[AsyncSession],
+    env_turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """An archived session still serves its event log but refuses new events
     with a 400. The conversation crosses; the files cannot."""
@@ -479,6 +559,8 @@ async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=env_turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -494,10 +576,13 @@ async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
     assert isinstance(outcome, TranscriptOnly)
     assert outcome.gap_reason == "session_dead"
     assert "hierarchical model" in outcome.transcript
+    turn_io_used.assert_ran(env_turn_path)
 
 
 async def test_transfer_degrades_to_transcript_when_the_session_vanishes_mid_transfer(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The 404 limb of a dead session: the log is read, then the session is
     deleted before the checkpoint turn's first event lands. Reading the log
@@ -530,6 +615,8 @@ async def test_transfer_degrades_to_transcript_when_the_session_vanishes_mid_tra
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -544,10 +631,14 @@ async def test_transfer_degrades_to_transcript_when_the_session_vanishes_mid_tra
 
     assert isinstance(outcome, TranscriptOnly)
     assert outcome.gap_reason == "session_dead"
+    turn_io_used.assert_matches(turn_path)
+    assert not state.sent_batches, "a vanished session must refuse before checkpoint send"
 
 
 async def test_transfer_degrades_to_transcript_when_the_bundle_is_oversize(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """A bundle bigger than the cap is never downloaded: the transfer would
     have to stream it through this process and back out again, and the cap
@@ -566,6 +657,8 @@ async def test_transfer_degrades_to_transcript_when_the_bundle_is_oversize(
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -585,10 +678,13 @@ async def test_transfer_degrades_to_transcript_when_the_bundle_is_oversize(
         "nothing will ever read a rejected bundle: the sweep skips handoff files and the "
         "delete queue is only fed after a successful upload, so the transfer deletes it here"
     )
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_transfer_degrades_to_transcript_when_the_checkpoint_wrote_no_archive(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The turn can end successfully and still produce nothing — the session
     talked instead of tarring. A reply is not evidence; the outputs listing
@@ -607,6 +703,8 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_wrote_no_arch
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -621,10 +719,13 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_wrote_no_arch
 
     assert isinstance(outcome, TranscriptOnly)
     assert outcome.gap_reason == "checkpoint_failed"
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_transfer_degrades_to_transcript_when_the_re_upload_fails(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The bundle is only useful once it is standalone. An upload that fails
     leaves the transfer with bytes it cannot mount, which is the transcript
@@ -662,6 +763,8 @@ async def test_transfer_degrades_to_transcript_when_the_re_upload_fails(
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -677,14 +780,16 @@ async def test_transfer_degrades_to_transcript_when_the_re_upload_fails(
     assert isinstance(outcome, TranscriptOnly)
     assert outcome.gap_reason == "upload_failed"
 
-
-# ---------------------------------------------------------------------------
-# Rung 3: history only
-# ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # Rung 3: history only
+    # ---------------------------------------------------------------------------
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_transfer_returns_history_only_when_the_session_log_is_gone(
     db_session_factory: async_sessionmaker[AsyncSession],
+    env_turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """A deleted session 404s on `events.list`, so there is no conversation to
     quote and no session to checkpoint. The platform thread is all the
@@ -702,6 +807,8 @@ async def test_transfer_returns_history_only_when_the_session_log_is_gone(
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=env_turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -717,10 +824,10 @@ async def test_transfer_returns_history_only_when_the_session_log_is_gone(
     assert outcome == HistoryOnly(gap_reason="events_unavailable")
     assert state.sent_batches == [], "a gone session is never billed"
 
-
-# ---------------------------------------------------------------------------
-# as_prepared_replacement
-# ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # as_prepared_replacement
+    # ---------------------------------------------------------------------------
+    assert turn_io_used.classes == [], "no checkpoint turn was driven, so no turn I/O was built"
 
 
 def test_as_prepared_replacement_mounts_the_bundle_and_keeps_the_transcript_out_of_system() -> None:
@@ -828,6 +935,8 @@ def test_as_prepared_replacement_says_only_the_thread_survived_for_history_only(
 
 async def test_transfer_leaves_uncommitted_work_behind_and_names_it_when_asked_to(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """`leave` is a person's answer, not a failure: the prompt stops capturing
     the changes, the checkout stays out of the archive, and the successor is
@@ -846,6 +955,8 @@ async def test_transfer_leaves_uncommitted_work_behind_and_names_it_when_asked_t
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -867,10 +978,13 @@ async def test_transfer_leaves_uncommitted_work_behind_and_names_it_when_asked_t
     assert outcome.unpreserved == (
         "uncommitted repository changes were left in the old checkout",
     ), "what did not cross has to be sayable, or the copy would overstate the handoff"
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_transfer_captures_uncommitted_work_when_the_answer_is_copy(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     state = FakeSessionsState(ma=FakeMAState())
     client = _client(state)
@@ -886,6 +1000,8 @@ async def test_transfer_captures_uncommitted_work_when_the_answer_is_copy(
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -904,10 +1020,13 @@ async def test_transfer_captures_uncommitted_work_when_the_answer_is_copy(
 
     assert isinstance(outcome, FullHandoff)
     assert outcome.unpreserved == (), "nothing was left behind, so nothing is claimed to be"
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_a_partial_archive_crosses_and_names_the_files_it_left_out(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """Over the cap, the checkpoint rebuilds the archive without its largest
     files. That archive is still a full handoff, and the successor is told
@@ -933,6 +1052,8 @@ async def test_a_partial_archive_crosses_and_names_the_files_it_left_out(
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -960,10 +1081,13 @@ async def test_a_partial_archive_crosses_and_names_the_files_it_left_out(
     assert f"Not carried over: {phrase}" in prepared.system_blocks[0]["text"], (
         "the successor reads the list where it reads everything else that is missing"
     )
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_a_left_out_listing_does_not_rescue_an_archive_still_over_the_cap(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """When even the rebuild is over the cap, the turn deletes it and says so:
     the transfer degrades to the transcript as before."""
@@ -984,6 +1108,8 @@ async def test_a_left_out_listing_does_not_rescue_an_archive_still_over_the_cap(
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -998,6 +1124,7 @@ async def test_a_left_out_listing_does_not_rescue_an_archive_still_over_the_cap(
 
     assert isinstance(outcome, TranscriptOnly), f"expected a transcript rung, got {outcome!r}"
     assert outcome.gap_reason == "bundle_oversize", "the rejection still wins"
+    turn_io_used.assert_ran(turn_path)
 
 
 def test_as_prepared_replacement_tells_the_successor_the_changes_were_left_behind() -> None:
@@ -1025,6 +1152,8 @@ def test_as_prepared_replacement_tells_the_successor_the_changes_were_left_behin
 
 async def test_checkpoint_rides_the_system_channel_on_a_model_that_takes_one(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The refusal this fixes was observed live on sonnet-5: delivered as an
     ordinary user message, the checkpoint reads as an instruction injected by
@@ -1046,6 +1175,8 @@ async def test_checkpoint_rides_the_system_channel_on_a_model_that_takes_one(
         old_session_id=old_session,
         old_snapshot=_snapshot(model_id="claude-sonnet-5"),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -1087,10 +1218,13 @@ async def test_checkpoint_rides_the_system_channel_on_a_model_that_takes_one(
         "the same prompt also rides the privileged channel where the model takes one"
     )
     assert "tar czf" in instruction
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_checkpoint_stays_a_user_message_on_a_model_without_system_support(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """haiku rejects the whole request when a `system.message` is present, so
     the checkpoint degrades to the ordinary channel — same bytes, worse
@@ -1109,6 +1243,8 @@ async def test_checkpoint_stays_a_user_message_on_a_model_without_system_support
         old_session_id=old_session,
         old_snapshot=_snapshot(model_id="claude-haiku-4-5"),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -1133,10 +1269,13 @@ async def test_checkpoint_stays_a_user_message_on_a_model_without_system_support
     assert "This instruction comes from the daimon host" in prompt, (
         "and the instruction itself follows them, unchanged"
     )
+    turn_io_used.assert_ran(turn_path)
 
 
 async def test_transfer_degrades_to_transcript_when_the_checkpoint_rejects_its_own_archive(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The prompt's own size guard deletes an over-cap archive and prints the
     size instead. That reply is the whole answer: there is nothing to poll for,
@@ -1154,6 +1293,8 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_rejects_its_o
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -1171,6 +1312,7 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_rejects_its_o
         "the size is why the files did not cross, and the copy has to say so"
     )
     assert "fit the hierarchical model" in outcome.transcript, "the conversation still crosses"
+    turn_io_used.assert_ran(turn_path)
 
 
 def test_the_mount_path_the_prompt_promises_is_the_one_the_successor_gets() -> None:
@@ -1217,6 +1359,8 @@ def test_the_reason_the_controls_carry_is_derived_from_the_destination() -> None
 
 async def test_the_checkpoint_controls_carry_the_reason_they_were_given(
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     """The reason is not a code: it is the one word the old session gets for
     why its workspace is going away, and it rides the controls the refusals
@@ -1235,6 +1379,8 @@ async def test_the_checkpoint_controls_carry_the_reason_they_were_given(
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
+        account_id=ACCOUNT_ID,
+        turn_path=turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -1257,6 +1403,7 @@ async def test_the_checkpoint_controls_carry_the_reason_they_were_given(
     assert controls["checkpoint"]["reason"] == CHECKPOINT_REASON_HANDOFF, (
         "the caller's reason is what the session is told, unmodified"
     )
+    turn_io_used.assert_ran(turn_path)
 
 
 def test_full_handoff_framing_names_the_normalised_mount_path() -> None:
@@ -1295,6 +1442,8 @@ async def test_full_transfer_accepts_partial_upload_reply_and_enqueues_cleanup(
     id_only: bool,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
 ) -> None:
     state = FakeSessionsState(ma=FakeMAState())
     base = make_fake_sessions_handler(state)
@@ -1330,6 +1479,8 @@ async def test_full_transfer_accepts_partial_upload_reply_and_enqueues_cleanup(
             old_session_id=old_session,
             old_snapshot=_snapshot(),
             tenant_id=TENANT_ID,
+            account_id=ACCOUNT_ID,
+            turn_path=turn_path,
             external_user_id="U123",
             transfer_id=TRANSFER_ID,
             markup=Decimal("1.0"),
@@ -1354,6 +1505,7 @@ async def test_full_transfer_accepts_partial_upload_reply_and_enqueues_cleanup(
     due = await list_due_pending_file_deletes(db_session, now=NOW + timedelta(days=8))
     assert [row.file_id for row in due] == [outcome.transfer_file_id]
     assert due[0].delete_after == NOW + timedelta(days=7)
+    turn_io_used.assert_ran(turn_path)
 
 
 @pytest.mark.parametrize(
@@ -1481,6 +1633,7 @@ async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
         tool_safety=policy,
         public_url=None,
         platform="discord",
+        account_id=ACCOUNT_ID,
     )
 
     answers = [
@@ -1593,6 +1746,7 @@ async def test_a_checkpoint_follows_its_conversations_rules_not_its_budget_chann
         public_url=None,
         platform="discord",
         channel_id="A",
+        account_id=ACCOUNT_ID,
     )
     await runner(
         old_session_id=old_session,
@@ -1649,6 +1803,7 @@ async def test_a_coordinator_session_is_never_checkpointed(
         tool_safety=ToolSafetyPolicy(enabled=True),
         public_url=None,
         platform="discord",
+        account_id=ACCOUNT_ID,
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -1719,6 +1874,7 @@ async def test_every_mcp_call_of_a_checkpoint_pauses_for_the_decider(
         tool_safety=ToolSafetyPolicy(enabled=enabled),
         public_url=public_url,
         platform="discord",
+        account_id=ACCOUNT_ID,
     )
 
     tools = state.sessions[old_session].agent.tools

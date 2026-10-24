@@ -38,11 +38,16 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.testing import build_fake_anthropic, list_response, ma_agent, ma_session
-from daimon.testing.ma import MARouter, sse_response
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    list_response,
+    sse_response,
+)
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
     ADMIN_TEAM,
@@ -217,9 +222,11 @@ async def test_handler_persona_matrix(
     evidence = json.dumps(result, ensure_ascii=False) + _sent_text(fake)
     refusals = (
         "not available for this account",
-        "Only an admin",
-        "Only a server admin",
-        "Only an admin can",
+        "Only an admin can change this",  # not the skills note's "can change them"
+        "Only an admin can create",
+        "Only an admin can top up",
+        "Only an admin can look up",
+        "Only an admin can mint",
         "Only the owner",
         "Ask in a channel that uses its own agents.",
     )
@@ -320,11 +327,21 @@ async def test_a_guest_owner_of_the_admin_team_is_an_admin(
 
 
 @pytest.mark.parametrize("requester", PERSONAS, ids=lambda persona: persona.name)
+@pytest.mark.usefixtures("instant_output_settle")
 async def test_tool_confirmation_only_requester_can_answer(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_clean: None,
+    db_committing_engine: AsyncEngine,
     requester: Persona,
 ) -> None:
-    """Mocked permission tests route a real pending card through ingress."""
+    """Mocked permission tests route a real pending card through ingress.
+
+    Its sessions get their own connections, as in production. On one shared
+    connection the external path's activity-notice lookup (an autobegun read,
+    rolled back on close) could own the transaction the decision batch's
+    operation joined, and roll that operation back before its claim (KeyError
+    "no operation ... :actions:...").
+    """
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     await provision_tenant(
         db_session_factory,
         platform="teams",

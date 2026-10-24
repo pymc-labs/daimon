@@ -7,11 +7,11 @@ from typing import Any, Literal
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, Scope
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.memory_stores import AnthropicMemoryStores, StoreCreate
 from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 scope = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="authorized"

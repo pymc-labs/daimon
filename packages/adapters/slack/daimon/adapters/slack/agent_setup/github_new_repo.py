@@ -121,7 +121,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         str(user.get("id") or ""),
     )
     client = await resolve_web_client(runtime, team_id=team_id)
-    if client is None or not await resolve_is_admin(client, user_id=user_id):
+    if client is None or not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
         return
     try:
         card_value: object = json.loads(str(action.get("value") or ""))
@@ -174,7 +174,9 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                     tenant_id=tenant_id,
                     platform="slack",
                     platform_user_id=user_id,
-                    verified_tenant_admin=await resolve_is_admin(client, user_id=user_id),
+                    verified_tenant_admin=await resolve_is_admin(
+                        client, user_id=user_id, host_team_id=team_id
+                    ),
                 )
                 url = await connect_link(
                     session,
@@ -182,7 +184,9 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                     tenant_id=tenant_id,
                     platform="slack",
                     platform_user_id=user_id,
-                    verified_tenant_admin=await resolve_is_admin(client, user_id=user_id),
+                    verified_tenant_admin=await resolve_is_admin(
+                        client, user_id=user_id, host_team_id=team_id
+                    ),
                     workspace_label=str(team.get("name") or "") or None,
                     requester_label=str(user.get("name") or "") or None,
                     origin_parent_channel_id=channel_id,

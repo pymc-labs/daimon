@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import anthropic
@@ -32,14 +33,16 @@ from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, TurnSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn import run_turn
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import TurnState
-from daimon.testing.ma import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
+from daimon.testing.turn_leg import MUX_LEG, leg_scope, turn_leg
+from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # --- Stream scripts --------------------------------------------------------
@@ -168,8 +171,13 @@ class FakeEventsResource:
     streams: list[_FakeEventStream] = field(default_factory=list["_FakeEventStream"])
 
     async def stream(
-        self, *, session_id: str, timeout: float | httpx.Timeout | anthropic.NotGiven | None = None
+        self,
+        *,
+        session_id: str,
+        timeout: float | httpx.Timeout | anthropic.NotGiven | None = None,
+        event_deltas: object = None,
     ) -> _FakeEventStream:
+        del event_deltas  # the mux codec asks for message previews; the scripts carry full events
         if not self.stream_scripts:
             raise AssertionError("FakeEventsResource: no stream_scripts left")
         script = self.stream_scripts.pop(0)
@@ -198,8 +206,10 @@ class FakeEventsResource:
             events.reverse()
         return _FakeEventList(events)
 
-    async def send(self, session_id: str, *, events: list[dict[str, Any]]) -> None:
+    async def send(self, session_id: str, *, events: list[dict[str, Any]]) -> SimpleNamespace:
         self.sent_events.append((session_id, list(events)))
+        # The SDK returns a `SendEventsResponse`; the mux codec reads `.data` (None: queued).
+        return SimpleNamespace(data=None)
 
 
 class _FakeEventStream:
@@ -336,6 +346,20 @@ class FakeAnthropic:
         self.options.append(options)
         return self
 
+    def with_middleware(self, *middleware: object) -> FakeAnthropic:
+        """No HTTP is sent by this fake, so redirect middleware has no work."""
+        return self
+
+
+async def run_turn_on_leg(**kwargs: Any) -> TurnState:  # noqa: ANN401 - forwards run_turn's keywords
+    """`run_turn` with the selected leg's path and authorized scope, for direct driver tests."""
+    from daimon.core.turn.privacy import TurnPrivacy
+
+    kwargs.setdefault("privacy", TurnPrivacy("test"))
+    kwargs.setdefault("path", turn_leg().path)
+    kwargs.setdefault("scope", leg_scope())
+    return await run_turn(**kwargs)
+
 
 # --- Error constructors (SDK exception shape) -----------------------------
 
@@ -413,8 +437,19 @@ def assert_lifecycle(lc: TurnLifecycle) -> None:
     _ = lc  # runtime no-op; compile-time structural check
 
 
-def deps_for(client: object = None, sm: async_sessionmaker[AsyncSession] | None = None) -> TurnDeps:
-    """Build the real turn bundle; tests replace only dependencies they exercise."""
+def deps_for(
+    client: object = None,
+    sm: async_sessionmaker[AsyncSession] | None = None,
+    *,
+    leg: TurnSettings | None = None,
+) -> TurnDeps:
+    """Build the real turn bundle; tests replace only dependencies they exercise.
+
+    The turn path and backend flags come from `leg`, by default the leg the
+    run selected through the environment (`daimon.testing.turn_leg`). A test
+    that needs one path passes `leg=MUX_LEG` or `leg=LEGACY_LEG`.
+    """
+    selected = leg if leg is not None else turn_leg()
 
     return TurnDeps(
         anthropic=cast(AsyncAnthropic, client),
@@ -431,5 +466,19 @@ def deps_for(client: object = None, sm: async_sessionmaker[AsyncSession] | None 
         github_app_private_key=None,
         public_url=None,
         tool_safety=OPEN_TOOL_SAFETY,
-        turn_path="mux",
+        turn_path=selected.path,
+        channel_backends=selected.channel_backends,
+        agent_backends=selected.agent_backends,
     )
+
+
+def deps_for_pinned_mux(
+    client: object = None, sm: async_sessionmaker[AsyncSession] | None = None
+) -> TurnDeps:
+    """`deps_for` on the mux path with channel backends on, whatever leg the run selected.
+
+    For tests of behaviour that exists only on mux (non-Anthropic backends,
+    admission of a configured channel backend). Naming it makes the pin visible;
+    tests that should hold on both paths use `deps_for`.
+    """
+    return deps_for(client, sm, leg=MUX_LEG)

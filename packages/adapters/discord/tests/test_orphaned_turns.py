@@ -45,10 +45,11 @@ from daimon.core.stores.turn_card_intents import (
     list_recoverable_turn_card_intents,
     record_turn_card_message,
 )
-from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
@@ -1040,8 +1041,8 @@ async def test_restart_delivers_a_completed_current_turn_in_the_existing_card(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.testing import MARouter, list_response
     from daimon.testing.turn_router import turn_events
+    from mux.testing.drivers.anthropic.ma import MARouter, list_response
 
     await _make_orphan(db_session, ma_session_id="sesn_completed")
     router = MARouter()
@@ -1113,8 +1114,8 @@ async def test_completed_previous_turn_is_not_delivered_for_an_unsent_orphan(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.testing import MARouter, list_response
     from daimon.testing.turn_router import turn_events
+    from mux.testing.drivers.anthropic.ma import MARouter, list_response
 
     await _make_orphan(db_session, ma_session_id="sesn_old_answer")
     router = MARouter()

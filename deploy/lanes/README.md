@@ -120,6 +120,14 @@ even on an empty database. Explicit `stamp` and `ensure_version` bookkeeping
 retain normal Alembic behavior on empty, main and canonical databases; stored
 legacy preview stamps must be upgraded before bookkeeping.
 
+A database carrying the historical `0122_recruitment` stamp already has the
+Preview schema. Online `alembic upgrade head` installs the missing main revisions
+and translates that stamp to `0145_recruitment` in the same transaction, without
+replaying Preview migrations or their retained-output cleanup. The repair builds
+the usage-observation tenant index without `CONCURRENTLY` so its DDL and stamp
+remain atomic. Ordinary main stamps follow the canonical chain normally. Schema
+downgrades across unsupported migrations remain unsupported.
+
 The serializing deployment callers are:
 
 - **Preview/fleet lanes:** the `lane` job in
@@ -147,7 +155,7 @@ Set `DAIMON_SIDECAR_PUBLIC_HOST` to a separate preview hostname. The default
 published TLS port. The proxy image is pinned by digest; the application uses
 `DAIMON_LANE_IMAGE` with `DAIMON_LANE_SHA`, as for other lane services.
 
-Migration `0119_watches` follows `0118_lead_intake`. Keep both
+Migration `0142_watches` follows `0141_lead_intake`. Keep both
 `DAIMON_WATCHES__ENABLED` and the core-owned database `global` gate off until
 release review. The sidecar cannot change either gate. Disabling the durable gate
 also cancels queued wakes; stop controls remain available with producers off.
@@ -167,7 +175,7 @@ the compatible-reader rollback floor. Do not enable request/header/body logs.
 
 #### Polling and owner management
 
-Migration `0120_watch_polling` follows `0119_watches`. The private `watch-executor`
+Migration `0143_watch_polling` follows `0142_watches`. The private `watch-executor`
 service listens on port 8767 without published ports or proxy routes; the public
 MCP app has no poll route. Compose supplies the same private executor secret to
 sidecar and executor. Both producer gates default off.

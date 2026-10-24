@@ -29,14 +29,15 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.stores.domain import Role
-from daimon.testing.ma_models import ma_agent, ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.ma_models import ma_agent
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic.credential_schemas import CredentialCreate
 from mux.drivers.anthropic.resources._secrets import SecretResolver
 from mux.drivers.anthropic.resources.vaults import Vaults
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import BaseModel, PostgresDsn, SecretStr
 from starlette.applications import Starlette
 from starlette.routing import Route

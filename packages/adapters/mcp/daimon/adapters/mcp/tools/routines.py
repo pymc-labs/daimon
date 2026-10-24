@@ -22,9 +22,11 @@ import discord
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import CallerView, load_isolation_view
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -52,7 +54,7 @@ from daimon.adapters.mcp.tools.teams._directory import (
     require_client,
     split_thread,
 )
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -103,6 +105,27 @@ class DeleteResult(BaseModel):
 def _routine_for_reader(auth: AuthIdentity, row: RoutineRow) -> RoutineRow:
     """Admins can manage metadata without reading a personal-memory result."""
     return routine_for_reader(row, user_id=auth.platform_user_id)
+
+
+def _require_routines_allowed(auth: AuthIdentity) -> None:
+    """A held credential or a client saves, changes and reads no routine.
+
+    Decided before any policy lookup, so no rule or empty policy relaxes it
+    (`authorize(SAVE_ROUTINE)`).
+    """
+    decision = authorize(
+        OPEN_ACCESS_POLICY,
+        subject=mcp_subject(auth),
+        action=Action.SAVE_ROUTINE,
+        surface=Surface.ROUTINE,
+        hold=auth.hold,
+    )
+    if not decision and decision.reason in ("outside_hold", "client_requester"):
+        record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
+        raise ToolError(
+            "this conversation is held to the channel it runs in, so it can't use routines. "
+            "Tell the caller. Do not retry."
+        )
 
 
 def _require_platform_user_id(auth: AuthIdentity) -> str:
@@ -255,7 +278,7 @@ async def _resolve_slack_destination(
                 raise ToolError(f"no thread {thread_ts} in {channel_id}")
     except SlackApiError as err:
         raise ToolError(
-            f"Slack could not find {destination_id} in this workspace "
+            f"Slack could not find {destination_id} here "
             f"({cast('dict[str, object]', err.response.data).get('error')}). Nothing was saved."  # pyright: ignore[reportUnknownMemberType]
         ) from err
     return None, None
@@ -317,7 +340,7 @@ async def _check_destination(
     """
     if kind == "dm":
         if auth.platform != "discord":
-            raise ToolError("DM routines are supported only on Discord")
+            raise ToolError("DM routines are not supported here")
         owner = _require_platform_user_id(auth)
         if destination_id is not None and destination_id != owner:
             raise ToolError("a DM routine can deliver only to its authenticated owner")
@@ -354,13 +377,14 @@ async def _check_destination(
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
         except AccessPolicyUnreadable as err:
             raise ToolError(
-                "the workspace access policy could not be read; no destination was saved"
+                "the access settings here could not be read; no destination was saved"
             ) from err
     if not authorize(
         policy,
-        subject=Subject(),
+        subject=mcp_subject(auth),
         action=Action.POST,
         surface=Surface.ROUTINE,
+        hold=auth.hold,
         place=Place(
             channel_id=channel_id, parent_channel_id=parent_channel_id, category_id=category_id
         ),
@@ -382,12 +406,13 @@ async def _load_policy_for_save(session: AsyncSession, *, tenant_id: UUID) -> Te
     try:
         return await load_access_policy(session, tenant_id=tenant_id)
     except AccessPolicyUnreadable as err:
-        raise ToolError("the workspace access policy could not be read; nothing was saved") from err
+        raise ToolError("the access settings here could not be read; nothing was saved") from err
 
 
 def _check_agent_pin(
     policy: TenantAccessPolicy,
     *,
+    auth: AuthIdentity,
     platform: str,
     agent_name: str,
     agent: AgentRef,
@@ -432,12 +457,13 @@ def _check_agent_pin(
             target_channel_id = split_thread(destination_id)[0]
     decision = authorize(
         policy,
-        subject=Subject(),
+        subject=mcp_subject(auth),
         action=Action.SAVE_ROUTINE,
         surface=Surface.ROUTINE,
         agent=agent,
         place=Place(channel_id=target_channel_id, parent_channel_id=destination_channel_id),
         origin=origin,
+        hold=auth.hold,
     )
     if not decision:
         record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
@@ -511,7 +537,7 @@ async def _require_agent_in_scope(
     raise ToolError(
         f"{agent_name} is neither the agent you are talking to nor the one the destination "
         "channel answers with, and a routine runs with its agent's repository, keys and "
-        "connectors, so only a workspace or server admin can schedule it. Tell the caller "
+        f"connectors, so only {admin_noun(auth.platform)} can schedule it. Tell the caller "
         "who can. Nothing was saved."
     )
 
@@ -530,6 +556,7 @@ async def _create_routine_impl(
     destination_id: str | None = None,
     origin_context_id: str | None = None,
 ) -> RoutineRow:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
     next_fire_at = _compute_next_fire_at(cron_expr, timezone)
@@ -636,9 +663,10 @@ async def _create_routine_impl(
         name=agent_name,
     )
     if match is None or not caller.sees_agent(match):
-        raise ToolError(f"no agent named {agent_name!r} found for this tenant")
+        raise ToolError(f"no agent named {agent_name!r} found here")
     _check_agent_pin(
         policy,
+        auth=auth,
         platform=auth.platform or "",
         agent_name=agent_name,
         agent=build_agent_ref(match.name, match.metadata, agent_name),
@@ -682,6 +710,7 @@ async def _list_routines_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
 ) -> list[RoutineRow]:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
@@ -701,6 +730,7 @@ async def _get_routine_impl(
     *,
     routine_id: UUID,
 ) -> RoutineRow:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session:
         row = await routines_store.get_routine(
@@ -730,6 +760,7 @@ async def _update_routine_impl(
     destination_id: str | None = None,
     clear_destination: bool = False,
 ) -> RoutineRow:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     if clear_destination and (destination_kind is not None or destination_id is not None):
         raise ToolError("clear_destination cannot be combined with a new destination")
@@ -761,9 +792,7 @@ async def _update_routine_impl(
         else:
             destination_channel_id = routine_destination_channel(row)
         if not caller.sees(agent_name or row.agent_name):
-            raise ToolError(
-                f"no agent named {agent_name or row.agent_name!r} found for this tenant"
-            )
+            raise ToolError(f"no agent named {agent_name or row.agent_name!r} found here")
         if clear_destination:
             effective_kind, effective_id = None, None
         elif destination_kind is not None:
@@ -790,7 +819,7 @@ async def _update_routine_impl(
                 name=agent_name,
             )
             if match is None:
-                raise ToolError(f"no agent named {agent_name!r} found for this tenant")
+                raise ToolError(f"no agent named {agent_name!r} found here")
             new_agent_id = match.id
         if any_agent_rules(update_policy) or any_own_readers(update_policy):
             # Check the agent the routine will run, by all its names.
@@ -808,6 +837,7 @@ async def _update_routine_impl(
             effective_name = agent_name if new_agent_id is not None else row.agent_name
             _check_agent_pin(
                 update_policy,
+                auth=auth,
                 platform=auth.platform or "",
                 agent_name=effective_name or effective_agent.name,
                 agent=build_agent_ref(
@@ -861,6 +891,7 @@ async def _delete_routine_impl(
     *,
     routine_id: UUID,
 ) -> DeleteResult:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
@@ -885,7 +916,7 @@ _SANDBOX_PERSON_ONLY = (
 _SANDBOX_ADMIN_ONLY = (
     "A routine's sandbox tools are changed by the operator with "
     "`daimon routines sandbox-tools`, the supported way today. This tool accepts "
-    "only a live Discord server admin's own token, which no Daimon surface issues "
+    "only a live platform admin's own token, which no Daimon surface issues "
     "yet; the routine's owner cannot. Do not retry."
 )
 
@@ -1006,11 +1037,11 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         optionally name where each run's result goes. Channel/thread runs are
         told where; if the agent does not post there itself, daimon posts the end
         of its final reply there. Owner-DM runs queue their successful final reply
-        privately for the owner. On Slack a thread is ``<channel id>:<thread
-        ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
-        are in. Discord ``dm`` delivers only to the authenticated owner; omit
-        ``destination_id`` to derive their user ID. Slack and Teams reject DM
-        destinations. Delivery status and failure reasons are returned by list/get.
+        privately for the owner. Use the canonical thread identifier returned by
+        this platform's read tools, in a channel you are in. Where DM delivery is
+        supported, ``dm`` delivers only to the authenticated owner; omit
+        ``destination_id`` to derive their user ID. Unsupported destinations are
+        refused. Delivery status and failure reasons are returned by list/get.
         A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
         spend counts toward the destination channel's budget, or without a
@@ -1085,7 +1116,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_id: str | None = None,
         clear_destination: bool = False,
     ) -> RoutineRow:
-        """PATCH-update a routine, including owner-only Discord DM delivery.
+        """PATCH-update a routine, including owner-only DM delivery where supported.
 
         Only provided fields are changed. Recruitment-reserved sources/destinations
         and unknown legacy provenance in configured tenants return not-found.
@@ -1130,8 +1161,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         for one routine's own scheduled runs. Admin only.
 
         They are off for every unattended run by default. The supported way today is the
-        operator's ``daimon routines sandbox-tools``. This tool accepts only a live Discord
-        server admin's own token, re-checked against the server on each call; no Daimon
+        operator's ``daimon routines sandbox-tools``. This tool accepts only a live platform
+        admin's own token, re-checked against the server on each call; no Daimon
         surface issues such a token yet, and the tool is kept for a future admin surface.
         Owning the routine is not enough, and agent keys, agents in a conversation, operator
         tokens, legacy tokens and other platforms are refused. DM routines cannot be opted

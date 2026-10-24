@@ -7,12 +7,14 @@ Pure module -- no I/O, no clock reads of its own. `turn_deadline` and
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 
 from daimon.core.errors import TurnError
 
 __all__ = [
     "TURN_CEILING_S",
+    "current_turn_deadline",
     "turn_deadline",
     "remaining_s",
     "CEILING_MESSAGE",
@@ -38,6 +40,12 @@ __all__ = [
 # kill exists. That is a backstop value, not a liveness signal, so the flat
 # deadline is still the right shape.
 TURN_CEILING_S: float = 45.0 * 60.0
+
+#: The running turn's deadline, for anything inside it that must not promise a
+#: time past it (an approval card's expiry). None outside a turn.
+current_turn_deadline: ContextVar[datetime | None] = ContextVar(
+    "current_turn_deadline", default=None
+)
 
 # The clamp floor for remaining_s -- see its docstring for why a floor exists.
 _MIN_REMAINING_S: float = 0.001
@@ -75,9 +83,7 @@ def remaining_s(deadline: datetime, *, now: datetime, refuse_expired: bool = Fal
 # which truncate to `str(err)[:100]`. `TurnError.__str__` is `f"{kind}: {msg}"`,
 # so this message must leave room for the "ceiling: " prefix -- see
 # `ceiling_error` and the length invariant pinned in test_ceiling.py.
-CEILING_MESSAGE: str = (
-    "this turn stopped responding and was abandoned — start fresh with a new message"
-)
+CEILING_MESSAGE: str = "this reply stopped responding and was dropped — send a new message"
 
 
 def ceiling_error() -> TurnError:

@@ -23,6 +23,8 @@ dependencies = [
     "imageio-ffmpeg>=0.6",
     "slack-sdk>=3.42,<4",
     "py-key-value-aio[postgresql]>=0.4.4",
+    "azure-identity>=1.25,<2",
+    "azure-storage-blob>=12.27,<13",
 ]
 
 [project.optional-dependencies]

@@ -37,9 +37,9 @@ from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.agent_mcp_credentials import list_credentials
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Platform
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

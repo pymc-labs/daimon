@@ -33,11 +33,11 @@ from daimon.core.stores import (
 )
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.isolated_sdk import build_async_anthropic
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ChannelRef, Provider, Scope
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.isolated_sdk import build_async_anthropic
 from pydantic import BaseModel, ConfigDict, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

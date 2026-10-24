@@ -517,8 +517,9 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.prepare import PreparedTurn
     from daimon.core.turn.state import TurnState
-    from daimon.testing import ma_agent, ma_environment, ma_session
+    from daimon.testing import ma_agent, ma_environment
     from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
+    from mux.testing.drivers.anthropic.ma import ma_session
 
     key = await deliver(db_session_factory, event(registered))
     async with db_session_factory.begin() as db:
@@ -543,7 +544,8 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         session_account_id=registered.owner_account_id,
         _record=AsyncMock(),
     )
-    from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+    from daimon.testing.ma import MARouter
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 
     router = MARouter()
     router.add("GET", r"/v1/sessions/session-bound/events", lambda *_: list_response([]))
@@ -748,6 +750,8 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         responder_name="analyst",
         role=Role.USER,
         attended=False,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         if ending in ("normal", "dead_session") or ending.startswith("spend_"):
             outcome = await call
@@ -919,7 +923,8 @@ async def test_watch_send_requires_current_unattended_session_grant(
     from daimon.core.turn.admission import Admission
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn_origin import execution_origin, turn_origin
-    from daimon.testing import ma_agent, ma_environment, ma_session
+    from daimon.testing import ma_agent, ma_environment
+    from mux.testing.drivers.anthropic.ma import ma_session
 
     wake_key = await deliver(db_session_factory, event(registered))
     grant = str(uuid.uuid4())
@@ -964,6 +969,8 @@ async def test_watch_send_requires_current_unattended_session_grant(
         responder_name="analyst",
         role=Role.USER,
         attended=grant_case == "attended",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         async with db_session_factory.begin() as db:
             await bind_origin_session(

@@ -69,6 +69,8 @@ from daimon.core.turn.unattended_capabilities import (
     protected_tools,
 )
 from mux.contracts.ids import Scope
+from mux.contracts.resources import AgentSpec
+from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -76,12 +78,58 @@ if TYPE_CHECKING:
     from daimon.core.turn.deps import TurnDeps
 
 
+def require_native_unattended_capabilities(spec: AgentSpec | None, *, profile_id: str) -> None:
+    """Refuse unreviewed or automatic native sandbox/custom tools before send.
+
+    Selfhosted inspects every call at its host boundary and Managed Agents
+    rewrites its session. Other providers must expose a reviewed native
+    target; their automatic tools cannot be stopped by refusing a pause.
+    """
+    if get_profile(profile_id).implicit_execution:
+        # Hosted OpenAI bash is implicit in its environment, so an empty
+        # agent.tools readback does not prove that execution is disabled.
+        raise AdmissionDenied(
+            reason="backend_unsupported",
+            detail="Automatic sandbox or custom tools cannot run without someone watching.",
+        )
+    if spec is None:
+        raise AdmissionDenied(
+            reason="backend_unsupported",
+            detail="The tool configuration cannot be checked for a reply nobody is watching.",
+        )
+    if any(
+        tool.kind in {"builtin", "custom"} and tool.permission == "auto"
+        for tool in spec.tools or ()
+    ):
+        raise AdmissionDenied(
+            reason="backend_unsupported",
+            detail="Automatic sandbox or custom tools cannot run without someone watching.",
+        )
+    if (
+        any(tool.permission == "auto" for tool in spec.tools or ())
+        or spec.mcp_servers
+        or spec.extensions
+        or spec.model.options
+    ):
+        # These runtimes have no host inspection of automatic MCP calls or
+        # provider-specific capabilities. Refusing their confirmation pauses
+        # would not prevent an automatic call from executing.
+        raise AdmissionDenied(
+            reason="backend_unsupported",
+            detail=(
+                "This model provider cannot inspect these tools before running "
+                "without someone watching."
+            ),
+        )
+
+
 async def refuse_ungated_confirmation(call: ToolCall) -> ToolConfirmationResult:
     """Refuse a prepared unattended call whose runtime cannot refresh its gate."""
     return ToolConfirmationResult(
         allow=False,
         deny_message=(
-            f"Refused {call.key}: this runtime cannot refresh the session's tool safety "
+            f"Refused {call.key}: this model provider cannot refresh the conversation's "
+            "tool safety "
             "gate before unattended confirmations. The tool call did not run."
         ),
     )

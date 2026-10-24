@@ -15,7 +15,7 @@ from daimon.core.stores.domain import (
     CliPrincipalRow,
     PlatformPrincipalRow,
 )
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
@@ -70,6 +70,21 @@ async def get_or_create_platform_principal(
     session.add(principal)
     await session.flush()
     return PlatformPrincipalRow.model_validate(principal)
+
+
+async def mark_principal_foreign(
+    session: AsyncSession, *, principal_id: uuid.UUID, home_id: str
+) -> None:
+    """Record the home organisation of a principal verified to belong to another one.
+
+    Sticky: set only while unset, and never cleared by code, so a later lookup
+    that cannot tell cannot turn a client back into a member.
+    """
+    await session.execute(
+        update(PlatformPrincipal)
+        .where(PlatformPrincipal.id == principal_id, PlatformPrincipal.foreign_home_id.is_(None))
+        .values(foreign_home_id=home_id)
+    )
 
 
 async def find_platform_principal(

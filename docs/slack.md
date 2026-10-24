@@ -37,10 +37,16 @@ has a personal memory with each agent, mounted only in their own sessions
 cannot read it. `/memory` shows the shared memory, `/memory mine` shows your
 own, and `/memory forget-mine` clears yours after you confirm with the code it
 gives you. Every reply is ephemeral, to the person who ran the command, and no
-argument names another member. See
+argument names another member. In a channel shared with another organisation the
+agent uses that channel's own memory instead, which everyone in the channel sees: no
+shared or personal memory is mounted there, `/memory` shows the channel's, and
+`/memory mine` and `/memory forget-mine` say personal memory is not used there. See
 [architecture](architecture.md#shared-and-personal-memory).
 
 ### Session output files
+
+Self-hosted turns do not run the automatic Managed Agents file sweep. Deliver
+files through Daimon's MCP message tools using staged file handles.
 
 Page-watch reports require live authorization at each post, edit and file-upload
 step. A refused check stops subsequent delivery, including terminal cleanup.
@@ -163,9 +169,15 @@ the requester can approve or deny. Each call gets its own card. Answered,
 expired and stopped cards lose
 their buttons.
 
+After install, the success page says to invite Daimon with `/invite @daimon`
+and mention it there, and on a first install the installer gets the same short
+welcome as a DM. A
+DM to Daimon when private chats are off, or before one has been started from a
+channel with `/dm-me`, gets a one-time reply saying how to reach it.
+
 By default Daimon reads only channels the bot is invited to. Members can
-additionally **connect their Slack account** (Daimon nudges them once, and
-offers a link whenever it hits a channel it can't read). A connected member's
+additionally **connect their Slack account** (Daimon offers a link whenever it
+hits a channel it can't read; it doesn't ask before that). A connected member's
 reads run with *their* Slack permissions: any channel or DM they can see, no
 bot invite needed, plus message search (results that come from a DM are only
 surfaced when you ask in a DM with Daimon).
@@ -185,7 +197,7 @@ Trust model notes for operators:
   bot. The one exception is direct-message content (DMs and group DMs), which
   Daimon will only surface in a DM with you, never in a channel.
 
-`/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Manage agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and Details also offers **🧰 Use from your coding tools** to connect that agent over MCP. The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
+`/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Set up agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and for an admin Details also offers **🧰 Use from your coding tools** to connect that agent over MCP and **➕ Add skill** (members see neither, since both are admin changes). The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
 
 `/github connect` shows a workspace admin an ephemeral **Connect GitHub** button
 in the channel or thread where they asked. Use `/github connect AgentName` to
@@ -262,7 +274,8 @@ adding another.
 
 Who may vote: anyone who could start a turn there (the invoker allowlist and the
 channel's rules), checked when the vote is recorded and again on send. Anyone else is
-told they can't, and nothing is recorded. External Slack Connect members are refused.
+told they can't, and nothing is recorded. A member of another workspace
+(Slack Connect) can vote and send the form only on an answer to their own request.
 The text is stored on the feedback row. Logs carry the row id and the reason
 codes. Deleting your data with `/privacy` removes the row.
 
@@ -321,6 +334,46 @@ Discord, and link previews are off, so the link shows nothing to anyone who can'
 already open the channel. When the answer is in a channel or thread with limited
 readers, the form
 tells the person their note leaves the channel, and the post says to answer there.
+
+### Slack Connect (shared channels)
+
+There is no setting. When Daimon is in a channel shared with another workspace,
+people from that workspace can mention it. On every turn Daimon asks Slack
+(`users.info`) which workspace the person belongs to; only a verified member of
+the workspace that installed the app counts as one of its own.
+
+People from the other workspace are plain users, held to the channel they asked
+in and its threads. They can stop their own turn, answer the approval card of
+their own turn, and rate an answer to their own request. They can't be
+administrators, use `/dm-me` or private conversations, create agents, set keys,
+read the workspace directory, or use routines, billing, privacy, agent setup,
+GitHub, browser sign-in or site access, **Ask a person** or thread hand-over.
+Clicking one of those controls, or sending one of those forms, gets "That's only
+for people at <your workspace>." and does nothing. "Always allow" on an approval
+card stays admin-only.
+
+Everything in a shared channel stays in it: every turn there is held to that
+channel, your own members' turns included. Those turns have no admin tools, so
+set agents up from an internal channel or a DM.
+
+Chat tools that read and post are bound to the channel. That does not limit
+the agent's sandbox or a third-party connector, which can still reach whatever
+the agent can reach. The person who picks the agent for a shared channel decides
+what it can reach, so choose an agent whose connectors and repos are fine for the
+other workspace to use.
+
+A channel counts as shared when `conversations.info` reports `is_ext_shared`
+(Slack's other flag, `is_shared`, also covers sharing between your own
+workspaces, so it is not used). The answer is cached for ten minutes per channel;
+if Slack can't be asked, Daimon falls back to what it has recorded and to who is
+asking. The `channel_shared` event records the channel at once. A channel stays
+recorded after `channel_unshared`, so its turns stay held.
+
+If both organisations install Daimon, the workspace whose installation receives
+the event answers.
+
+Subscribe the app to `channel_shared`, `channel_unshared` and
+`member_joined_channel`: apply `docs/slack-app-manifest.yaml` and reinstall.
 
 ### Private conversations
 

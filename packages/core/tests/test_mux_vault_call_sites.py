@@ -26,7 +26,7 @@ from daimon.core.mcp_vault import (
 )
 from daimon.core.mux_backend import resource_scope
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 NOW = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
 STAMP = NOW.isoformat()

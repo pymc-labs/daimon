@@ -24,7 +24,7 @@ def render_degraded_notice(failures: Sequence[McpServerFailure]) -> str | None:
     if not failures:
         return None
     lines = [
-        f"⚠️ `{f.server_name}` was unavailable this turn: it {_REASON[f.error_type]}. "
+        f"⚠️ `{f.server_name}` was unavailable for this reply: it {_REASON[f.error_type]}. "
         "Ask to reconnect it, or to disconnect it."
         for f in failures
     ]
@@ -32,7 +32,7 @@ def render_degraded_notice(failures: Sequence[McpServerFailure]) -> str | None:
 
 
 def degraded_failure_message(failures: Sequence[McpServerFailure]) -> str:
-    """The error text for a turn that produced nothing after MCP failures."""
+    """The error text for a reply that came to nothing after connection failures."""
     names = ", ".join(f"'{f.server_name}'" for f in failures)
     detail = failures[-1].message
-    return f"MCP server {names} failed and the turn produced no reply: {detail}"
+    return f"Connection {names} failed, so there is no reply: {detail}"

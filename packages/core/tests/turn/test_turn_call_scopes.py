@@ -13,12 +13,12 @@ from daimon.core.errors import TurnError
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.io import turn_io
 from daimon.core.turn.run import _turn_port_kwargs  # pyright: ignore[reportPrivateUsage]
-from daimon.testing.ma import list_response, send_events_response
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic.transport import LegacyTurnTransport
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma import list_response, send_events_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 from .conftest import make_status_idle
 

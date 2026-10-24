@@ -21,14 +21,14 @@ def _contract() -> dict:
     return next(c for c in contracts if c["name"] == NAME)
 
 
-def test_mux_source_scope_covers_initializer_and_all_non_conformance_siblings() -> None:
+def test_mux_source_scope_covers_initializer_and_all_non_testing_siblings() -> None:
     contract = _contract()
     package = ROOT / "packages/mux/mux"
     siblings = {
         "mux." + (p.stem if p.is_file() else p.name)
         for p in package.iterdir()
         if (p.suffix == ".py" or (p.is_dir() and (p / "__init__.py").exists()))
-        and p.stem not in {"__init__", "conformance"}
+        and p.stem not in {"__init__", "testing"}
     }
     listed = {m for m in contract["source_modules"] if m.startswith("mux.") and "*" not in m}
     assert listed == siblings
@@ -74,7 +74,9 @@ def _check(root: Path) -> subprocess.CompletedProcess[str]:
         "mux.state.usage_ledger",
     ],
 )
-@pytest.mark.parametrize("target", ["mux.conformance.budget", "daimon.testing.conformance.budget"])
+@pytest.mark.parametrize(
+    "target", ["mux.testing.conformance.budget", "daimon.testing.conformance.budget"]
+)
 @pytest.mark.parametrize("indirect", [False, True])
 def test_real_import_linter_refuses_reintroduced_harness_import(
     tmp_path: Path, source: str, target: str, indirect: bool

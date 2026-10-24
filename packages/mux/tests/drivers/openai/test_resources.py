@@ -10,13 +10,13 @@ from email import policy
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.resources import CredentialBinding, SkillUpload, SkillUploadFile
 from mux.drivers.openai import artifacts, skills, transport, vaults
 from mux.drivers.openai._common import Context
 from mux.drivers.openai.transport import Object
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.testing.isolated_sdk import build_async_openai
 from openai import AsyncOpenAI
 
 SCOPE = Scope(

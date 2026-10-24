@@ -115,6 +115,7 @@ from daimon.core.agent_identity import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.platform_words import words_for
 from daimon.core.stores.domain import Role, WizardSessionRow
 from daimon.core.stores.tenants import get_turn_cap
 from daimon.core.stores.thread_sessions import (
@@ -131,6 +132,7 @@ from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, wait_for_ticket
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_queue import TurnTicket
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.apply import apply
@@ -155,8 +157,8 @@ _CALLBACK_FAILED = "Something went wrong.\n\nTry again."
 _CHECK_FAILED = "Something went wrong.\n\nTry again."
 _DRAINING = "Daimon is restarting.\n\nPress Submit again in a minute."
 _OVER_CAP = (
-    "Your answers were recorded, but this server has too many chats in flight "
-    "right now -- ask again in the thread in a moment."
+    f"Your answers were recorded, but this {words_for('discord').space} has too many "
+    "chats at once right now -- ask again in the thread in a moment."
 )
 
 
@@ -490,6 +492,7 @@ async def run_wizard_submit_turn_observed(
             admission = await admit(
                 bot.runtime.turn_deps,
                 tenant_id=row.tenant_id,
+                requester_org=RequesterOrg.HOST,
                 platform="discord",
                 external_user_id=str(interaction.user.id),
                 channel_id=parent_channel_id,
@@ -528,6 +531,8 @@ async def run_wizard_submit_turn_observed(
                 _log.info("wizard_submit.skipped.agent_pinned_elsewhere", short_id=row.id)
             elif err.reason == "own_agents_only":
                 _log.info("wizard_submit.skipped.channel_isolated", short_id=row.id)
+            elif err.reason == "client_requester":
+                _log.info("wizard_submit.skipped.client_requester", short_id=row.id)
             elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
             elif err.reason == "channel_budget_exceeded":
@@ -537,7 +542,9 @@ async def run_wizard_submit_turn_observed(
             if err.reason != "writers_none":
                 await channel.send(
                     "Your answers were recorded.\n\n"
-                    + admission_refusal_message(err.reason, bot.runtime.settings)
+                    + admission_refusal_message(
+                        err.reason, bot.runtime.settings, cause=err.cause, provider=err.provider
+                    )
                 )
             return
 

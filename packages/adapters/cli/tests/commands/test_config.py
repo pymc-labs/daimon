@@ -28,7 +28,7 @@ from daimon.core.scope import (
 )
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner

@@ -13,6 +13,7 @@ from daimon.core._models import (
     GitHubAppInstallation,
     TenantGitHubRepo,
 )
+from daimon.core.github_app_auth import PermissionProfile
 from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
@@ -52,8 +53,120 @@ class AgentGrant(BaseModel):
     version: int
 
 
-class SecondInstallationError(ValueError):
-    """A grant would make one agent use two GitHub installations."""
+type AdmissibleGrantRows = tuple[tuple[AgentGrant, AuthorizedRepo, PermissionProfile], ...]
+
+
+MAX_AGENT_INSTALLATIONS = 12
+MAX_SESSION_VAULT_CREDENTIALS = 15
+REPOS_PER_INSTALLATION_TOKEN = 500
+RESERVED_CHAT_MCP_CREDENTIALS = 1
+
+
+class InstallationLimitError(ValueError):
+    """A grant would exceed the agent's GitHub installation limit."""
+
+
+class SessionVaultBudgetError(ValueError):
+    """A grant would exceed the session vault's credential limit."""
+
+
+class ReadOnlyMultiInstallationError(ValueError):
+    """Multi-installation App grants require write access to every repo."""
+
+
+def projected_session_credential_count(
+    token_chunks: int,
+    *,
+    multi_installation: bool,
+    include_alias: bool,
+    other_credentials: int = RESERVED_CHAT_MCP_CREDENTIALS,
+) -> int:
+    """Count token variables, working alias, Copilot and other vault credentials."""
+    if token_chunks < 0 or other_credentials < 0:
+        raise ValueError("vault credential count cannot be negative")
+    if multi_installation:
+        return token_chunks + 2 * int(include_alias and token_chunks > 0) + other_credentials
+    return int(token_chunks > 0) + int(include_alias and token_chunks > 0) + other_credentials
+
+
+def installation_token_chunks(repo_ids_by_installation: dict[int, set[int]]) -> int:
+    """Count GitHub's 500-repo exact-scope chunks after deduplication."""
+    return sum(
+        (len(repo_ids) + REPOS_PER_INSTALLATION_TOKEN - 1) // REPOS_PER_INSTALLATION_TOKEN
+        for repo_ids in repo_ids_by_installation.values()
+    )
+
+
+def require_projected_grant_budget(
+    repo_ids_by_installation: dict[int, set[int]],
+    *,
+    any_read_only: bool,
+    has_working_repo: bool,
+    agent_name: str,
+) -> None:
+    """Check the complete stored grant set before changing it or its alias."""
+    if len(repo_ids_by_installation) > MAX_AGENT_INSTALLATIONS:
+        raise InstallationLimitError(
+            f"{agent_name} can use repos from up to {MAX_AGENT_INSTALLATIONS} GitHub "
+            f"accounts or orgs, and this change would make it "
+            f"{len(repo_ids_by_installation)}. Nothing was saved."
+        )
+    multi_installation = len(repo_ids_by_installation) > 1
+    if multi_installation and any_read_only:
+        raise ReadOnlyMultiInstallationError(
+            f"{agent_name} has read-only GitHub repos. Make them read-write or "
+            "remove them before adding repos from another account or org."
+        )
+    if (
+        projected_session_credential_count(
+            installation_token_chunks(repo_ids_by_installation),
+            multi_installation=multi_installation,
+            include_alias=has_working_repo or not multi_installation,
+        )
+        > MAX_SESSION_VAULT_CREDENTIALS
+    ):
+        raise SessionVaultBudgetError(
+            f"{agent_name} can't take more GitHub repos: its session would need "
+            "more than 15 credentials. Remove a repo or an account first."
+        )
+
+
+def admissible_grant_rows(
+    rows: AdmissibleGrantRows,
+) -> tuple[AdmissibleGrantRows, tuple[str, ...]]:
+    """Select the same valid installation set for preparation and rotation."""
+    by_installation: dict[int, list[tuple[AgentGrant, AuthorizedRepo, PermissionProfile]]] = {}
+    for item in rows:
+        by_installation.setdefault(item[1].installation_id, []).append(item)
+    accepted: list[tuple[AgentGrant, AuthorizedRepo, PermissionProfile]] = []
+    refused: list[str] = []
+    ordered = sorted(
+        by_installation,
+        key=lambda installation_id: (
+            max(repo.authorized_at for _, repo, _ in by_installation[installation_id]),
+            installation_id,
+        ),
+    )
+    for installation_id in ordered:
+        candidate = accepted + by_installation[installation_id]
+        repo_ids: dict[int, set[int]] = {}
+        for _, repo, _ in candidate:
+            repo_ids.setdefault(repo.installation_id, set()).add(repo.repo_id)
+        try:
+            require_projected_grant_budget(
+                repo_ids,
+                any_read_only=any(profile != "write" for _, _, profile in candidate),
+                has_working_repo=any(grant.is_working_repo for grant, _, _ in candidate),
+                agent_name="agent",
+            )
+        except (InstallationLimitError, SessionVaultBudgetError, ReadOnlyMultiInstallationError):
+            refused.extend(
+                f"https://github.com/{repo.repo_full_name}"
+                for _, repo, _ in by_installation[installation_id]
+            )
+            continue
+        accepted = candidate
+    return tuple(accepted), tuple(sorted(refused))
 
 
 async def lock_agent_grants(
@@ -64,6 +177,41 @@ async def lock_agent_grants(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"github-agent-grants:{tenant_id}:{agent_id}"},
     )
+
+
+async def lock_tenant_grants(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Serialize every grant, authorization and installation-binding writer in a tenant."""
+    # Global grant-write order: tenant, then repository IDs, then agent UUIDs.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"github-tenant-grants:{tenant_id}"},
+    )
+    session.info["github_tenant_grant_lock"] = (session.get_transaction(), tenant_id)
+
+
+def assert_tenant_grants_locked(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Catch a grant writer that bypassed the tenant lock during development."""
+    held = session.info.get("github_tenant_grant_lock")
+    assert held == (session.get_transaction(), tenant_id), "tenant grant lock must be first"
+
+
+async def lock_repo_grants(session: AsyncSession, *, tenant_id: uuid.UUID, repo_id: int) -> None:
+    """Serialize a new grant with a confirmed installation reassignment."""
+    assert_tenant_grants_locked(session, tenant_id=tenant_id)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"github-repo-grants:{tenant_id}:{repo_id}"},
+    )
+
+
+async def lock_repo_grants_batch(
+    session: AsyncSession, *, tenant_id: uuid.UUID, repo_ids: set[int]
+) -> None:
+    """Take every repo lock before any agent lock in this transaction."""
+    # Within the tenant lock: repository IDs ascending, then agent UUIDs ascending.
+    # A batch must never acquire a new repository lock after its first agent lock.
+    for repo_id in sorted(repo_ids):
+        await lock_repo_grants(session, tenant_id=tenant_id, repo_id=repo_id)
 
 
 def _visible_to(agent_id: uuid.UUID | None) -> ColumnElement[bool]:
@@ -182,6 +330,9 @@ class AgentRepo(BaseModel):
     is_working_repo: bool = False
     grant_version: int = 0
     authorization_version: int = 0
+    # The App installation the repo's authorization rests on; the per-agent
+    # account limit counts these, not owner names (an owner can be renamed).
+    installation_id: int | None = None
 
 
 async def list_agent_repos(
@@ -211,6 +362,7 @@ async def list_agent_repos(
                 is_working_repo=grant.is_working_repo,
                 grant_version=grant.version,
                 authorization_version=row.version,
+                installation_id=row.installation_id,
             )
         )
     return sorted(result, key=lambda repo: repo.full_name.casefold())
@@ -245,12 +397,16 @@ async def set_working_repo(
     agent_id: uuid.UUID,
     repo_name: str | None,
     account_id: uuid.UUID,
+    agent_name: str | None = None,
 ) -> str | None:
     """Select one live grant as the filesystem repo, or clear the selection.
 
-    The caller verifies that the account manages this agent. Locking the
-    agent's grant rows serializes changes to an existing grant set.
+    The caller verifies that the account manages this agent. The per-agent
+    grant lock serializes this selection with grant admission.
     """
+    await lock_tenant_grants(session, tenant_id=tenant_id)
+    assert_tenant_grants_locked(session, tenant_id=tenant_id)
+    await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     rows = list(
         await session.scalars(
             select(AgentGitHubGrant)
@@ -265,21 +421,32 @@ async def set_working_repo(
     )
     selected: AgentGitHubGrant | None = None
     selected_name: str | None = None
+    repo_ids_by_installation: dict[int, set[int]] = {}
+    any_read_only = False
     if repo_name is not None:
         for grant in rows:
             repo = await repo_for_agent(
                 session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
             )
-            if repo is None or repo.status != "active":
+            if repo is None:
+                continue
+            repo_ids_by_installation.setdefault(repo.installation_id, set()).add(grant.repo_id)
+            any_read_only |= grant.ceiling_access != "write" or repo.max_access != "write"
+            if repo.status != "active":
                 continue
             installation = await session.get(GitHubAppInstallation, repo.installation_id)
             if not installation_covers_repo(installation, repo.repo_full_name):
                 continue
             if repo.repo_full_name.casefold() == repo_name.casefold():
                 selected, selected_name = grant, repo.repo_full_name
-                break
         if selected is None:
             raise ValueError("That repo is not on this agent's list. Offer Connect GitHub.")
+        require_projected_grant_budget(
+            repo_ids_by_installation,
+            any_read_only=any_read_only,
+            has_working_repo=True,
+            agent_name=agent_name or str(agent_id),
+        )
     changed_ids: list[int] = []
     for grant in rows:
         wanted = grant is selected
@@ -319,6 +486,8 @@ async def remove_agent_repo(
     only is disconnected too, since no other agent may use it; adding it back
     needs a new Connect. A server-wide repo stays connected for other agents.
     """
+    await lock_tenant_grants(session, tenant_id=tenant_id)
+    assert_tenant_grants_locked(session, tenant_id=tenant_id)
     await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     removed = await remove_grant(
         session,
@@ -365,7 +534,7 @@ async def remove_agent_repo(
 
 _ACCESS_RANK = {"none": 0, "read": 1, "write": 2}
 
-SERVER_WIDE_GRANT_MESSAGE = "Only a server admin can add a repo connected for the whole server."
+SERVER_WIDE_GRANT_MESSAGE = "Only an admin can add a repo connected for everyone here."
 
 
 async def require_may_grant(
@@ -395,6 +564,7 @@ async def stage_grant(
     mount_path: str | None = None,
     is_working_repo: bool = False,
     agent_name: str | None = None,
+    repo_lock_held: bool = False,
 ) -> AgentGrant:
     """Stage or update a grant. The caller owns the transaction and authorizes the actor."""
     if _ACCESS_RANK[baseline_access] > _ACCESS_RANK[ceiling_access]:
@@ -403,6 +573,10 @@ async def stage_grant(
         not mount_path.startswith("/workspace/") or ".." in mount_path.split("/")
     ):
         raise ValueError("mount path must be inside /workspace")
+    await lock_tenant_grants(session, tenant_id=tenant_id)
+    assert_tenant_grants_locked(session, tenant_id=tenant_id)
+    if not repo_lock_held:
+        await lock_repo_grants(session, tenant_id=tenant_id, repo_id=repo_id)
     await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     authorized = await repo_for_agent(
         session, tenant_id=tenant_id, repo_id=repo_id, agent_id=agent_id, for_update=True
@@ -413,19 +587,25 @@ async def stage_grant(
     installation = await session.get(GitHubAppInstallation, authorized.installation_id)
     if not installation_covers_repo(installation, authorized.repo_full_name):
         raise ValueError("GitHub App installation is not active")
+    repo_ids_by_installation: dict[int, set[int]] = {authorized.installation_id: {repo_id}}
+    any_read_only = ceiling_access != "write" or authorized.max_access != "write"
+    has_working_repo = is_working_repo
     for grant in await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id):
         if grant.repo_id == repo_id:
             continue
         other = await repo_for_agent(
             session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
         )
-        if other is not None and other.installation_id != authorized.installation_id:
-            org = other.repo_full_name.split("/", 1)[0]
-            raise SecondInstallationError(
-                f"{agent_name or agent_id} already uses repos from {org}. "
-                "One agent can use one GitHub org. Use another agent for repos from a "
-                "different org."
-            )
+        if other is not None:
+            repo_ids_by_installation.setdefault(other.installation_id, set()).add(other.repo_id)
+            any_read_only |= grant.ceiling_access != "write" or other.max_access != "write"
+            has_working_repo |= grant.is_working_repo
+    require_projected_grant_budget(
+        repo_ids_by_installation,
+        any_read_only=any_read_only,
+        has_working_repo=has_working_repo,
+        agent_name=agent_name or str(agent_id),
+    )
     if is_working_repo:
         working = await session.scalars(
             select(AgentGitHubGrant)
@@ -492,6 +672,8 @@ async def remove_grant(
     repo_id: int,
     changed_by_account_id: uuid.UUID | None = None,
 ) -> bool:
+    await lock_tenant_grants(session, tenant_id=tenant_id)
+    assert_tenant_grants_locked(session, tenant_id=tenant_id)
     await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     row = await session.get(AgentGitHubGrant, (tenant_id, agent_id, repo_id), with_for_update=True)
     if row is None or not row.app_visible:

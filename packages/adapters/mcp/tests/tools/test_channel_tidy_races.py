@@ -18,10 +18,10 @@ from daimon.core.stores.access_policy import (
     set_access_policy,
 )
 from daimon.core.stores.agent_posts import get_post
-from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine
-from daimon.testing.ma import build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from . import test_channel_tidy_discord as d

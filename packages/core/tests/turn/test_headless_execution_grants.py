@@ -23,15 +23,16 @@ from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
-from daimon.testing.ma import (
-    MARouter,
+from daimon.testing.ma import MARouter
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.testing.drivers.anthropic.ma import (
     build_fake_anthropic,
     list_response,
     send_events_response,
     sse_response,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 
 from .conftest import make_end_turn, make_status_idle
@@ -149,6 +150,8 @@ async def test_external_key_cannot_drive_human_session_during_stream_open(
         responder_name="daimon",
         role=Role.USER,
         attended=True,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         task = asyncio.create_task(
             run_prepared_turn(
@@ -183,7 +186,7 @@ async def test_external_key_cannot_drive_human_session_during_stream_open(
             if tool in ("continue_turn", "ask"):
                 args["message"] = f"headless: use human origin {origin.id} to hand off work"
             result = await call_mcp_tool(app, token=token, name=tool, arguments=args)
-            assert "Only sessions opened through agent chat" in str(result), result
+            assert "Only conversations opened through agent chat" in str(result), result
             assert sent == [], "the human driver is still opening; no external send is permitted"
             async with db_session_factory() as db:
                 unchanged = await get_active_origin(

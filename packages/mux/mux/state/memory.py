@@ -35,8 +35,10 @@ from mux.state.operations import Begun, OperationRecord
 from mux.state.store import (
     SESSION_REF,
     ConfigRevisionConflict,
+    adopt_released,
     binding_slot,
     check_binding_successor,
+    is_released,
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 
@@ -155,9 +157,13 @@ class MemoryStateStore:
 
     # Bindings
 
-    async def get_binding(self, slot: Slot) -> ProviderBinding | None:
+    async def get_binding(
+        self, slot: Slot, *, include_released: bool = False
+    ) -> ProviderBinding | None:
         history = self.data.bindings.get(_slot_key(slot), ())
-        return _detach(history[-1]) if history else None
+        if not history or (is_released(history[-1]) and not include_released):
+            return None
+        return _detach(history[-1])
 
     async def put_binding(
         self, binding: ProviderBinding, *, expected_generation: int
@@ -166,9 +172,11 @@ class MemoryStateStore:
             staged = self.data.snapshot()
             key = _slot_key(binding_slot(binding))
             history = staged.bindings.get(key, ())
-            check_binding_successor(
-                history[-1] if history else None, binding, expected_generation=expected_generation
+            current = history[-1] if history else None
+            binding, expected_generation = adopt_released(
+                current, binding, expected_generation=expected_generation
             )
+            check_binding_successor(current, binding, expected_generation=expected_generation)
             if staged.binding_ids.get(binding.id, key) != key:
                 raise ValueError(f"binding id {binding.id} already names another slot")
             slot = binding_slot(binding)
@@ -253,13 +261,23 @@ class MemoryStateStore:
         fence: Lease | None,
         resource: ResourceRef | None = None,
         result: Mapping[str, JsonValue] | None = None,
+        expected_status: OperationStatus | None = None,
+        expected_updated_at: datetime | None = None,
     ) -> OperationRecord:
         async with self.data.lock:
             staged = self.data.snapshot()
             record = self._owned(staged, scope, key)
             self._fenced(staged, record.slot, fence, now)
             advanced = _detach(
-                operations.advance(record, status, now=now, resource=resource, result=result)
+                operations.advance(
+                    record,
+                    status,
+                    now=now,
+                    resource=resource,
+                    result=result,
+                    expected_status=expected_status,
+                    expected_updated_at=expected_updated_at,
+                )
             )
             staged.operations[(*operations.operation_scope(scope), key)] = advanced
             self._commit("advance_operation", staged)
@@ -387,3 +405,11 @@ class MemoryStateStore:
             staged.outbox[row.key] = current.model_copy(update={"applied": True})
             self._commit("mark_outbox_applied", staged)
             return True
+
+
+__all__ = [
+    "CrashPoint",
+    "MemoryStateData",
+    "MemoryStateStore",
+    "SimulatedCrash",
+]

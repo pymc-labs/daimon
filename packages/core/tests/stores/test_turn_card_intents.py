@@ -209,11 +209,11 @@ async def test_delete_retired_turn_card_intents_is_bounded_and_cutoff_scoped(
 
 async def test_duplicate_concurrent_turn_token_returns_one_persisted_intent(
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
 ) -> None:
     tenant = await make_tenant(db_session)
     await db_session.commit()
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     token = uuid.uuid4()
     ready = asyncio.Barrier(2)
 

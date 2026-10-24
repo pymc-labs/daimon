@@ -22,10 +22,11 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.turn_origins import create_origin, get_active_origin
 from daimon.core.turn_origin import turn_origin
-from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -96,6 +97,8 @@ async def test_switch_target_updates_shared_binding_and_only_requesting_snapshot
             configuration_target_ma_agent_id="agent_original",
             configuration_target_name="original",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             is_setup=True,
             chat_session_id="test-session",
         ) as origin,
@@ -111,6 +114,8 @@ async def test_switch_target_updates_shared_binding_and_only_requesting_snapshot
             configuration_target_ma_agent_id="agent_original",
             configuration_target_name="original",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             is_setup=True,
             chat_session_id="test-session",
         ) as concurrent,
@@ -167,6 +172,8 @@ async def test_tool_rejects_wrong_or_expired_origin_before_ma_access(
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         now=now,
         expires_at=now + timedelta(minutes=-1 if mismatch == "expired" else 10),
         is_setup=True,
@@ -255,6 +262,8 @@ async def test_origin_refuses_agent_scoped_token_for_another_responder(
         responder_name="Daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         auth = AuthIdentity(
             account_id=account.id,
@@ -264,7 +273,7 @@ async def test_origin_refuses_agent_scoped_token_for_another_responder(
             **{credential: uuid.uuid4()},
             chat_session_id="test-session",
         )
-        with pytest.raises(ToolError, match="another responder"):
+        with pytest.raises(ToolError, match="another agent"):
             await require_turn_origin(runtime, auth, str(origin.id))
 
 
@@ -280,7 +289,7 @@ async def test_model_change_uses_specialist_identity_and_retains_admin_gate(
     from daimon.adapters.mcp.tools.agents import _update_agent_impl
     from daimon.core.scope import ChannelScopeRef
     from daimon.core.stores.scoped_config_write import set_fields
-    from daimon.testing.ma import json_body
+    from mux.testing.drivers.anthropic.ma import json_body
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -360,7 +369,7 @@ async def test_model_change_uses_specialist_identity_and_retains_admin_gate(
         assert updates == ["/v1/agents/agent_specialist"], "Daimon is never mutated"
     else:
         with pytest.raises(
-            ToolError, match="Changing 'specialist' needs a workspace or server admin"
+            ToolError, match="Changing 'specialist' needs its owner or a server admin"
         ):
             await _update_agent_impl(
                 runtime,
@@ -429,6 +438,8 @@ async def test_setup_target_refuses_in_a_handoff_thread_and_names_who_answers(
         responder_name="research-bot",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="handoff conversation: research-bot answers here"):
             await _set_setup_target_impl(
@@ -491,6 +502,8 @@ async def test_setup_target_refusal_in_ordinary_chat_keeps_configuration_open(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError) as refused:
             await _set_setup_target_impl(
@@ -540,6 +553,8 @@ async def test_missing_origin_never_discovers_a_running_human_turn(
         responder_name="Daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as first:
         assert (await require_turn_origin(runtime, auth, str(first.id))).id == first.id
         with pytest.raises(ToolError, match="origin_context_id"):
@@ -556,6 +571,8 @@ async def test_missing_origin_never_discovers_a_running_human_turn(
             responder_name="Daimon",
             role=Role.USER,
             chat_session_id="test-session",
+            sender_foreign=False,
+            shared_channel=False,
         ):
             with pytest.raises(ToolError, match="origin_context_id"):
                 await require_turn_origin(runtime, auth, "")

@@ -37,3 +37,17 @@ def test_a_channel_kept_to_its_own_agents_says_why_it_cannot_move_to_a_dm() -> N
 def test_a_dm_refusal_uses_the_workspace_nouns() -> None:
     message = _denial_text("invoker_not_allowed")
     assert message == "Daimon can't accept your request here.\n\nAsk an admin to add you."
+
+
+def test_a_dm_provider_refusal_names_its_cause_and_fix() -> None:
+    settings = MagicMock()
+    settings.slack.bot_display_name = "daimon"
+    text = _error_message(
+        AdmissionDenied(
+            reason="backend_unsupported", cause="provider_not_allowed", provider="gemini"
+        ),
+        settings=settings,
+        team_id="T1",
+    )
+    assert text.startswith("Gemini isn't turned on for this workspace.")
+    assert "channel" not in text

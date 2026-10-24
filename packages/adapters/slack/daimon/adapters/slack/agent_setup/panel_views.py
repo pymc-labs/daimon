@@ -48,11 +48,9 @@ from daimon.core.github_connect_cards import repo_count
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
+from daimon.core.platform_words import words_for
 from daimon.core.roster import Page, Roster, RosterAgent
-from daimon.core.routing_facts import (
-    PRECEDENCE_LINE,
-    build_routing_request,
-)
+from daimon.core.routing_facts import build_routing_request, precedence_line
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
     EMPTY_ROSTER_COPY,
@@ -301,16 +299,15 @@ CHANNEL_SKILLS_ADD_HINT: Final = "A library skill, or one uploaded to this chann
 OPERATOR_TOKENS_LABEL: Final = "Operator tokens"
 MAX_OPERATOR_TOKEN_LINES: Final = 25
 OPERATOR_TOKENS_NOTE: Final = (
-    f"An operator token lets an integration call daimon's tenant tools as you, for "
-    f"{PANEL_TTL_DAYS} days. It is shown once; revoke it here or with "
-    "`daimon mcp revoke-token`."
+    f"An operator token lets an integration use Daimon as you for "
+    f"{PANEL_TTL_DAYS} days. It is shown once; revoke it here."
 )
 PERMISSIONS_LABEL: Final = "Permissions"
 RULE_COPY_LABEL: Final = "Keep it to a copy"
 RULE_RELEASE_LABEL: Final = "Release its agents"
 PERMISSIONS_NOTE: Final = (
-    "*Who can read it*: anyone; only this channel, so only turns here read its messages "
-    "and conversations; or only its own agents, so also only agents kept here run and show "
+    "*Who can read it*: anyone; only this channel, so only conversations here can "
+    "read it; or only its own agents, so also only agents kept here run and show "
     "here, and nowhere else. Its default agent becomes one; "
     f"*{RULE_COPY_LABEL}* makes one from the agent answering now. *Who can post*: anyone; "
     "only its own agents; or nobody, daimon included."
@@ -320,7 +317,7 @@ RULE_RELEASE_NOTE: Final = (
     "elsewhere, bringing what they remembered here."
 )
 
-CODING_TOOLS_UNAVAILABLE_NOTE: Final = "Coding-tool access is not configured for this deployment."
+CODING_TOOLS_UNAVAILABLE_NOTE: Final = "Coding-tool access isn't set up yet."
 
 _DETAIL_LIST_MAX_CHARS: Final = 8_000
 
@@ -414,7 +411,7 @@ def _place_labels(places: Sequence[AnsweringPlace]) -> list[str]:
         elif place.tier == "tenant":
             labels.append("the workspace default")
         else:
-            labels.append("the deployment default")
+            labels.append("the Daimon-wide default")
     return labels
 
 
@@ -530,7 +527,7 @@ def build_details_view(
 ) -> dict[str, Any]:
     """One agent's whole readable state, in the order the roster promised.
 
-    `is_admin` controls the avatar buttons. The core phrases
+    `is_admin` controls the avatar, Add skill and coding-tool buttons. The core phrases
     `details.unrouted_note` in the reader's voice. Key values are not a
     parameter: the model carries names and attribution only.
     """
@@ -600,7 +597,7 @@ def build_details_view(
         picker: dict[str, Any] = {
             "type": "static_select",
             "action_id": ACTION_BACKEND_SELECT,
-            "placeholder": {"type": "plain_text", "text": "Model backend"},
+            "placeholder": {"type": "plain_text", "text": "Model provider"},
             "options": choices,
         }
         current = next(
@@ -609,18 +606,22 @@ def build_details_view(
         )
         if current is not None:
             picker["initial_option"] = current
-        blocks.append(_section("*Model backend*", accessory=picker))
-    actions = [
-        _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name),
-        _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name),
-    ]
-    if coding_tools_available:
+        blocks.append(_section("*Model provider*", accessory=picker))
+    actions = [_button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name)]
+    # Only the buttons that can work for this reader: adding a skill and minting
+    # a coding-tool token are admin changes (a built-in agent takes no skill even
+    # from an admin), so a member is not offered a button that only refuses.
+    if is_admin and not details.daimon_managed:
+        actions.append(
+            _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)
+        )
+    if is_admin and coding_tools_available:
         actions.insert(
             0,
             _button(action_id=ACTION_CODING_TOOLS, label=CODING_TOOLS_LABEL, value=details.name),
         )
     blocks.append({"type": "actions", "elements": actions})
-    if not coding_tools_available:
+    if is_admin and not coding_tools_available:
         blocks.append(_context(CODING_TOOLS_UNAVAILABLE_NOTE))
     return finish_modal(
         title=title,
@@ -646,10 +647,10 @@ def build_backend_preview_view(
     applying: bool = False,
 ) -> dict[str, Any]:
     selection = "Use default" if meta.backend_target == "clear" else preview.target_backend
-    lines = [f"*Model backend: {selection}*"]
+    lines = [f"*Model provider: {selection}*"]
     for label, items in (
         ("Unsupported skills", preview.unsupported_skills),
-        ("Unsupported MCPs", preview.unsupported_mcps),
+        ("Unsupported connections", preview.unsupported_mcps),
         ("Unsupported capabilities", preview.unsupported_capabilities),
         ("Shared-thread limits", preview.shared_thread_limits),
     ):
@@ -657,11 +658,11 @@ def build_backend_preview_view(
         shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
         lines.append(f"{label}: {shown}")
     lines.extend(
-        [preview.cost_line, "Existing threads keep their backend; channel overrides still apply."]
+        [preview.cost_line, "Existing threads keep their provider; channel settings still apply."]
     )
     blocks = [_section("\n".join(lines))]
     if not preview.allowed:
-        blocks.append(_context("This backend is not enabled for this workspace."))
+        blocks.append(_context("This provider is off for this workspace. Pick another."))
     if applying:
         blocks.append(_context("Applying…"))
     else:
@@ -677,7 +678,7 @@ def build_backend_preview_view(
             )
         blocks.append({"type": "actions", "elements": buttons})
     return finish_modal(
-        title="Model backend",
+        title="Model provider",
         blocks=blocks,
         private_metadata=encode_panel_metadata(meta),
         callback_id=CALLBACK_DETAILS,
@@ -864,12 +865,12 @@ def build_routing_view(
     else:
         blocks.append(_section("*Workspace default:* Not assigned"))
     if answering_map.deployment_default is not None:
-        line = f"Deployment default: *{escape_mrkdwn(answering_map.deployment_default)}*"
+        line = f"Daimon-wide default: *{escape_mrkdwn(answering_map.deployment_default)}*"
         if answering_map.tenant_consumes_fallthrough:
             line = f"{line}\n\n_Not used while a workspace default is set._"
         blocks.append(_section(line))
     else:
-        blocks.append(_section("_no deployment default_"))
+        blocks.append(_section("_no Daimon-wide default_"))
     blocks.append({"type": "divider"})
     blocks.extend(_environment_blocks(answering_map, picker=environment_picker))
     links = list(setup_links[:MAX_SETUP_LINKS])
@@ -917,7 +918,7 @@ def _environment_blocks(
     tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment
     defaults = [f"*Workspace default:* {_shown_name(tenant) if tenant else 'Not assigned'}"]
     if deployment is not None:
-        defaults.append(f"Deployment default: *{_shown_name(deployment)}*")
+        defaults.append(f"Daimon-wide default: *{_shown_name(deployment)}*")
         if tenant is not None:
             defaults.append("_Not used while a workspace default is set._")
     rows = answering_map.channel_environments
@@ -1252,7 +1253,7 @@ def _routing_request_line(
     request = build_routing_request(
         agent_name=escape_mrkdwn(agent_name or "an agent"), channel_label=f"<#{channel_id}>"
     )
-    return f"{PRECEDENCE_LINE} {lead}{request}"
+    return f"{precedence_line(words_for('slack').space)} {lead}{request}"
 
 
 # ---------------------------------------------------------------------------

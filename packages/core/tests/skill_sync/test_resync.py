@@ -15,7 +15,7 @@ from daimon.core.stores import github_access, github_app_installations
 from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_cli_principal
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

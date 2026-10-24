@@ -33,7 +33,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.posted_controls import CardKind
 from daimon.core.purge import AccountPurgeResult
-from daimon.testing.ma import MARouter
+from mux.testing.drivers.anthropic.ma import MARouter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .cards import CapturedCard

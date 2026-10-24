@@ -12,7 +12,8 @@ from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma import MARouter
+from mux.testing.drivers.anthropic.ma import list_response
 from rich.console import Console
 
 from ..harness import build_cli_runtime

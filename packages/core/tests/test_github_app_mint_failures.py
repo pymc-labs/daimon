@@ -172,6 +172,83 @@ async def _seed_multi_installation_grants(
     return tenant_id, agent_id
 
 
+@pytest.mark.asyncio
+async def test_preparation_refuses_only_installation_that_makes_legacy_grants_invalid(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, agent_id = await _seed_multi_installation_grants(
+        db_session_factory, repos=((771, 101, True), (772, 201, False))
+    )
+    async with db_session_factory.begin() as session:
+        grant = await session.get(AgentGitHubGrant, (tenant_id, agent_id, 101))
+        assert grant is not None
+        grant.baseline_access = "read"
+        grant.ceiling_access = "read"
+        newer = await github_access.repo_for_agent(
+            session, tenant_id=tenant_id, repo_id=201, agent_id=agent_id
+        )
+        assert newer is not None
+        newer.authorized_at = datetime.now(UTC) + timedelta(minutes=1)
+    monkeypatch.setattr(github_app_session, "build_app_jwt", _fake_jwt)
+    minted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        minted.append(request.url.path)
+        return httpx.Response(201, json={"token": "token-a"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        access = await prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            provisional_session_id="legacy-invalid",
+            config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            cache=PermissionCache(),
+        )
+    assert minted == ["/app/installations/771/access_tokens"]
+    assert {token.installation_id for token in access.tokens} == {771}
+    assert access.excluded_repo_urls == ("https://github.com/owner772/repo201",)
+    assert access.token_repo_urls == ("https://github.com/owner771/repo101",)
+
+
+@pytest.mark.asyncio
+async def test_preparation_refuses_thirteenth_legacy_installation_only(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, agent_id = await _seed_multi_installation_grants(
+        db_session_factory,
+        repos=tuple(
+            (installation_id, installation_id, installation_id == 1)
+            for installation_id in range(1, 14)
+        ),
+    )
+    monkeypatch.setattr(github_app_session, "build_app_jwt", _fake_jwt)
+    minted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        minted.append(request.url.path)
+        return httpx.Response(201, json={"token": f"token-{len(minted)}"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        access = await prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            provisional_session_id="legacy-thirteen",
+            config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            cache=PermissionCache(),
+        )
+    assert len(minted) == 12
+    assert {token.installation_id for token in access.tokens} == set(range(1, 13))
+    assert access.excluded_repo_urls == ("https://github.com/owner13/repo13",)
+
+
 async def test_grant_added_after_create_delivery_does_not_change_snapshot_mode(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -780,7 +857,7 @@ async def test_new_repo_in_b_remints_only_b_and_preserves_a(
                 repository_selection="selected",
                 suspended_at=None,
             )
-        # M1 keeps stage_grant's second-installation guard. Seed B directly.
+        # Seed B directly to exercise the existing multi-installation session.
         for repo_id in (101, 102):
             session.add(
                 AgentGitHubGrant(
@@ -1496,6 +1573,58 @@ async def test_single_installation_failed_read_group_keeps_legacy_refresh_deadli
     )
     assert isinstance(due, UpdateInPlace)
     assert RotateAppTokens(resource_ids={}) in due.ops
+
+
+@pytest.mark.asyncio
+async def test_inadmissible_second_installation_does_not_rotate_legacy_token(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, agent_id = await _seed_multi_installation_grants(
+        db_session_factory, repos=((771, 101, False), (772, 201, False))
+    )
+    async with db_session_factory.begin() as session:
+        grant = await session.get(AgentGitHubGrant, (tenant_id, agent_id, 101))
+        assert grant is not None
+        grant.baseline_access = "read"
+        grant.ceiling_access = "read"
+    monkeypatch.setattr(github_app_session, "build_app_jwt", _fake_jwt)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        assert json.loads(request.content)["repository_ids"] == [101]
+        return httpx.Response(201, json={"token": "read-token"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        access = await prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            provisional_session_id="legacy-admitted-pending",
+            config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            cache=PermissionCache(),
+        )
+        await finish_app_delivery(
+            db_session_factory,
+            client,
+            access=access,
+            provisional_session_id="legacy-admitted-pending",
+            session_id="legacy-admitted-live",
+        )
+    assert access.excluded_repo_urls == ("https://github.com/owner772/repo201",)
+    assert len(access.tokens) == 1 and access.tokens[0].chunk is None
+    async with db_session_factory() as session:
+        assert (
+            await session_installations_needing_rotation(session, session_id="legacy-admitted-live")
+            == ()
+        )
+        assert (
+            await session_installations_needing_rotation(session, session_id="legacy-admitted-live")
+            == ()
+        )
 
 
 @pytest.mark.asyncio

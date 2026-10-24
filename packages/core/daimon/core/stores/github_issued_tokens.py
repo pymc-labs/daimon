@@ -13,7 +13,7 @@ from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_snapshot import SessionSnapshot, token_scope_parts
 from daimon.core.stores.domain import ThreadSessionRow
-from daimon.core.stores.github_access import list_live_grant_repositories
+from daimon.core.stores.github_access import admissible_grant_rows, list_live_grant_repositories
 from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import CursorResult, and_, delete, or_, select, text, update
@@ -406,17 +406,27 @@ async def session_installations_needing_rotation(
         if session_token is not None
         else []
     )
-    multi_installation = len({repo.installation_id for _, repo in live_grants}) > 1
-    desired_groups = group_repository_access(
-        [
+    admissible, _ = admissible_grant_rows(
+        tuple(
             (
-                repo.installation_id,
-                repo.repo_id,
+                grant,
+                repo,
                 "write"
                 if grant.ceiling_access == "write" and repo.max_access == "write"
                 else "read",
             )
             for grant, repo in live_grants
+        )
+    )
+    multi_installation = len({repo.installation_id for _, repo, _ in admissible}) > 1
+    desired_groups = group_repository_access(
+        [
+            (
+                repo.installation_id,
+                repo.repo_id,
+                profile,
+            )
+            for _, repo, profile in admissible
             if f"https://github.com/{repo.repo_full_name}" not in excluded_urls
         ],
         sort_repo_ids=multi_installation,

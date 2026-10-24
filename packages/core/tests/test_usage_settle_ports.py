@@ -17,9 +17,9 @@ from anthropic import APIStatusError, BadRequestError, NotFoundError
 from daimon.core import usage_sweep
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.stores import session_settle_state
-from daimon.testing.isolated_sdk import build_async_anthropic
 from mux.drivers.anthropic.resources.session_tools import EventPage, EventQuery, SessionTools
 from mux.errors import ScopeViolation
+from mux.testing.isolated_sdk import build_async_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

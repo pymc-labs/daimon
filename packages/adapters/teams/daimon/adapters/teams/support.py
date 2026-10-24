@@ -58,6 +58,7 @@ from daimon.adapters.teams.card_actions import (
     card_actor,
     dialog,
     dialog_message,
+    dialog_notice,
     error_text,
     guarded,
     heading,
@@ -334,7 +335,7 @@ class SupportCommand:
     ) -> TaskModuleResponse:
         """Ask a human on an answer: the form, for someone who could have asked there."""
         return await guarded(
-            self._ask_open(ctx.activity), dialog_message(FAILED), "teams.support.failed"
+            self._ask_open(ctx.activity), dialog_notice(TITLE, FAILED), "teams.support.failed"
         )
 
     async def on_ask_submit(
@@ -347,13 +348,13 @@ class SupportCommand:
     async def _ask_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None or not activity.reply_to_id:
-            return dialog_message(DENIED)
+            return dialog_notice(TITLE, DENIED)
         place = AnswerPlace.of(activity, activity.reply_to_id)
         if (access := await check_answer_access(self._runtime, actor, place)).access != "allowed":
-            return dialog_message(refusal_text(access.access))
+            return dialog_notice(TITLE, refusal_text(access.access))
         remaining = await self._remaining(actor.tenant_id, actor.user_id)
         if remaining <= 0:
-            return dialog_message(OUT_OF_CREDITS)
+            return dialog_notice(TITLE, OUT_OF_CREDITS)
         return dialog(TITLE, ask_form(place.message_id, remaining, sealed=access.sealed))
 
     async def _ask_submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleResponse:

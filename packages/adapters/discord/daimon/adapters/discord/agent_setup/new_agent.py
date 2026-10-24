@@ -142,6 +142,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                 system=system_value,
                 model=model_value,
                 account_id=self.state.guild_account_id,
+                creator_account_id=self.state.account_id,
             )
             if created.anthropic_id is None:
                 raise UserFacingError(

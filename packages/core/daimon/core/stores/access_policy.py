@@ -17,7 +17,9 @@ from typing import Any, cast
 from daimon.core._models import Tenant, TenantAccessPolicyRecord
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.provider_keys import default_enabled_backends
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
+from mux.profiles import MANAGED_AGENTS
 from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -32,7 +34,7 @@ class AccessPolicyUnreadable(UserFacingError):
         super().__init__(
             detail
             or (
-                "this workspace's access settings can't be read, so no turn was started; "
+                "the access settings here can't be read, so Daimon can't reply; "
                 "ask an admin to fix them"
             )
         )
@@ -151,6 +153,13 @@ async def _roles_supported(
     )
 
 
+def _with_default_backends(policy: TenantAccessPolicy) -> TenantAccessPolicy:
+    default = default_enabled_backends()
+    if policy.enabled_backends == default:
+        return policy
+    return policy.model_copy(update={"enabled_backends": default})
+
+
 async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
     # Select the row, not just its payload: a JSON `null` payload would
     # otherwise read as "no row" and fall open.
@@ -160,12 +169,19 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
         )
     ).scalar_one_or_none()
     if record is None:
-        return OPEN_ACCESS_POLICY
+        return _with_default_backends(OPEN_ACCESS_POLICY)
     payload = cast(object, record.policy)
     if isinstance(payload, dict):
-        if "enabled_backends" in payload:
+        if "enabled_backends" in payload or "backends_explicit" in payload:
             raise AccessPolicyUnreadable(tenant_id=tenant_id)
-        payload = {**cast("dict[str, Any]", payload), "enabled_backends": record.enabled_backends}
+        explicit = record.enabled_backends_explicit
+        payload = {
+            **cast("dict[str, Any]", payload),
+            "enabled_backends": record.enabled_backends
+            if explicit
+            else list(default_enabled_backends()),
+            "backends_explicit": explicit,
+        }
     try:
         # JSON null, an array or a string fail validation like a bad field does.
         policy = TenantAccessPolicy.model_validate(payload)
@@ -173,8 +189,7 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
             raise AccessPolicyUnreadable(
                 tenant_id=tenant_id,
                 detail=(
-                    "this workspace has unsupported Discord role access settings; "
-                    "ask an admin to fix them"
+                    "this space has unsupported role access settings; ask an admin to fix them"
                 ),
             )
         return policy
@@ -192,7 +207,15 @@ async def set_access_policy(
             "Discord roles require a Discord tenant and cannot include @everyone (guild id)"
         )
     payload = policy.model_dump(mode="json")
-    backends = payload.pop("enabled_backends")
+    # A list that differs from the deployment default is a choice even when the
+    # caller rebuilt the policy from a defaulted one (a model_dump round trip).
+    explicit = payload.pop("backends_explicit") or tuple(policy.enabled_backends) != (
+        default_enabled_backends()
+    )
+    # A tenant on the deployment default keeps following it: its loaded default is
+    # never written back as a choice, and older builds read Anthropic only.
+    chosen = payload.pop("enabled_backends")
+    backends = chosen if explicit else [MANAGED_AGENTS.provider]
     # Older readers already imply the default admin bypass and forbid unknown keys.
     if policy.invoker_admin_bypass:
         payload.pop("invoker_admin_bypass")
@@ -208,10 +231,20 @@ async def set_access_policy(
             payload.pop(key, None)
     await session.execute(
         insert(TenantAccessPolicyRecord)
-        .values(tenant_id=tenant_id, policy=payload, enabled_backends=backends)
+        .values(
+            tenant_id=tenant_id,
+            policy=payload,
+            enabled_backends=backends,
+            enabled_backends_explicit=explicit,
+        )
         .on_conflict_do_update(
             index_elements=[TenantAccessPolicyRecord.tenant_id],
-            set_={"policy": payload, "enabled_backends": backends, "updated_at": func.now()},
+            set_={
+                "policy": payload,
+                "enabled_backends": backends,
+                "enabled_backends_explicit": explicit,
+                "updated_at": func.now(),
+            },
         )
     )
     await session.flush()

@@ -17,6 +17,7 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
@@ -89,7 +90,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             await send_pending_new_repo_notice(runtime, interaction, tenant_id=tenant_id)
             await send_pending_removal_notice(runtime, interaction, tenant_id=tenant_id)
 
-    @app_commands.command(name="connect", description="Connect GitHub repos")
+    @app_commands.command(name="connect", description=DESCRIPTIONS["github"])
     @app_commands.describe(agent="Agent to connect")
     @require_registered_guild
     async def connect(self, interaction: BotInteraction, agent: str | None = None) -> None:

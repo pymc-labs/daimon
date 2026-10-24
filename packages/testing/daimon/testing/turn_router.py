@@ -28,7 +28,8 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
     BetaManagedAgentsTextBlock,
 )
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     NotHandled,
     json_body,
@@ -36,13 +37,7 @@ from daimon.testing.ma import (
     send_events_response,
     sse_response,
 )
-from daimon.testing.ma_models import (
-    DEFAULT_MODEL_ID,
-    ma_agent,
-    ma_environment,
-    ma_model_usage,
-    ma_session,
-)
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_MODEL_ID, ma_model_usage, ma_session
 
 AGENT_TEXT = "Hello from the agent!"
 AGENT_ID = "ag_parity_test"

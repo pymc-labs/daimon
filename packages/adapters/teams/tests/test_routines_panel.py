@@ -16,7 +16,8 @@ from daimon.adapters.teams.routines_panel import ADMIN_ONLY, NOT_OWNER
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, list_routines_for_tenant
-from daimon.testing import build_fake_anthropic, list_response, ma_agent
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -28,6 +29,7 @@ from .conftest import (
     make_card_action,
     make_invoke,
     make_message_activity,
+    notice_text,
     post_activity,
     running_service,
 )
@@ -163,7 +165,7 @@ async def test_create_dialog_is_admin_only(
 
     assert admin["task"]["type"] == "continue", "an admin gets the form"
     assert '"daimon"' in json.dumps(admin), "the agent picker lists the tenant's agents"
-    assert user["task"] == {"type": "message", "value": ADMIN_ONLY}
+    assert notice_text(user) == ADMIN_ONLY, "a refusal opens as a one-line dialog"
 
 
 async def test_create_rejects_a_bad_cron_then_creates_the_routine_for_the_admin(
@@ -180,7 +182,7 @@ async def test_create_rejects_a_bad_cron_then_creates_the_routine_for_the_admin(
 
     assert bad["task"]["type"] == "continue", "the form comes back to fix"
     assert "That schedule or time zone isn't valid." in json.dumps(bad)
-    assert "Routine created for daimon" in good["task"]["value"]
+    assert "Routine created for daimon, every day at 09:00 UTC." in good["task"]["value"]
     async with db_session_factory() as session:
         [row] = await list_routines_for_tenant(session, tenant_id=TENANT)
     assert row.created_by_user_id == AAD_OBJECT_ID, "the clicker owns the routine"

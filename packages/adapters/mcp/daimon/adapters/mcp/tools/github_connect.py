@@ -9,6 +9,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
@@ -76,7 +77,7 @@ async def _post_discord_connect_card(
     requested_repo: str | None = None,
 ) -> None:
     if auth.external_id is None:
-        raise ToolError("GitHub setup requires a Discord server.")
+        raise ToolError("GitHub setup requires a server.")
     card = await resolve_connect_card(
         runtime.session_factory,
         runtime.settings,
@@ -99,7 +100,7 @@ async def _post_discord_connect_card(
         channel = await client.fetch_channel(int(thread_id))
         require_general_channel(runtime, auth.external_id, channel)
         if not isinstance(channel, discord.Thread) or str(channel.guild.id) != auth.external_id:
-            raise ToolError("GitHub setup requires the originating Discord thread.")
+            raise ToolError("GitHub setup requires the originating thread.")
         await channel.send(
             embed=discord.Embed.from_dict(discord_embed_payload(card)),
             view=view,
@@ -119,7 +120,7 @@ async def _post_slack_connect_card(
     requested_repo: str | None = None,
 ) -> None:
     if auth.external_id is None:
-        raise ToolError("GitHub setup requires a Slack workspace.")
+        raise ToolError("GitHub setup only works from a chat.")
     card = await resolve_connect_card(
         runtime.session_factory,
         runtime.settings,
@@ -177,15 +178,15 @@ async def _github_connect_impl(
     confirmed: bool = False,
 ) -> ConnectResult:
     if auth.platform not in ("discord", "slack", "teams") or auth.platform_user_id is None:
-        raise ToolError("GitHub setup from chat is available in Discord, Slack and Teams.")
+        raise ToolError("GitHub setup from chat isn't available here.")
     root = runtime.settings.mcp.app_root_url
     config = runtime.settings.github_app
     if runtime.fernet is None:
-        raise ToolError("GitHub setup is unavailable on this server.")
+        raise ToolError(f"GitHub setup is unavailable on this {space_noun(auth.platform)}.")
     if root is None or not all(
         (config.app_id, config.app_slug, config.private_key, config.client_id, config.client_secret)
     ):
-        raise ToolError("GitHub setup is unavailable on this server.")
+        raise ToolError(f"GitHub setup is unavailable on this {space_noun(auth.platform)}.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     target_name = agent_name or origin.configuration_target_name or origin.responder_name
     target_ma_id = expected_ma_agent_id
@@ -413,8 +414,11 @@ async def _github_connect_impl(
         return ConnectResult(
             status="delivery_failed",
             message=(
-                "I couldn't send the Connect GitHub link to your 1:1 chat with me. "
-                "Open a chat with me in Teams, then try again. Teams opens none "
+                "I couldn't send the Connect GitHub link: connecting GitHub works only "
+                "for people in the organisation that added Daimon."
+                if auth.platform == "teams" and origin.sender_foreign
+                else "I couldn't send the Connect GitHub link to your 1:1 chat with me. "
+                "Open a chat with me, then try again. A chat can't be opened "
                 "with people from another organisation."
                 if auth.platform == "teams"
                 else "I couldn't show the GitHub connection button. Try again."
@@ -465,10 +469,11 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Use this when someone asks to let an agent read a private repository
         at github.com/owner/repo. Show a single-use
-        connection button bound to the selected agent to a server admin; repos
+        connection button bound to the selected agent to an admin; repos
         connected this way are for that agent only. Other members get Ask an
-        admin and a recorded request. On Teams the card goes to the requester's
-        1:1 chat. Never repeat a private link in a shared reply. For a setup
+        admin and a recorded request. The card may go to the requester's
+        private chat instead; the result says so. Never repeat a private link in a
+        shared reply. For a setup
         target, pass its current name and MA id from turn_controls; otherwise
         this defaults to the responder.
         When GitHub access interrupted a task, pass a short restatement as

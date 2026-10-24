@@ -30,14 +30,14 @@ from daimon.adapters.mcp.tools.skills import _list_impl, _sync_impl
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec, EnvironmentSpec
 from daimon.core.stores.domain import Role
-from daimon.testing import ma_agent
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..harness import seed_tenant
 
-_ADMIN_REQUIRED = "requires a workspace or server admin"
+_ADMIN_REQUIRED = "requires an admin"
 
 
 # ---------------------------------------------------------------------------

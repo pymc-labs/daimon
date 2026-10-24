@@ -40,7 +40,7 @@ from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.core.stores.task_continuations import record_continuation as insert_reader_fixture
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)

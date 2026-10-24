@@ -122,6 +122,9 @@ class _AnswerPlace:
     channel_id: str
     message_ts: str
     thread_ts: str
+    #: Who asked for the turn this answer belongs to, as the answer's own buttons say;
+    #: empty on an answer posted before they did.
+    requested_by: str = ""
 
     def metadata(self) -> str:
         return json.dumps(
@@ -129,17 +132,22 @@ class _AnswerPlace:
                 "channel_id": self.channel_id,
                 "message_ts": self.message_ts,
                 "thread_ts": self.thread_ts,
+                **({"requested_by": self.requested_by} if self.requested_by else {}),
             },
             separators=(",", ":"),
         )
 
 
-def build_feedback_actions_block() -> dict[str, Any]:
+def build_feedback_actions_block(requested_by: str | None = None) -> dict[str, Any]:
     """The 👍/👎 actions block appended to the last chunk of a final answer.
 
     Both buttons are deliberately unstyled — the message is shared, so any
     per-click visual state would leak one viewer's vote to everyone else.
+    ``requested_by`` is the Slack user who asked for this answer: each button
+    carries it as its value, which is how a click from a member of another
+    workspace is tied to an answer to their own request (they may rate no other).
     """
+    value = {"value": requested_by} if requested_by else {}
     return {
         "type": "actions",
         "block_id": "feedback_vote",
@@ -148,11 +156,13 @@ def build_feedback_actions_block() -> dict[str, Any]:
                 "type": "button",
                 "action_id": FEEDBACK_VOTE_UP,
                 "text": {"type": "plain_text", "text": "\N{THUMBS UP SIGN}"},
+                **value,
             },
             {
                 "type": "button",
                 "action_id": FEEDBACK_VOTE_DOWN,
                 "text": {"type": "plain_text", "text": "\N{THUMBS DOWN SIGN}"},
+                **value,
             },
         ],
     }
@@ -168,7 +178,12 @@ def vote_for_action_id(action_id: str) -> Vote | None:
 
 
 def build_feedback_modal(
-    *, channel_id: str, message_ts: str, thread_ts: str, shared: bool = False
+    *,
+    channel_id: str,
+    message_ts: str,
+    thread_ts: str,
+    shared: bool = False,
+    requested_by: str = "",
 ) -> dict[str, Any]:
     """The "What went wrong?" form: optional reasons, optional text, one required.
 
@@ -178,7 +193,12 @@ def build_feedback_modal(
     access check. ``shared`` adds the line saying the form goes to the support
     team too, for a tenant that routes it there.
     """
-    place = _AnswerPlace(channel_id=channel_id, message_ts=message_ts, thread_ts=thread_ts)
+    place = _AnswerPlace(
+        channel_id=channel_id,
+        message_ts=message_ts,
+        thread_ts=thread_ts,
+        requested_by=requested_by,
+    )
     notice: list[dict[str, Any]] = (
         [{"type": "context", "elements": [{"type": "mrkdwn", "text": _SHARED_HINT}]}]
         if shared
@@ -275,6 +295,9 @@ class FeedbackTextDecision:
     thread_ts: str
     feedback_id: str
     user_name: str = ""
+    #: The submitter is from another workspace; their row is recorded as a client's.
+    external: bool = False
+    requested_by: str = ""
 
 
 def _metadata(raw: object) -> dict[str, Any]:
@@ -291,8 +314,9 @@ def evaluate_feedback_text_submission(payload: dict[str, Any]) -> FeedbackTextDe
     Both fields are optional on their own but not together: a form with no
     reason picked and whitespace-only text is refused with a field error, so
     the person can fix it rather than lose the form. Reason codes outside the
-    vocabulary are dropped. An external Slack Connect member's form closes
-    and goes no further, as their click would have.
+    vocabulary are dropped. A Slack Connect member's form closes
+    and goes no further unless the form was opened from an answer to their own
+    request, as their click would have.
     """
     view: dict[str, Any] = payload.get("view") or {}
     meta = _metadata(view.get("private_metadata"))
@@ -317,6 +341,8 @@ def evaluate_feedback_text_submission(payload: dict[str, Any]) -> FeedbackTextDe
         thread_ts=str(meta.get("thread_ts") or "") or message_ts,
         feedback_id=str(meta.get("feedback_id") or ""),
         user_name=str(user.get("username") or user.get("name") or ""),
+        external=is_external_interactive(payload),
+        requested_by=str(meta.get("requested_by") or ""),
     )
     if not raw_text.strip() and not reasons:
         return dataclasses.replace(
@@ -326,12 +352,17 @@ def evaluate_feedback_text_submission(payload: dict[str, Any]) -> FeedbackTextDe
                 "errors": {_TEXT_BLOCK_ID: "Pick a reason or write a few words."},
             },
         )
-    if is_external_interactive(payload):
+    if decision.external and not _own_answer(decision.requested_by, str(user.get("id") or "")):
         log.info("feedback.external_submission_rejected")
         return decision
     if not (decision.channel_id and (decision.message_ts or decision.feedback_id)):
         return decision
     return dataclasses.replace(decision, proceed=True, text=raw_text, reasons=reasons)
+
+
+def _own_answer(requested_by: str, user_id: str) -> bool:
+    """Whether the answer is to the user's own request; unknown means no."""
+    return bool(requested_by) and requested_by == user_id
 
 
 _RecordOutcome = Literal["recorded", "missing", "refused", "unreadable"]
@@ -362,6 +393,7 @@ async def _record(
     place: _AnswerPlace,
     vote: Vote,
     details: tuple[str | None, tuple[str, ...]] | None = None,
+    external: bool = False,
 ) -> _Recorded:
     """Decide access, then upsert the vote, and the form's ``details`` (text,
     reasons) when given, all in one transaction.
@@ -375,7 +407,7 @@ async def _record(
         log.info("feedback.tenant_missing", tenant_id=str(tenant_id))
         return _Recorded("missing")
     subject, account_id = await resolve_clicker(
-        runtime, client, tenant_id=tenant_id, user_id=user_id
+        runtime, client, tenant_id=tenant_id, user_id=user_id, external=external
     )
     async with runtime.sessionmaker() as session, session.begin():
         # Decided under the tenant policy lock in the transaction that writes,
@@ -475,7 +507,27 @@ async def handle_feedback_vote(runtime: SlackRuntime, payload: dict[str, Any]) -
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
-    place = _AnswerPlace(channel_id=channel_id, message_ts=message_ts, thread_ts=thread_ts)
+    requested_by = str(actions[0].get("value") or "")
+    external = is_external_interactive(payload)
+    place = _AnswerPlace(
+        channel_id=channel_id,
+        message_ts=message_ts,
+        thread_ts=thread_ts,
+        requested_by=requested_by,
+    )
+    if external and not _own_answer(requested_by, user_id):
+        # A member of another workspace rates only an answer to their own
+        # request; an answer that does not say who asked is not theirs.
+        log.info("feedback.external_vote_refused")
+        await post_ephemeral(
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            thread_ts=thread_ts,
+            message_ts=message_ts,
+            text=_NOT_ALLOWED,
+        )
+        return
 
     view_id: str | None = None
     if vote == "down" and trigger_id:
@@ -487,11 +539,20 @@ async def handle_feedback_vote(runtime: SlackRuntime, payload: dict[str, Any]) -
                 message_ts=message_ts,
                 thread_ts=thread_ts,
                 shared=_support_channel(runtime, team_id=team_id) is not None,
+                requested_by=requested_by,
             ),
         )
 
     outcome = (
-        await _record(runtime, client, team_id=team_id, user_id=user_id, place=place, vote=vote)
+        await _record(
+            runtime,
+            client,
+            team_id=team_id,
+            user_id=user_id,
+            place=place,
+            vote=vote,
+            external=external,
+        )
     ).outcome
     if outcome != "recorded":
         if outcome == "missing" and view_id is None:
@@ -548,7 +609,10 @@ async def handle_feedback_details_click(runtime: SlackRuntime, payload: dict[str
     channel_id = str(meta.get("channel_id") or "")
     message_ts = str(meta.get("message_ts") or "")
     thread_ts = str(meta.get("thread_ts") or "") or message_ts
+    requested_by = str(meta.get("requested_by") or "")
     if not (team_id and user_id and trigger_id and channel_id and message_ts):
+        return
+    if is_external_interactive(payload) and not _own_answer(requested_by, user_id):
         return
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
@@ -561,6 +625,7 @@ async def handle_feedback_details_click(runtime: SlackRuntime, payload: dict[str
             message_ts=message_ts,
             thread_ts=thread_ts,
             shared=_support_channel(runtime, team_id=team_id) is not None,
+            requested_by=requested_by,
         ),
     )
     if view_id is None:
@@ -612,7 +677,12 @@ async def run_feedback_text_submission(
         await reply(_FORM_EXPIRED)
         return
 
-    place = _AnswerPlace(channel_id=d.channel_id, message_ts=d.message_ts, thread_ts=d.thread_ts)
+    place = _AnswerPlace(
+        channel_id=d.channel_id,
+        message_ts=d.message_ts,
+        thread_ts=d.thread_ts,
+        requested_by=d.requested_by,
+    )
     recorded = await _record(
         runtime,
         client,
@@ -621,6 +691,7 @@ async def run_feedback_text_submission(
         place=place,
         vote="down",
         details=(d.text if d.text.strip() else None, d.reasons),
+        external=d.external,
     )
     if recorded.outcome != "recorded" or recorded.row_id is None:
         await reply(_refusal_text(recorded.outcome))

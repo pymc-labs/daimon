@@ -123,7 +123,9 @@ def build_skill_zip(skill_dir: Path, *, name: str | None = None) -> SkillPackage
 # ---------------------------------------------------------------------------
 
 
-def canonical_zip_bytes(src_dir: Path, *, arcname_prefix: str) -> bytes:
+def canonical_zip_bytes(
+    src_dir: Path, *, arcname_prefix: str, max_uncompressed_bytes: int | None = None
+) -> bytes:
     """Build a byte-deterministic zip of ``src_dir``.
 
     File order is lexicographic, timestamps are zeroed (1980-01-01), and
@@ -147,6 +149,7 @@ def canonical_zip_bytes(src_dir: Path, *, arcname_prefix: str) -> bytes:
     )
 
     buf = io.BytesIO()
+    remaining = max_uncompressed_bytes
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for p in files:
             rel = p.relative_to(src_dir).as_posix()
@@ -154,7 +157,15 @@ def canonical_zip_bytes(src_dir: Path, *, arcname_prefix: str) -> bytes:
             zi.date_time = _ZERO_TS
             zi.external_attr = 0
             zi.compress_type = zipfile.ZIP_DEFLATED
-            zf.writestr(zi, p.read_bytes())
+            if remaining is None:
+                body = p.read_bytes()
+            else:
+                with p.open("rb") as source:
+                    body = source.read(remaining + 1)
+                if len(body) > remaining:
+                    raise DefaultsError("Skill exceeds the decoded byte cap.")
+                remaining -= len(body)
+            zf.writestr(zi, body)
     return buf.getvalue()
 
 

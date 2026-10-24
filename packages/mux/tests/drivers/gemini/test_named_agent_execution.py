@@ -4,7 +4,6 @@ import json
 
 import httpx
 import pytest
-from daimon.core.turn.gemini_state import SQLiteGeminiStorage
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -15,10 +14,10 @@ from mux.drivers.gemini.deployment import configured_catalog_transport, configur
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashTransport
 from mux.errors import UnsupportedCapability
 from mux.state.memory import MemoryStateStore
-
-from .test_catalog import SCOPE, WORKSPACE, Wire, spec
-from .test_deployment_isolation import FORBIDDEN_NAMES, owned_clients
-from .test_flash import Accounting
+from mux.testing.drivers.gemini.accounting import Accounting
+from mux.testing.drivers.gemini.catalog_wire import SCOPE, WORKSPACE, Wire, spec
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.drivers.gemini.owned_clients import FORBIDDEN_NAMES, owned_clients
 
 
 @pytest.mark.parametrize("name", FORBIDDEN_NAMES)
@@ -58,7 +57,7 @@ async def test_public_catalog_transport_owns_explicit_sdk_clients_and_closes_the
 @pytest.mark.parametrize("accepted", [False, True])
 @pytest.mark.parametrize("native_status", [200, 503])
 async def test_actual_sdk_dispatch_keeps_verified_native_id_model_and_single_attempt(
-    accepted, native_status, monkeypatch, tmp_path
+    accepted, native_status, monkeypatch
 ):
     wire = Wire()
     posts = []
@@ -100,9 +99,7 @@ async def test_actual_sdk_dispatch_keeps_verified_native_id_model_and_single_att
         return wire.handle(request)
 
     owned = owned_clients(monkeypatch, handle)
-    storage = SQLiteGeminiStorage(
-        tmp_path / "agents.sqlite", namespace="explicit-scoped-native-intent"
-    )
+    storage = MemoryStorage()
     store = MemoryStateStore()
     base = configured_transport(api_key="offline-selected")
     try:
@@ -169,9 +166,7 @@ async def test_actual_sdk_dispatch_keeps_verified_native_id_model_and_single_att
             # A new call retains the same named definition and verified tariff.
             accounting.held.clear()
             # Reconstruct the ordinary driver with the persisted named definition.
-            retained_storage = SQLiteGeminiStorage(
-                tmp_path / "agents.sqlite", namespace="explicit-scoped-native-intent"
-            )
+            retained_storage = storage
             restarted_policy = FlashTransport(base, accounting, native_agent=verified)
             backend = GeminiManagedAgents(
                 restarted_policy,

@@ -12,7 +12,6 @@ import time
 
 import httpx
 import pytest
-from daimon.testing.ma import MARouter, build_fake_anthropic, session_response
 from daimon.testing.turn_fakes import (
     DelayThenYield,
     FakeEventsResource,
@@ -20,6 +19,7 @@ from daimon.testing.turn_fakes import (
     RaiseReadTimeout,
     YieldEvent,
 )
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, session_response
 
 
 async def test_raise_read_timeout_raises_httpx_read_timeout_during_iteration() -> None:

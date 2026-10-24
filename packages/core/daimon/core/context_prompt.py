@@ -31,7 +31,8 @@ DEFAULT_FRAGMENTS: dict[TurnContext, str] = {
         "and state before claiming continuity; do not assume running processes survived."
     ),
 }
-_MARKER = "\n\nDaimon context fragment configuration (selected per turn):\n"
+FRAGMENT_MARKER = "\n\nDaimon context fragment configuration (selected per turn):\n"
+_MARKER = FRAGMENT_MARKER
 
 
 class ContextFragment(BaseModel):

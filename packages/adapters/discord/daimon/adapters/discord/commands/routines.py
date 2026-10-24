@@ -19,6 +19,7 @@ from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
+from daimon.core.platform_words import DESCRIPTIONS
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -44,7 +45,7 @@ class RoutinesCog(commands.Cog):
 
     @app_commands.command(
         name="routines",
-        description="Scheduled jobs",
+        description=DESCRIPTIONS["routines"],
     )
     @require_registered_guild
     @require_manage_guild

@@ -23,7 +23,16 @@ from typing import Literal, Never, cast
 
 import httpx
 from anthropic import AsyncAnthropic, AsyncStream
-from daimon.testing.conformance.budget import (
+from mux.contracts.ids import ResourceRef, Scope
+from mux.contracts.usage import UsageObservation
+from mux.drivers.anthropic import (
+    AnthropicManagedAgents,
+    ResourceAuthorization,
+    Vaults,
+    observation_from_event,
+)
+from mux.errors import ScopeViolation
+from mux.testing.conformance.budget import (
     ActualSpend,
     BudgetConfig,
     BudgetGuard,
@@ -36,19 +45,12 @@ from daimon.testing.conformance.budget import (
     TokenLimits,
     TokenUsage,
 )
-from daimon.testing.conformance.recording import Audit, RecordingError
-from daimon.testing.conformance.usage_settlement import (
+from mux.testing.conformance.recording import Audit, RecordingError
+from mux.testing.conformance.usage_settlement import (
     AnthropicSessionSpend,
     actual_from_anthropic_sessions,
 )
-from daimon.testing.isolated_sdk import TLS_PROXY_ENV_VARS, build_async_anthropic
-from mux.contracts.ids import ResourceRef, Scope
-from mux.contracts.usage import UsageObservation
-from mux.drivers.anthropic import AnthropicManagedAgents
-from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
-from mux.drivers.anthropic.resources.vaults import Vaults
-from mux.drivers.anthropic.usage import observation_from_event
-from mux.errors import ScopeViolation
+from mux.testing.isolated_sdk import TLS_PROXY_ENV_VARS, build_async_anthropic
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 MODEL = "claude-haiku-5-5"

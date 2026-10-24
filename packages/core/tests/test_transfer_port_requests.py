@@ -14,8 +14,8 @@ from anthropic.types.beta import FileMetadata
 from daimon.core import thread_handoff, workspace_transfer
 from daimon.core.session_ports_compat import session_scope
 from daimon.core.session_seal import session_facts
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

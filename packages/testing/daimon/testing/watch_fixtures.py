@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 def watch_migration() -> dict[str, object]:
     return runpy.run_path(
-        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0119_watches.py")
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0142_watches.py")
     )
 
 
@@ -78,7 +78,7 @@ async def install_poll_ports(session: AsyncSession) -> None:
     assert isinstance(schema, str) and schema.startswith("test_")
     quoted = '"' + schema + '"'
     migration = runpy.run_path(
-        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0120_watch_polling.py")
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0143_watch_polling.py")
     )
     for key in ("PROJECT_SQL", "PAGE_SQL", "POLL_SQL", "CLAIM_SQL"):
         await session.execute(text(migration[key].format(schema=quoted)))

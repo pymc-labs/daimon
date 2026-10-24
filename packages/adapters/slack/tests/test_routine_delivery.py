@@ -433,7 +433,7 @@ async def test_dm_row_is_explicitly_refused_without_channel_or_dm_io(
     row = row.model_copy(update={"destination_kind": "dm", "destination_id": "U1"})
     post, client = _poster(db_session_factory, monkeypatch)
     result = await post(row)
-    assert result.status == "skipped" and "only on Discord" in result.note
+    assert result.status == "skipped" and "not supported here" in result.note
     client.chat_postMessage.assert_not_awaited()
     client.conversations_open.assert_not_awaited()
 
@@ -444,7 +444,8 @@ async def test_generated_files_use_existing_slack_upload_path(
 ):
     import httpx
     from daimon.core.routine_files import OUTBOX_FILES, PREFIX, RoutineFile, RoutinePayload
-    from daimon.testing.ma import MARouter, build_fake_anthropic
+    from daimon.testing.ma import MARouter
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
     row = await _routine(db_session, kind="thread", destination_id="C1:1717.5")
     row = row.model_copy(
@@ -613,3 +614,29 @@ async def test_upload_failure_does_not_log_signed_url(
     async with db_session_factory() as session:
         after = await get_routine(session, row.id, tenant_id=row.tenant_id)
     assert after.delivery_status == "skipped"
+
+
+async def test_a_shared_channels_routine_never_leaves_it_by_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its fire ran held to the channel, so its result goes there or nowhere."""
+    from daimon.core.stores.shared_channels import mark_channel_shared
+    from slack_sdk.errors import SlackApiError
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    await mark_channel_shared(
+        db_session, tenant_id=row.tenant_id, platform="slack", channel_id="C1", source="platform"
+    )
+    await db_session.commit()
+    post, client = _poster(db_session_factory, monkeypatch)
+    response = MagicMock(spec=AsyncSlackResponse)
+    response.data = {"ok": False, "error": "not_in_channel"}
+    client.chat_postMessage = AsyncMock(side_effect=SlackApiError("not_in_channel", response))
+
+    outcome = await post(row)
+
+    assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
+    client.conversations_open.assert_not_awaited()

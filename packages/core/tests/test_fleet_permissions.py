@@ -283,12 +283,12 @@ def test_native_budget_requires_single_input_and_short_deadline():
     root = parent()
     values = root.limits.model_dump() | {
         "native_budget_usd": Decimal("0.02"),
-        "deadline": NOW + timedelta(seconds=120),
+        "deadline": NOW + timedelta(seconds=600),
         "max_turns": 1,
     }
     WorkerLimits.model_validate(values).require_native_dispatch(NOW)
     for changes, field in (
-        ({"deadline": NOW + timedelta(seconds=121)}, "deadline"),
+        ({"deadline": NOW + timedelta(seconds=601)}, "deadline"),
         ({"deadline": NOW}, "deadline"),
         ({"max_turns": 2}, "max_turns"),
         ({"budget_usd": Decimal("0.01")}, "native_budget_usd"),
@@ -297,14 +297,16 @@ def test_native_budget_requires_single_input_and_short_deadline():
             WorkerLimits.model_validate(values | changes).require_native_dispatch(NOW)
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+@pytest.mark.parametrize("provider", ["anthropic"])
 def test_soft_native_budget_does_not_waive_unsupported_hard_limits(provider):
     root = parent(provider)
     values = root.limits.model_dump() | {"native_budget_usd": Decimal("0.02")}
-    with pytest.raises(WorkerSpecRefused, match="native_budget_usd: unsupported"):
-        WorkerLimits.model_validate(values).require_profile(
-            get_profile(parent("gemini").backend_grants[0].profile)
-        )
+    # Gemini has no native cap; nor has OpenAI on our project (`spend_control` -> 400).
+    for unsupported in ("gemini", "openai"):
+        with pytest.raises(WorkerSpecRefused, match="native_budget_usd: unsupported"):
+            WorkerLimits.model_validate(values).require_profile(
+                get_profile(parent(unsupported).backend_grants[0].profile)
+            )
     supported = get_profile(root.backend_grants[0].profile)
     WorkerLimits.model_validate(values).require_profile(supported)
     for field in ("max_model_requests", "max_input_tokens", "max_output_tokens"):
@@ -705,11 +707,11 @@ def test_native_mcp_policy_that_is_dropped_by_compilation_refuses():
 
 
 async def test_openai_attenuated_mcp_allowlist_reaches_actual_sdk_request():
-    from daimon.testing.isolated_sdk import build_async_openai
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from mux.drivers.openai._common import Context
     from mux.drivers.openai.agents import OpenAIAgents
     from mux.drivers.openai.transport import SDKTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.isolated_sdk import build_async_openai
 
     root = parent("openai")
     server = MCPConnection(
@@ -988,9 +990,9 @@ def test_clone_metadata_map_clear_is_allowed_when_root_has_no_stamps():
 
 async def test_actual_anthropic_clone_refuses_opaque_authority_without_extra_io():
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
     from mux.drivers.anthropic.resources.agents import AnthropicAgents
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     root = parent()
     scope = root.fleet.scope
@@ -1044,11 +1046,11 @@ async def test_actual_anthropic_clone_refuses_opaque_authority_without_extra_io(
 
 
 async def test_actual_openai_clone_preserves_implicit_execution_and_refuses_added_tool():
-    from daimon.testing.isolated_sdk import build_async_openai
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from mux.drivers.openai._common import Context
     from mux.drivers.openai.agents import OpenAIAgents
     from mux.drivers.openai.transport import SDKTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.isolated_sdk import build_async_openai
 
     root = parent("openai")
     scope = root.fleet.scope
@@ -1931,7 +1933,7 @@ def test_frozen_root_remains_narrow_after_current_policy_or_source_changes():
 
 
 async def test_root_freeze_uses_actual_sdk_owner_capture_and_owned_resource_projection(
-    db_preflight, db_nullpool_engine
+    db_preflight, db_committing_engine
 ):
     from daimon.core.authz import build_agent_ref
     from daimon.core.channel_backend import load_backend_agent
@@ -1940,12 +1942,12 @@ async def test_root_freeze_uses_actual_sdk_owner_capture_and_owned_resource_proj
     from daimon.core.turn.admission import AdmissionGrant
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.factories import make_account, make_tenant
-    from daimon.testing.ma import MARouter
     from daimon.testing.ma_models import ma_agent, ma_environment
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma import MARouter
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
     async with sm.begin() as db:
         tenant = await make_tenant(db)
@@ -2168,3 +2170,43 @@ def test_gemini_unknown_or_expanded_execution_envelopes_refuse(update):
     )
     with pytest.raises(WorkerSpecRefused):
         limits.require_profile(get_profile("gemini.inline_reuse"))
+
+
+@pytest.mark.parametrize(
+    ("now", "priced"),
+    [(datetime(2026, 11, 30, tzinfo=UTC), True), (datetime(2026, 12, 1, tzinfo=UTC), False)],
+)
+def test_granted_argon_worker_spec_resolves_only_inside_its_price_window(monkeypatch, now, priced):
+    from daimon.core import pricing
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(pricing, "datetime", Clock)
+    root = parent("gemini")
+    argon = backend_selection("gemini").model_copy(update={"model": "gemini-4-argon"})
+    model = ModelRef(provider="gemini", id="gemini-4-argon")
+    root = replace(
+        root,
+        spec=root.spec.model_copy(update={"model": model}),
+        backend_grants=(argon,),
+        models=(model,),
+    )
+    if priced:
+        assert resolve(root).backend == argon
+    else:
+        with pytest.raises(WorkerSpecRefused, match="backend: unsupported"):
+            resolve(root)
+
+
+@pytest.mark.parametrize(
+    ("backend", "kept"), [("anthropic", True), ("gemini", True), ("openai", False)]
+)
+def test_a_worker_keeps_its_description_wherever_the_provider_has_one(backend, kept) -> None:
+    """Only an OpenAI worker goes without it: OpenAI agents have no description (J4)."""
+    root = parent(backend)
+    spec = root.spec.model_copy(update={"description": "A saved agent people pick by name."})
+    resolved = resolve_worker_spec(root, spec, policy=POLICY, now=NOW)
+    assert resolved.spec.description == (spec.description if kept else None)

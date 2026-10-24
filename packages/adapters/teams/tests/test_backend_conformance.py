@@ -21,26 +21,27 @@ from daimon.adapters.teams import app as platform_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.channel_backend import channel_ref, set_channel_backend
+from daimon.core.config import load_turn_settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.prepare import PreparedTurn
-from daimon.testing import ma_session
 from daimon.testing.adapters.teams.backend_conformance import (
     BackendTurnEnvelope,
     backend_selection_turn,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.isolated_sdk import (
+from daimon.testing.turn_router import build_turn_router
+from mux.contracts.config import BackendConfig, ConfigRevision
+from mux.testing.drivers.anthropic.ma import json_body, make_fake_memory_store_handler
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.isolated_sdk import (
     SDK_ENV_VARS,
     AmbientSDKConfigurationError,
     build_async_anthropic,
 )
-from daimon.testing.ma import json_body, make_fake_memory_store_handler
-from daimon.testing.turn_router import build_turn_router
-from mux.contracts.config import BackendConfig, ConfigRevision
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -231,7 +232,18 @@ async def test_changed_current_config_refusal_remains_visible_without_native_wri
             )
             await session.commit()
         assert changed.local == revision_of(first).local + 1
-        for thread in (THREAD, NEW_THREAD):
+        # The mux turn path pins a thread to the revision it started on
+        # (`turn/admission.py` retained_revision): a channel change reaches new
+        # threads only, so the existing thread keeps running on its own revision.
+        # The legacy path has no per-thread pin and refuses every thread.
+        on_mux = (app.runtime.turn_deps.turn_path or load_turn_settings().path) == "mux"
+        if on_mux:
+            retained = await dispatch(THREAD, USER)
+            assert retained.reused and retained.ma_session_id == first.ma_session_id
+            assert revision_of(retained).local == revision_of(first).local
+            assert revision_of(retained).profile == "anthropic.managed_agents"
+        refused_threads = (NEW_THREAD,) if on_mux else (THREAD, NEW_THREAD)
+        for thread in refused_threads:
             before = len(wire.requests)
             with pytest.raises(AdmissionDenied) as denied:
                 await dispatch(thread, USER)
@@ -394,3 +406,29 @@ async def test_actual_fixture_refuses_ambient_sdk_settings(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://n7-poison.invalid")
     with pytest.raises(AmbientSDKConfigurationError):
         await setup(db_session, db_session_factory)
+
+
+async def test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    app, dispatch, wire = await setup(db_session, db_session_factory)
+    app.runtime = dataclasses.replace(
+        app.runtime, turn_deps=dataclasses.replace(app.runtime.turn_deps, turn_path="mux")
+    )
+    try:
+        first = await dispatch(THREAD, USER)
+        async with db_session_factory.begin() as session:
+            await set_channel_backend(
+                session,
+                channel_ref(tenant_id_from(first), "teams", CHANNEL),
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
+            )
+        second = await dispatch(THREAD, USER)
+        assert second.reused
+        assert second.ma_session_id == first.ma_session_id
+        assert revision_of(second) == revision_of(first)
+        assert wire.stream_hits == [first.ma_session_id, first.ma_session_id]
+        await persisted(db_session_factory, second, THREAD)
+    finally:
+        await app.runtime.anthropic.close()

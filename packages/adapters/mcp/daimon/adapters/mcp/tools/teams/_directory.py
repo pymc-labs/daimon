@@ -125,6 +125,6 @@ async def require_readable(
     if not ref.is_standard and ref.channel_id not in read_policy.origin_channel_ids:
         raise ToolError(
             f"{ref.channel_name} is a {ref.channel_type} channel: daimon reads it only from a "
-            "conversation inside it. Pass this turn's origin_context_id when you are in it."
+            "conversation inside it. Pass your origin_context_id when you are in it."
         )
     read_policy.require(target or ref.channel_id, ref.channel_id if target else None)

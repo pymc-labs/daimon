@@ -29,6 +29,7 @@ from daimon.adapters.mcp.tools._rule_view import (
     require_bindable,
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.reachability import (
     require_admin,
     require_bindable_as_channel_default,
@@ -145,14 +146,16 @@ async def _set_agent_default_impl(
             require_bindable(policy, agent_name, agent=agent, channel_id=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
+    space = space_noun(auth.platform)
     if channel_id is not None:
         scope: ChannelScopeRef | TenantScopeRef = ChannelScopeRef(
             tenant_id=tenant_id, channel_id=channel_id
         )
-        scope_label = f"channel:{channel_id}"
+        scope_label = note_scope = f"channel:{channel_id}"
     else:
         scope = TenantScopeRef(tenant_id=tenant_id)
         scope_label = "workspace"
+        note_scope = space
 
     if agent is None:
         agent = await find_agent_by_daimon_tag(
@@ -181,7 +184,9 @@ async def _set_agent_default_impl(
         scope=scope_label,
         agent_name=agent_name,
         previous_agent_name=prior_agent,
-        routing_note=build_set_default_note(agent_name=agent_name, scope_label=scope_label)
+        routing_note=build_set_default_note(
+            agent_name=agent_name, scope_label=note_scope, space=space
+        )
         + (f" {repos_come_too_line(agent_name)}" if brings_repos else ""),
     )
 
@@ -198,14 +203,16 @@ async def _clear_agent_default_impl(
         refuse(clear_refusal(policy, channel_id=channel_id), agent_name=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
+    space = space_noun(auth.platform)
     if channel_id is not None:
         scope: ChannelScopeRef | TenantScopeRef = ChannelScopeRef(
             tenant_id=tenant_id, channel_id=channel_id
         )
-        scope_label = f"channel:{channel_id}"
+        scope_label = note_scope = f"channel:{channel_id}"
     else:
         scope = TenantScopeRef(tenant_id=tenant_id)
         scope_label = "workspace"
+        note_scope = space
 
     async with runtime.session_factory.begin() as session:
         prior = await get_scope(session, scope=scope)
@@ -221,7 +228,9 @@ async def _clear_agent_default_impl(
     return ClearDefaultResult(
         scope=scope_label,
         cleared=had_default,
-        routing_note=build_clear_default_note(scope_label=scope_label, cleared=had_default),
+        routing_note=build_clear_default_note(
+            scope_label=note_scope, cleared=had_default, space=space
+        ),
     )
 
 
@@ -386,11 +395,11 @@ async def _explain_agent_resolution_impl(
                     next_step = (
                         "Open a new setup conversation to continue."
                         if binding.kind == "setup"
-                        else "Start the task again in a new thread to continue."
+                        else "Start the task again in a new conversation to continue."
                     )
                     raise ToolError(
                         f"{kind_label} '{thread_id}' in '{channel_id}' was deleted. "
-                        f"Its recorded responder is {binding.responder_name} "
+                        f"Its recorded agent is {binding.responder_name} "
                         f"({binding.responder_ma_agent_id}); configuration target: {target}. "
                         f"{next_step}"
                     )
@@ -444,6 +453,7 @@ async def _explain_agent_resolution_impl(
             environment_name=resolved.environment_name,
             tier=resolved.environment_name_tier,
             channel_id=channel_id,
+            space=space_noun(auth.platform),
         ),
         responder_ma_agent_id=binding.responder_ma_agent_id if binding else None,
         configuration_target_ma_agent_id=binding.configuration_target_ma_agent_id
@@ -459,6 +469,7 @@ async def _explain_agent_resolution_impl(
             agent_name=resolved.agent_name,
             tier=resolved.agent_name_tier,
             channel_id=channel_id,
+            space=space_noun(auth.platform),
         ),
     )
 
@@ -471,22 +482,19 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str | None = None,
         expected_ma_agent_id: str | None = None,
     ) -> SetDefaultResult:
-        """Make an agent answer in a channel or become the whole server/workspace default.
+        """Make an agent answer in a channel or become the whole workspace's default.
         For example, make churn-explorer answer in #growth. Changes the agent that answers;
         use ``clear_agent_default`` to stop that routing.
 
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core). Requires Manage Server (admin).
+        core). Requires an admin.
 
-        Discord: ``channel_id`` MUST be the parent channel's id — the one
-        your context gives as
-        ``<channel platform="discord" id="..." role="parent_channel">``.
-        Never pass the current thread's id here. Slack: use the id from
-        ``<channel platform="slack" id="...">`` — Slack's context always
-        names the parent channel. Teams: use ``parent_channel_id`` from
-        turn_controls. A channel default is resolved from the parent;
+        ``channel_id`` MUST be the parent channel's id: ``parent_channel_id`` from
+        turn_controls, the same id your context gives on the ``<channel ...
+        role="parent_channel">`` element where it has one. Never pass the current
+        thread's id here. A channel default is resolved from the parent;
         setup threads keep their bound responder. A default
         written against a thread id is a scope nothing ever reads: the write
         succeeds, this tool reports success, and the channel keeps answering
@@ -507,13 +515,10 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
-        default the call is a no-op (idempotent). Requires Manage Server (admin).
+        default the call is a no-op (idempotent). Requires an admin.
 
-        Discord: ``channel_id`` MUST be the parent channel's id
-        (``<channel platform="discord" id="..." role="parent_channel">``),
-        never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Teams: use
-        ``parent_channel_id`` from turn_controls. Clearing a thread id is a
+        ``channel_id`` MUST be the parent channel's id: ``parent_channel_id`` from
+        turn_controls, never the current thread's id. Clearing a thread id is a
         silent no-op that leaves the channel's real default in place.
         """
         return await _clear_agent_default_impl(runtime, await _auth(ctx), channel_id)
@@ -542,10 +547,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel-bound keys can read their own channel. Hidden agents and configuration
         targets are omitted. Admins retain their routing view within channel isolation.
 
-        Discord: ``channel_id`` MUST be the parent channel's id
-        (``<channel platform="discord" id="..." role="parent_channel">``),
-        never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Teams: ``parent_channel_id``
+        ``channel_id`` MUST be the parent channel's id: ``parent_channel_id``
         from turn_controls, with its ``thread_id``. Asking about a thread id
         reports that thread's own (almost always empty) scope, which reads
         as a confident answer about the channel and is not one — and if the

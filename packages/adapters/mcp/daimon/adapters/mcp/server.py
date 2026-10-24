@@ -77,8 +77,10 @@ from daimon.adapters.mcp.tools.lead_intake import register_lead_intake_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
+from daimon.adapters.mcp.tools.models import register_model_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.plain_text_mentions import register_plain_text_mentions_tools
+from daimon.adapters.mcp.tools.progress_plans import register_progress_plan_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
 from daimon.adapters.mcp.tools.promo_issuing import register_promo_issuing_tools
 from daimon.adapters.mcp.tools.propagation import register_propagation_tools
@@ -556,6 +558,7 @@ def create_mcp_app(
     sessions.register_sessions_tools(mcp, runtime)
     agent_chat.register_agent_chat_tools(mcp, runtime, billing_config=effective_billing_config)
     time.register_time_tools(mcp, runtime)
+    register_model_tools(mcp, runtime)  # list_models: names, ids and list prices
     routines.register_routines_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
     from daimon.adapters.mcp.tools.watches import register_watch_tools
@@ -579,6 +582,7 @@ def create_mcp_app(
     register_channel_copy_tools(mcp, runtime)  # archive a closing channel's copy
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
+    register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills

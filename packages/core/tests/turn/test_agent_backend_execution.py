@@ -18,7 +18,7 @@ from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.resources import Agent, AgentSpec
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .test_provider_dispatch import ACCOUNT, REVISION, SCOPE, TENANT, admission, deps_for
+from .test_provider_dispatch import ACCOUNT, REVISION, SCOPE, TENANT, admission, deps_for_pinned_mux
 
 NOW = datetime(2026, 10, 12, tzinfo=UTC)
 
@@ -81,7 +81,7 @@ def request_for(row: AgentRevision, runtime: TurnRuntime) -> ProviderPreparation
         ),
     )
     deps = replace(
-        deps_for(None, async_sessionmaker[AsyncSession]()),
+        deps_for_pinned_mux(None, async_sessionmaker[AsyncSession]()),
         channel_backends=True,
         agent_backends=True,
         turn_runtimes={config.profile: runtime},

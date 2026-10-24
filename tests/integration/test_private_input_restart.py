@@ -53,10 +53,10 @@ from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.core.stores.domain import CredentialRequestRow, TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _GUILD_ID = 770001

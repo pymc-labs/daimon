@@ -24,6 +24,8 @@ from daimon.core.agent_identity import (
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.direct_messages import (
+    ColdDmNotices,
+    cold_dm_text,
     is_sealed_slack_message,
     reply_to_dm,
     require_dm_enabled,
@@ -39,6 +41,7 @@ from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn_hold import RequesterOrg
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -111,7 +114,9 @@ def _error_message(exc: Exception, *, settings: Settings, team_id: str) -> str:
             _log_dm_setup_needed(team_id=team_id, cause=str(code))  # pyright: ignore[reportUnknownArgumentType]  # SlackApiError.response is untyped
             return _REAUTHORIZE
     if isinstance(exc, AdmissionDenied):
-        return admission_refusal_message(exc.reason, settings, in_dm=True)
+        return admission_refusal_message(
+            exc.reason, settings, in_dm=True, cause=exc.cause, provider=exc.provider
+        )
     return render_error(exc, request_id=bound_request_id())
 
 
@@ -181,6 +186,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             admission = await admit(
                 runtime.turn_deps,
                 tenant_id=tenant_id,
+                requester_org=RequesterOrg.HOST,
                 platform="slack",
                 external_user_id=user_id,
                 channel_id=channel_id,
@@ -256,6 +262,26 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 )
 
 
+#: Who has been told in this process that a private message has nothing to continue.
+_COLD_DM_NOTICES = ColdDmNotices()
+
+
+async def _explain_no_private_chat(
+    client: AsyncWebClient, *, team_id: str, user_id: str, channel_id: str, dms_on: bool
+) -> None:
+    """Answer a DM that has no conversation to continue, once per person per process."""
+    person = f"{team_id}:{user_id}"
+    if not _COLD_DM_NOTICES.first_time(person):
+        return
+    try:
+        await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            channel=channel_id, text=cold_dm_text("slack", dms_on=dms_on)
+        )
+    except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
+        _COLD_DM_NOTICES.forget(person)
+        log.warning("slack.dm.cold_notice_failed", error_type=type(exc).__name__)
+
+
 async def handle_direct_message(
     runtime: SlackRuntime, event: dict[str, Any], *, team_id: str
 ) -> None:
@@ -275,12 +301,19 @@ async def handle_direct_message(
             conversation = await get_conversation(
                 session, platform="slack", route_key=route_key, external_user_id=user_id
             )
-            if conversation is None or not await dm_enabled(
-                session, tenant_id=conversation.tenant_id
-            ):
-                return
+            dms_on = await dm_enabled(
+                session,
+                tenant_id=conversation.tenant_id
+                if conversation is not None
+                else derive_tenant_uuid(platform="slack", workspace_id=team_id),
+            )
         client = await resolve_web_client(runtime, team_id=team_id)
         if client is None:
+            return
+        if conversation is None or not dms_on:
+            await _explain_no_private_chat(
+                client, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=dms_on
+            )
             return
         role = await _live_role(client, user_id=user_id, team_id=team_id)
         content = str(event.get("text") or "")

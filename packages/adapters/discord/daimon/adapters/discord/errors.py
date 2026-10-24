@@ -20,10 +20,12 @@ from daimon.core.errors import (
     UserFacingError,
 )
 from daimon.core.notebooks.publish import NotebookRateLimitError
+from daimon.core.platform_words import words_for
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
-from daimon.core.turn.notices import short_ref
+from daimon.core.turn.notices import provider_quota_copy, short_ref
+from mux.errors import ProviderError
 from ulid import ULID
 
 import discord
@@ -83,7 +85,10 @@ def _guidance(exc: BaseException) -> str | None:
             return "Daimon doesn't have permission to post here. Ask a server admin for help."
         return None
     if isinstance(exc, AgentNameCollision):
-        return "This workspace already has an agent with that name. Pick a different name."
+        return (
+            f"This {words_for('discord').space} already has an agent with that name. "
+            "Pick a different name."
+        )
     if isinstance(exc, UserFacingError):
         return str(exc)
     if isinstance(exc, DirectMessageBusy):
@@ -123,9 +128,30 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, anthropic.APIError):
         # Connection failures, timeouts and errors with no status.
         return _AI_UNREACHABLE
+    if isinstance(exc, ProviderError):
+        if (quota := provider_quota_copy(exc)) is not None:
+            return quota  # a model the plan gives no quota names that, not "busy"
+        # Any provider behind the neutral driver layer (Gemini, OpenAI...).
+        if exc.category in {"rate_limited", "overloaded"}:
+            return _AI_BUSY
+        if exc.category == "transient_network" or (exc.category == "upstream" and exc.retryable):
+            return _AI_UNREACHABLE
+        return _AI_REFUSED
     if isinstance(exc, discord.HTTPException):
         return _PLATFORM_REFUSED
     return _OUR_SIDE
+
+
+WAKE_REFUSED_LINES = (
+    "The fleet finished, but I couldn't pick this conversation back up to report on it. "
+    "That's a problem on our side.",
+    "Mention me to continue.",
+)
+
+
+def render_wake_refused(*, request_id: str) -> str:
+    """A fleet completion wake that was refused before its turn ran, with its `Ref`."""
+    return "\n\n".join((*WAKE_REFUSED_LINES, f"-# Ref {short_ref(request_id)}"))
 
 
 def error_lines(exc: BaseException) -> tuple[str, ...]:
@@ -159,7 +185,7 @@ def render_error(
     """
     if isinstance(exc, SessionAgentMismatch):
         return render_responder_changed_without_handoff(
-            new_responder=new_responder or "the current responder",
+            new_responder=new_responder or "the current agent",
             owner=owner or "the previous agent",
             channel=channel or "this channel",
             offer_button=offer_button,

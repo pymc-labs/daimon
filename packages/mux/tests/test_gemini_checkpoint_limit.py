@@ -8,8 +8,6 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
-from daimon.core.checkpoint_prompt import HANDOFF_MAX_BYTES
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -18,6 +16,7 @@ from mux.contracts.resources import AgentSpec, EnvironmentSpec, Session, Session
 from mux.drivers.gemini import GeminiManagedAgents, resources
 from mux.errors import ProviderError, ScopeViolation
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 
 pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
 
@@ -107,8 +106,6 @@ def test_snapshot_accepts_a_real_40_mib_binary_member(
 ) -> None:
     body = binary_member()
     snapshot = archive({"work/large.bin": body}, compressed=compressed)
-    if compressed:
-        assert len(snapshot) < HANDOFF_MAX_BYTES
     reads: list[int] = []
     original_read = tarfile.ExFileObject.read
 

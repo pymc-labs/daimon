@@ -1,13 +1,13 @@
 """F2 offline: Daimon's default capabilities on the OpenAI backend, MCP served for real.
 
-The F1 default-capability scenario (`daimon.testing.conformance.default_capability`) runs
+The F1 default-capability scenario (`mux.testing.conformance.default_capability`) runs
 against the OpenAI driver with the default agent's 11 skills and builtin tools,
 exactly as the F1 OpenAI test scripts them. What F2 adds: the `daimon-mcp`
 attachment is authenticated (`credential_ref` resolved per session by the
 driver's `mcp_secrets`), and its two read tools are served by the disposable
 loopback host (`daimon.testing.qa_mcp_host`) through its gate. When the driver
 creates the session, the scripted provider does what OpenAI's server-side MCP
-client would: it takes the serialized authorization, calls the real gate, and
+client would: it resolves the attached vault credential, calls the real gate, and
 the turn's `mcp_call` results are the real tool results. F1's own checks then
 judge the whole turn.
 
@@ -28,7 +28,15 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 import yaml
-from daimon.testing.conformance.default_capability import (
+from mux.contracts.ids import Scope
+from mux.contracts.resources import AgentSpec, MCPConnection, SkillUpload, SkillUploadFile
+from mux.drivers.openai import OpenAIDriver
+from mux.drivers.openai._common import Context
+from mux.drivers.openai.agents import agent_spec
+from mux.drivers.openai.transport import Object, SDKTransport, object_json
+from mux.drivers.openai.turn import MemoryRecoveryJournal
+from mux.drivers.openai.usage import MemoryUsageRevisions
+from mux.testing.conformance.default_capability import (
     BASH_RESULT,
     FINAL_MESSAGE,
     MCP_TOOLS,
@@ -38,23 +46,15 @@ from daimon.testing.conformance.default_capability import (
     NamedSkill,
     skill_text,
 )
-from daimon.testing.conformance.recording import Audit, Recorder
-from daimon.testing.conformance.runner import run_default_capability
-from daimon.testing.drivers.openai.default_capability import (
+from mux.testing.conformance.recording import Audit, Recorder
+from mux.testing.conformance.runner import run_default_capability
+from mux.testing.drivers.openai.default_capability import (
     BUILTIN_MAPPING,
     MODEL,
     SCOPE,
     OpenAIDefaultCapabilityFactory,
     OpenAIDefaultCapabilityTransport,
 )
-from mux.contracts.ids import Scope
-from mux.contracts.resources import AgentSpec, MCPConnection, SkillUpload, SkillUploadFile
-from mux.drivers.openai import OpenAIDriver
-from mux.drivers.openai._common import Context
-from mux.drivers.openai.agents import agent_spec
-from mux.drivers.openai.transport import Object, SDKTransport, object_json
-from mux.drivers.openai.turn import MemoryRecoveryJournal
-from mux.drivers.openai.usage import MemoryUsageRevisions
 from openai import AsyncOpenAI
 from pydantic import JsonValue
 
@@ -233,8 +233,32 @@ class _HostServedMcp:
         self.posted_bodies: list[str] = []
         self.results: dict[str, Object] = {}
         self.gate_statuses: list[int] = []
+        self.vaults: dict[str, Object] = {}
+        self.vault_credentials: dict[str, Object] = {}
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/vaults":
+            if request.method == "GET":
+                return httpx.Response(
+                    200, json={"data": list(self.vaults.values()), "has_more": False}
+                )
+            identity = "qa-session-vault-" + str(len(self.vaults))
+            raw = {"id": identity, **json.loads(request.content)}
+            self.vaults[identity] = raw
+            return httpx.Response(200, json=raw)
+        if path.startswith("/v1/vaults/"):
+            identity = path.split("/")[3]
+            if path.endswith("/credentials"):
+                raw = {
+                    "id": "qa-mcp-credential",
+                    "vault_id": identity,
+                    "created_at": 0,
+                    **json.loads(request.content),
+                }
+                self.vault_credentials[identity] = raw
+                return httpx.Response(200, json=raw)
+            return httpx.Response(200, json=self.vaults[identity])
         if (request.method, request.url.path) == ("POST", "/v1/agents/sessions"):
             self.posted_bodies.append(request.content.decode())
             await self._serve(object_json(json.loads(request.content)))
@@ -261,7 +285,13 @@ class _HostServedMcp:
         (server,) = [tool for tool in tools if tool.get("type") == "mcp"]
         transport = object_json(server["transport"])
         assert transport["server_url"] == MCP_URL
-        authorization = str(transport["authorization"])
+        assert "authorization" not in transport
+        (vault_id,) = body["vault_ids"]
+        credential = self.vault_credentials[vault_id]
+        assert credential["id"] == server["credential_id"]
+        auth = object_json(credential["auth"])
+        assert auth["type"] == "static_bearer" and auth["mcp_server_url"] == MCP_URL
+        authorization = "Bearer " + str(auth["token"])
         self.authorizations.append(authorization)
         headers = {**INIT_HEADERS, "Authorization": authorization}
         init = await self.mcp.post(self.gate_url, json=dict(INIT_BODY), headers=headers)
@@ -386,10 +416,10 @@ async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(
             # MCP was really served, by the real host, under the run bearer.
             assert served.authorizations == [f"Bearer {qa.bearer.token}"]
             assert served.gate_statuses == [200, 200, 200]
-            # Only the bound attachment carries an authorization into the session
-            # POST, and it is exactly the resolved run bearer: no other, unbound
-            # authorization is copied in.
-            assert served.posted_mcp == [("daimon-mcp", f"Bearer {qa.bearer.token}")]
+            # No bearer enters the session request: the provider reads only its
+            # one attached, caller-scoped vault for the captured MCP destination.
+            assert served.posted_mcp == [("daimon-mcp", None)]
+            assert qa.bearer.token not in "".join(served.posted_bodies)
             assert f2.resolutions == [(SCOPE, CREDENTIAL, MCP_URL)]
             assert "qa-agent" in json.dumps(served.results["describe_agent"])
             assert QA_SESSION_ID in json.dumps(served.results["list_my_sessions"])

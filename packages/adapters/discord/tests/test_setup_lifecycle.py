@@ -12,7 +12,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

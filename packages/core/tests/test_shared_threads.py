@@ -32,7 +32,7 @@ from daimon.core.channel_backend import (
     current_backend_and_sharing,
     set_channel_backend,
 )
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, load_turn_settings
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -56,19 +56,15 @@ from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import PreparedTurn, bind_session
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import (
     make_account,
     make_ledger_entry,
     make_tenant,
     make_tenant_config,
 )
-from daimon.testing.ma import (
-    MARouter,
-    build_fake_anthropic,
-    make_fake_memory_store_handler,
-    resolved_agent_env_router,
-)
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
+from daimon.testing.ma import resolved_agent_env_router
+from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, CapabilityRequirement, ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import ProviderBinding
@@ -78,6 +74,12 @@ from mux.errors import (
     MigrationUnsupported,
     UnsupportedCapability,
 )
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    make_fake_memory_store_handler,
+)
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -664,12 +666,15 @@ async def test_unconfigured_and_per_caller_binds_read_nothing_new(
 
     assert traces[0] == traces[1] == traces[2]
     touched = " ".join(traces[1] + traces[2])
-    for table in (
-        "provider_binding",
-        "journal_session",
-        "channel_config_revision",
-    ):
-        assert table not in touched
+    # The mux path publishes every non-DM first bind to the neutral binding
+    # tables (`turn/prepare.py` `prepared_persistence`), shared or not, so
+    # those are touched there and only there. The traces above are identical
+    # for the unconfigured, per-caller and reconfigured channels either way.
+    published = ("provider_binding", "journal_session")
+    on_mux = load_turn_settings().path == "mux"
+    for table in published:
+        assert (table in touched) == on_mux
+    assert "channel_config_revision" not in touched
 
 
 # SYS-047 / SYS-048 still decide first
@@ -713,6 +718,7 @@ async def test_access_policy_and_protection_refuse_before_a_shared_thread_is_con
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",

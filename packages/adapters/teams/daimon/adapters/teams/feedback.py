@@ -56,6 +56,7 @@ from daimon.adapters.teams.card_actions import (
     card_actor,
     dialog,
     dialog_message,
+    dialog_notice,
     error_text,
     guarded,
     submitted_fields,
@@ -107,6 +108,7 @@ log = structlog.get_logger()
 
 FEEDBACK_DIALOG = "feedback_form"
 TITLE = "What went wrong?"
+VOTE_TITLE = "Feedback"
 REASONS_INPUT = "reasons"
 TEXT_INPUT = "text"
 MAX_FEEDBACK_CHARS = 4000  # Slack's feedback modal cap.
@@ -271,7 +273,7 @@ class TeamsFeedback:
         self, activity: TaskFetchInvokeActivity | MessageFetchTaskInvokeActivity, vote: Vote
     ) -> TaskModuleResponse:
         return await guarded(
-            self._vote(activity, vote), dialog_message(FAILED), "teams.feedback.failed"
+            self._vote(activity, vote), dialog_notice(VOTE_TITLE, FAILED), "teams.feedback.failed"
         )
 
     async def on_submit(self, ctx: ActivityContext[TaskSubmitInvokeActivity]) -> TaskModuleResponse:
@@ -293,12 +295,12 @@ class TeamsFeedback:
         actor = await card_actor(self._runtime, activity)
         message_id = activity.reply_to_id
         if actor is None or not message_id:
-            return dialog_message(DENIED)
+            return dialog_notice(VOTE_TITLE, DENIED)
         recorded = await self._record(actor, AnswerPlace.of(activity, message_id), vote)
         if recorded.outcome != "recorded":
-            return dialog_message(refusal_text(recorded.outcome))
+            return dialog_notice(VOTE_TITLE, refusal_text(recorded.outcome))
         if vote == "up":
-            return dialog_message(THANKS_VOTE)
+            return dialog_notice(VOTE_TITLE, THANKS_VOTE)
         return dialog(TITLE, feedback_form(message_id, shared=self._shared(actor.tenant_id)))
 
     async def _submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleResponse:

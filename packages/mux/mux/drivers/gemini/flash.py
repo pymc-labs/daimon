@@ -1,9 +1,12 @@
 """Explicit host Flash policy; no client creation, retry or implicit selection."""
 
-from collections.abc import AsyncIterator, Mapping
+import logging
+import sys
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import Set as AbstractSet
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from pydantic import JsonValue
 
@@ -18,10 +21,14 @@ from mux.drivers.gemini.transport import (
     string,
 )
 from mux.errors import ProviderError
-from mux.profiles.gemini import WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, WORKER_MODEL
+
+log = logging.getLogger(__name__)
 
 FLASH_PRIMARY = "gemini-3.8-flash"
 FLASH_MODELS = (FLASH_PRIMARY, "gemini-flash-latest", "gemini-3.5-flash-lite")
+# Every model an attempt may name. Argon is only ever its own single attempt.
+ATTEMPT_MODELS = (*FLASH_MODELS, ARGON_MODEL)
 
 
 @dataclass(frozen=True)
@@ -31,17 +38,57 @@ class FlashAttempt:
     outcome: Literal["accepted", "refused", "unknown"]
     http_status: int | None = None
     interaction_id: str | None = None
+    # False only when the create provably never reached Google (its connection
+    # failed): nothing was sent, so its hold is freed at once.
+    sent: bool = True
 
 
 class FlashAccounting(Protocol):
     """Caller persists a hold before each dispatch, and preserves its outcome.
 
-    A failed accounting operation stops the chain. This policy cannot waive a
-    budget or infer a free call from a refusal. Actuals arrive via scoped Usage.
+    A failed accounting operation stops the chain. Actuals arrive via scoped
+    Usage. Free calls are reported `refused`: an HTTP 4xx that rejected the
+    request itself, a 503 that refused the work (both with their status, no
+    interaction returned), or a create that never reached Google (`sent=False`).
+    Anything Google may have accepted stays `unknown`.
+    An owner may also offer `release_unbilled(interaction_id=...)`, called when
+    an interaction is read back cancelled, unbilled and with no step but its input.
     """
 
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None: ...
     async def after_attempt(self, *, receipt: FlashAttempt) -> None: ...
+
+
+_DEFINITE = ("invalid_request", "auth", "permission", "not_found")
+
+
+def definite_rejection(error: ProviderError) -> int | None:
+    """The 4xx status of a create Google rejected outright, else None.
+
+    Needs the provider's own HTTP status: a local refusal (no status), e.g. a
+    response check after a 200, may follow an accepted request. Timeouts, a bare
+    429, 5xx and network failures may have been accepted too; a 429 naming its
+    QuotaFailure was not.
+    """
+    code = error.native_error_code or ""
+    if code == "http_429" and error.native_code in ("quota_zero", "quota_exhausted"):
+        return 429  # Google's QuotaFailure: refused before any interaction existed
+    if error.category not in _DEFINITE or not code.startswith("http_4"):
+        return None
+    status = code.removeprefix("http_")
+    return int(status) if status.isdigit() else None
+
+
+def only_input_steps(steps: object) -> bool:
+    """No step but the caller's own input: Gemini produced nothing for it."""
+    if steps is None:
+        return True
+    if not isinstance(steps, list):
+        return False
+    return all(
+        isinstance(step, dict) and cast(dict[str, object], step).get("type") == "user_input"
+        for step in cast(list[object], steps)
+    )
 
 
 class FlashTransport:
@@ -52,7 +99,11 @@ class FlashTransport:
         *,
         native_agent: Agent | None = None,
         bounded_worker: bool = False,
+        primary: str = FLASH_PRIMARY,
     ) -> None:
+        if primary not in (FLASH_PRIMARY, ARGON_MODEL):
+            raise ValueError("an explicit Flash or Argon primary is required")
+        self._primary = primary
         self._bounded_worker = bounded_worker
         self._native_agent = native_agent
         self.source, self.accounting = source, accounting
@@ -73,17 +124,20 @@ class FlashTransport:
         capped = model_request(dict(request))
         original = {} if capped else object_value(request["agent_config"])
         required = (
-            self._native_agent.spec.model.id if self._native_agent is not None else FLASH_PRIMARY
+            self._native_agent.spec.model.id if self._native_agent is not None else self._primary
         )
         if (
-            required not in (FLASH_PRIMARY, WORKER_MODEL)
+            required not in (FLASH_PRIMARY, WORKER_MODEL, ARGON_MODEL)
             or (request.get("model") if capped else original.get("model")) != required
         ):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="flash_primary_required"
             )
         models = (FLASH_PRIMARY,) if self._bounded_worker else FLASH_MODELS
-        if self._bounded_worker and (not capped or required != FLASH_PRIMARY):
+        if required == ARGON_MODEL:
+            # A 503 on Argon is the turn's answer, never a silent switch to Flash.
+            models = (ARGON_MODEL,)
+        if self._bounded_worker and (not capped or required not in (FLASH_PRIMARY, ARGON_MODEL)):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="worker_model_required"
             )
@@ -111,40 +165,113 @@ class FlashTransport:
             else:
                 bounded["agent_config"] = {**original, "model": name}
             try:
-                reply = await self.source.create(bounded)
+                return await self._dispatch(bounded, model, index + 1)
             except ProviderError as error:
-                refused = error.category == "overloaded" and error.native_code == "503"
-                await self.accounting.after_attempt(
-                    receipt=FlashAttempt(
-                        model=model,
-                        attempt=index + 1,
-                        outcome="refused" if refused else "unknown",
-                        http_status=503 if refused else None,
-                    )
-                )
-                if not refused or index + 1 == len(models):
+                # Only a 503 moves down the chain; a rejected request is the answer.
+                if error.category != "overloaded" or error.native_code != "503":
                     raise
-                continue
+                if index + 1 == len(models):
+                    raise
+        raise ProviderError("upstream", retryable=False, native_code="flash_chain_exhausted")
+
+    async def _dispatch(
+        self, request: Mapping[str, JsonValue], model: ModelRef, attempt: int
+    ) -> Object:
+        """One create against its reserved hold, always followed by exactly one receipt.
+
+        However the create ends, the receipt is published: a timeout, a cancel or a
+        malformed reply after the send stays `unknown` (Google may have accepted it),
+        so the hold is never left without an outcome and the next attempt in this
+        context is never refused for a missing receipt.
+        """
+        receipt = FlashAttempt(model=model, attempt=attempt, outcome="unknown")
+        try:
+            reply = await self.source.create(request)
             # No fallback on malformed/lost acceptance or persistence failure.
             interaction = string(reply["id"])
             string(reply["status"])
             self._models[interaction] = model
-            await self.accounting.after_attempt(
-                receipt=FlashAttempt(
-                    model=model,
-                    attempt=index + 1,
-                    outcome="accepted",
-                    interaction_id=interaction,
-                )
+            receipt = FlashAttempt(
+                model=model, attempt=attempt, outcome="accepted", interaction_id=interaction
             )
             return reply
-        raise ProviderError("upstream", retryable=False, native_code="flash_chain_exhausted")
+        except ProviderError as error:
+            refused = error.category == "overloaded" and error.native_code == "503"
+            rejected = definite_rejection(error)
+            unsent = error.category == "transient_network" and error.native_code == "connect_failed"
+            receipt = FlashAttempt(
+                model=model,
+                attempt=attempt,
+                outcome="refused" if refused or rejected is not None or unsent else "unknown",
+                http_status=503 if refused else rejected,
+                sent=not unsent,
+            )
+            raise
+        finally:
+            # Awaited in this task, never shielded: the owner's per-attempt marker is
+            # context-local, and a shielded task would clear only its own copy. A
+            # create cancelled once still completes this await.
+            unwinding = sys.exc_info()[1]
+            try:
+                await self.accounting.after_attempt(receipt=receipt)
+            except Exception:
+                # A failed receipt never replaces a cancel or timeout in flight (the
+                # hold stays for the TTL); beside a provider error, or on success,
+                # it still stops the chain.
+                if unwinding is None or isinstance(unwinding, ProviderError):
+                    raise
+                log.warning(
+                    "gemini_attempt_receipt_failed attempt=%s outcome=%s",
+                    attempt,
+                    receipt.outcome,
+                )
+
+    def mount_echo_digests(self, interaction_id: str) -> frozenset[str]:
+        digests = getattr(self.source, "mount_echo_digests", None)
+        return frozenset() if digests is None else digests(interaction_id)
+
+    def bind_mount_echo(self, interaction_id: str, digests: AbstractSet[str]) -> None:
+        bind = getattr(self.source, "bind_mount_echo", None)
+        if bind is not None:
+            bind(interaction_id, digests)
 
     async def get(self, interaction_id: str) -> Object:
-        return await self.source.get(interaction_id)
+        reply = await self.source.get(interaction_id)
+        await self._release_unbilled(interaction_id, reply)
+        return reply
 
     async def cancel(self, interaction_id: str) -> Object:
-        return await self.source.cancel(interaction_id)
+        reply = await self.source.cancel(interaction_id)
+        await self._release_unbilled(interaction_id, reply)
+        return reply
+
+    async def _release_unbilled(self, interaction_id: str, reply: Mapping[str, object]) -> None:
+        """A cancelled interaction that never ran frees its hold at once.
+
+        Never ran: cancelled, no usage, and no step but the caller's own input
+        (Gemini's stamps cannot show it: `updated` stays equal to `created` even
+        while a run works). Settlement otherwise waits for a usage reading that
+        never comes. Anything that may have run keeps its hold for settlement or
+        the TTL. Keyed by the
+        interaction alone, so a cancel seen by another transport (a deadline
+        cleanup, a later poll) releases it too. A failed release is logged and
+        left to the hold's TTL, never raised into the turn.
+        """
+        release = cast(
+            Callable[..., Awaitable[object]] | None,
+            getattr(self.accounting, "release_unbilled", None),
+        )
+        if (
+            release is None
+            or reply.get("status") != "cancelled"
+            or reply.get("usage") is not None
+            or not only_input_steps(reply.get("steps"))
+        ):
+            return
+        try:
+            await release(interaction_id=interaction_id)
+        except Exception:
+            log.warning("gemini_hold_release_failed interaction_id=%s", interaction_id)
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         return await self.source.download_snapshot(environment_id)

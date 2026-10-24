@@ -46,9 +46,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 @pytest.fixture
 async def owned(
-    db_preflight: DatabasePreflight, db_nullpool_engine: AsyncEngine
+    db_preflight: DatabasePreflight, db_committing_engine: AsyncEngine
 ) -> tuple[AgentBackendService, BackendAgent, BackendActor, async_sessionmaker[AsyncSession]]:
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as session:
         tenant = await make_tenant(session)
@@ -268,17 +268,18 @@ async def test_disallowed_retained_backend_is_refused_by_same_admission_gate(own
 
 
 def test_factory_uses_existing_flags() -> None:
-    assert not make_backend_service(None, TurnSettings()).enabled
-    assert not make_backend_service(None, TurnSettings(path="mux")).enabled
+    assert make_backend_service(None, TurnSettings()).enabled, "on by default"
+    assert not make_backend_service(None, TurnSettings(path="legacy")).enabled
+    assert not make_backend_service(None, TurnSettings(channel_backends=False)).enabled
     assert make_backend_service(None, TurnSettings(path="mux", channel_backends=True)).enabled
 
 
 async def test_public_loader_uses_actual_scoped_sdk_projection_and_never_updates(owned) -> None:
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.testing.ma import list_response
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma import list_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, agent, _, sessions = owned
     native = ma_agent(
@@ -426,11 +427,23 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     assert consent_spec is not None and consent_spec.loader is not None
     consent_module = importlib.util.module_from_spec(consent_spec)
     consent_spec.loader.exec_module(consent_module)
+    model_path = path.with_name("0118_agent_backend_model.py")
+    model_spec = importlib.util.spec_from_file_location("backend_model_restore", model_path)
+    assert model_spec is not None and model_spec.loader is not None
+    model_module = importlib.util.module_from_spec(model_spec)
+    model_spec.loader.exec_module(model_module)
+    owner_path = path.with_name("0119_agent_owner_settings.py")
+    owner_spec = importlib.util.spec_from_file_location("agent_owner_restore", owner_path)
+    assert owner_spec is not None and owner_spec.loader is not None
+    owner_module = importlib.util.module_from_spec(owner_spec)
+    owner_spec.loader.exec_module(owner_module)
     async with sessions.begin() as session:
         connection = await session.connection()
 
         def downgrade(sync):
             with Operations.context(MigrationContext.configure(sync)):
+                owner_module.downgrade()
+                model_module.downgrade()
                 consent_module.downgrade()
                 module.downgrade()
             schema = sync.scalar(text("SELECT current_schema()"))
@@ -458,6 +471,8 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
                     fleet_spec.loader.exec_module(fleet_module)
                     fleet_module.upgrade()
                     consent_module.upgrade()
+                    model_module.upgrade()
+                    owner_module.upgrade()
 
             await connection.run_sync(upgrade)
     async with sessions() as session:
@@ -703,7 +718,7 @@ async def test_scoped_source_reuse_projects_actual_sdk_retrieve_without_extra_re
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, agent, _, sessions = owned
     native = ma_agent(
@@ -730,7 +745,7 @@ async def test_scoped_source_reuse_refuses_unbound_or_inactive_source_without_ex
 ):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, agent, _, sessions = owned
     payload = ma_agent(
@@ -786,7 +801,7 @@ async def test_retained_and_disabled_resolution_need_no_fabricated_source(owned)
 async def test_source_loader_retains_full_sdk_intent_without_serializing_it(owned):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, prior, _, sessions = owned
     payload = ma_agent(
@@ -834,7 +849,7 @@ async def test_source_loader_retains_full_sdk_intent_without_serializing_it(owne
 async def test_source_projection_missing_unused_sdk_date_keeps_existing_preview(owned):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, prior, _, sessions = owned
     payload = ma_agent(
@@ -869,3 +884,138 @@ async def test_non_admin_and_agent_key_refused_without_revision_or_audit(owned, 
         await service.set_backend(agent, "anthropic", 0, replace(actor, subject=subject))
     assert await service.current(agent) is None
     assert await service.audit(agent.tenant_id) == ()
+
+
+async def test_selfhosted_agent_selection_refuses_before_source_capture(owned):
+    service, agent, actor, sessions = owned
+
+    async def forbidden_capture(source):
+        raise AssertionError("source capture must not run for a selfhosted agent preference")
+
+    service = AgentBackendService(sessions, enabled=True, capture_source=forbidden_capture)
+    with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
+        await service.preview(agent, "selfhosted")
+    with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
+        compatibility_preview(agent, "selfhosted", await service.tenant_policy(agent.tenant_id))
+
+
+@pytest.mark.fresh_schema
+async def test_legacy_selfhosted_agent_revision_cannot_materialize(owned):
+    from daimon.core.stores import agent_backends
+
+    service, agent, actor, sessions = owned
+    channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="channel")
+    from sqlalchemy import text
+
+    async with sessions.begin() as db:
+        # Model an invalid legacy row inside this test's isolated DDL schema.
+        await db.execute(
+            text("ALTER TABLE agent_backend_revision DROP CONSTRAINT ck_agent_backend_provider")
+        )
+        await agent_backends.put_revision(
+            db,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            local=1,
+            backend="selfhosted",
+            digest="legacy",
+            previous_local=None,
+            agent_name=agent.name,
+            preview_digest="legacy",
+        )
+        assert await agent_backends.has_backend_preference_by_name(
+            db, tenant_id=agent.tenant_id, agent_name=agent.name, backend="selfhosted"
+        )
+        with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
+            await resolve_turn_backend(db, channel, agent, enabled=True)
+        assert await mux_state.latest_config_revision(db, channel) is None
+        await agent_backends.put_revision(
+            db,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            local=2,
+            backend=None,
+            digest="clear",
+            previous_local=1,
+            agent_name=agent.name,
+            preview_digest="clear",
+        )
+        assert not await agent_backends.has_backend_preference_by_name(
+            db, tenant_id=agent.tenant_id, agent_name=agent.name, backend="selfhosted"
+        )
+
+
+async def test_a_picked_model_is_stored_previewed_reverted_and_resolved(owned) -> None:
+    from daimon.core.channel_backend import agent_selection, picked_model, resolve_agent_backend
+
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    default = await service.preview(agent, "gemini")
+    argon = await service.preview(agent, "gemini", "gemini-4-argon")
+    assert default.target_model is None and argon.target_model == "gemini-4-argon"
+    assert argon.digest != default.digest
+    assert "gemini-4-argon" in argon.cost_line
+    # Naming the default is the same preview as naming none.
+    assert await service.preview(agent, "gemini", "gemini-3.8-flash") == default
+    assert picked_model("gemini", "gemini-3.8-flash") is None
+    first = await service.set_backend(
+        agent,
+        "gemini",
+        0,
+        actor,
+        expected_preview_digest=argon.digest,
+        model="gemini-4-argon",
+    )
+    assert (first.backend, first.model) == ("gemini", "gemini-4-argon")
+    assert resolve_agent_backend(None, first).model == "gemini-4-argon"
+    channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="any")
+    async with sessions.begin() as session:
+        resolved, _, source = await resolve_turn_backend(session, channel, agent, enabled=True)
+    assert resolved is not None and source == "agent"
+    assert (resolved.backend, resolved.model) == ("gemini", "gemini-4-argon")
+    assert resolved.content_digest() == agent_selection("gemini", "gemini-4-argon").content_digest()
+    second = await service.set_backend(agent, "gemini", 1, actor, model="gemini-3.8-flash")
+    assert second.model is None
+    third = await service.revert(agent, actor, expected_revision=2)
+    assert (third.backend, third.model) == ("gemini", "gemini-4-argon")
+    cleared = await service.clear_backend(agent, 3, actor)
+    assert (cleared.backend, cleared.model) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("backend", "model"),
+    [("gemini", "gemini-3.8-pro"), ("openai", "gemini-4-argon"), ("anthropic", "claude-opus-5-5")],
+)
+async def test_an_unselectable_model_is_refused_before_any_write(owned, backend, model) -> None:
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    with pytest.raises(AgentBackendRefused, match="model not selectable"):
+        await service.preview(agent, backend, model)
+    with pytest.raises(AgentBackendRefused, match="model not selectable"):
+        await service.set_backend(agent, backend, 0, actor, model=model)
+    assert await service.current(agent) is None
+
+
+async def test_an_admin_allowlist_save_is_a_choice_the_keyed_default_never_overrides(
+    owned, monkeypatch
+) -> None:
+    service, agent, actor, sessions = owned
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
+    monkeypatch.delenv("DAIMON_CHANNEL_GEMINI_KEY", raising=False)
+    default = await service.tenant_policy(agent.tenant_id)
+    assert default.enabled_backends == ("anthropic", "openai"), "keyed, never configured"
+
+    await service.set_tenant_allowlist(agent.tenant_id, ("anthropic",), default.revision, actor)
+
+    async with sessions() as session:
+        stored = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
+    assert stored.enabled_backends == ("anthropic",) and stored.backends_explicit is True
+    chosen = await service.tenant_policy(agent.tenant_id)
+    assert chosen.enabled_backends == ("anthropic",)
+
+    await service.set_tenant_allowlist(agent.tenant_id, None, chosen.revision, actor)
+
+    async with sessions() as session:
+        followed = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
+    assert followed.backends_explicit is False, "None goes back to the deployment default"
+    assert followed.enabled_backends == ("anthropic", "openai")

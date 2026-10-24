@@ -7,7 +7,8 @@ import pytest
 from anthropic.types.beta import FileMetadata
 from daimon.core.output_delivery import MAX_BYTES_CEILING
 from daimon.core.routine_files import collect_routine_files, decode_payload, deliver_routine_files
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma import MARouter
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 
 
 def file_client(sizes: list[int]):

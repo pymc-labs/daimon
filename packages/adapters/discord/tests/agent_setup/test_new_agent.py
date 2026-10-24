@@ -7,7 +7,9 @@ lands the reader on the created agent's Details carrying the honest next step.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -16,11 +18,11 @@ import discord
 import httpx
 import pytest
 from daimon.adapters.discord.agent_setup import new_agent as new_agent_mod
-from daimon.adapters.discord.agent_setup import write as write_mod
 from daimon.adapters.discord.agent_setup.details_view import DetailsView
 from daimon.adapters.discord.agent_setup.new_agent import NewAgentModal
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core import agent_lifecycle
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -29,10 +31,10 @@ from daimon.core.models_catalog import list_model_choices
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _CREATED_ID = "ag_churn"
@@ -409,6 +411,7 @@ async def test_submit_stamps_the_guild_account_not_the_personal_one(
         public_url: str | None = None,
         managed: bool = True,
         references: object = None,
+        create_only: bool = False,
     ) -> ResourceOutcome:
         captured["spec"] = spec
         captured["account_id"] = account_id
@@ -420,7 +423,7 @@ async def test_submit_stamps_the_guild_account_not_the_personal_one(
             kind="agent", name=spec.name, action=Action.CREATED, anthropic_id=_CREATED_ID
         )
 
-    monkeypatch.setattr(write_mod, "reconcile_agent", _spy_reconcile)
+    monkeypatch.setattr(agent_lifecycle, "reconcile_agent", _spy_reconcile)
     monkeypatch.setattr(
         new_agent_mod, "resolve_tenant_for_panel", AsyncMock(return_value=_TENANT_ID)
     )
@@ -494,11 +497,18 @@ async def test_real_discord_name_collision_is_rendered_without_a_sentry_capture(
     """A name collision is an expected outcome, not a defect to page someone about."""
     captured: list[BaseException] = []
 
+    @contextlib.asynccontextmanager
+    async def _no_lock(*_args: Any, **_kwargs: Any) -> AsyncIterator[None]:
+        yield
+
+    # No database here: the name lock is the core's, tested there.
+    monkeypatch.setattr(agent_lifecycle, "agent_name_lock", _no_lock)
+
     monkeypatch.setattr(
         new_agent_mod, "capture_exception_with_scope", lambda err: captured.append(err)
     )
     monkeypatch.setattr(
-        write_mod,
+        agent_lifecycle,
         "find_agents_by_daimon_tag",
         AsyncMock(return_value=[ma_agent(id="ag_existing", name="churn-explorer")]),
     )
@@ -516,7 +526,7 @@ async def test_real_discord_name_collision_is_rendered_without_a_sentry_capture(
     interaction.followup.send.assert_called_once()
     message = interaction.followup.send.call_args.args[0]
     assert message.startswith(
-        "This workspace already has an agent with that name. Pick a different name.\n\n-# Ref "
+        "This server already has an agent with that name. Pick a different name.\n\n-# Ref "
     ), "the caller sees the reason and a short ref, without an exception body"
 
 

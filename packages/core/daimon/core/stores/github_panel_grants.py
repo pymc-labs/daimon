@@ -152,13 +152,14 @@ async def stage_panel_grant(
     is_working_repo: bool,
 ) -> None:
     """Keep an active agent's changes separate from its current live grants."""
+    await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
     baseline_access = "write"
     ceiling_access = "write"
     authorized = await github_access.repo_for_agent(
         session, tenant_id=tenant_id, repo_id=repo_id, agent_id=agent_id, for_update=True
     )
     if authorized is None or authorized.status != "active":
-        raise ValueError("Repository is not connected to this workspace.")
+        raise ValueError("Repository is not connected here.")
     await github_access.require_may_grant(session, repo=authorized, account_id=account_id)
     installation = await session.get(GitHubAppInstallation, authorized.installation_id)
     if not installation_covers_repo(installation, authorized.repo_full_name):
@@ -202,6 +203,7 @@ async def remove_panel_grant(
     repo_id: int,
     account_id: uuid.UUID | None,
 ) -> None:
+    await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
     row = await session.get(AgentGitHubGrantDraft, (tenant_id, agent_id, repo_id))
     if row is None:
         row = AgentGitHubGrantDraft(tenant_id=tenant_id, agent_id=agent_id, repo_id=repo_id)
@@ -236,6 +238,7 @@ async def activate_grants(
     agent_name: str,
 ) -> bool:
     """Apply the panel's draft changes to live App grants."""
+    await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
     await require_app_eligible_agent(
         session, tenant_id=tenant_id, agent_id=agent_id, agent_name=agent_name
     )
@@ -249,7 +252,10 @@ async def activate_grants(
             .with_for_update()
         )
     )
-    for draft in drafts:
+    await github_access.lock_repo_grants_batch(
+        session, tenant_id=tenant_id, repo_ids={draft.repo_id for draft in drafts}
+    )
+    for draft in sorted(drafts, key=lambda item: item.repo_id):
         if draft.operation == "remove":
             await github_access.remove_grant(
                 session,
@@ -275,6 +281,7 @@ async def activate_grants(
                 granted_by_account_id=account_id,
                 is_working_repo=draft.is_working_repo,
                 agent_name=agent_name,
+                repo_lock_held=True,
             )
     if drafts:
         await session.execute(

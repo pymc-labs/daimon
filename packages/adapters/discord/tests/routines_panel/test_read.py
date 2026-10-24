@@ -14,7 +14,7 @@ from daimon.adapters.discord.routines_panel.write import (
 )
 from daimon.core.config import RecruitmentSettings
 from daimon.core.cron import next_slot_at_or_after
-from daimon.testing.ma import build_stub_anthropic
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .conftest import SeedRoutineFn

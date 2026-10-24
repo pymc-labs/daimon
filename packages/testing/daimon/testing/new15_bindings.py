@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import math
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from daimon.core.turn.admission import AdmissionObserver, admit
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import PreparedTurn, bind_session
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.admin_bindings import AdminBindings, AdminCommand, AdminReceipt
 from daimon.testing.admission_evidence import AdmissionEffects, AdmissionReceipt, admission_edge
 from daimon.testing.channel_accounting import (
@@ -74,6 +76,15 @@ class New15Bindings:
     invoke_denial: Callable[[str, AdmissionObserver], Awaitable[object]]
     effects: Callable[[], AdmissionEffects]
     native_send_count: Callable[[], int | None]
+    clock: Callable[[], float] = time.monotonic
+    """Capture-window clock shared with ``admission_edge``."""
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    """How the authored late-notice observation window elapses.
+
+    The defaults observe the window in wall time. An injected pair may elapse it
+    on a virtual timeline only if ``clock`` is the timeline every effect is
+    stamped with and ``sleep`` runs the timers due before it returns; otherwise
+    deferred work would be skipped while the receipt still claims the window."""
 
     async def authorize(self) -> None:
         await self.admin.authorize_command(
@@ -141,6 +152,7 @@ class New15Bindings:
             admitted = await admit(
                 self.deps,
                 tenant_id=uuid.UUID(self.scope.tenant_id),
+                requester_org=RequesterOrg.HOST,
                 platform=self.admin.platform,
                 external_user_id=self.external_user_id,
                 channel_id=self.channel_id,
@@ -218,7 +230,7 @@ class New15Bindings:
 
                     async def second(observer: AdmissionObserver) -> object:
                         result = await self.invoke_denial(authored["steps"][4]["text"], observer)
-                        await asyncio.sleep(float(authored["steps"][5]["s"]))
+                        await self.sleep(float(authored["steps"][5]["s"]))
                         return result
 
                     admission = await admission_edge(
@@ -233,6 +245,7 @@ class New15Bindings:
                         invoke=second,
                         effects=self.effects,
                         native_send_count=self.native_send_count,
+                        clock=self.clock,
                     )
             readback = await reader.snapshot()
         finally:

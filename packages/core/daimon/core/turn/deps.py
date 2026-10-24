@@ -28,6 +28,7 @@ from daimon.core.config import (
     DiscordSettings,
     GithubAppSettings,
     McpSettings,
+    ProgressPlansSettings,
     RecruitmentSettings,
     Settings,
     TurnSettings,
@@ -41,6 +42,7 @@ from daimon.core.membership import MembershipResolver
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_admins import ServerAdminIds
 from daimon.core.scope import DeploymentDefault
+from daimon.core.scope_cascade import CascadeMode
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.specs import SkillRef
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -119,6 +121,14 @@ class TurnDeps:
     # Every turn inside `run_prepared_turn`, whatever started it; read by shutdown drains.
     running_turns: RunningTurns = field(default_factory=RunningTurns)
     fleet_enabled: bool = False
+    # `DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD`: each OpenAI model's daily spend cap
+    # per tenant. None (a bundle built by hand) checks nothing.
+    openai_daily_model_cap_usd: Decimal | None = None
+    # `DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, the same cap for Gemini models.
+    gemini_daily_model_cap_usd: Decimal | None = None
+    # `DAIMON_PROGRESS_PLANS__MODE`: the deployment tier of the progress-plans cascade.
+    # Disabled unless built from settings, so a bundle assembled by hand never reads it.
+    progress_plans: CascadeMode = CascadeMode.DISABLED
     fleet_max_workers: int = 8
     fleet_root_grants: (
         Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]] | None
@@ -221,6 +231,13 @@ def build_turn_deps(
         preparation_gate=PreparationGate(_preparation_limit(settings)),
         budget_notices_off=_notices_off(settings),
         fleet_enabled=settings.fleet.enabled,
+        openai_daily_model_cap_usd=settings.billing.openai_daily_model_cap_usd,
+        gemini_daily_model_cap_usd=settings.billing.gemini_daily_model_cap_usd,
+        progress_plans=(
+            plans.mode
+            if isinstance(plans := cast(object, settings.progress_plans), ProgressPlansSettings)
+            else CascadeMode.DISABLED
+        ),
         fleet_max_workers=settings.fleet.max_workers_per_run,
         fleet_root_grants=fleet_root_grants,
         platform_skills=load_platform_skills(

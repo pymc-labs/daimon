@@ -6,7 +6,7 @@ description: Work in a person's own Microsoft 365 from Teams (OneDrive and Share
 # Microsoft 365
 
 The `microsoft_*` tools act as the person who asked, with their own
-Microsoft access, and exist only in Teams.
+Microsoft access.
 
 - Not connected: tell them and ask whether they want to connect. Call
   `connect_microsoft` only if they say yes; it sends a private sign-in card to

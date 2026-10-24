@@ -272,7 +272,7 @@ async def test_search_dm_destination_keeps_dm_hits(
 async def test_dispatch_slack_search_rejects_discord_only_filters(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Via the registered tool: content + a Discord-only filter → rejected."""
+    """Via the registered tool: content + an unsupported filter → rejected."""
     runtime = await _make_runtime(committing_sessionmaker)
     auth = _auth()
     await _seed_user_token(runtime, committing_sessionmaker)
@@ -282,7 +282,7 @@ async def test_dispatch_slack_search_rejects_discord_only_filters(
     register_channel_tools(mcp, runtime)
 
     async with Client(mcp) as client:
-        with pytest.raises(ToolError, match="slack"):
+        with pytest.raises(ToolError, match="supports only content and limit"):
             await client.call_tool("search_messages", {"content": "q", "author_ids": ["U1"]})
 
 

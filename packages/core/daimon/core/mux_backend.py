@@ -12,14 +12,17 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
+from daimon.core.anthropic_guard import require_anthropic_allowed
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
-from mux.drivers.anthropic import AnthropicManagedAgents
-from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
-from mux.drivers.anthropic.resources._secrets import SecretResolver
-from mux.drivers.anthropic.turn import AnthropicEvents
+from mux.drivers.anthropic import (
+    AnthropicEvents,
+    AnthropicManagedAgents,
+    ResourceAuthorization,
+    SecretResolver,
+)
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
 
@@ -45,6 +48,13 @@ class TurnRuntime:
         Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None
     ) = field(default=None, kw_only=True)
     materialize_worker: Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None = (
+        field(default=None, kw_only=True)
+    )
+    # Runs once when the turn ends (success, failure, cancel or deadline): revokes
+    # per-turn credentials the runtime minted.
+    end_of_turn: Callable[[], Awaitable[None]] | None = field(default=None, kw_only=True)
+    # Publishes a template row's counterpart for the admitted agent version, once.
+    materialize_root: Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None = (
         field(default=None, kw_only=True)
     )
 
@@ -89,6 +99,7 @@ def register_turn_backend(profile: str, factory: BackendFactory, *, fallback: bo
 
 
 def _anthropic_turn_backend(request: TurnBackendRequest) -> TurnBackend:
+    require_anthropic_allowed()
     workspace = request.session.account_scope_id if request.session is not None else str(uuid4())
     authorization = ResourceAuthorization(
         request.scope, frozenset({("session", request.session_id)})
@@ -169,6 +180,7 @@ def managed_agents(
     resources: frozenset[tuple[str, str]] = frozenset(),
     secrets: SecretResolver | None = None,
 ) -> AnthropicManagedAgents:
+    require_anthropic_allowed()
     return AnthropicManagedAgents(
         client,
         authorization=ResourceAuthorization(scope, resources) if scope is not None else None,

@@ -9,7 +9,7 @@ import httpx
 import pytest
 from daimon.core import mux_compat as compat
 from daimon.core.mux_backend import platform_scope
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 STAMP = "2026-01-01T00:00:00Z"
 SCOPE = platform_scope("test vault request fidelity")

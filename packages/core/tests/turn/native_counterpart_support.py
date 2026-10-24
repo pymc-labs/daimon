@@ -21,11 +21,12 @@ from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.testing import pytest_plugin as database_plugin
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.isolated_sdk import SDK_ENV_VARS, build_async_openai, build_gemini_client
+from daimon.testing.key_presence import called_by_key_presence
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.resources import Agent, AgentSpec, SkillUpload, SkillUploadFile
 from mux.state.memory import MemoryStateStore
+from mux.testing.isolated_sdk import SDK_ENV_VARS, build_async_openai, build_gemini_client
 
 from .test_openai_deployment import application as application
 from .test_provider_dispatch import ACCOUNT, REVISION, SCOPE, TENANT
@@ -238,10 +239,10 @@ async def owned(
                 ),
             )
         else:
-            from daimon.testing.drivers.gemini.fake import MemoryStorage
             from mux.drivers.gemini import GeminiManagedAgents
             from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
             from mux.drivers.gemini.transport import SDKTransport as GeminiSDKTransport
+            from mux.testing.drivers.gemini.fake import MemoryStorage
 
             client = build_gemini_client(
                 transport=httpx.MockTransport(wire.handle),
@@ -324,7 +325,7 @@ async def owned(
         original = os.environ.get
 
         def refuse_key(name: str, default: str | None = None) -> str | None:
-            if name == plan.api_key_env:
+            if name == plan.api_key_env and not called_by_key_presence():
                 raise AssertionError("native readback component discovered a credential")
             return original(name, default)
 

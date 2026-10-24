@@ -33,20 +33,40 @@ from daimon.adapters.mcp.tools.discord import (
 from daimon.adapters.mcp.tools.teams._send import (
     _post_teams_wizard_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.stores.wizard_session import create_wizard_session
 from daimon.core.wizard.expiry import derive_expires_at
-from daimon.core.wizard.spec import Step, WizardSpec
+from daimon.core.wizard.spec import Option, Step, WizardSpec
 from daimon.core.wizard.state import WizardStatus, new_short_id
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 _STOP_SIGNAL: Final[str] = (
-    "WIZARD_POSTED: the form is now live in the channel. End your turn "
+    "WIZARD_POSTED: the form is now live in the channel. End your reply "
     "immediately — do not narrate, do not continue, and do not call another "
     "tool. The user's answers will arrive later as a brand-new message "
     "carrying a keyed block; that is when you resume, with the full history "
     "of having asked."
 )
+
+
+def _scrubbed_step(step: Step, platform: str | None) -> Step:
+    """`step` with the text a person reads scrubbed of other chat apps; answer values stay."""
+    return step.model_copy(
+        update={
+            "question": scrub_other_platforms(step.question, platform),
+            "options": [
+                Option(
+                    label=scrub_other_platforms(option.label, platform),
+                    value=option.value,
+                    description=None
+                    if option.description is None
+                    else scrub_other_platforms(option.description, platform),
+                )
+                for option in step.options
+            ],
+        }
+    )
 
 
 async def _post_wizard_impl(
@@ -58,15 +78,17 @@ async def _post_wizard_impl(
     channel_id: str,
 ) -> str:
     if auth.platform == "slack":
-        raise ToolError("post_wizard is not supported on Slack")
+        raise ToolError("post_wizard isn't available here")
     if auth.platform_user_id is None:
         raise ToolError("post_wizard requires a platform-bound identity")
 
     # `image_url` is server-populated: a caller-supplied value must never
     # reach the renderer, so it is stripped before validation even runs.
-    stripped_steps = [step.model_copy(update={"image_url": None}) for step in steps]
+    stripped_steps = [
+        _scrubbed_step(step.model_copy(update={"image_url": None}), auth.platform) for step in steps
+    ]
     try:
-        spec = WizardSpec(prompt=prompt, steps=stripped_steps)
+        spec = WizardSpec(prompt=scrub_other_platforms(prompt, auth.platform), steps=stripped_steps)
     except ValueError as err:
         raise ToolError(
             f"Invalid wizard form: {err} Split it into a shorter follow-up form."
@@ -135,12 +157,11 @@ def register_wizard_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         user), ``kind`` (``choice``, ``multi`` or ``text``), and ``options``
         for the two choice kinds. A step may carry one finished image by
         passing the file-store handle returned by the image-generation tool —
-        never a URL, never a diagram source. Discord: server channels and
-        threads, not direct messages. Teams: a channel (the form starts a new
-        post), a thread or a 1:1 chat, with no step images. A form that exceeds a platform
-        ceiling (too many steps, too many options, too long a question)
-        raises an error naming the offending step — split the form into a
-        shorter follow-up and retry.
+        never a URL, never a diagram source. Post it in a channel or thread you
+        are in; where a place takes no forms or no step images, the call is refused
+        and says so. A form that exceeds a limit (too many steps, too many
+        options, too long a question) raises an error naming the offending
+        step — split the form into a shorter follow-up and retry.
 
         AFTER CALLING THIS TOOL YOU MUST END YOUR TURN IMMEDIATELY. Do not
         narrate the form, do not continue the conversation, and do not call

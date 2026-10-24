@@ -59,7 +59,9 @@ async def _post(
     *,
     channel: str = "C1",
 ) -> tuple[asyncio.Task[Any], str]:
-    hook = cards.hook(cast(AsyncWebClient, client), channel=channel, thread_ts="1699.9")
+    hook = cards.hook(
+        cast(AsyncWebClient, client), team_id="T_HOST", channel=channel, thread_ts="1699.9"
+    )
     waiting = asyncio.create_task(hook(prompt or _prompt()))
     while not client.chat_postMessage.await_count:
         await asyncio.sleep(0)
@@ -423,7 +425,9 @@ async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
 async def test_an_unanswered_card_expires_and_is_retired() -> None:
     cards = SlackConfirmationCards()
     client = _client()
-    hook = cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")
+    hook = cards.hook(
+        cast(AsyncWebClient, client), team_id="T_HOST", channel="C1", thread_ts="1699.9"
+    )
 
     answer = await hook(_prompt(expires_in=timedelta(milliseconds=10)))
 
@@ -458,10 +462,14 @@ async def _run_turn_with_stalled_card_retire(
         BetaManagedAgentsSessionStatusIdleEvent,
     )
     from daimon.core.tool_safety import ToolSafetyPolicy
-    from daimon.core.turn import run_turn
     from daimon.core.turn.approvals import interactive_decider
     from daimon.core.turn.posture import BillingExempt, PolicyApproval
-    from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
+    from daimon.testing.turn_fakes import (
+        FakeAnthropic,
+        RecordingLifecycle,
+        YieldEvent,
+        run_turn_on_leg,
+    )
 
     monkeypatch.setattr(driver_mod, "CLEANUP_BUDGET_S", 0.2)
     at = datetime.now(UTC)
@@ -500,7 +508,7 @@ async def _run_turn_with_stalled_card_retire(
     ]
     started = asyncio.get_running_loop().time()
     final = await asyncio.wait_for(
-        run_turn(
+        run_turn_on_leg(
             privacy=TurnPrivacy("slack", RecruitmentSettings()),
             anthropic=fa,  # type: ignore[arg-type]
             session_id="sess_1",
@@ -546,7 +554,10 @@ async def test_a_stalled_slack_retire_cannot_hold_the_turn_past_its_budget(
     cards = SlackConfirmationCards()
 
     elapsed, final = await _run_turn_with_stalled_card_retire(
-        cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9"), monkeypatch
+        cards.hook(
+            cast(AsyncWebClient, client), team_id="T_HOST", channel="C1", thread_ts="1699.9"
+        ),
+        monkeypatch,
     )
 
     assert final.error is not None and final.error.kind == "ceiling"  # type: ignore[attr-defined]
@@ -564,7 +575,9 @@ async def test_upload_card_has_color_and_private_details() -> None:
             "consequence": "Anyone with the notebook's link can open these files.",
         }
     )
-    hook = cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")
+    hook = cards.hook(
+        cast(AsyncWebClient, client), team_id="T_HOST", channel="C1", thread_ts="1699.9"
+    )
     waiting = asyncio.create_task(hook(prompt))
     while not client.chat_postMessage.await_count:
         await asyncio.sleep(0)
@@ -596,6 +609,7 @@ async def test_admin_confirmation_rechecks_each_click_before_settlement() -> Non
     waiting = asyncio.create_task(
         cards.hook(
             cast(AsyncWebClient, client),
+            team_id="T_HOST",
             channel="C1",
             thread_ts="1699.9",
             prepare_admin=prepare,
@@ -633,7 +647,9 @@ async def test_admin_confirmation_without_a_verifier_posts_nothing() -> None:
     cards = SlackConfirmationCards()
     prompt = _prompt().model_copy(update={"admin": True})
     assert (
-        await cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")(prompt)
+        await cards.hook(
+            cast(AsyncWebClient, client), team_id="T_HOST", channel="C1", thread_ts="1699.9"
+        )(prompt)
         == "denied"
     )
     client.chat_postMessage.assert_not_awaited()
@@ -661,6 +677,7 @@ async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
     waiting = asyncio.create_task(
         cards.hook(
             cast(AsyncWebClient, client),
+            team_id="T_HOST",
             channel="C1",
             thread_ts="1699.9",
             prepare_admin=AsyncMock(return_value=prompt),
@@ -702,11 +719,14 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
     runtime = MagicMock()
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
     client = _client()
-    client.users_info = AsyncMock(return_value={"ok": True, "user": {"is_admin": True}})
+    client.users_info = AsyncMock(
+        return_value={"ok": True, "user": {"is_admin": True, "team_id": "T_HOST"}}
+    )
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
     SlackConfirmationCards().hook(
         cast(AsyncWebClient, client),
+        team_id="T_HOST",
         channel="C1",
         thread_ts="1699.9",
         runtime=runtime,
@@ -717,7 +737,10 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
     assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
     check = kwargs["current_admin"]
     assert await check("U1") is True
-    client.users_info.return_value = {"ok": True, "user": {"is_admin": False}}
+    client.users_info.return_value = {
+        "ok": True,
+        "user": {"is_admin": False, "team_id": "T_HOST"},
+    }
     assert await check("U1") is False
     assert client.users_info.await_count == 2
 
@@ -732,7 +755,7 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
         update={
             "admin": True,
             "action": "Switch Research. " + losses,
-            "denied_action": "Model backend unchanged",
+            "denied_action": "Model provider unchanged",
             "consequence": losses,
             "detail_lines": ("Optional skill: " + "x" * 1000,),
         }
@@ -865,3 +888,58 @@ async def test_cancelled_retirement_wait_can_be_retried() -> None:
     await click
     await asyncio.wait_for(result.retire_unsent(), 1)
     assert client.chat_update.await_args.kwargs["text"].startswith("Stopped")
+
+
+async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from daimon.core import confirmation
+    from mux.contracts.ids import ChannelRef
+
+    tenant, account = uuid4(), uuid4()
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+
+    def hook(admission):
+        SlackConfirmationCards().hook(
+            cast(AsyncWebClient, _client()),
+            team_id="T_HOST",
+            channel="C1",
+            thread_ts="1699.9",
+            runtime=runtime,
+            admission=admission,
+            tenant_id=tenant,
+            account_id=account,
+        )
+        return factory.call_args.kwargs["pin_channel"]
+
+    assert hook(SimpleNamespace(origin_channel_id="C_ORIGIN")) == ChannelRef(
+        tenant_id=str(tenant), platform="slack", channel_id="C_ORIGIN"
+    )
+    assert hook(None) is None, "no admitted channel, no pin card"
+
+
+async def test_a_card_still_open_posts_one_reminder_in_its_thread(monkeypatch) -> None:
+    """ROOT 2: a long card pings its requester once, in the card's thread."""
+    from daimon.core.posted_controls import lifecycle
+
+    monkeypatch.setattr(lifecycle, "REMIND_AFTER_S", 0.02)
+    monkeypatch.setattr(lifecycle, "REMIND_MIN_LEFT_S", 0.05)
+    cards = SlackConfirmationCards()
+    client = _client()
+    waiting, _approve = await _post(cards, client, _prompt(expires_in=timedelta(seconds=0.3)))
+    assert await waiting == "expired"
+    posts = [call.kwargs for call in client.chat_postMessage.await_args_list]
+    reminders = [kwargs for kwargs in posts if "still waiting" in str(kwargs.get("text"))]
+    assert reminders == [
+        {
+            "channel": "C1",
+            "thread_ts": "1699.9",
+            "text": "<@U1> This is still waiting for your click.",
+        }
+    ]

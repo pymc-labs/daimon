@@ -35,20 +35,54 @@ ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = ROOT / "packages/core/alembic"
 FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
-PREVIOUS_HEAD = "0117_clear_legacy_routine_output"
-LEAD_HEAD = "0118_lead_intake"
-WATCH_HEAD = "0119_watches"
-WATCH_POLLING = "0120_watch_polling"
-SANDBOX_HEAD = "0121_routine_sandbox_tools"
-HEAD = "0122_recruitment"
+MAIN_HEAD = "0131_usage_obs_tenant_idx"
+MAIN_SUCCESSORS = [
+    "0111_turn_origin_foreign_sender",
+    "0112_selfhosted_resources",
+    "0113_selfhosted_skill_catalog",
+    "0114_selfhosted_skill_pins",
+    "0115_progress_plan_scopes",
+    "0116_shared_channel_facts",
+    "0117_agent_channel_memory_store",
+    "0118_agent_backend_model",
+    "0119_agent_owner_settings",
+    "0120_mcp_token_surface",
+    "0121_refused_turn_outcome",
+    "0122_thread_provider_release",
+    "0123_tenant_backends_explicit",
+    "0128_fleet_run_end_notice",
+    MAIN_HEAD,
+]
+PREVIEW_IDS = {
+    "0111_cold_dm_agent": "0134_cold_dm_agent",
+    "0112_routine_dm_destination": "0135_routine_dm_destination",
+    "0113_unattended_turn_provenance": "0136_unattended_turn_provenance",
+    "0114_turn_attendance": "0137_turn_attendance",
+    "0115_origin_session_grants": "0138_origin_session_grants",
+    "0116_thread_model_settings": "0139_thread_model_settings",
+    "0117_clear_legacy_routine_output": "0140_clear_legacy_routine_output",
+    "0118_lead_intake": "0141_lead_intake",
+    "0119_watches": "0142_watches",
+    "0120_watch_polling": "0143_watch_polling",
+    "0121_routine_sandbox_tools": "0144_routine_sandbox_tools",
+    "0122_recruitment": "0145_recruitment",
+}
+FROZEN_PREVIEW = Path(__file__).parent / "fixtures/preview_migrations"
+PREVIOUS_HEAD = "0140_clear_legacy_routine_output"
+LEAD_HEAD = "0141_lead_intake"
+WATCH_HEAD = "0142_watches"
+WATCH_POLLING = "0143_watch_polling"
+SANDBOX_HEAD = "0144_routine_sandbox_tools"
+HEAD = "0145_recruitment"
 CHAIN = [
     MAIN,
-    "0111_cold_dm_agent",
-    "0112_routine_dm_destination",
-    "0113_unattended_turn_provenance",
-    "0114_turn_attendance",
-    "0115_origin_session_grants",
-    "0116_thread_model_settings",
+    *MAIN_SUCCESSORS,
+    "0134_cold_dm_agent",
+    "0135_routine_dm_destination",
+    "0136_unattended_turn_provenance",
+    "0137_turn_attendance",
+    "0138_origin_session_grants",
+    "0139_thread_model_settings",
     PREVIOUS_HEAD,
     LEAD_HEAD,
     WATCH_HEAD,
@@ -72,17 +106,17 @@ SANDBOX_COLUMNS = {
 # instead of silently changing the historical chain.
 PREVIEW_CHAIN = {
     "0110_cold_dm_agent": (
-        "0111_cold_dm_agent",
+        "0134_cold_dm_agent",
         FORK,
         "0dd1c622c56c93b5a37aeebd0f1dff4bbdf369f900c84bc82c0eea409b6f32d8",
     ),
     "0111_routine_dm_destination": (
-        "0112_routine_dm_destination",
+        "0135_routine_dm_destination",
         "0110_cold_dm_agent",
         "c6847980363d5509ef1e6d0181796a1c41dd564b3ed304235bff7e36a29cf318",
     ),
     "0112_unattended_turn_provenance": (
-        "0113_unattended_turn_provenance",
+        "0136_unattended_turn_provenance",
         "0111_routine_dm_destination",
         "c5738445743c6b1d854199720f01b99c341169395a8072633b07bff193f89fe6",
     ),
@@ -93,6 +127,20 @@ PREVIEW_CHAIN = {
     ),
 }
 TABLES = {
+    "selfhosted_agents",
+    "selfhosted_environments",
+    "selfhosted_resource_operations",
+    "progress_plan_scopes",
+    "thread_model_settings",
+    "shared_channels",
+    "agent_channel_memory_store",
+    "agent_owner",
+    "agent_backend_revision",
+    "mcp_tokens",
+    "turn_origins",
+    "platform_principals",
+    "tenant_access_policies",
+    "usage_observation",
     "microsoft_user_tokens",
     "microsoft_sign_ins",
     "direct_message_policies",
@@ -134,7 +182,12 @@ def _historical_scripts(tmp_path: Path) -> Path:
         if source.stem not in CHAIN:
             shutil.copy(source, versions / source.name)
     for legacy, (canonical, parent, digest) in PREVIEW_CHAIN.items():
-        script = (SCRIPTS / "versions" / f"{canonical}.py").read_text()
+        frozen = next((old for old, new in PREVIEW_IDS.items() if new == canonical), canonical)
+        script = (
+            FROZEN_PREVIEW / f"{frozen}.py"
+            if canonical != MAIN
+            else SCRIPTS / "versions" / f"{canonical}.py"
+        ).read_text()
         script, revisions = re.subn(
             r'^revision: str = ".*"$', f'revision: str = "{legacy}"', script, flags=re.M
         )
@@ -169,12 +222,19 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         return kind != "table" or name in compared_tables
 
     def include_object(
-        _obj: object,
+        obj: object,
         name: str | None,
         kind: str,
-        _reflected: bool,
+        reflected: bool,
         _compare_to: object,
     ) -> bool:
+        # Historical main retains these two objects for older readers, while
+        # its ORM intentionally omits them. Fresh/repaired schema parity below
+        # still compares them, including the retained index's definition.
+        if reflected and kind == "index" and name == "mcp_tokens_account_idx":
+            return False
+        if reflected and kind == "column" and name == "is_external":
+            return getattr(getattr(obj, "table", None), "name", None) != "turn_origins"
         if kind == "column" and expected not in (SANDBOX_HEAD, HEAD):
             return name not in SANDBOX_COLUMNS
         return kind != "table" or name in compared_tables
@@ -337,25 +397,27 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 ).one() == ("dm", "owner", True, "source-channel", "source-thread")
                 sync.commit()
                 with pytest.raises(RuntimeError, match="convert or remove DM routines"):
-                    command.downgrade(config, MAIN)
+                    command.downgrade(config, MAIN_HEAD)
                 # The failed downgrade rolls back the provenance downgrade too.
                 _assert_head(sync, PREVIOUS_HEAD)
                 sync.execute(text("DELETE FROM routines"))
                 sync.commit()
             # Each new revision reverses, including Microsoft's tables.
-            for target in reversed([FORK, *CHAIN[: CHAIN.index(PREVIOUS_HEAD) + 1]]):
+            for target in reversed(
+                [MAIN_HEAD, *CHAIN[CHAIN.index(MAIN_HEAD) + 1 : CHAIN.index(PREVIOUS_HEAD) + 1]]
+            ):
                 command.downgrade(config, target)
                 assert sync.scalar(text("SELECT version_num FROM alembic_version")) == target
                 inspector = inspect(sync)
-                if target == "0112_routine_dm_destination":
+                if target == "0135_routine_dm_destination":
                     assert "unattended_turn_event_id" not in {
                         c["name"] for c in inspector.get_columns("usage_reconcile_progress")
                     }
-                if target == "0111_cold_dm_agent":
+                if target == "0134_cold_dm_agent":
                     assert "source_provenance_known" not in {
                         c["name"] for c in inspector.get_columns("routines")
                     }
-                if target == MAIN:
+                if target == MAIN_HEAD:
                     assert "dm_agent_name" not in {
                         c["name"] for c in inspector.get_columns("direct_message_policies")
                     }
@@ -406,6 +468,7 @@ def _record_sql(statements: list[str]) -> Callable[..., None]:
 
 
 LEGACY = (
+    *PREVIEW_IDS,
     "0110_cold_dm_agent",
     "0111_routine_dm_destination",
     "0112_unattended_turn_provenance",
@@ -421,7 +484,9 @@ async def test_diagnostics_never_write_even_without_a_version_table(
     start: str,
     read_only: bool,
 ) -> None:
-    historical = _historical_scripts(tmp_path)
+    historical = (
+        _preview_scripts(tmp_path) if start in PREVIEW_IDS else _historical_scripts(tmp_path)
+    )
     canonical = tmp_path / "canonical"
     shutil.copytree(SCRIPTS, canonical, ignore=shutil.ignore_patterns("__pycache__"))
     async with migration_database.connect() as connection:
@@ -637,7 +702,10 @@ async def test_concurrent_migrator_fails_cleanly_then_retry_succeeds(
                 for p, (output, _) in zip(processes, outputs, strict=True)
                 if p.returncode == 1
             )
-            assert b"duplicate key" in loser or b"already exists" in loser, loser.decode()
+            assert any(
+                message in loser
+                for message in (b"duplicate key", b"already exists", b"lock timeout")
+            ), loser.decode()
         async with migration_database.connect() as connection:
 
             def verify_and_retry(sync: Connection) -> None:
@@ -727,7 +795,7 @@ async def test_bookkeeping_sql_matches_origin_main(
         await connection.run_sync(exercise)
 
 
-@pytest.mark.parametrize("start", ["empty", MAIN, "0111_cold_dm_agent"])
+@pytest.mark.parametrize("start", ["empty", MAIN, "0134_cold_dm_agent"])
 async def test_purge_stamp_preserves_normal_nonlegacy_bookkeeping(
     migration_database: AsyncEngine,
     start: str,
@@ -752,6 +820,304 @@ async def test_purge_stamp_preserves_normal_nonlegacy_bookkeeping(
                 sync.scalar(text("SELECT version_num FROM alembic_version"))
                 == "0001_initial_schema"
             )
+            sync.commit()
+
+        await connection.run_sync(exercise)
+
+
+def _preview_scripts(tmp_path: Path) -> Path:
+    """The byte-frozen scripts actually run by Preview at f4dcb43cc."""
+    scripts = tmp_path / "deployed-preview"
+    versions = scripts / "versions"
+    versions.mkdir(parents=True)
+    shutil.copy(Path(__file__).parent / "fixtures/preview_alembic_env.py", scripts / "env.py")
+    for source in (SCRIPTS / "versions").glob("*.py"):
+        if source.stem not in CHAIN or source.stem == MAIN:
+            shutil.copy(source, versions / source.name)
+    for source in FROZEN_PREVIEW.glob("*.py"):
+        shutil.copy(source, versions / source.name)
+    return scripts
+
+
+def _assert_usage_index_valid(sync: Connection) -> None:
+    assert (
+        sync.scalar(
+            text(
+                "SELECT indisvalid AND indisready FROM pg_index "
+                "WHERE indexrelid = to_regclass('ix_usage_observation_tenant_id')"
+            )
+        )
+        is True
+    )
+    assert inspect(sync).get_columns("alembic_version")[0]["type"].length >= max(map(len, CHAIN))
+
+
+@pytest.mark.parametrize("start", [*PREVIEW_IDS, "0120_mcp_token_surface", MAIN_HEAD])
+async def test_real_deployed_chains_upgrade_without_replaying_preview_data(
+    migration_database: AsyncEngine, tmp_path: Path, start: str
+) -> None:
+    historical = _preview_scripts(tmp_path) if start in PREVIEW_IDS else SCRIPTS
+    async with migration_database.connect() as connection:
+
+        def exercise(sync: Connection) -> None:
+            command.upgrade(_config(historical, sync), start)
+            sync.commit()
+            inspector = inspect(sync)
+            assert inspector.has_table("security_audit_events"), "0123 reads this historical table"
+            sync.execute(
+                text(
+                    "INSERT INTO tenants (platform,external_id) VALUES ('discord','preserve-preview')"
+                )
+            )
+            if inspector.has_table("lead_intake_configs"):
+                sync.execute(
+                    text(
+                        "INSERT INTO lead_intake_configs (tenant_id,config,encrypted_credentials) "
+                        "SELECT id,'{}'::jsonb,decode('cafe','hex') FROM tenants"
+                    )
+                )
+            if inspector.has_table("recruitment_threads"):
+                sync.execute(
+                    text(
+                        "INSERT INTO recruitment_threads (tenant_id,thread_id,parent_id,phase,"
+                        "revision,encrypted_state,raw_expires_at,expires_at) "
+                        "SELECT id,'thread','parent','preserved','revision',decode('beef','hex'),"
+                        "now()+interval '1 day',now()+interval '7 days' FROM tenants"
+                    )
+                )
+            if inspector.has_table("watch_controls"):
+                sync.execute(
+                    text("INSERT INTO watch_controls (scope,enabled) VALUES ('sentinel',true)")
+                )
+            if "dm_agent_name" in {
+                col["name"] for col in inspector.get_columns("direct_message_policies")
+            }:
+                sync.execute(
+                    text(
+                        "INSERT INTO direct_message_policies (tenant_id,enabled,dm_agent_name) "
+                        "SELECT id,true,'preserved-agent' FROM tenants"
+                    )
+                )
+            # Freeze every old column of every old row. Main's new columns must not
+            # conceal loss or rewriting of data already present on the Preview schema.
+            queries = {
+                table: "SELECT coalesce(jsonb_agg(to_jsonb(saved) ORDER BY to_jsonb(saved)::text),"
+                "'[]'::jsonb) FROM (SELECT "
+                + ",".join('"' + col["name"] + '"' for col in inspector.get_columns(table))
+                + ' FROM "'
+                + table
+                + '") AS saved'
+                for table in inspector.get_table_names()
+                if table != "alembic_version"
+            }
+            before = {table: sync.scalar(text(query)) for table, query in queries.items()}
+            sync.commit()
+            config = _config(SCRIPTS, sync)
+            statements: list[str] = []
+            recorder = _record_sql(statements)
+            event.listen(sync, "before_cursor_execute", recorder)
+            try:
+                command.upgrade(config, "head")
+            finally:
+                event.remove(sync, "before_cursor_execute", recorder)
+            _assert_head(sync)
+            _assert_usage_index_valid(sync)
+            for table, query in queries.items():
+                assert sync.scalar(text(query)) == before[table], table
+            if start == "0122_recruitment":
+                assert not any(
+                    "UPDATE routines" in sql or "CREATE TABLE lead_" in sql for sql in statements
+                ), "already-applied Preview cleanup and DDL must not replay"
+            sync.commit()
+            statements.clear()
+            event.listen(sync, "before_cursor_execute", recorder)
+            try:
+                command.upgrade(config, "head")
+            finally:
+                event.remove(sync, "before_cursor_execute", recorder)
+            assert all(sql.lstrip().upper().startswith("SELECT") for sql in statements)
+            _assert_usage_index_valid(sync)
+            sync.commit()
+
+        await connection.run_sync(exercise)
+
+
+@pytest.mark.parametrize("failure_point", ["index", "stamp"])
+async def test_repair_failure_rolls_back_main_ddl_index_and_stamp_together(
+    migration_database: AsyncEngine, tmp_path: Path, failure_point: str
+) -> None:
+    historical = _preview_scripts(tmp_path)
+    async with migration_database.connect() as connection:
+
+        def exercise(sync: Connection) -> None:
+            command.upgrade(_config(historical, sync), "0122_recruitment")
+            sync.commit()
+            tables_before = set(inspect(sync).get_table_names())
+            sync.commit()
+
+            def fail(
+                _connection: Connection,
+                _cursor: object,
+                statement: str,
+                _parameters: object,
+                _context: ExecutionContext,
+                _executemany: bool,
+            ) -> None:
+                if (
+                    failure_point == "index"
+                    and "CREATE INDEX IF NOT EXISTS ix_usage_observation" in statement
+                ) or (failure_point == "stamp" and statement.startswith("UPDATE alembic_version")):
+                    raise RuntimeError("injected repair failure")
+
+            event.listen(sync, "after_cursor_execute", fail)
+            try:
+                with pytest.raises(RuntimeError, match="injected repair failure"):
+                    command.upgrade(_config(SCRIPTS, sync), "head")
+            finally:
+                event.remove(sync, "after_cursor_execute", fail)
+            sync.rollback()
+            assert (
+                sync.scalar(text("SELECT version_num FROM alembic_version")) == "0122_recruitment"
+            )
+            assert set(inspect(sync).get_table_names()) == tables_before
+            assert "sender_foreign" not in {
+                c["name"] for c in inspect(sync).get_columns("turn_origins")
+            }
+            assert "enabled_backends_explicit" not in {
+                c["name"] for c in inspect(sync).get_columns("tenant_access_policies")
+            }
+            assert sync.scalar(text("SELECT to_regclass('ix_usage_observation_tenant_id')")) is None
+            sync.commit()
+            command.upgrade(_config(SCRIPTS, sync), "head")
+            _assert_head(sync)
+            _assert_usage_index_valid(sync)
+            sync.commit()
+
+        await connection.run_sync(exercise)
+
+
+def test_main_migration_bodies_are_byte_identical_and_preview_fixture_is_frozen() -> None:
+    import subprocess
+
+    for name in subprocess.check_output(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "4c151880377fff26887b5570cd8f1776a2880b49",
+            "packages/core/alembic/versions",
+        ],
+        cwd=ROOT,
+        text=True,
+    ).splitlines():
+        if not name.endswith(".py"):
+            continue
+        assert (ROOT / name).read_bytes() == subprocess.check_output(
+            ["git", "show", f"4c151880377fff26887b5570cd8f1776a2880b49:{name}"], cwd=ROOT
+        )
+    for revision in PREVIEW_IDS:
+        name = f"packages/core/alembic/versions/{revision}.py"
+        assert (FROZEN_PREVIEW / f"{revision}.py").read_bytes() == subprocess.check_output(
+            ["git", "show", f"f4dcb43cc2493ceef4123ec30f5837b20ca58dc9:{name}"], cwd=ROOT
+        )
+
+
+def _schema_contract(sync: Connection) -> dict[str, object]:
+    """Compare constraints, indexes and function/security shape, independent of column order."""
+    inspector = inspect(sync)
+    tables: dict[str, object] = {}
+    for table in inspector.get_table_names():
+        tables[table] = {
+            "columns": sorted(
+                (column["name"], str(column["type"]), column["nullable"], str(column["default"]))
+                for column in inspector.get_columns(table)
+            ),
+            "checks": sorted(
+                (check["name"], check["sqltext"])
+                for check in inspector.get_check_constraints(table)
+            ),
+            "primary_key": inspector.get_pk_constraint(table),
+            "foreign_keys": sorted(
+                inspector.get_foreign_keys(table), key=lambda key: key["name"] or ""
+            ),
+            "indexes": sorted(inspector.get_indexes(table), key=lambda index: index["name"]),
+            "unique": sorted(
+                inspector.get_unique_constraints(table), key=lambda key: key["name"] or ""
+            ),
+        }
+    functions = sync.execute(
+        text(
+            "SELECT proname, pg_get_function_identity_arguments(p.oid), pg_get_functiondef(p.oid), "
+            "prosecdef, proconfig, proacl::text FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' "
+            "AND proname LIKE '%watch%' ORDER BY proname, pg_get_function_identity_arguments(p.oid)"
+        )
+    ).all()
+    roles = sync.execute(
+        text(
+            "SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, rolbypassrls "
+            "FROM pg_roles WHERE rolname IN ('daimon_sidecar','daimon_watch_ingress_owner') "
+            "ORDER BY rolname"
+        )
+    ).all()
+    rls = sync.execute(
+        text(
+            "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' "
+            "AND c.relkind='r' ORDER BY relname"
+        )
+    ).all()
+    return {"tables": tables, "functions": functions, "roles": roles, "rls": rls}
+
+
+async def test_fresh_and_repaired_preview_schemas_have_identical_constraints_and_security(
+    migration_database: AsyncEngine, tmp_path: Path
+) -> None:
+    historical = _preview_scripts(tmp_path)
+    async with migration_database.connect() as connection:
+
+        def exercise(sync: Connection) -> None:
+            config = _config(SCRIPTS, sync)
+            command.upgrade(config, "head")
+            sync.commit()
+            fresh = _schema_contract(sync)
+            sync.execute(text("DROP SCHEMA public CASCADE"))
+            sync.execute(text("CREATE SCHEMA public AUTHORIZATION pg_database_owner"))
+            sync.commit()
+            command.upgrade(_config(historical, sync), "0122_recruitment")
+            sync.commit()
+            command.upgrade(config, "head")
+            sync.commit()
+            assert _schema_contract(sync) == fresh
+            _assert_usage_index_valid(sync)
+            sync.commit()
+
+        await connection.run_sync(exercise)
+
+
+async def test_legacy_multihead_is_refused_before_any_repair_ddl(
+    migration_database: AsyncEngine, tmp_path: Path
+) -> None:
+    historical = _preview_scripts(tmp_path)
+    async with migration_database.connect() as connection:
+
+        def exercise(sync: Connection) -> None:
+            command.upgrade(_config(historical, sync), "0122_recruitment")
+            sync.execute(
+                text("INSERT INTO alembic_version (version_num) VALUES ('0110_microsoft_accounts')")
+            )
+            sync.commit()
+            before = _schema_contract(sync)
+            sync.commit()
+            with pytest.raises(util.CommandError, match="multi-head legacy"):
+                command.upgrade(_config(SCRIPTS, sync), "head")
+            sync.rollback()
+            assert _schema_contract(sync) == before
+            assert set(sync.scalars(text("SELECT version_num FROM alembic_version"))) == {
+                "0122_recruitment",
+                MAIN,
+            }
             sync.commit()
 
         await connection.run_sync(exercise)

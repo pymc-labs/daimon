@@ -12,14 +12,6 @@ from dataclasses import dataclass, replace
 from typing import Literal, cast
 
 from daimon.testing.accounting_conformance import HostAccountingHook
-from daimon.testing.conformance.runner import (
-    Adapter,
-    PendingKind,
-    PendingReason,
-    Scenario,
-    ScriptedTransport,
-    SendEvidence,
-)
 from daimon.testing.openai_termination import OpenAITerminationEnvelope
 from daimon.testing.turn_conformance import (
     BackendSelectionEnvelope,
@@ -33,6 +25,14 @@ from mux.contracts.resources import SkillUpload
 from mux.errors import ScopeViolation
 from mux.state.memory import CrashPoint
 from mux.state.store import StateStore
+from mux.testing.conformance.runner import (
+    Adapter,
+    PendingKind,
+    PendingReason,
+    Scenario,
+    ScriptedTransport,
+    SendEvidence,
+)
 
 type EvidenceHook = Callable[[], Awaitable[Evidence]]
 PROFILE = "openai.persistent_workspace"

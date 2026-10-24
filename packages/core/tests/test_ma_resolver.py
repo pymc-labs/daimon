@@ -32,14 +32,14 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
     not_found_response,
     skill_response,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment
 
 # ---------------------------------------------------------------------------
 # Local helpers (inline construction per guideline:testing)

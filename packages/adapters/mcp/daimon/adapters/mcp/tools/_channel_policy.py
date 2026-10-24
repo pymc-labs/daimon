@@ -34,6 +34,7 @@ from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
 )
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -44,8 +45,10 @@ from daimon.core.authz import (
     build_agent_ref,
     home_hold,
 )
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
+from daimon.core.mux_backend import resource_scope
 from daimon.core.permissions import (
     agent_permissions,
     any_agent_rules,
@@ -56,7 +59,9 @@ from daimon.core.permissions import (
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.turn_origins import get_active_origin, list_active_origins
+from daimon.core.turn_hold import TurnHold
 from fastmcp.exceptions import ToolError
 
 _log = structlog.get_logger(__name__)
@@ -77,11 +82,11 @@ _RUNS_IN_SEND_MSG = (
     "threads under them). Tell the caller and offer to post in one of them. Do not retry."
 )
 _UNREADABLE_MSG = (
-    "this workspace's access policy could not be read, so daimon won't read or post channels"
+    "the access settings here could not be read, so daimon won't read or post channels"
 )
 _INSIDE_MSG = (
-    "this channel's readers are limited to turns inside it: it can only be read from a "
-    "conversation there. If you are answering in that channel, pass this turn's "
+    "this channel's readers are limited to conversations inside it: it can only be read from a "
+    "conversation there. If you are answering in that channel, pass your "
     "origin_context_id; otherwise tell the caller. Do not retry."
 )
 _HELD_READ_MSG = (
@@ -92,6 +97,13 @@ _OWN_AGENTS_MSG = (
     "this channel is kept to its own agents: only they read it, so nothing was read. "
     "Tell the caller. Do not retry."
 )
+_HELD_OUTSIDE_MSG = (
+    "this conversation is held to the channel it runs in, so nothing is read, posted or sent "
+    "outside it. Tell the caller. Do not retry."
+)
+#: Why `authorize` refuses a held credential: the target lies outside the hold, or the
+#: requester is a client for whom the action is never available.
+_HELD_REASONS = frozenset({"outside_hold", "client_requester", "origin_required"})
 _AMBIGUOUS_HOLD_MSG = (
     "this agent is answering in more than one channel kept to its own agents at once, so "
     "daimon can't tell which one this call belongs to and did nothing. Tell the caller to "
@@ -106,6 +118,23 @@ async def load_channel_policy(runtime: McpRuntime, auth: AuthIdentity) -> Tenant
             return await load_access_policy(session, tenant_id=auth.tenant_id)
     except AccessPolicyUnreadable as exc:
         raise ToolError(_UNREADABLE_MSG) from exc
+
+
+def hold_place(hold: TurnHold) -> Place:
+    """Where a held credential runs: its channel, whatever a call says about its origin."""
+    return Place.from_origin(parent_channel_id=hold.channel_id, thread_id=None)
+
+
+def _restricted(auth: AuthIdentity) -> bool:
+    """The caller is held to a channel or is a client: no no-rules shortcut applies."""
+    return auth.hold is not None or auth.client
+
+
+def _raise_if_held_refused(action: Action, decision: Decision) -> None:
+    """Refuse plainly a call a held credential's hold or client status forbids."""
+    if decision.reason in _HELD_REASONS:
+        record_authz_denial(action, decision.reason)
+        raise ToolError(_HELD_OUTSIDE_MSG)
 
 
 async def require_channel_writable(
@@ -145,9 +174,13 @@ async def require_channel_writable(
         own_dm=_is_requesters_own_dm(channel_id),
     )
     subject = mcp_subject(auth)
+    # The credential's hold is decided first: it is the authority for a held turn, so
+    # neither the quick paths below nor a model-supplied origin can widen it.
+    first = authorize(policy, subject=subject, action=Action.POST, place=place, hold=auth.hold)
+    if not first:
+        _raise_if_held_refused(Action.POST, first)
     # Writers none, the own-DM allowance and a tenant without agent rules need no agent
     # lookup; settle those first.
-    first = authorize(policy, subject=subject, action=Action.POST, place=place)
     if first.reason == "writers_none":
         record_authz_denial(Action.POST, first.reason)
         raise ToolError(_WRITERS_NONE_MSG)
@@ -155,13 +188,19 @@ async def require_channel_writable(
         return
     agent = agent if agent is not None else await _executing_agent(runtime, auth, policy)
     # A running turn's hold only narrows: it never grants what `origin` would not.
-    running = await _held_origin(runtime, auth, policy, agent, None)
-    hold = home_hold(policy, agent, turn_origin_place(running)) if running else None
+    running = await _running_hold(runtime, auth, policy, agent)
+    hold = home_hold(policy, agent, running) if running else None
     if hold is not None and home_of(policy, channel_id, parent_channel_id) != hold:
         record_authz_denial(Action.POST, "own_agents_only")
         raise ToolError(_HELD_SEND_MSG)
     decision = authorize(
-        policy, subject=subject, action=Action.POST, agent=agent, place=place, origin=origin
+        policy,
+        subject=subject,
+        action=Action.POST,
+        agent=agent,
+        place=place,
+        origin=running if auth.hold is not None else origin,
+        hold=auth.hold,
     )
     if not decision:
         record_authz_denial(Action.POST, decision.reason)
@@ -212,6 +251,16 @@ async def _executing_agent(
     executing = auth.chat_agent_id or auth.agent_id
     if executing is None or not (any_agent_rules(policy) or any_own_readers(policy)):
         return AgentRef.none()
+    if auth.anthropic_disabled or anthropic_disabled():
+        record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
+            resource_scope(tenant_id=str(auth.tenant_id)), executing
+        )
+        if record is None:
+            return AgentRef.unresolved()
+        return build_agent_ref(
+            record.spec.name,
+            {**dict(record.spec.metadata or {}), MA_METADATA_KEY_NAME: record.spec.name},
+        )
     agent = await find_agent_by_derived_uuid_cached(
         runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=executing
     )
@@ -228,7 +277,7 @@ async def require_dm_recipient_allowed(
     Keeps such an agent admitted in an admin's DM or hub turn from carrying
     its context to any other workspace member through a direct message.
     """
-    if auth.chat_agent_id is None and auth.agent_id is None:
+    if not _restricted(auth) and auth.chat_agent_id is None and auth.agent_id is None:
         return
     policy = await load_channel_policy(runtime, auth)
     agent = await _executing_agent(runtime, auth, policy)
@@ -239,7 +288,9 @@ async def require_dm_recipient_allowed(
         agent=agent,
         recipient_id=recipient_id,
         origin=await _running_hold(runtime, auth, policy, agent),
+        hold=auth.hold,
     )
+    _raise_if_held_refused(Action.DIRECT_MESSAGE, decision)
     if not decision:
         record_authz_denial(Action.DIRECT_MESSAGE, decision.reason)
     if decision.reason == "agent_unresolved":
@@ -266,10 +317,12 @@ async def require_agent_creatable(
     A chat turn that names no verified origin is refused too: it may be running
     in that setup thread, and judged from outside it would slip the rule."""
     refusal = await _held_refusal(runtime, auth, Action.CREATE_AGENT, origin)
+    if refusal in _HELD_REASONS:
+        raise ToolError(_HELD_OUTSIDE_MSG)
     if refusal == "origin_missing":
         raise ToolError(
-            "create_agent needs a verified origin_context_id from a chat turn while a "
-            "channel in this workspace is kept to its own agents, and this call has none. "
+            "create_agent needs a verified origin_context_id from a chat while a "
+            "channel here is kept to its own agents, and this call has none. "
             "Nothing was created. Tell the caller to create the agent from a chat conversation. "
             "Do not retry."
         )
@@ -370,9 +423,11 @@ async def require_identity_changeable(
 def _raise_refusal(refusal: str | None, *, what: str, nothing: str) -> None:
     if refusal is None:
         return
+    if refusal in _HELD_REASONS:
+        raise ToolError(f"{what} is refused: {_HELD_OUTSIDE_MSG} {nothing}")
     if refusal == "origin_missing":
         raise ToolError(
-            f"{what} needs this turn's origin_context_id while a channel in this workspace "
+            f"{what} needs your origin_context_id while a channel here "
             f"is kept to its own agents, and this call has none. {nothing} Pass it and "
             "retry once."
         )
@@ -400,10 +455,11 @@ async def _held_refusal(
     An identity with no executing agent (the operator, a person's own hub
     token) is held nowhere. `approved` says whether the requester approved this
     call on a card; it is asked only when that would decide it."""
-    if auth.chat_agent_id is None and auth.agent_id is None:
+    credential_held = _restricted(auth)
+    if not credential_held and auth.chat_agent_id is None and auth.agent_id is None:
         return None
     policy = await load_channel_policy(runtime, auth)
-    if not (any_own_readers(policy) or any_agent_rules(policy)):
+    if not credential_held and not (any_own_readers(policy) or any_agent_rules(policy)):
         return None
     agent = await _executing_agent(runtime, auth, policy)
     held = (
@@ -411,7 +467,9 @@ async def _held_refusal(
         or origin
         or (mcp_place(auth) if token_channel_id(auth) is not None else None)
     )
-    decision = authorize(policy, subject=mcp_subject(auth), action=action, agent=agent, origin=held)
+    decision = authorize(
+        policy, subject=mcp_subject(auth), action=action, agent=agent, origin=held, hold=auth.hold
+    )
     if decision.reason == "needs_approval" and approved is not None and await approved():
         decision = authorize(
             policy,
@@ -420,11 +478,12 @@ async def _held_refusal(
             agent=agent,
             origin=held,
             approved=True,
+            hold=auth.hold,
         )
     if not decision:
         record_authz_denial(action, decision.reason)
         return decision.reason
-    if any_own_readers(policy) and auth.agent_id is None and origin is None:
+    if any_own_readers(policy) and auth.agent_id is None and origin is None and not credential_held:
         record_authz_denial(action, "origin_missing")
         return "origin_missing"
     return None
@@ -450,17 +509,36 @@ class ChannelReadPolicy:
     agent: AgentRef = field(default_factory=AgentRef.none)
     origin: TurnOriginRow | None = None
     origin_place: Place | None = None
+    #: Who is reading, so a client is refused whatever a rule says.
+    subject: Subject = field(default_factory=Subject)
+    #: The channel a held credential stays in; None for an unheld call.
+    hold: TurnHold | None = None
 
     def _decide(self, channel_id: str, parent_channel_id: str | None) -> Decision:
+        inside = self.origin_channel_ids
+        if self.hold is not None and self.hold.contains(channel_id, parent_channel_id):
+            # The credential places the call in the channel, so what limits its
+            # readers to "inside" is satisfied for the target it holds there.
+            inside = inside | {channel_id, self.hold.channel_id}
+            if parent_channel_id is not None:
+                inside = inside | {parent_channel_id}
         return authorize(
             self.policy,
-            subject=Subject(),
+            subject=self.subject,
             action=Action.READ_CHANNEL,
             agent=self.agent,
             place=Place(channel_id=channel_id, parent_channel_id=parent_channel_id),
-            origin_channel_ids=self.origin_channel_ids,
+            origin_channel_ids=inside,
             origin=self.origin_place,
+            hold=self.hold,
         )
+
+    @property
+    def withholds_hits(self) -> bool:
+        """Whether search hits may be withheld, so a total or page size taken from
+        the platform could count hits the caller may not see: some channel's
+        readers are limited, or the call is held to one channel."""
+        return self.hold is not None or any_readers_limited(self.policy)
 
     def allows(self, channel_id: str, parent_channel_id: str | None = None) -> bool:
         return bool(self._decide(channel_id, parent_channel_id))
@@ -468,7 +546,9 @@ class ChannelReadPolicy:
     def lists(self, channel_id: str, parent_channel_id: str | None = None) -> bool:
         """Whether a channel list may name this channel: a call held to a channel
         kept to its own agents names only it. Limited readers hide messages, not
-        the name."""
+        the name. A held credential names only the channel it is held to."""
+        if self.hold is not None and not self.hold.contains(channel_id, parent_channel_id):
+            return False
         held = home_hold(self.policy, self.agent, self.origin_place)
         return held is None or held == home_of(self.policy, channel_id, parent_channel_id)
 
@@ -480,6 +560,9 @@ class ChannelReadPolicy:
         decision = self._decide(channel_id, parent_channel_id)
         if decision:
             return
+        if decision.reason in _HELD_REASONS:
+            record_authz_denial(Action.READ_CHANNEL, decision.reason)
+            raise ChannelReadRefused(_HELD_OUTSIDE_MSG)
         if not self.lists(channel_id, parent_channel_id):
             raise ChannelReadRefused(_HELD_READ_MSG)
         if decision.reason == "own_agents_only":
@@ -519,24 +602,44 @@ async def load_read_policy(
         if any_own_readers(policy)
         else AgentRef.none()
     )
+    if auth.hold is not None:
+        # The credential is the authority: a named origin can neither widen nor
+        # be needed, so it is not read.
+        return ChannelReadPolicy(
+            policy,
+            frozenset({auth.hold.channel_id}),
+            agent,
+            origin_place=hold_place(auth.hold),
+            subject=mcp_subject(auth),
+            hold=auth.hold,
+        )
     bound = token_channel_id(auth)
     if bound is not None:
         return ChannelReadPolicy(
-            policy, frozenset({bound}), agent, origin_place=Place(channel_id=bound)
+            policy,
+            frozenset({bound}),
+            agent,
+            origin_place=Place(channel_id=bound),
+            subject=mcp_subject(auth),
         )
     # Readers own are limited too, so an origin that holds a call is resolved.
     if not (any_readers_limited(policy) or resolve_without_seals):
-        return ChannelReadPolicy(policy, agent=agent)
+        return ChannelReadPolicy(policy, agent=agent, subject=mcp_subject(auth))
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     origin = await _held_origin(runtime, auth, policy, agent, origin)
     if origin is None:
-        return ChannelReadPolicy(policy, agent=agent)
+        return ChannelReadPolicy(policy, agent=agent, subject=mcp_subject(auth))
     inside = {origin.parent_channel_id, origin.thread_id}
     if auth.platform == "slack":
         # A Slack thread's rule is keyed by its channel_id:thread_ts form.
         inside.add(f"{origin.parent_channel_id}:{origin.thread_id}")
     return ChannelReadPolicy(
-        policy, frozenset(inside), agent, origin, origin_place=turn_origin_place(origin)
+        policy,
+        frozenset(inside),
+        agent,
+        origin,
+        origin_place=turn_origin_place(origin),
+        subject=mcp_subject(auth),
     )
 
 
@@ -558,7 +661,10 @@ async def _running_hold(
     runtime: McpRuntime, auth: AuthIdentity, policy: TenantAccessPolicy, agent: AgentRef
 ) -> Place | None:
     """Where a chat turn of this account and agent running in a channel kept to its own agents
-    is, whatever origin the call names; it only narrows (`_held_origin`)."""
+    is, whatever origin the call names; it only narrows (`_held_origin`). A held
+    credential runs in its own channel, whatever any turn is doing."""
+    if auth.hold is not None:
+        return hold_place(auth.hold)
     running = await _held_origin(runtime, auth, policy, agent, None)
     return turn_origin_place(running) if running is not None else None
 
@@ -634,6 +740,30 @@ async def list_running_origins(runtime: McpRuntime, auth: AuthIdentity) -> list[
     ]
 
 
+async def caller_foreign_status(runtime: McpRuntime, auth: AuthIdentity) -> bool | None:
+    """Whether the caller is a person from another organisation (Teams), who has no
+    1:1 chat with Daimon. It is a fact about the person, so any of their running turns
+    says it; None when they have none, so nothing is known."""
+    if auth.platform is None:
+        return None
+    async with runtime.session_factory() as session:
+        running = await list_active_origins(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            now=datetime.now(UTC),
+        )
+    if not running:
+        return None
+    return any(origin.sender_foreign for origin in running)
+
+
+async def caller_is_foreign(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """`caller_foreign_status`, with "nothing known" read as a person who is not."""
+    return await caller_foreign_status(runtime, auth) is True
+
+
 async def get_verified_origin(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
 ) -> TurnOriginRow | None:
@@ -667,5 +797,10 @@ async def get_verified_origin(
         or executing_agent
         != derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
     ):
+        return None
+    if auth.hold is not None and not auth.hold.contains(
+        origin.thread_id or origin.parent_channel_id, origin.parent_channel_id
+    ):
+        # A held credential's named origin can only narrow: one outside its channel is none.
         return None
     return origin

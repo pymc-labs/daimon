@@ -10,8 +10,9 @@ from daimon.core.continuity import watch_turn
 from daimon.core.continuity.watch_turn import read_report_policy, watch_posture
 from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
 from daimon.core.turn import unattended_capabilities as capabilities
-from daimon.testing import ma_agent, ma_session
+from daimon.testing import ma_agent
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma import ma_session
 
 
 async def _apply_watch_capabilities(

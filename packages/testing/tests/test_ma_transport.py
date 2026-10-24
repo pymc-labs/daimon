@@ -26,10 +26,10 @@ from daimon.testing.effect_recorder import (
     RecordingPlatformClient,
     database_metadata,
 )
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_router import turn_events
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 

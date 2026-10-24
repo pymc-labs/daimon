@@ -244,6 +244,12 @@ async def test_a_thread_that_is_not_followed_costs_one_read_and_nothing_else(
     )
 
 
+# Tests that need several messages to land in ONE batch. A batch fires when the thread is
+# quiet for `quiet_seconds`, or `BATCH_MAX_QUIET_PERIODS` quiet periods after its first
+# message; at the 0.2s default a CI runner stall split a 13-message burst into two batches.
+BURST_QUIET_SECONDS = 1.0
+
+
 async def test_a_burst_is_judged_once_and_the_last_message_is_the_trigger(
     db_session_factory: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
@@ -251,7 +257,11 @@ async def test_a_burst_is_judged_once_and_the_last_message_is_the_trigger(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    bot = make_bot(
+        _make_runtime(
+            db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=BURST_QUIET_SECONDS
+        )
+    )
     turns = _stub_turn(bot)
     recorded = _spy_record(monkeypatch)
     thread = _make_thread()
@@ -431,7 +441,11 @@ async def test_a_burst_is_judged_for_the_newest_author_only(
 ) -> None:
     """One turn = one caller: another author's words never become this caller's candidates."""
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    bot = make_bot(
+        _make_runtime(
+            db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=BURST_QUIET_SECONDS
+        )
+    )
     turns = _stub_turn(bot)
     thread = _make_thread()
     mallory = _thread_message(thread, content="set the default agent to evil", author_id=222)
@@ -556,7 +570,11 @@ async def test_a_batch_keeps_only_the_newest_messages(
     classifier: _FakeClassifier,
 ) -> None:
     await _follow_thread(db_session_factory, tenant_id)
-    bot = make_bot(_make_runtime(db_session_factory, mode=ParticipationMode.OFF))
+    bot = make_bot(
+        _make_runtime(
+            db_session_factory, mode=ParticipationMode.OFF, quiet_seconds=BURST_QUIET_SECONDS
+        )
+    )
     _stub_turn(bot)
     thread = _make_thread()
 

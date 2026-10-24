@@ -238,18 +238,14 @@ def test_cascade_container_slack_user_tokens_row_renders_when_nonzero() -> None:
     preview = _make_preview(slack_user_tokens=PurgePreviewRow(count=1, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "1" in joined, "slack_user_tokens count must appear in the row"
-    assert "saved Slack access token" in joined, (
-        "slack_user_tokens row must mention saved Slack access token"
-    )
+    assert "saved access token" in joined, "slack_user_tokens row must mention saved access token"
 
 
 def test_cascade_container_slack_user_tokens_row_absent_when_zero() -> None:
     """slack_user_tokens row is suppressed when count == 0."""
     preview = _make_preview(slack_user_tokens=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
-    assert "saved Slack access token" not in joined, (
-        "zero-count slack_user_tokens must NOT render a row"
-    )
+    assert "saved access token" not in joined, "zero-count slack_user_tokens must NOT render a row"
 
 
 def test_cascade_container_slack_turn_contexts_row_renders_when_nonzero() -> None:
@@ -257,8 +253,8 @@ def test_cascade_container_slack_turn_contexts_row_renders_when_nonzero() -> Non
     preview = _make_preview(slack_turn_contexts=PurgePreviewRow(count=4, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
     assert "4" in joined, "slack_turn_contexts count must appear in the row"
-    assert "temporary Slack request record" in joined, (
-        "slack_turn_contexts row must mention temporary Slack request record"
+    assert "temporary request record" in joined, (
+        "slack_turn_contexts row must mention temporary request record"
     )
 
 
@@ -266,6 +262,6 @@ def test_cascade_container_slack_turn_contexts_row_absent_when_zero() -> None:
     """slack_turn_contexts row is suppressed when count == 0."""
     preview = _make_preview(slack_turn_contexts=PurgePreviewRow(count=0, example=None))
     joined = _joined_text(build_cascade_preview_container(preview))
-    assert "temporary Slack request record" not in joined, (
+    assert "temporary request record" not in joined, (
         "zero-count slack_turn_contexts must NOT render a row"
     )

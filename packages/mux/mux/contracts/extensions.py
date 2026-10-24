@@ -63,3 +63,10 @@ ANTHROPIC_EXTENSIONS = _refs(
     "anthropic.platform_export",
 )
 OPENAI_EXTENSIONS = _refs("openai.vaults", "openai.steer")
+
+__all__ = [
+    "ANTHROPIC_EXTENSIONS",
+    "ExtensionConfig",
+    "ExtensionRef",
+    "OPENAI_EXTENSIONS",
+]

@@ -1,4 +1,4 @@
-"""Host credential references in agent intent; bearer values only in session input."""
+"""Host credential references in agent intent; bearer values stay in caller-owned vaults."""
 
 from __future__ import annotations
 
@@ -7,14 +7,12 @@ import re
 from collections.abc import Awaitable, Callable, Sequence
 from urllib.parse import urlsplit
 
-from pydantic import JsonValue, TypeAdapter
+from pydantic import TypeAdapter
 
 from mux.contracts.ids import Scope
 from mux.contracts.resources import MCPConnection
 from mux.drivers.openai._common import Context, objects, text
-from mux.drivers.openai.secret_value import RedactedCredential
 from mux.drivers.openai.transport import Object, object_json
-from mux.errors import ProviderError
 
 KEY = "mux_mcp_credential_refs"
 _CONNECTIONS = TypeAdapter(tuple[MCPConnection, ...])
@@ -94,7 +92,7 @@ def encode(connections: Sequence[MCPConnection], context: Context) -> Object:
     return {KEY: value}
 
 
-def _non_mcp_tool(native: Object) -> Object:
+def non_mcp_tool(native: Object) -> Object:
     """Rebuild only the exact native shapes admitted by this driver."""
     kind = native.get("type")
     if kind in ("web_search", "tool_search", "programmatic_tool_calling"):
@@ -145,7 +143,7 @@ def _validate_native_auth(tools: Sequence[Object]) -> None:
     """
     for native in tools:
         if native.get("type") != "mcp":
-            _non_mcp_tool(native)
+            non_mcp_tool(native)
             continue
         transport = object_json(native["transport"])
         if (
@@ -206,48 +204,3 @@ def decode(raw: Object, context: Context) -> tuple[MCPConnection, ...]:
         ):
             raise ValueError("MCP credential destination or policy changed")
     return connections
-
-
-def _authorization(value: object) -> str:
-    if not isinstance(value, str) or not value or "\r" in value or "\n" in value:
-        raise ProviderError("permission", retryable=False, native_code="mcp_secret_unavailable")
-    return RedactedCredential("Bearer " + value)
-
-
-async def session_tools(
-    scope: Scope,
-    agent: Object,
-    context: Context,
-    resolver: MCPSecretResolver | None,
-    *,
-    vaults_attached: bool,
-) -> list[JsonValue] | None:
-    connections = decode(agent, context)
-    if not connections:
-        return None
-    if resolver is None:
-        raise context.unsupported("host_mcp_secret_resolver")
-    if vaults_attached:
-        raise context.unsupported("mixed_mcp_authentication")
-    connection = connections[0]
-    tools: list[JsonValue] = []
-    for native in objects(agent["tools"]):
-        if native.get("type") != "mcp":
-            tools.append(_non_mcp_tool(native))
-            continue
-        credential_ref = connection.credential_ref
-        if credential_ref is None:
-            raise ValueError("missing MCP credential reference")
-        try:
-            authorization = _authorization(await resolver(scope, credential_ref, connection.url))
-        except Exception:
-            raise ProviderError(
-                "permission", retryable=False, native_code="mcp_secret_unavailable"
-            ) from None
-        expected = tool(connection, context)
-        transport: Object = {
-            **object_json(expected["transport"]),
-            "authorization": authorization,
-        }
-        tools.append({**expected, "transport": transport, "connection_origin": "service"})
-    return tools

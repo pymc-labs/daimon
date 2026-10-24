@@ -17,23 +17,6 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 import yaml
-from daimon.testing.conformance.default_capability import (
-    BASH_RESULT,
-    FINAL_MESSAGE,
-    MCP_TOOLS,
-    PROMPT,
-    DefaultCapabilityAdapter,
-    DefaultManifest,
-    NamedSkill,
-    scenario,
-    skill_text,
-)
-from daimon.testing.conformance.recording import Audit, Recorder, Replay, RequestMetadata
-from daimon.testing.conformance.runner import run_default_capability
-from daimon.testing.drivers.gemini.default_capability import BUILTIN_MAPPING
-from daimon.testing.drivers.gemini.fake import MemoryStorage
-from daimon.testing.drivers.gemini.live_cert import EvidenceAliases
-from daimon.testing.isolated_sdk import build_gemini_client
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import Event
 from mux.contracts.extensions import ExtensionConfig
@@ -51,6 +34,23 @@ from mux.drivers.gemini.core import GeminiSessions
 from mux.drivers.gemini.skill_deployment import GCSBundleDeployment, file_manifest
 from mux.drivers.gemini.transport import Object, SDKTransport, object_value
 from mux.state.memory import MemoryStateStore
+from mux.testing.conformance.default_capability import (
+    BASH_RESULT,
+    FINAL_MESSAGE,
+    MCP_TOOLS,
+    PROMPT,
+    DefaultCapabilityAdapter,
+    DefaultManifest,
+    NamedSkill,
+    scenario,
+    skill_text,
+)
+from mux.testing.conformance.recording import Audit, Recorder, Replay, RequestMetadata
+from mux.testing.conformance.runner import run_default_capability
+from mux.testing.drivers.gemini.default_capability import BUILTIN_MAPPING
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.drivers.gemini.live_cert import EvidenceAliases
+from mux.testing.isolated_sdk import build_gemini_client
 from pydantic import JsonValue, TypeAdapter
 
 if TYPE_CHECKING:
@@ -201,7 +201,7 @@ def steps(authored: DefaultManifest, outputs: dict[str, str], *, failed: bool) -
                     "type": "mcp_server_tool_call",
                     "id": name,
                     "name": name,
-                    "server_name": "daimon-mcp",
+                    "server_name": "daimon_mcp",
                     "arguments": {},
                 },
                 {
@@ -321,7 +321,7 @@ async def test_f2_gemini_default_capabilities_through_real_loopback(
                     for t in tools
                     if isinstance(t, dict) and t.get("type") == "mcp_server"
                 ]
-                assert server["name"] == "daimon-mcp" and server["url"] == MCP_URL
+                assert server["name"] == "daimon_mcp" and server["url"] == MCP_URL
                 assert server["allowed_tools"] == [{"mode": "auto", "tools": sorted(MCP_TOOLS)}]
                 authorization = object_value(server["headers"])["Authorization"]
                 assert isinstance(authorization, str)

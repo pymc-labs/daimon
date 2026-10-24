@@ -12,8 +12,7 @@ import httpx
 import pytest
 from anthropic.types.beta import FileMetadata
 from daimon.core import output_delivery
-from daimon.testing import build_fake_anthropic, list_response
-from daimon.testing.ma import MARouter
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (

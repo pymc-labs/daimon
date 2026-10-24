@@ -90,6 +90,10 @@ def test_task_is_empty_placeholder_kept_for_forward_compat_when_referenced() -> 
     assert isinstance(task, Task), "Task is a placeholder; Managed Agents emits no task events yet"
 
 
+def _tool(tool_id: str) -> ToolUseBlock:
+    return ToolUseBlock(kind="tool_use", id=tool_id, type="agent.tool_use", name="bash", input={})
+
+
 class TestExtractFinalResponse:
     def test_multi_tool_returns_text_after_last_tool_use(self) -> None:
         content: list[ContentBlock] = [
@@ -181,3 +185,91 @@ class TestExtractSealedResponses:
 
     def test_empty_content_returns_empty_list(self) -> None:
         assert extract_sealed_responses([], min_chars=500) == []
+
+
+@pytest.mark.usefixtures("status_log_on")
+class TestAnswersWithTheStatusLogOn:
+    """Every message after the last tool is kept, set apart by a blank line."""
+
+    def test_the_answer_is_every_message_after_the_last_tool_set_apart_by_a_blank_line(
+        self,
+    ) -> None:
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text="🔍 **Looking up:** saturation priors"),
+            _tool("tu_1"),
+            TextBlock(kind="text", text="📚 **Found:** 14 patterns"),
+            TextBlock(kind="text", text="Priors on saturation are usually Beta."),
+        ]
+        assert extract_final_response(content) == (
+            "📚 **Found:** 14 patterns\n\nPriors on saturation are usually Beta."
+        )
+
+    def test_an_emoji_led_message_of_real_answer_text_is_never_dropped(self) -> None:
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text="⚠️ Do not run this against production."),
+            TextBlock(kind="text", text="Run it against staging."),
+        ]
+        assert extract_final_response(content) == (
+            "⚠️ Do not run this against production.\n\nRun it against staging."
+        )
+
+    def test_messages_are_not_glued(self) -> None:
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text="First"),
+            TextBlock(kind="text", text="second"),
+        ]
+        assert extract_final_response(content) == "First\n\nsecond"
+
+    def test_a_blank_message_adds_nothing(self) -> None:
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text=" "),
+            TextBlock(kind="text", text="The answer."),
+        ]
+        assert extract_final_response(content) == "The answer."
+
+    def test_a_lone_message_is_returned_untouched(self) -> None:
+        content: list[ContentBlock] = [TextBlock(kind="text", text="  padded\n")]
+        assert extract_final_response(content) == "  padded\n"
+
+    def test_a_run_of_messages_before_a_tool_is_one_sealed_candidate(self) -> None:
+        first = "a" * 250
+        second = "b" * 250
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text=first),
+            TextBlock(kind="text", text=second),
+            _tool("tu_1"),
+        ]
+        assert extract_sealed_responses(content, min_chars=500) == [(0, f"{first}\n\n{second}")]
+
+    def test_a_sealed_run_keeps_a_short_message_beside_a_long_one(self) -> None:
+        answer = "x" * 600
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text="🔍 Looking up: priors"),
+            TextBlock(kind="text", text=answer),
+            _tool("tu_1"),
+        ]
+        assert extract_sealed_responses(content, min_chars=500) == [
+            (0, f"🔍 Looking up: priors\n\n{answer}")
+        ]
+
+    def test_the_seal_floor_counts_whitespace_the_join_trims(self) -> None:
+        first = "a" * 248 + "\n\n"
+        second = "\n\n" + "b" * 248
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text=first),
+            TextBlock(kind="text", text=second),
+            _tool("tu_1"),
+            TextBlock(kind="text", text="Saved."),
+        ]
+        sealed = extract_sealed_responses(content, min_chars=500)
+        assert [index for index, _ in sealed] == [0], (
+            "500 raw characters seal as the old glued block did, even if the join trims some"
+        )
+
+    def test_short_messages_alone_are_not_sealed(self) -> None:
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text="🔍 one"),
+            TextBlock(kind="text", text="📚 two"),
+            _tool("tu_1"),
+        ]
+        assert extract_sealed_responses(content, min_chars=500) == []

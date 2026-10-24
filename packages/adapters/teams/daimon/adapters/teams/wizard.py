@@ -22,7 +22,7 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     toast,
 )
-from daimon.adapters.teams.identity import TeamsInbound, canonical_uuid
+from daimon.adapters.teams.identity import TeamsInbound, canonical_uuid, display_bot_name
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.stores.domain import WizardSessionRow
 from daimon.core.stores.wizard_session import (
@@ -116,7 +116,7 @@ def _inbound(
         activity_id=activity.id,
         text=text,
         service_url=service_url,
-        bot_name=activity.recipient.name,
+        bot_name=display_bot_name(activity.recipient.name),
         team_id=team.id if team is not None else None,
         team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,
         user_name=activity.from_.name,

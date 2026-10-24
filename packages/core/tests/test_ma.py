@@ -43,15 +43,16 @@ from daimon.core.ma import (
     terminal_stop_reason,
     update_agent_with_version_retry,
 )
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     build_no_retry_anthropic,
     list_response,
     sse_response,
 )
-from daimon.testing.ma_models import ma_agent, ma_session
-from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_models import ma_session
 
 
 def _user_message(event_id: str, text: str) -> BetaManagedAgentsUserMessageEvent:

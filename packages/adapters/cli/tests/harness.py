@@ -9,7 +9,7 @@ from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import RecruitmentSettings, Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
-from daimon.testing import MARouter, build_fake_anthropic, build_stub_anthropic
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

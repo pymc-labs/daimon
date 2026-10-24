@@ -74,3 +74,15 @@ class RestoreReceipt(Contract):
     operation_id: str
     session: ResourceRef
     accepted_losses: tuple[str, ...] = ()
+
+
+__all__ = [
+    "CancelReceipt",
+    "DeletionReceipt",
+    "Operation",
+    "OperationStatus",
+    "RestoreReceipt",
+    "SendReceipt",
+    "StopObservation",
+    "UpdateReceipt",
+]

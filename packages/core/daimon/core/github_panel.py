@@ -11,7 +11,12 @@ from daimon.core.native_admins import AdminCaller, read_stored_admin
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_access import SERVER_WIDE_GRANT_MESSAGE
+from daimon.core.stores.github_access import (
+    SERVER_WIDE_GRANT_MESSAGE,
+    InstallationLimitError,
+    ReadOnlyMultiInstallationError,
+    SessionVaultBudgetError,
+)
 from daimon.core.stores.github_connect import (
     PINNED_AGENT_MESSAGE,
     admin_account_for_platform_user,
@@ -103,7 +108,7 @@ async def sync_connect_admin(
 ) -> None:
     """Record a live platform admin check before a connect entry point mints a link."""
     if not verified_tenant_admin:
-        raise ValueError("Only a workspace admin can connect GitHub.")
+        raise ValueError("Only an admin can connect GitHub.")
     principal = await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
     )
@@ -119,8 +124,8 @@ _PUBLIC_ERRORS = frozenset(
         "Give this agent read access to its skill repo first.",
         "This repo is no longer connected.",
         "Select at least one repo.",
-        "Only a server or workspace admin can manage connected repos.",
-        "Only a workspace admin can connect GitHub.",
+        "Only an admin can manage connected repos.",
+        "Only an admin can connect GitHub.",
         PINNED_AGENT_MESSAGE,
         SERVER_WIDE_GRANT_MESSAGE,
     }
@@ -129,6 +134,10 @@ _PUBLIC_ERRORS = frozenset(
 
 def safe_github_error(error: ValueError) -> str:
     """Keep internal access and storage terminology off chat screens."""
+    if isinstance(
+        error, (InstallationLimitError, SessionVaultBudgetError, ReadOnlyMultiInstallationError)
+    ):
+        return str(error)
     message = str(error)
     return message if message in _PUBLIC_ERRORS else "GitHub didn't answer. Try again in a minute."
 
@@ -216,7 +225,7 @@ async def connect_link(
     """
     root = connect_root(settings)
     if root is None:
-        raise ValueError("GitHub connection is not configured for this workspace.")
+        raise ValueError("GitHub connection is not configured here.")
     for_agent = agent_id is not None and agent_name is not None
     if verified_tenant_admin:
         account_id = await admin_account_for_platform_user(
@@ -228,7 +237,7 @@ async def connect_link(
         )
         account_id = principal.account_id
     else:
-        raise ValueError("Only a workspace admin can connect GitHub.")
+        raise ValueError("Only an admin can connect GitHub.")
     if agent_id is not None and agent_name is not None:
         await require_app_eligible_agent(
             session,

@@ -16,8 +16,9 @@ from daimon.testing.f2_native_bounds import (
     native_tools,
     verify_tools,
 )
-from daimon.testing.isolated_sdk import SDK_ENV_VARS, build_async_anthropic
-from daimon.testing.ma_models import ma_agent, ma_session
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.isolated_sdk import SDK_ENV_VARS, build_async_anthropic
 
 
 @pytest.fixture(autouse=True)

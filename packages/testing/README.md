@@ -154,9 +154,99 @@ The last fixture user drains background work, drops the schema and disposes the
 engine. Different databases or schemas retain separate engines; the NullPool
 fixture retains its own pool on the shared schema.
 
+# Pooled committing engine
+
+`db_committing_engine` is a pooled engine (pool 5 plus 10 overflow, as in
+production) on the worker schema, for tests whose sessions really `COMMIT` or
+that need several independent connections. It replaces `db_nullpool_engine`,
+which opens a new connection, about 20 ms, for every checkout. Statements stay
+prepared on a warm connection, and code that gates on its pool
+(`session_preparation_gate.pool_headroom`) takes the production path. The
+pool is session-scoped (`db_committing_pool`); the per-test fixture adds the
+checks below. `DAIMON_TEST_NULLPOOL=1` makes the pool a NullPool again, which
+restores the old behaviour.
+
+Keep `db_nullpool_engine` for a test that:
+
+- runs `asyncio.run` per call, such as a Typer command under `CliRunner`:
+  asyncpg connections belong to the loop that opened them;
+- takes a session-level advisory lock on purpose, or kills a backend with
+  `pg_terminate_backend`: only closing the connection ends either.
+
+Code that disposes the engine it is handed would replace the shared pool, and the
+teardown fails the test for it. Give that code
+`sibling_nullpool_engine(db_committing_engine)`, a throwaway NullPool engine on
+the same schema.
+
+## What a test can and cannot leak
+
+Pooled connections outlive the test, so the fixture enforces the isolation a
+fresh connection used to give. The pool rolls every connection back when it is
+returned (`pool_reset_on_return="rollback"`), and refuses to hand out one that
+is still inside a transaction. Every connection starts a session at the worker
+schema's `search_path` with a 60 s `lock_timeout`.
+
+Rolled back by the pool, so a test cannot leak it: uncommitted rows, an open
+transaction on a connection it returned, `SET LOCAL`.
+
+Detected at teardown, which then fails the test and resets the connection so
+the next test is not hit as well. For every connection the test touched:
+
+- `search_path` other than the worker schema;
+- a session-level `SET` of `statement_timeout`, `lock_timeout`,
+  `idle_in_transaction_session_timeout`, `TimeZone`, `DateStyle`, `role`, the
+  default transaction isolation or read-only mode, `synchronous_commit`,
+  `work_mem`, `client_min_messages` or `application_name`, compared with what a
+  brand-new connection of the pool reports (the list is `_WATCHED_GUCS` in
+  `daimon/testing/db.py`; add a setting there if a test needs another);
+- a temp table or other temp object;
+- a `LISTEN` channel;
+- a session-level advisory lock;
+- a connection still checked out, with or without a transaction;
+- a session fence (`pool_headroom`) permit that was never released, or a
+  replaced pool.
+
+Every pooled engine the fixtures build (`db_engine` and the committing pool)
+also fails the test that returns a connection to its pool inside an open
+transaction, naming the test and the backend pid, and terminates that
+connection. Without this, such a connection keeps its row and advisory locks,
+the next `COMMIT` on it is only a `RELEASE SAVEPOINT`, and the sibling pooled
+connection's wipe waits on those locks until the job times out. The usual
+cause is several tasks sharing one `AsyncConnection` (a test body plus a
+background task on `db_session_factory`): `daimon/testing/db.py` makes COMMIT and
+ROLLBACK on such a connection wait for the statement running on it, which is
+what lets a rollback and a new transaction interleave otherwise.
+
+Not checked: a `SET` of a setting outside that list, prepared statements a test
+creates with SQL `PREPARE`, and changes
+a test commits to `public` or to another schema. A test that needs any of these
+should use `db_nullpool_engine`, whose connections close with the test.
+
+# Reusable schema for `fresh_schema` tests
+
+A test marked `@pytest.mark.fresh_schema` runs its own DDL, so it cannot use the
+worker's shared schema. It gets the worker's one reusable DDL schema
+(`test_f<pid>_<8hex>`), built from the ORM models on first use and dropped with
+the worker's other schemas. `db_session` runs the test in a transaction and rolls
+it back, and Postgres rolls DDL back with it, so a test that only issues
+`ALTER`, `CREATE` or `DROP` and never commits leaves nothing behind.
+
+A test that commits anyway (`session.commit()`, `engine.begin()`) is caught
+before the next one starts. The next `fresh_schema` test compares a catalog
+fingerprint of the schema with the one taken after the build. The fingerprint
+covers columns (type, nullability, default, identity, generation, collation),
+indexes, constraints, triggers, functions, views, sequences, and enum and domain
+types. If it is unchanged, the test deletes every row and restarts the
+sequences that were advanced; if it differs, the schema is dropped and rebuilt.
+Either way each test starts on an empty, ORM-shaped schema, as a private one
+would give it.
+
+`DAIMON_TEST_FRESH_SCHEMA=1` restores a private schema per test (CREATE,
+`create_all`, DROP around the test), which is slower and isolates the same way.
+
 # Isolated provider SDK clients
 
-`daimon.testing.isolated_sdk` supplies `build_async_openai`,
+`mux.testing.isolated_sdk` supplies `build_async_openai`,
 `build_async_anthropic` and `build_gemini_client` for tests. Each requires an
 explicit HTTPX transport and supplies a fake API key, a fixed provider base URL
 and empty custom headers by default. Override `api_key`, `base_url` and `headers`
@@ -167,7 +257,7 @@ factories; imports remain lazy.
 
 ```python
 import httpx
-from daimon.testing.isolated_sdk import build_async_openai
+from mux.testing.isolated_sdk import build_async_openai
 
 transport = httpx.MockTransport(
     lambda request: httpx.Response(200, json={"data": [], "object": "list"})
@@ -383,7 +473,7 @@ This hook neither mutates budgets/credit nor binds the source executor itself.
 
 ```python
 import httpx
-from daimon.testing.isolated_sdk import build_async_openai
+from mux.testing.isolated_sdk import build_async_openai
 
 transport = httpx.MockTransport(
     lambda request: httpx.Response(200, json={"data": [], "object": "list"})
@@ -884,6 +974,19 @@ checks; a copied PASS or matching caller-supplied hash pair is never consulted.
 Foreign capture identities, mismatched roots, missing usage/coverage, extra
 native sends and silence cannot earn a pass.
 
+The twenty-second window is authored by the source; what is observed depends on
+the `clock`/`sleep` pair of `New15Bindings`. By default both are real time, so
+the window is a genuine wall-clock observation. The included tests inject the
+event loop's own clock instead: they patch `loop.time`, stamp every capture
+(posts, logs, the admission window) from it, and advance it in 0.25 s steps with a
+real slice of I/O between steps. Timers the system armed (`asyncio.sleep`,
+`loop.call_later`) therefore fire at their due loop time inside the window, in
+order, and a late answer is captured. The window is covered in loop time, not in
+wall time. Work that only wall time can advance is not covered, so a task the
+denial spawned that is still running after the window, or a thread it started,
+fails the capture rather than going unseen. An injected pair must keep that
+property: it may not add to the clock without running the timers due before it.
+
 The included actual-SDK/Postgres proofs exercise Anthropic, OpenAI and Gemini.
 Their explicitly **mock** tariff is USD100 per million input/output tokens,
 markup one and zero offline native infrastructure; 100 input plus 50 output
@@ -926,17 +1029,15 @@ are offline actual SDK HTTP requests with owned Postgres readback.
 
 ## Conformance and manual probe tooling
 
-`daimon.testing.conformance` owns the backend-neutral conformance runner,
+`mux.testing.conformance` owns the backend-neutral conformance runner,
 normalized recorder and live-probe BudgetGuard. Provider SDK/script adapters live
-under `daimon.testing.drivers`; platform conformance callbacks live under
+under `mux.testing.drivers`; platform conformance callbacks live under
 `daimon.testing.adapters`. These are test-only dependencies and are never
 imported by runtime packages. The former `mux.conformance` namespace is removed.
 
-Tests live in `packages/testing/tests/conformance`, outside the wheel package.
-The existing ledger, retention, recorder and optimized-Python refusal checks are
-retained. Native certification receipts and replay tapes live under
-`packages/testing/fixtures`; their stored JSON bytes are unchanged. Provider
-reference/QA docs live under `packages/testing/docs` rather than inside `mux`.
+The conformance kit, its tests, saved receipts, replay tapes and reference docs
+now live in `packages/mux` (`mux.testing`, `packages/mux/tests`,
+`packages/mux/docs`), so the mux suite runs without Daimon installed.
 Product runtime usage/outbox reconciliation continues to use the mux state
 ledger; the manual admin hold-reconciliation tool is test support only.
 

@@ -381,6 +381,8 @@ async def _world(
                 now=now,
                 chat_session_id=f"session-{member}",
                 attended=True,
+                sender_foreign=False,
+                shared_channel=False,
             )
             tokens[member], _, _ = await mint_chat_mcp_token(
                 session,

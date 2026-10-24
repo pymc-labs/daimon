@@ -57,7 +57,7 @@ from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_stub_anthropic, list_response
+from mux.testing.drivers.anthropic.ma import MARouter, build_stub_anthropic, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner

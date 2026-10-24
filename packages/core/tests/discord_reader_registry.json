@@ -233,6 +233,30 @@
       "guard": "recruitment_withholds_routine",
       "regression": "packages/core/tests/test_recruitment_stored_routines.py:test_stored_content_readers_follow_settings_restart",
       "note": "Internal mutation/current-creator/execution bookkeeping reads do not serialize content. Raw internal store reads remain available for scheduler state, with adapter projection reads required to pass service settings."
+    },
+    "fleet_live": {
+      "boundary": "packages/adapters/discord/daimon/adapters/discord/bot.py:_live_fleet_card",
+      "guard": "protected(",
+      "regression": "packages/adapters/discord/tests/test_fleet_card.py:test_reserved_fleet_notice_and_live_card_never_read_messages",
+      "note": "Refuse reserved thread metadata before reading the saved fleet post or fetching its card, including for admins."
+    },
+    "fleet_ended": {
+      "boundary": "packages/adapters/discord/daimon/adapters/discord/bot.py:_post_fleet_run_end",
+      "guard": "protected(",
+      "regression": "packages/adapters/discord/tests/test_fleet_card.py:test_reserved_fleet_notice_and_live_card_never_read_messages",
+      "note": "Resolve thread metadata then refuse before card fetch, history fallback or output."
+    },
+    "fleet_history": {
+      "boundary": "packages/adapters/discord/daimon/adapters/discord/posted_controls/fleet.py:resolve",
+      "guard": "protected(",
+      "regression": "packages/adapters/discord/tests/test_fleet_card.py:test_reserved_fleet_parent_refuses_before_resolving_or_reading_history",
+      "note": "Runtime factory refuses current reserved metadata before resolving a card parent. All card display/history paths first obtain that parent; terminal notices inherit fleet_ended."
+    },
+    "confirm_click": {
+      "boundary": "packages/adapters/discord/daimon/adapters/discord/confirm_click.py:_click",
+      "guard": "protected(",
+      "regression": "packages/adapters/discord/tests/test_confirm_click.py:test_reserved_channel_refuses_before_card_content",
+      "note": "Authenticated staging operator may resolve channel metadata for audit. The click path refuses reserved metadata before raw get_message, view reconstruction or handler dispatch. _fetched_guild_id reads metadata only."
     }
   },
   "entries": {
@@ -362,11 +386,15 @@
       "count": 1,
       "boundary": "gateway"
     },
+    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._live_fleet_card:fetch_message:c9b427aaa4c4": {
+      "count": 1,
+      "boundary": "fleet_live"
+    },
     "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._open_wake_thread:fetch_channel:7bd325816d94": {
       "count": 1,
       "boundary": "continuation"
     },
-    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._orchestrate_observed._open_thread:fetch_channel:f312d455691f": {
+    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._orchestrate_observed_guarded._open_thread:fetch_channel:f312d455691f": {
       "count": 1,
       "boundary": "gateway"
     },
@@ -413,6 +441,14 @@
     "packages/adapters/discord/daimon/adapters/discord/commands/here.py:HereCog.here:fetch_channel:5b79bc56cf5c": {
       "count": 1,
       "boundary": "here"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/confirm_click.py:ConfirmClicker._click:fetch_channel:6fe1a4443f07": {
+      "count": 1,
+      "boundary": "confirm_click"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/confirm_click.py:ConfirmClicker._fetched_guild_id:fetch_channel:7fe2ab3ba823": {
+      "count": 1,
+      "boundary": "confirm_click"
     },
     "packages/adapters/discord/daimon/adapters/discord/context.py:_resolve_reply_target:fetch:5c21b0ab779e": {
       "count": 1,
@@ -533,6 +569,14 @@
     "packages/adapters/discord/daimon/adapters/discord/posted_controls/fleet.py:FleetControl:persistent_control:eb1bb367e831": {
       "count": 1,
       "boundary": "controls"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/posted_controls/fleet.py:history_finder.find:history:26231a46899b": {
+      "count": 1,
+      "boundary": "fleet_history"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/posted_controls/fleet.py:show_fleet_ended:fetch_message:cb98dde86295": {
+      "count": 1,
+      "boundary": "fleet_ended"
     },
     "packages/adapters/discord/daimon/adapters/discord/privacy_panel/cascade.py:CascadePreviewView:persistent_control:05791b90753b": {
       "count": 1,
@@ -789,7 +833,7 @@
       "boundary": "stored_mcp",
       "note": "Content projection uses the shared current-settings store filter before returning rows."
     },
-    "packages/adapters/scheduler/daimon/adapters/scheduler/main.py:_build_fire._fire:run_turn:5d961d5b3e98": {
+    "packages/adapters/scheduler/daimon/adapters/scheduler/main.py:_build_fire._fire:run_turn:84185225a3bc": {
       "count": 1,
       "boundary": "scheduler"
     },
@@ -823,11 +867,11 @@
       "boundary": "stored_internal",
       "note": "Slack/Teams entrypoints derive their own platform tenant; Discord R UUIDs cannot overlap. Creator checks are metadata-only."
     },
-    "packages/core/daimon/core/headless_runner.py:run_turn_impl:run_turn:20a99fabd300": {
+    "packages/core/daimon/core/headless_runner.py:run_turn_impl:run_turn:02eaeb69b466": {
       "count": 1,
       "boundary": "driver"
     },
-    "packages/core/daimon/core/smoke.py:run_smoke_check:run_turn:d3508e9172ea": {
+    "packages/core/daimon/core/smoke.py:run_smoke_check:run_turn:99187b4bba86": {
       "count": 1,
       "boundary": "headless"
     },
@@ -854,7 +898,7 @@
       "count": 1,
       "boundary": "driver"
     },
-    "packages/core/daimon/core/workspace_transfer.py:transfer_workspace:run_turn:3690ad321002": {
+    "packages/core/daimon/core/workspace_transfer.py:transfer_workspace:run_turn:e3a4e2142d08": {
       "count": 1,
       "boundary": "driver"
     }

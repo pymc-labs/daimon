@@ -157,3 +157,16 @@ def resolve_default(config: BackendConfig | None) -> ResolvedBackend:
         requires=config.requires,
         thread_mode=config.thread_mode,
     )
+
+
+__all__ = [
+    "BackendConfig",
+    "CapabilityRequirement",
+    "ConfigRevision",
+    "DEFAULT_BACKEND",
+    "DEFAULT_PROFILES",
+    "ResolvedBackend",
+    "ThreadMode",
+    "check_selection",
+    "resolve_default",
+]

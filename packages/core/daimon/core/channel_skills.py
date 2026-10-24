@@ -25,7 +25,7 @@ import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Final, Literal, NoReturn
+from typing import Final, Literal, NoReturn, Protocol
 
 import anthropic
 import structlog
@@ -83,15 +83,15 @@ _TRUNCATED = re.compile(r"~[0-9a-f]{4}$")
 ChannelSkillRefusal = Literal["not_found", "not_usable", "no_version", "too_many", "mount_clash"]
 
 REFUSALS: Final[dict[ChannelSkillRefusal, str]] = {
-    "not_found": "No skill of this workspace has that name or id. Nothing changed.",
+    "not_found": "No skill here has that name or id. Nothing changed.",
     "not_usable": (
         "That skill was uploaded to an agent that doesn't answer in this channel, so the "
         "channel can't add it. Nothing changed."
     ),
     "no_version": "That skill has no version to add yet. Nothing changed.",
     "too_many": (
-        f"The channel's agent would run with more than {AGENT_SKILL_CAP} skills, the most a "
-        "session may have. Remove one first. Nothing changed."
+        f"The channel's agent would run with more than {AGENT_SKILL_CAP} skills, the most "
+        "one conversation can have. Remove one first. Nothing changed."
     ),
     "mount_clash": (
         "That skill loads under the same name as one the channel's agent or this channel "
@@ -412,7 +412,14 @@ def _log_once(event: str, key: tuple[str, ...], **fields: object) -> None:
     _log.warning(event, **fields)
 
 
-def skill_room(agent: BetaManagedAgentsAgent, platform_skills: Sequence[MaSkill] = ()) -> int:
+class SkillHolder(Protocol):
+    """The skill-selection helpers need only a resolved list, never a provider client."""
+
+    @property
+    def skills(self) -> Sequence[MaSkill]: ...
+
+
+def skill_room(agent: SkillHolder, platform_skills: Sequence[MaSkill] = ()) -> int:
     """How many channel skills a session of `agent` may add under `AGENT_SKILL_CAP`. Pure.
 
     Every skill the session holds before them counts: the agent's own and the
@@ -588,7 +595,7 @@ async def turn_platform_skills(
 def applicable_skills(
     rows: Sequence[ChannelSkillRow],
     *,
-    agent: BetaManagedAgentsAgent,
+    agent: SkillHolder,
     agent_names: tuple[str | None, ...],
     bodies: dict[str, str] | None,
     platform_skills: Sequence[MaSkill] = (),

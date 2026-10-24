@@ -2,12 +2,63 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog
 
 if TYPE_CHECKING:
     from daimon.testing.db import DatabasePreflight
+
+
+def use_plain_console_tracebacks() -> None:
+    """Render exceptions in structlog's unconfigured console output as plain text.
+
+    Without a configured chain, `log.exception(...)` goes through structlog's default
+    `ConsoleRenderer`, which formats the traceback with `rich` and syntax-highlights every
+    frame's source through pygments: about a second of CPU per logged exception, and many
+    tests exercise a failure path that logs one. The default processors are shared with
+    `structlog.reset_defaults()`, so switching the formatter on that instance also holds
+    after a test resets structlog. Which exceptions are logged, and the event fields that
+    carry them, do not change; only the traceback's text layout does.
+    """
+    for processor in structlog.get_config()["processors"]:
+        if isinstance(processor, structlog.dev.ConsoleRenderer):
+            processor.exception_formatter = structlog.dev.plain_traceback
+
+
+def pytest_configure() -> None:
+    use_plain_console_tracebacks()
+
+
+@contextmanager
+def restoring_structlog_config() -> Iterator[None]:
+    """Put structlog's global configuration back the way it was on exit.
+
+    Production setup (`configure_logging`, which app factories such as `create_mcp_app`
+    call) swaps in an INFO-filtering, JSON-rendering chain for the whole process. Left in
+    place, it drops the debug events a later test captures with
+    `structlog.testing.capture_logs()`, which replaces only the processors, so whether that
+    test passes depends on what ran before it on the same worker.
+    """
+    was_configured = structlog.is_configured()
+    saved = structlog.get_config()
+    saved["processors"] = list(saved["processors"])
+    try:
+        yield
+    finally:
+        if not was_configured:
+            structlog.reset_defaults()
+        elif structlog.get_config() != saved:
+            structlog.configure(**saved)
+
+
+@pytest.fixture(autouse=True)
+def _restore_structlog_config() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    with restoring_structlog_config():
+        yield
 
 
 def _schema_cache_key(request: pytest.FixtureRequest) -> object:

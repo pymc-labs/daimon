@@ -11,17 +11,17 @@ from pathlib import Path
 
 import httpx
 import pytest
-from daimon.testing.conformance.budget import BudgetGuard, ProbePlan
-from daimon.testing.conformance.runner import ConformanceFailure
-from daimon.testing.drivers.gemini import round_cases
-from daimon.testing.drivers.gemini.live_cert import EvidenceAliases
-from daimon.testing.drivers.gemini.round_cases import case_ceiling, run_c04, run_c06
-from daimon.testing.drivers.gemini.round_runner import execute
-from daimon.testing.drivers.gemini.round_usage import UsageBook
-from daimon.testing.isolated_sdk import build_gemini_client
 from mux.contracts.ids import ResourceRef
 from mux.drivers.gemini.core import GeminiEvents, GeminiSessions
 from mux.drivers.gemini.transport import Object, SDKTransport
+from mux.testing.conformance.budget import BudgetGuard, ProbePlan
+from mux.testing.conformance.runner import ConformanceFailure
+from mux.testing.drivers.gemini import round_cases
+from mux.testing.drivers.gemini.live_cert import EvidenceAliases
+from mux.testing.drivers.gemini.round_cases import case_ceiling, run_c04, run_c06
+from mux.testing.drivers.gemini.round_runner import execute
+from mux.testing.drivers.gemini.round_usage import UsageBook
+from mux.testing.isolated_sdk import build_gemini_client
 
 from .test_round_cases import SCOPE, NativeWire, admission
 
@@ -294,7 +294,7 @@ def test_import_and_case_bound_validation_ignore_ambient_low_decimal_precision(
 ) -> None:
     code = """from decimal import getcontext, Decimal
 getcontext().prec=6
-from daimon.testing.drivers.gemini.round_cases import INTERACTION_CEILING_USD, case_ceiling
+from mux.testing.drivers.gemini.round_cases import INTERACTION_CEILING_USD, case_ceiling
 if INTERACTION_CEILING_USD != Decimal("1.032192") or case_ceiling(3) != Decimal("3.096576"):
     raise RuntimeError("signed bound changed")
 print("exact bounds retained")
@@ -305,7 +305,7 @@ print("exact bounds retained")
     with localcontext() as context:
         context.prec = 6
         assert case_ceiling(3) == Decimal("3.096576")
-        from daimon.testing.drivers.gemini.round_runner import Envelope
+        from mux.testing.drivers.gemini.round_runner import Envelope
 
         envelope = Envelope.model_validate_json(selected.envelope.model_dump_json())
         guard = BudgetGuard(selected.config, tmp_path / "spend.md")

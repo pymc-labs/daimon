@@ -9,7 +9,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -27,6 +27,7 @@ from daimon.core.turn.admission import AdmissionDecision, AdmissionObserver, adm
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, MissingTurnConfigError
 from daimon.core.turn.notices import admission_refusal_text
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.admission_evidence import AdmissionEffects, admission_edge
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.discord_surface import OfflineDiscordGateway
@@ -213,7 +214,10 @@ def gateway_message(clock: Clock) -> tuple[discord.Client, discord.Message, Offl
         (
             "balance_depleted",
             "turn.skipped.over_balance",
-            admission_refusal_text("balance_depleted", DISCORD_REFUSAL_NOUNS),
+            # The fixture tenant never had credit.
+            admission_refusal_text(
+                "balance_depleted", DISCORD_REFUSAL_NOUNS, cause="no_credit_yet"
+            ),
         ),
         # Main a5097ab195a3d94d999f606e216b7d25120abaec: approved monthly-limit notice (A/O/G).
         (
@@ -251,12 +255,18 @@ async def test_real_gate_and_adapter_denial_have_no_native_sends_or_provider_roo
             user=object(),
             # Merged #839 (7fa0ddf392481c6067f66f0128ba8bb02af3e411): constructor default.
             _ingress_clock=None,
-            runtime=SimpleNamespace(turn_deps=deps, settings=SimpleNamespace(discord=None)),
+            runtime=SimpleNamespace(
+                turn_deps=deps,
+                sessionmaker=deps.sessionmaker,
+                settings=SimpleNamespace(discord=None),
+            ),
             _wait_for_orphan_recovery=AsyncMock(),
             # The default protected-channel signal is a platform reaction, never a native send.
             _signal_protected_channel=AsyncMock(),
         ),
     )
+
+    bot._orchestrate_observed_guarded = MethodType(DaimonBot._orchestrate_observed_guarded, bot)  # pyright: ignore[reportPrivateUsage]
 
     async def invoke(observer: AdmissionObserver) -> None:
         async def observed(*args: Any, **kwargs: Any) -> object:
@@ -381,6 +391,7 @@ async def test_observer_preserves_real_acceptance_denial_and_warm_dispatch(
 
     kwargs = dict(
         tenant_id=uuid.UUID(scope.tenant_id),
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="103",
         channel_id="101",
@@ -427,6 +438,7 @@ async def test_non_decision_errors_do_not_create_an_admission_receipt(
         await admit(
             deps,
             tenant_id=uuid.UUID(scope.tenant_id),
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="103",
             channel_id="101",

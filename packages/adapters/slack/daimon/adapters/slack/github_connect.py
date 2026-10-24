@@ -57,7 +57,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
         if not parts or parts[0].casefold() != "connect":
             await reply("Run /github connect [agent].")
             return
-        if not await resolve_is_admin(client, user_id=user_id):
+        if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
             await reply("Only an admin can connect repos. Ask one to run /github.")
             return
         user_info = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]

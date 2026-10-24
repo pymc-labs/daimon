@@ -11,21 +11,25 @@ from uuid import UUID
 
 import discord
 import pytest
+import structlog
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.posted_controls.fleet import (
+    FLEET_STOPPING,
     DiscordFleetCard,
     DiscordFleetCardFactory,
     FleetControl,
+    TypedPresser,
     build_fleet_view,
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import AgentRef, FleetFacts, Place, Subject
+from daimon.core.config import RecruitmentSettings
 from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer, result_digest
-from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
+from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts, FleetRefused
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from discord.webhook.async_ import AsyncWebhookAdapter, async_context
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
@@ -181,6 +185,12 @@ def setup(provider="anthropic"):
         }
 
     owner.control.side_effect = control
+
+    async def settle_run(_parent, fleet, status, **_kwargs):
+        return replace(fleet, status=status, version=fleet.version + 1)
+
+    owner.settle_run.side_effect = settle_run
+    owner.pending_wakes.return_value = 0
     loader = AsyncMock(return_value=(parent(provider), POLICY))
     send, edit = AsyncMock(), AsyncMock()
     card = DiscordFleetCard(
@@ -286,8 +296,102 @@ async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(ad
         replace(current, subject=Subject(platform_user_id="456", is_admin=admin)),
         policy,
     )
-    await buttons(send.call_args.kwargs["view"])[0].callback(interaction(456, card=card))
+    click = interaction(456, card=card)
+    with structlog.testing.capture_logs() as logs:
+        await buttons(send.call_args.kwargs["view"])[0].callback(click)
     assert owner.control.await_count == (1 if admin else 0)
+    pressed = [entry for entry in logs if entry["event"] == "fleet.control_pressed"]
+    assert pressed == (
+        [
+            {
+                "event": "fleet.control_pressed",
+                "log_level": "info",
+                "run_id": str(RUN),
+                "worker_id": str(worker().id),
+                "action": "kill",
+                "pressed_by": "456",
+                "presser_is_admin": True,
+            }
+        ]
+        if admin
+        else []
+    ), "only an accepted press is recorded, with who pressed it"
+    if not admin:
+        click.response.send_message.assert_awaited_once_with(
+            "Only the person who started this fleet, or someone with Manage Server, can stop it.",
+            ephemeral=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("refusal", "text"),
+    [
+        ("terminal_worker", "This worker has already finished."),
+        (
+            "stale",
+            "This fleet changed since the card was drawn. Wait for the card to update, then try again.",
+        ),
+        ("inactive", "You can't control this fleet from here."),
+        ("outage", "Couldn't reach the fleet just now. Try again in a moment."),
+        (
+            "limit",
+            "This fleet has run out of the time or steps it was given, so it can't be resumed.",
+        ),
+        (
+            "operation_conflict",
+            "Someone's press on this fleet is still going through. Try again in a moment.",
+        ),
+        (
+            "control_evidence_unavailable",
+            "Someone's press on this fleet is still going through. Try again in a moment.",
+        ),
+        (
+            "control_evidence_invalid",
+            "This fleet changed since the card was drawn. Wait for the card to update, then try again.",
+        ),
+    ],
+)
+async def test_a_refused_fleet_click_names_its_real_cause(refusal, text):
+    card, owner, loader, send, _ = setup()
+    await card.refresh()
+    if refusal == "terminal_worker":
+        # The run goes on; only the clicked worker has finished.
+        owner.read_run.return_value = (run(), (worker(status="succeeded"),))
+    elif refusal == "stale":
+        owner.read_run.return_value = (run(), (worker(version=4),))
+    elif refusal == "inactive":
+        current, policy = loader.return_value
+        loader.return_value = (replace(current, fleet=replace(current.fleet, active=False)), policy)
+    elif refusal == "outage":
+        loader.side_effect = FleetRefused("prerequisites_unavailable")
+    elif refusal == "limit":
+        owner.read_run.return_value = (run(), (worker(deadline_at=NOW),))
+    else:
+        # Refused by the shared owner while writing the press.
+        owner.control.side_effect = FleetRefused(refusal)
+    label = "Resume 1" if refusal == "limit" else "Stop 1"
+    click = interaction(card=card)
+    view = send.call_args.kwargs["view"]
+    await next(item for item in buttons(view) if item.item.label == label).callback(click)
+    written = refusal in (
+        "operation_conflict",
+        "control_evidence_unavailable",
+        "control_evidence_invalid",
+    )
+    assert owner.control.await_count == (1 if written else 0)
+    click.response.send_message.assert_awaited_once_with(text, ephemeral=True)
+
+
+async def test_a_click_on_a_fleet_that_already_ended_says_so():
+    card, owner, _, send, _ = setup()
+    await card.refresh()
+    owner.read_run.return_value = (replace(run(), status="cancelled"), (worker(),))
+    click = interaction(card=card)
+    await buttons(send.call_args.kwargs["view"])[0].callback(click)
+    owner.control.assert_not_awaited()
+    click.response.send_message.assert_awaited_once_with(
+        "This fleet has already stopped.", ephemeral=True
+    )
 
 
 async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_item(
@@ -539,6 +643,42 @@ async def test_run_level_control_uses_the_same_owner_and_run_compare_and_set(act
     assert owner.control.call_args.kwargs["operation_key"] == f"discord:fleet:{RUN}:all:2:{action}"
 
 
+def _author(user_id: int) -> discord.Member:
+    author = MagicMock(spec=discord.Member)
+    author.id = user_id
+    return author
+
+
+async def test_a_typed_stop_is_the_run_level_stop_button_by_its_author():
+    """J7: "stop the fleet" in the run's thread kills the whole run, as Stop-all does."""
+    card, owner, loader, send, _ = setup()
+    await card.refresh()
+    presser = TypedPresser(user=_author(123), guild_id=60, channel_id=70)
+    assert await card.stop_typed(presser, message=None) == FLEET_STOPPING
+    owner.control.assert_awaited_once()
+    assert owner.control.call_args.args[2] is None
+    assert owner.control.call_args.kwargs["action"] == "kill"
+    assert owner.control.call_args.kwargs["expected_version"] == run().version
+    assert owner.control.call_args.kwargs["operation_key"] == f"discord:fleet:{RUN}:all:2:kill"
+    assert loader.await_args_list[-1].args == (presser,)
+
+
+async def test_a_typed_stop_by_someone_else_is_refused_before_any_control_write():
+    """The loader answers for the live author (as the host's does); not the starter, not admin."""
+    card, owner, loader, send, _ = setup()
+    await card.refresh()
+
+    async def as_author(presser):
+        current = parent()
+        return replace(current, subject=Subject(platform_user_id=str(presser.user.id))), POLICY
+
+    loader.side_effect = as_author
+    presser = TypedPresser(user=_author(456), guild_id=60, channel_id=70)
+    text = await card.stop_typed(presser, message=None)
+    owner.control.assert_not_awaited()
+    assert text.startswith("Only the person who started this fleet")
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_setup_registers_fleet_control_only_when_enabled(db_session_factory, enabled):
     from .harness import make_bot
@@ -568,18 +708,330 @@ async def test_all_three_backends_render_without_spec_or_result_material():
     assert len(buttons(view)) == 6
 
 
-async def test_waiting_collect_blocks_real_lifecycle_summary_path():
+def _texts(*mocks):
+    return [str(c.kwargs.get("content", "")) for mock in mocks for c in mock.await_args_list]
+
+
+def _headlines(*mocks):
+    return [
+        item.content
+        for mock in mocks
+        for c in mock.await_args_list
+        if c.kwargs.get("view") is not None
+        for item in c.kwargs["view"].walk_children()
+        if isinstance(item, discord.ui.TextDisplay) and item.content.startswith("**Fleet")
+    ]
+
+
+def _collected(status, *, via_search=False, **reply):
+    """The root's completed daimon fleet_collect call and the reply it read."""
+    text = json.dumps({"run_id": str(RUN), "status": status, **reply})
+    return ToolUseBlock(
+        kind="tool_use",
+        id=f"collect-{status}",
+        type="agent.mcp_tool_use",
+        name="call_tool" if via_search else "fleet_collect",
+        input={"name": "fleet_collect", "arguments": {"run_id": str(RUN)}}
+        if via_search
+        else {"run_id": str(RUN)},
+        mcp_server_name=DAIMON_SERVER_NAME,
+        status="complete",
+        result_content=[{"type": "text", "text": text}],
+    )
+
+
+def _message(identifier):
+    value = MagicMock(spec=discord.Message)
+    value.id = identifier
+    return value
+
+
+def _result_event(identifier, text):
+    return Event(
+        id=identifier,
+        session_id=identifier,
+        sequence=4,
+        type="agent.message",
+        turn_id="fixture-turn",
+        observed_at=NOW,
+        authority="record",
+        native=NativeProvenance(provider="anthropic", api_revision="1"),
+        payload={
+            "item_id": identifier,
+            "content": [{"type": "text", "text": text}],
+            "complete": True,
+        },
+    )
+
+
+async def test_waiting_collect_ends_the_turn_card_without_the_premature_answer():
+    # r5 turn 1: workers still running when the root ended its turn. The
+    # "Working on it…" card stayed at 0s; it now ends with a waiting notice.
     card, owner, _, send, edit = setup()
     lifecycle = DiscordTurnLifecycle(
         send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
     )
     state = TurnState(content=[TextBlock(kind="text", text="A premature claimed summary")])
     await lifecycle.on_render(state)
-    send.reset_mock()
     await lifecycle.on_terminal_success(state)
     owner.wait.assert_awaited_once()
+    owner.settle_run.assert_not_awaited()
+    messages = _texts(send, edit)
+    assert not any("premature" in text for text in messages)
+    (notice,) = [text for text in messages if "Fleet is still working" in text]
+    # The answer message is never edited again: it names no worker state that
+    # would read as stuck after the run ends (r14); the card carries progress.
+    assert "pending" not in notice and "fleet card" in notice
+    assert lifecycle.was_answered and lifecycle._terminal
+
+
+async def test_a_plain_turn_posts_no_fleet_card():
+    # smoke-1 D: every turn holds a fleet run; one nothing was spawned into
+    # rendered "Fleet — no workers started" on every turn.
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), ())
+    assert await card.refresh() is False
     send.assert_not_awaited()
-    assert not lifecycle.was_answered
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    state = TurnState(content=[TextBlock(kind="text", text="Just an answer.")])
+    await lifecycle.on_render(state)
+    await lifecycle.on_terminal_success(state)
+    assert sum("Just an answer." in text for text in _texts(send, edit)) == 1
+    assert not _headlines(send, edit)
+    # A run with a worker still gets its card.
+    owner.read_run.return_value = (run(), (worker(),))
+    assert await card.refresh() is True
+    assert _headlines(send, edit)
+
+
+@pytest.mark.parametrize("render_first", [False, True])
+async def test_zero_worker_run_delivers_the_roots_answer_and_ends_the_fleet_card(render_first):
+    # r2/r3/r4: the root spawned nothing, so "Working on it…" and
+    # "Fleet — running" stayed stuck and its answer never reached the user.
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), ())
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    state = TurnState(
+        content=[TextBlock(kind="text", text="The fleet run didn't start: root_unavailable.")]
+    )
+    if render_first:
+        await lifecycle.on_render(state)
+    await lifecycle.on_terminal_success(state)
+    assert sum("The fleet run didn't start" in text for text in _texts(send, edit)) == 1
+    assert lifecycle.was_answered and lifecycle._terminal
+    owner.settle_run.assert_awaited_once()
+    assert owner.settle_run.await_args.args[2] == "cancelled"
+    # Nothing was spawned, so no fleet card was ever posted (smoke-1 D).
+    assert not _headlines(send, edit)
+    owner.wait.assert_not_awaited()
+    owner.read_result.assert_not_awaited()
+
+
+async def test_partial_result_heads_the_roots_answer_with_the_failed_worker():
+    # r5 wake: W1 and W2 succeeded, W3 failed; the reply said only
+    # "No reviewed result to share".
+    card, owner, _, send, edit = setup()
+    output = _result_event("worker-result", "Verified W1 result")
+    pointer = ResultPointer(output.session_id, 4, result_digest(dict(output.payload)), "x")
+    succeeded = worker(role="W1", status="succeeded", result=pointer)
+    failed = worker(
+        ordinal=2, role="W3", status="failed", error_code="dispatch_refused", backend="gemini"
+    )
+    owner.read_run.return_value = (run(), (succeeded, failed))
+    owner.read_result.return_value = output
+    owner.validate_contract.return_value = "Verified W1 result"
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    await lifecycle.on_render(TurnState())
+    state = TurnState(
+        content=[
+            _collected("blocked", partial=True),
+            TextBlock(kind="text", text="W1 says: verified. W3 failed."),
+        ]
+    )
+    await lifecycle.on_terminal_success(state)
+    final = [text for text in _texts(send, edit) if "W1 says: verified." in text]
+    assert len(final) == 1
+    assert final[0].startswith("Partial result: 1 of 2 workers succeeded.")
+    assert "W3: failed: Daimon refused to start it; try again" in final[0] and "\\_" not in final[0]
+    assert "No reviewed result to share." not in final[0]
+    assert _headlines(send, edit)[-1] == "**Fleet — partial result**"
+    assert owner.settle_run.await_args.args[2] == "failed"
+    assert lifecycle.was_answered
+
+
+WAKE = UUID(int=99)
+
+
+def _card(owner, loader, send, edit, **kwargs):
+    return DiscordFleetCard(
+        run_id=None,
+        service=FleetOrchestrator(owner),
+        load_parent=loader,
+        send=send,
+        edit=edit,
+        clock=lambda: NOW,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("restarted", [False, True])
+async def test_wake_turn_edits_the_fleet_card_its_root_turn_posted(restarted):
+    # r5: the wake posted a second "Fleet — blocked" card and left the first
+    # "Fleet — running" card stuck above it. After a restart the process map is
+    # empty, so the run's card is found again by its run-scoped controls.
+    _, owner, loader, _, _ = setup()
+    posted: dict = {}
+    first_message = _message(1)
+    first_send = AsyncMock(return_value=first_message)
+    first_edit = AsyncMock(side_effect=lambda message, **kwargs: message)
+    first = _card(owner, loader, first_send, first_edit, posted=posted)
+    root_turn = DiscordTurnLifecycle(
+        send=first_send, edit=first_edit, agent_name="root", model_id="m", fleet_card=first
+    )
+    await root_turn.on_render(TurnState())
+    await root_turn.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="ok")]))
+    assert posted[RUN] is first_message
+    owner.settle_run.assert_not_awaited()
+
+    owner.read_run.return_value = (run(), (worker(status="failed", error_code="deadline_expired"),))
+    find = AsyncMock(return_value=first_message)
+    wake_send = AsyncMock(return_value=_message(2))
+    wake_edit = AsyncMock(side_effect=lambda message, **kwargs: message)
+    wake = _card(
+        owner,
+        loader,
+        wake_send,
+        wake_edit,
+        posted={} if restarted else posted,
+        find_posted=find,
+        wake_id=WAKE,
+    )
+    wake_turn = DiscordTurnLifecycle(
+        send=wake_send, edit=wake_edit, agent_name="root", model_id="m", fleet_card=wake
+    )
+    await wake_turn.on_render(TurnState())
+    await wake_turn.on_terminal_success(
+        TurnState(content=[_collected("blocked"), TextBlock(kind="text", text="x")])
+    )
+    assert find.await_count == (1 if restarted else 0)
+    card_sends = [c for c in wake_send.await_args_list if c.kwargs.get("view") is not None]
+    assert not card_sends
+    adopted = [c for c in wake_edit.await_args_list if c.args and c.args[0] is first_message]
+    assert adopted
+    assert _headlines(wake_edit)[-1] == "**Fleet — blocked**"
+    assert any("ran out of time" in text for text in _texts(wake_send, wake_edit))
+    # The wake's own claim is kept for the wake owner to settle as delivered.
+    assert owner.settle_run.await_args.kwargs == {"wake_id": WAKE, "unless_waking": False}
+
+
+@pytest.mark.parametrize("owed", [0, 1])
+async def test_result_finishing_during_the_roots_last_reply_is_left_to_its_wake(owed):
+    # #1288 review: the root collected "waiting" and wrote "I'll report back";
+    # the workers finished before the turn ended. That stale answer must not
+    # become the final one, the run must stay open, and the wake must deliver.
+    card, owner, _, send, edit = setup()
+    output = _result_event("worker-result", "DO_NOT_POST_RESULT")
+    pointer = ResultPointer(output.session_id, 4, result_digest(dict(output.payload)), "x")
+    owner.read_run.return_value = (run(), (worker(status="succeeded", result=pointer),))
+    owner.read_result.return_value = output
+    owner.validate_contract.return_value = "DO_NOT_POST_RESULT"
+    owner.pending_wakes.return_value = owed
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    await lifecycle.on_render(TurnState())
+    state = TurnState(
+        content=[
+            _collected("waiting"),
+            TextBlock(kind="text", text="STALE: I'll report back when they finish."),
+        ]
+    )
+    await lifecycle.on_terminal_success(state)
+    messages = _texts(send, edit)
+    assert not any("STALE" in text or "DO_NOT_POST" in text for text in messages)
+    assert any("I'll post the result here next." in text for text in messages)
+    owner.settle_run.assert_not_awaited()
+    # An owed wake is reused; otherwise one is armed for the finished workers.
+    assert owner.wait.await_count == (0 if owed else 1)
+    assert "**Fleet — collected**" not in _headlines(send, edit)
+    assert lifecycle.was_answered and lifecycle._terminal
+
+
+async def test_a_root_answer_after_its_terminal_collect_ends_the_run_and_retires_wakes():
+    card, owner, _, send, edit = setup()
+    output = _result_event("worker-result", "Verified result")
+    pointer = ResultPointer(output.session_id, 4, result_digest(dict(output.payload)), "x")
+    owner.read_run.return_value = (run(), (worker(status="succeeded", result=pointer),))
+    owner.read_result.return_value = output
+    owner.validate_contract.return_value = "Verified result"
+    owner.pending_wakes.return_value = 1
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    await lifecycle.on_render(TurnState())
+    state = TurnState(
+        content=[
+            _collected("waiting"),
+            _collected("ready"),
+            TextBlock(kind="text", text="The verified summary."),
+        ]
+    )
+    await lifecycle.on_terminal_success(state)
+    assert sum("The verified summary." in text for text in _texts(send, edit)) == 1
+    owner.wait.assert_not_awaited()
+    assert owner.settle_run.await_args.args[2] == "completed"
+    assert owner.settle_run.await_args.kwargs == {"wake_id": None, "unless_waking": False}
+
+
+@pytest.mark.parametrize("workers", ["none", "running", "finished"])
+async def test_root_turn_error_ends_the_fleet_card_and_still_owes_the_result(workers):
+    card, owner, _, send, edit = setup()
+    rows = {
+        "none": (),
+        "running": (worker(status="running"),),
+        "finished": (worker(status="failed", error_code="dispatch_refused"),),
+    }[workers]
+    owner.read_run.return_value = (run(), rows)
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    await lifecycle.on_render(TurnState())
+    await lifecycle.on_terminal_failure(TurnState(), RuntimeError("fixture root failure"))
+    headlines = _headlines(send, edit)
+    if workers == "none":
+        assert owner.settle_run.await_args.args[2] == "cancelled"
+        assert not headlines
+        owner.wait.assert_not_awaited()
+    else:
+        owner.settle_run.assert_not_awaited()
+        owner.wait.assert_awaited_once()
+        assert headlines[-1] == "**Fleet — running**"
+    owner.read_result.assert_not_awaited()
+
+
+async def test_wake_turn_posts_its_own_card_when_the_earlier_one_is_gone():
+    _, owner, loader, _, _ = setup()
+    gone = _message(1)
+    response = MagicMock(status=404, reason="Not Found")
+    edit = AsyncMock(side_effect=discord.NotFound(response, "Unknown Message"))
+    send = AsyncMock(return_value=_message(2))
+    card = DiscordFleetCard(
+        run_id=None,
+        service=FleetOrchestrator(owner),
+        load_parent=loader,
+        send=send,
+        edit=edit,
+        clock=lambda: NOW,
+        posted={RUN: gone},
+    )
+    assert await card.refresh()
+    send.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -607,6 +1059,7 @@ async def test_blocked_fleet_posts_only_status_notice_and_finishes_turn(
         content=[
             TextBlock(kind="text", text="DO_NOT_POST_SEALED " * 80),
             ToolUseBlock(kind="tool_use", id="tool", type="agent.tool_use", name="read", input={}),
+            _collected("blocked"),
             TextBlock(kind="text", text="DO_NOT_POST_FINAL"),
         ]
     )
@@ -669,7 +1122,8 @@ async def test_terminal_failure_sealed_answers_obey_fleet_disclosure_policy(work
     assert any(sealed in message for message in messages) is (worker_status is None)
     assert any("embeds" in call.kwargs for call in send.await_args_list + edit.await_args_list)
     owner.read_result.assert_not_awaited()
-    owner.wait.assert_not_awaited()
+    # The failed root is still owed its workers' result through a wake.
+    assert owner.wait.await_count == (worker_status is not None)
     assert not lifecycle.was_answered
 
 
@@ -727,7 +1181,10 @@ async def test_actual_review_barrier_controls_the_existing_summary_delivery(verd
     await lifecycle.on_render(TurnState())
     send.reset_mock()
     state = TurnState(
-        content=[TextBlock(kind="text", text="The orchestrator's one final summary.")]
+        content=[
+            _collected("ready" if verdict == "approved" else "blocked", via_search=True),
+            TextBlock(kind="text", text="The orchestrator's one final summary."),
+        ]
     )
     await lifecycle.on_terminal_success(state)
     messages = [
@@ -761,7 +1218,7 @@ def test_real_bot_flag_off_does_not_construct_a_sender_or_fleet_service():
 
 @pytest.mark.parametrize("recovered_attribution", [False, True])
 async def test_real_webhook_replacement_records_both_accepted_card_messages(
-    db_nullpool_engine, db_clean, monkeypatch, recovered_attribution
+    db_committing_engine, db_clean, monkeypatch, recovered_attribution
 ):
     from daimon.adapters.discord import post_transport
     from daimon.adapters.discord.post_transport import DiscordPostTransport
@@ -775,7 +1232,7 @@ async def test_real_webhook_replacement_records_both_accepted_card_messages(
     from .harness import make_bot
     from .test_bot import _make_runtime
 
-    sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session, id=TENANT, platform="discord", workspace_id="60")
         await make_account(session, id=ACCOUNT, tenant=tenant)
@@ -1165,23 +1622,23 @@ async def test_installed_factory_never_discloses_sealed_text_without_proven_abse
         for call in send.await_args_list + edit.await_args_list
     )
     owner.read_result.assert_not_awaited()
-    owner.wait.assert_not_awaited()
+    assert owner.wait.await_count == (authority in ("active", "failed"))
 
 
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_runtime_installs_factory_only_with_opted_in_owner_bindings(
-    db_nullpool_engine, monkeypatch, enabled
+    db_committing_engine, monkeypatch, enabled
 ):
     from pathlib import Path
 
     from daimon.adapters.discord import runtime as runtime_module
     from daimon.core.config import Settings
-    from daimon.testing.ma import build_stub_anthropic
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1313,7 +1770,7 @@ async def test_stored_replacement_attribution_cannot_be_overridden_before_writin
 
 
 @pytest.fixture
-async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkeypatch, request):
+async def discord_frozen_root(db_preflight, db_committing_engine, db_clean, monkeypatch, request):
     """Reuse the root owner's SDK/PG fixture with Discord destination metadata."""
     from packages.core.tests.turn import test_frozen_root as root_owner
 
@@ -1353,7 +1810,7 @@ async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkey
     monkeypatch.setattr(root_owner, "make_platform_principal", principal)
     monkeypatch.setattr(root_owner, "Subject", original_subject)
     monkeypatch.setattr(root_owner, "parent", permissions)
-    async for value in root_owner.root_turn.__wrapped__(db_preflight, db_nullpool_engine):
+    async for value in root_owner.root_turn.__wrapped__(db_preflight, db_committing_engine):
         if getattr(request, "param", True):
             await root_owner.freeze(value)
         yield value
@@ -1361,7 +1818,7 @@ async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkey
 
 @pytest.mark.parametrize("actor", ["owner", "admin", "foreign_account", "unbound"])
 async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projection(
-    discord_frozen_root, db_nullpool_engine, db_schema, monkeypatch, actor
+    discord_frozen_root, db_committing_engine, db_schema, monkeypatch, actor
 ):
     from pathlib import Path
 
@@ -1374,7 +1831,7 @@ async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projec
     from daimon.core.turn.runtime_manifest import read_frozen_root
     from daimon.testing.db import build_test_engine
     from daimon.testing.factories import make_platform_principal
-    from daimon.testing.ma import build_stub_anthropic
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 
     deps, prepared, _, intent, _, scope, _, _ = discord_frozen_root
     original, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
@@ -1388,7 +1845,7 @@ async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projec
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1426,6 +1883,25 @@ async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projec
             recorder.sender(thread, turn_card_intent_id=intent.id),
             AsyncMock(),
             turn_card_intent_id=intent.id,
+        )
+        # A run nothing was spawned into posts no card (smoke-1 D): spawn one.
+        frozen_run, _ = await fleet.run_status(
+            deps.sessionmaker, tenant_id=TENANT, run_id=original.fleet.run_id
+        )
+        await fleet.add_worker(
+            deps.sessionmaker,
+            tenant_id=TENANT,
+            run_id=frozen_run.id,
+            ordinal=1,
+            role="research",
+            spec={},
+            spec_digest="spec-1",
+            backend="openai",
+            profile="openai.conversation_only",
+            model="gpt-6-luna",
+            budget_usd=Decimal("0.01"),
+            deadline_at=frozen_run.deadline_at,
+            max_turns=1,
         )
         assert card is not None and await card.refresh()
         assert card.run_id == original.fleet.run_id
@@ -1559,7 +2035,7 @@ async def test_real_runtime_refreshes_click_subject_without_replacing_root_scope
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("supplied_prices", [False, True])
 async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clients(
-    db_nullpool_engine, monkeypatch, enabled, supplied_prices
+    db_committing_engine, monkeypatch, enabled, supplied_prices
 ):
     from pathlib import Path
 
@@ -1567,12 +2043,12 @@ async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clien
     from daimon.core.config import Settings
     from daimon.core.fleet_orchestration import HostFleetPorts
     from daimon.core.pricing import MODEL_PRICING
-    from daimon.testing.ma import build_stub_anthropic
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1686,14 +2162,14 @@ async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clien
 
 
 async def test_runtime_preserves_falsey_injected_fleet_service_ownership(
-    db_nullpool_engine, monkeypatch
+    db_committing_engine, monkeypatch
 ):
     from pathlib import Path
 
     from daimon.adapters.discord import runtime as runtime_module
     from daimon.core.config import Settings
     from daimon.core.fleet_orchestration import HostFleetPorts
-    from daimon.testing.ma import build_stub_anthropic
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 
     class ExplicitOwner(FleetOrchestrator):
         def __bool__(self):
@@ -1702,7 +2178,7 @@ async def test_runtime_preserves_falsey_injected_fleet_service_ownership(
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1724,7 +2200,7 @@ async def test_runtime_preserves_falsey_injected_fleet_service_ownership(
 @pytest.mark.parametrize("discord_frozen_root", [False], indirect=True)
 @pytest.mark.parametrize("fleet_enabled", [False, True])
 async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
-    discord_frozen_root, db_nullpool_engine, db_schema, monkeypatch, fleet_enabled
+    discord_frozen_root, db_committing_engine, db_schema, monkeypatch, fleet_enabled
 ):
     from pathlib import Path
 
@@ -1734,8 +2210,8 @@ async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
     from daimon.core.stores import mux_state
     from daimon.core.turn.run import run_prepared_turn
     from daimon.testing.db import build_test_engine
-    from daimon.testing.ma import sse_response
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma import sse_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     from packages.core.tests.turn.conftest import (
         make_agent_message,
@@ -1750,7 +2226,7 @@ async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1788,7 +2264,7 @@ async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
     original_routes = transport.router.routes
 
     def accept_input(request, match):
-        from daimon.testing.ma import send_events_response
+        from mux.testing.drivers.anthropic.ma import send_events_response
 
         sent.set()
         return send_events_response()
@@ -1886,3 +2362,401 @@ async def test_real_runtime_ordinary_turn_without_fleet_root_has_no_card(discord
     assert await card.allow_sealed_responses() is True
     assert await card.allow_summary() is True
     send.assert_not_awaited()
+
+
+async def test_history_finder_matches_only_a_bot_card_with_this_runs_controls():
+    from types import SimpleNamespace
+
+    from daimon.adapters.discord.posted_controls.fleet import history_finder
+
+    def posted(author_bot, custom_id, webhook_id=None):
+        button = SimpleNamespace(custom_id=custom_id)
+        row = SimpleNamespace(children=[button])
+        container = SimpleNamespace(children=[SimpleNamespace(content="text"), row])
+        message = MagicMock(spec=discord.Message)
+        message.webhook_id = webhook_id
+        message.author.bot = author_bot
+        message.components = [container]
+        return message
+
+    other_run = posted(True, f"fleet:{UUID(int=7).hex}:all:1:kill")
+    forged = posted(False, f"fleet:{RUN.hex}:all:1:kill")
+    card = posted(False, f"fleet:{RUN.hex}:all:4:resume", webhook_id=5)
+
+    async def history(limit):
+        assert limit == 50
+        for message in (other_run, forged, card):
+            yield message
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.history = history
+    assert await history_finder(thread)(RUN) is card
+    assert await history_finder(thread)(UUID(int=8)) is None
+
+
+def test_a_worker_running_as_another_agent_shows_that_agents_name():
+    as_researcher = worker(ordinal=1, role="research")
+    as_researcher = replace(
+        as_researcher,
+        spec={
+            **as_researcher.spec,
+            "name": "researcher",
+            "metadata": {"daimon_name": "researcher"},
+        },
+    )
+    plain = replace(worker(ordinal=2, role="W2"), spec={**worker().spec, "name": "W2"})
+    # An inline spec named like an agent inherits the root's metadata: it ran as no agent.
+    inline = replace(
+        worker(ordinal=3, role="claude"),
+        spec={**worker().spec, "name": "fleet-claude", "metadata": {"daimon_name": "daimon-fleet"}},
+    )
+    view = build_fleet_view(run(), (as_researcher, plain, inline))
+    text = "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+    assert "**research** (researcher) ·" in text
+    # A worker named after its role (a plain task worker) shows no agent name.
+    assert "**W2** ·" in text and "(W2)" not in text
+    assert "**claude** ·" in text and "(fleet-claude)" not in text
+
+
+def test_an_agent_workers_card_row_says_what_it_runs_without():
+    worker_row = worker(ordinal=1, role="openai")
+    as_openai = replace(
+        worker_row,
+        spec={
+            **worker_row.spec,
+            "name": "fleet-openai",
+            "metadata": {"daimon_name": "fleet-openai"},
+            "declared_drops": ["memory", "tools", "model_controls"],
+        },
+    )
+    view = build_fleet_view(run(), (as_openai,))
+    text = "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+    assert "**openai** (fleet-openai, without its memory, its tools, its model settings) ·" in text
+
+
+def test_a_task_copy_of_the_root_says_which_of_its_setup_it_runs_without():
+    """#1357: workers of a root with a logged-in connector or stored secrets run without them."""
+    copy_row = worker(ordinal=0, role="W1")
+    copy = replace(
+        copy_row,
+        spec={
+            **copy_row.spec,
+            "name": "W1",
+            "declared_drops": ["files", "mcp", "skills", "tools"],
+        },
+    )
+    plain_row = worker(ordinal=1, role="W2")
+    plain = replace(
+        plain_row, spec={**plain_row.spec, "name": "W2", "declared_drops": ["skills", "tools"]}
+    )
+    view = build_fleet_view(run(), (copy, plain))
+    text = "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+    assert "**W1** (without its files, its connected tools) ·" in text
+    # Every task worker runs without tools and skills; that isn't news.
+    assert "**W2** ·" in text
+
+
+@pytest.mark.parametrize("rows", ["none", "worker"])
+async def test_sealed_answers_wait_only_once_something_was_spawned(rows):
+    # Every turn holds a fleet run: an empty one must not withhold a plain
+    # turn's answer written before a trailing tool call.
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), () if rows == "none" else (worker(),))
+    assert await card.allow_sealed_responses() is (rows == "none")
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    sealed = "An answer written before a trailing tool call. " * 30
+    state = TurnState(
+        content=[
+            TextBlock(kind="text", text=sealed),
+            ToolUseBlock(kind="tool_use", id="tool", type="agent.tool_use", name="read", input={}),
+        ]
+    )
+    await lifecycle.on_render(state)
+    posted = any(
+        sealed.strip()[:40] in str(call.kwargs.get("content", ""))
+        for call in send.await_args_list + edit.await_args_list
+    )
+    assert posted is (rows == "none")
+
+
+async def test_the_answer_shows_a_running_fleets_card_never_posted_by_a_render():
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), (worker(status="running"),))
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    await lifecycle.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="Started the workers.")])
+    )
+    assert "**Fleet — running**" in _headlines(send, edit)
+
+
+def _ended_thread(card=None, stored=None):
+    async def history(limit):
+        if card is not None:
+            yield card
+
+    thread = MagicMock(spec=discord.Thread)
+    thread.history = history
+    thread.send = AsyncMock(side_effect=lambda *args, **kwargs: _message(800))
+    thread.fetch_message = AsyncMock(
+        side_effect=(lambda _id: stored)
+        if stored is not None
+        else discord.NotFound(MagicMock(status=404), "gone")
+    )
+    return thread
+
+
+def _ended_card(identifier=700, with_controls=True):
+    from types import SimpleNamespace
+
+    message = _message(identifier)
+    message.webhook_id = None
+    message.author.bot = True
+    button = SimpleNamespace(custom_id=f"fleet:{RUN.hex}:all:2:kill")
+    message.components = (
+        [SimpleNamespace(children=[SimpleNamespace(children=[button])])] if with_controls else []
+    )
+    message.edit = AsyncMock(side_effect=lambda **kwargs: message)
+    return message
+
+
+def _notice(workers, *, card_message_id=None, delivered=False, status="failed"):
+    from daimon.core.stores.fleet import EndNotice
+
+    return EndNotice(
+        run=replace(run(), status=status),
+        workers=tuple(workers),
+        card_message_id=card_message_id,
+        delivered=delivered,
+        attempts=1,
+    )
+
+
+def _view_texts(view):
+    return [item.content for item in view.walk_children() if hasattr(item, "content")]
+
+
+async def test_an_ended_run_settles_its_stored_card_and_says_so():
+    from daimon.adapters.discord.posted_controls.fleet import show_fleet_ended
+
+    # Already edited once (no controls left): only the stored id finds it.
+    card = _ended_card(with_controls=False)
+    thread = _ended_thread(stored=card)
+    record = AsyncMock()
+    notice = _notice(
+        (
+            worker(ordinal=1, status="failed", error_code="deadline_expired"),
+            worker(
+                "openai", ordinal=2, status="dispatch_refused", error_code="backend_unsupported"
+            ),
+        ),
+        card_message_id="700",
+    )
+    await show_fleet_ended(thread, notice, record)
+
+    thread.fetch_message.assert_awaited_once_with(700)
+    view = card.edit.await_args.kwargs["view"]
+    assert "Fleet — failed" in "\n".join(_view_texts(view))
+    assert not any(isinstance(item, discord.ui.Button) for item in view.walk_children())
+    assert not any("running" in text or "starting" in text for text in _view_texts(view))
+    # The card is edited in place; only the line is a new message.
+    (line,), kwargs = thread.send.await_args
+    assert thread.send.await_count == 1
+    assert line.startswith(
+        "The fleet ended: it ran out of time before its result was delivered here."
+    )
+    assert "failed: it ran out of time" in line
+    assert "@everyone" not in line and "<#50>" not in line
+    assert kwargs["allowed_mentions"].everyone is False
+    # Remembered, but not settled here: the line was still owed.
+    record.assert_awaited_once_with(notice.run, card, False)
+
+
+async def test_a_card_found_by_its_run_is_edited_when_none_is_stored():
+    from daimon.adapters.discord.posted_controls.fleet import show_fleet_ended
+
+    card = _ended_card()
+    thread = _ended_thread(card)
+    await show_fleet_ended(thread, _notice((worker(ordinal=1, status="succeeded"),)))
+    thread.fetch_message.assert_not_awaited()
+    card.edit.assert_awaited_once()
+    (line,), _ = thread.send.await_args
+    assert line.startswith("The fleet ended: its result wasn't delivered here.")
+
+
+async def test_a_lost_card_is_posted_again_and_remembered():
+    from daimon.adapters.discord.posted_controls.fleet import show_fleet_ended
+
+    notice = _notice((worker(ordinal=1, status="succeeded"),), card_message_id="700")
+    for card, failure in (
+        (None, None),
+        (_ended_card(), discord.NotFound(MagicMock(status=404), "gone")),
+        (_ended_card(), discord.Forbidden(MagicMock(status=403), "not ours")),
+    ):
+        if card is not None:
+            card.edit.side_effect = failure
+        thread = _ended_thread(card)
+        record = AsyncMock()
+        await show_fleet_ended(thread, notice, record)
+        first, second = thread.send.await_args_list
+        assert "Fleet — failed" in "\n".join(_view_texts(first.kwargs["view"]))
+        assert second.args[0].startswith("The fleet ended:")
+        (_, posted, terminal), _ = record.await_args
+        assert posted.id == 800 and terminal is False
+
+
+async def test_a_run_a_wake_answered_gets_only_its_card():
+    from daimon.adapters.discord.posted_controls.fleet import show_fleet_ended
+
+    card = _ended_card()
+    thread = _ended_thread(card)
+    notice = _notice((worker(ordinal=1, status="succeeded"),), delivered=True, status="completed")
+    await show_fleet_ended(thread, notice)
+    card.edit.assert_awaited_once()
+    thread.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("status", "terminal"), [("running", False), ("failed", True)])
+async def test_every_rendered_card_is_recorded_and_a_terminal_one_settles(status, terminal):
+    card, owner, _, send, _ = setup()
+    owner.read_run.return_value = (replace(run(), status=status), (worker(),))
+    send.return_value = _message(900)
+    record = AsyncMock()
+    card._record = record  # the factory passes it; this card is built directly
+    await card.refresh()
+    (shown, message, settled), _ = record.await_args
+    assert shown.status == status and message.id == 900 and settled is terminal
+
+
+async def test_a_failed_card_record_never_breaks_the_render():
+    card, _, _, send, _ = setup()
+    send.return_value = _message(900)
+    card._record = AsyncMock(side_effect=RuntimeError("db down"))
+    assert await card.refresh() is True
+
+
+def _run_end_bot(channel, *, may_post=True):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        runtime=SimpleNamespace(
+            sessionmaker=MagicMock(),
+            settings=SimpleNamespace(recruitment=RecruitmentSettings()),
+        ),
+        _channel_by_id=AsyncMock(return_value=channel)
+        if not isinstance(channel, Exception)
+        else AsyncMock(side_effect=channel),
+        _may_post_in=AsyncMock(return_value=may_post),
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "outcome"),
+    [
+        (discord.NotFound(MagicMock(status=404), "gone"), "give_up"),
+        (discord.Forbidden(MagicMock(status=403), "no"), "give_up"),
+        (discord.HTTPException(MagicMock(status=400), "archived"), "give_up"),
+        (discord.HTTPException(MagicMock(status=429), "slow down"), "retry"),
+        (discord.HTTPException(MagicMock(status=503), "later"), "retry"),
+    ],
+)
+async def test_run_end_notice_retries_only_a_transient_failure(failure, outcome):
+    from daimon.adapters.discord.bot import DaimonBot
+
+    bot = _run_end_bot(failure)
+    assert await DaimonBot._post_fleet_run_end(bot, _notice(())) == outcome  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("case", ["foreign_guild", "not_a_thread", "may_not_post"])
+async def test_run_end_notice_posts_nothing_where_it_does_not_belong(monkeypatch, case):
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.adapters.discord.posted_controls import fleet as fleet_card
+
+    shown = AsyncMock()
+    monkeypatch.setattr(fleet_card, "show_fleet_ended", shown)
+    thread = _ended_thread()
+    thread.guild.id = 61 if case == "foreign_guild" else 60
+    channel = MagicMock(spec=discord.TextChannel) if case == "not_a_thread" else thread
+    bot = _run_end_bot(channel, may_post=case != "may_not_post")
+    assert await DaimonBot._post_fleet_run_end(bot, _notice(())) == "give_up"  # type: ignore[arg-type]
+    shown.assert_not_awaited()
+    thread.send.assert_not_awaited()
+
+
+async def test_run_end_notice_shows_in_the_runs_own_thread(monkeypatch):
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.adapters.discord.posted_controls import fleet as fleet_card
+
+    shown = AsyncMock()
+    monkeypatch.setattr(fleet_card, "show_fleet_ended", shown)
+    thread = _ended_thread()
+    thread.guild.id = 60
+    bot = _run_end_bot(thread)
+    notice = _notice(())
+    assert await DaimonBot._post_fleet_run_end(bot, notice) == "shown"  # type: ignore[arg-type]
+    bot._channel_by_id.assert_awaited_once_with(70)
+    (where, what, record), _ = shown.await_args
+    assert where is thread and what is notice and callable(record)
+
+
+def test_a_setup_error_reads_as_ours_with_a_log_reference():
+    from daimon.adapters.discord.posted_controls.fleet import (
+        _worker_status,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    failed = worker(status="failed", error_code="setup_error")
+    status = _worker_status(failed)
+    assert status == (
+        f"failed: a setup error on our side; give an admin the reference (ref {str(failed.id)[:8]})"
+    )
+    assert "couldn't be set up on that model" not in status
+
+
+async def test_reserved_fleet_notice_and_live_card_never_read_messages(monkeypatch):
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.adapters.discord.posted_controls import fleet as fleet_card
+
+    thread = _ended_thread()
+    thread.guild.id = 60
+    recruitment = RecruitmentSettings(
+        tenants={"60": {"channel_ids": [str(thread.parent_id)], "recruiter_user_ids": ["7"]}}
+    )
+    bot = _run_end_bot(thread)
+    bot.runtime.settings.recruitment = recruitment
+    shown = AsyncMock()
+    monkeypatch.setattr(fleet_card, "show_fleet_ended", shown)
+    assert await DaimonBot._post_fleet_run_end(bot, _notice(())) == "give_up"
+    assert await DaimonBot._live_fleet_card(bot, thread, author_id=7, is_admin=True) is None
+    shown.assert_not_awaited()
+    thread.fetch_message.assert_not_awaited()
+    thread.send.assert_not_awaited()
+    bot._may_post_in.assert_not_awaited()
+
+
+async def test_reserved_fleet_parent_refuses_before_resolving_or_reading_history():
+    from types import SimpleNamespace
+
+    thread = _ended_thread()
+    thread.guild.id = 60
+    thread.history = MagicMock(side_effect=AssertionError("reserved history must not be read"))
+    recruitment = RecruitmentSettings(
+        tenants={"60": {"channel_ids": [str(thread.parent_id)], "recruiter_user_ids": ["7"]}}
+    )
+    sessions = MagicMock()
+    factory = DiscordFleetCardFactory.from_runtime(
+        MagicMock(), SimpleNamespace(recruitment=recruitment, sessionmaker=sessions)
+    )
+    with pytest.raises(FleetRefused, match="prerequisites_unavailable"):
+        await factory._resolve(thread, 7, UUID(int=1), UUID(int=2), None)
+    sessions.assert_not_called()
+    thread.history.assert_not_called()
+    thread.fetch_message.assert_not_awaited()

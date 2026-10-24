@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -30,6 +29,7 @@ from mux.errors import (
     UnsupportedCapability,
 )
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="allowed")
 type Resources = tuple[GeminiManagedAgents, FakeTransport, MemoryStorage, MemoryStateStore]

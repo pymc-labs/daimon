@@ -47,9 +47,9 @@ from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_origin import turn_origin as real_turn_origin
-from daimon.testing import ma_agent, ma_environment
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
@@ -493,7 +493,7 @@ async def test_bind_replaced_after_loss_never_fires_before_the_turn(
         await bot.on_message(message)
 
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
-    assert not any("lost the workspace this task was running in" in t for t in sent_texts), (
+    assert not any("lost this task's working files" in t for t in sent_texts), (
         f"prepared.continuity alone must never trigger the loss notice, got {sent_texts}"
     )
 
@@ -569,7 +569,7 @@ async def test_outcome_replaced_after_loss_prepends_exactly_one_loss_notice_to_t
         "the loss notice must be the answer's first paragraph, exactly once"
     )
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
-    assert not any("lost the workspace this task was running in" in t for t in sent_texts), (
+    assert not any("lost this task's working files" in t for t in sent_texts), (
         f"the loss notice must not also be sent as its own message, got {sent_texts}"
     )
 
@@ -624,7 +624,7 @@ async def test_ordinary_turn_posts_no_loss_notice(
         await bot.on_message(message)
 
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
-    assert not any("lost the workspace this task was running in" in t for t in sent_texts), (
+    assert not any("lost this task's working files" in t for t in sent_texts), (
         f"an ordinary turn must post no loss notice, got {sent_texts}"
     )
 

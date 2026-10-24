@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
-from mux.contracts.receipts import Operation
+from mux.contracts.receipts import DeletionReceipt, Operation
 from mux.contracts.resources import CredentialBinding, CredentialInfo, Vault
 from mux.drivers.openai._common import Context, objects, owned, page_of, query, revision, text
 from mux.drivers.openai.secret_value import RedactedCredential
@@ -62,7 +62,7 @@ class OpenAIVaults:
             revision=revision(public),
         )
 
-    async def _retrieve(self, scope: Scope, vault: ResourceRef) -> Vault:
+    async def retrieve(self, scope: Scope, vault: ResourceRef) -> Vault:
         self._c.check(scope, vault, "vault")
         raw = await self._c.call("GET", "/vaults/" + segment(vault.id))
         if raw.get("id") != vault.id:
@@ -113,6 +113,14 @@ class OpenAIVaults:
             seen.add(cursor)
         if found is not None:
             return found
+        return await self.create(scope, name, key=key)
+
+    @owned
+    async def create(self, scope: Scope, name: str, *, key: str) -> Vault:
+        self._c.authorize(scope, "vault")
+        name = name.strip()
+        if not 1 <= len(name.encode()) <= 256:
+            raise ValueError("invalid vault name")
         body: Object = {
             "name": name,
             "metadata": {"mux_tenant": scope.tenant_id, "mux_account": scope.account_id or ""},
@@ -121,7 +129,7 @@ class OpenAIVaults:
 
     @owned
     async def credentials(self, scope: Scope, vault: ResourceRef) -> tuple[CredentialInfo, ...]:
-        await self._retrieve(scope, vault)
+        await self.retrieve(scope, vault)
         result: list[CredentialInfo] = []
         cursor: str | None = None
         seen: set[str] = set()
@@ -171,7 +179,7 @@ class OpenAIVaults:
             raise ValueError("invalid credential name")
         if self._secrets is None:
             raise self._c.unsupported("host_secret_resolver")
-        await self._retrieve(scope, vault)
+        await self.retrieve(scope, vault)
         try:
             secret = await self._secrets(scope, credential.credential_ref)
         except Exception:
@@ -199,7 +207,7 @@ class OpenAIVaults:
     async def remove(
         self, scope: Scope, vault: ResourceRef, credential_id: str, *, key: str
     ) -> Operation:
-        await self._retrieve(scope, vault)
+        await self.retrieve(scope, vault)
         path = f"/vaults/{segment(vault.id)}/credentials/{segment(credential_id)}"
         raw = await self._c.call("GET", path)
         if raw.get("id") != credential_id:
@@ -221,6 +229,15 @@ class OpenAIVaults:
             created_at=now,
             updated_at=now,
         )
+
+    @owned
+    async def delete(self, scope: Scope, vault: ResourceRef, *, key: str) -> DeletionReceipt:
+        """Destroy a host-authorized private vault and its credentials."""
+        await self.retrieve(scope, vault)
+        raw = await self._c.call("DELETE", "/vaults/" + segment(vault.id), key=key)
+        if raw.get("id") != vault.id or raw.get("deleted") is not True:
+            raise ValueError("vault deletion was not acknowledged")
+        return DeletionReceipt(operation_id=key, deleted=(vault,))
 
     @owned
     async def archive(self, scope: Scope, vault: ResourceRef, *, key: str) -> Operation:

@@ -1,5 +1,31 @@
 # Architecture
 
+Account erasure previews and deletes the account’s self-hosted resource retry
+receipts. The tenant’s shared agent and environment records remain available.
+Personal resource writes take the account-erasure lock and reject erased accounts,
+so an in-flight mutation cannot leave a new personal receipt after erasure.
+
+For a selected `selfhosted.loop` profile that passes capability admission, the
+host resolves the agent and environment from tenant-scoped Postgres resource
+ports. Identity and channel-access checks precede resolution; agent policy and
+billing gates follow it. It makes no Anthropic calls, including defaults
+reconciliation and platform/channel skill resolution. The driver reads MCP
+configuration and skill references from the complete stored mux agent spec.
+Admission projects only the policy facts into its existing SDK-shaped fields;
+that projection does not create a provider client. Existing Anthropic turns
+retain their resolver and self-healing behavior. The operator entry point
+`daimon selfhosted init` creates or reuses these records without provider
+credentials.
+
+Agent fleet configuration uses `request_fleet_config` in an active chat with a
+verified confirmation card. The owner or a current admin chooses worker agents
+by name and the run's worker, spending and deadline limits. The host resolves the
+names within the tenant. Partial edits retain all omitted limits and the saved
+expiry; the card lists explicit cap removals. Current-settings reads return the
+complete editable configuration. The host reloads the preview and editor permission when Confirm
+is clicked, and applies the revision-checked write. Provider allowlist changes
+use a separate admin-only confirmation; API keys never enable providers by themselves.
+
 Opted-in Discord worker fleets use the existing posted-card renderer and Stop
 guard. The card shows each worker's role, backend, model and current state.
 Complete rows stay in ordinal order within Discord's total text limit; large
@@ -16,10 +42,41 @@ store as the turn. It selects by the genuine intent, verifies a recovered run,
 and preserves the original account and host scope while refreshing the click
 subject through existing role readers. Unbound or stale authority refuses.
 Stop and Resume reload current root permissions and use the shared fleet
-operation owner with a scoped version and idempotency key. The ordinary
+operation owner with a scoped version and idempotency key. The fleet's starter
+or a current server admin may press them; each accepted press logs
+`fleet.control_pressed` with who pressed it. The ordinary
 orchestrator answer is delivered only after authoritative collection and
 required result reviews succeed. Default fleet settings create no card,
 service discovery or additional sender.
+
+Self-hosted channels use the opening message as the Discord thread title and
+stay mention-only on Discord and Teams, without the optional Anthropic
+participation classifier. Responder-change notices use a generic previous-agent
+label. Automatic Anthropic session-file sweeps are skipped on Discord, Slack
+and Teams; the self-hosted harness can deliver files through Daimon's MCP tools.
+Self-hosted MCP credentials refuse Anthropic-specific management operations
+before any provider request; provider-neutral tools remain available. Channel
+authorization resolves their execution identity from tenant-scoped local agent
+records, including agent rules. Isolation views, timer lists, current-place cards
+and tenant summaries use the same live local records and retain channel
+visibility boundaries. Cosmetic Slack identity lookup is skipped.
+Adapter turns and their child tasks inherit the same Anthropic prohibition.
+Queued continuations retain the thread concurrency lock but start a fresh provider
+context for each wake, then apply the requesting caller's own retained-backend
+guard. Draining another caller's timer never transfers the originating turn's
+provider prohibition. A guard denial defers the queued work for retry.
+Organic participation, adapter turns, handovers and continuation guards use one
+effective backend resolver with the thread and caller identity. It checks the
+retained backend binding before the channel's current selection. A retained self-hosted thread
+stays mention-only after a channel backend change; a retained Anthropic thread
+can still reply after its channel switches to self-hosted. New threads use the
+current channel selection. Discord `/here`, Slack `/here` and Teams `here`
+establish the backend context before loading their current-place cards, so
+self-hosted cards resolve local agent records without Anthropic requests.
+Timers and task continuations check self-hosted targets in local records and
+require an installed self-hosted runtime; an unavailable runtime produces a
+clear notice. Self-hosted responder notices omit the Hand over button, and
+previously posted buttons refuse without a provider lookup.
 
 With the mux turn path and channel backends enabled, an admin can choose **Model
 backend** in an agent's setup Details on Discord, Slack or Teams. The preview
@@ -140,9 +197,11 @@ and CI:
 | CLI admin commands and run must not import each other | `daimon.adapters.cli.commands` ⟂ `daimon.adapters.cli.run` |
 | Mux must not import daimon | `mux` → `daimon` |
 | Mux contracts and profiles import no provider SDK or driver | `mux.contracts`, `mux.profiles`, `mux.errors` → a provider SDK or `mux.drivers` |
-| Only mux.drivers.anthropic / openai / gemini imports its SDK (three contracts) | `mux` → `anthropic`, `openai` or `google`, except from that provider's driver |
+| Only mux.drivers.anthropic / openai / gemini imports its SDK (three contracts) | `mux` → `anthropic`, `openai` or `google`, except from that provider's driver and its test doubles under `mux.testing.drivers` |
+| Product code must not import test harnesses | `daimon.core`, `daimon.adapters`, `mux` (except `mux.testing`) → `mux.testing`, `daimon.testing` |
 | notebook-host must not import daimon | `notebook_host` → `daimon` |
 | report-host must not import daimon | `report_host` → `daimon` |
+| harness must not import daimon | `daimon_harness` → `daimon` |
 
 The first two make the platform surfaces replaceable: a change to how Slack
 renders a table cannot reach Discord, and core can be exercised without any
@@ -197,6 +256,26 @@ the render task posts progress and the existing terminal callbacks retire the
 card and deliver the final answer. Anthropic keeps its native event tap.
 Alternate-provider usage does not become an Anthropic meter; an unverified
 display cost is omitted.
+
+Whatever a model writes for a person on one chat platform has the other two
+apps' names replaced by "another app" before it is posted
+(`platform_words.scrub_other_platforms`, a plain-text pass that leaves lowercase
+"slack" and "teams" alone). A URL is opaque to the pass: one on another app's
+host is replaced whole, any other is kept byte for byte and only a link's label
+is scrubbed, judged by the parsed host. A scrub that fails logs
+`outbound_scrub.failed` and falls back to a blunt name replacement, so a reply is
+never lost or leaked. `run_prepared_turn` wraps each chat turn's lifecycle
+so the card, the answer and any sealed answer arrive scrubbed on all three
+platforms, and the status card does the same for its draft and tool lines. The
+render loop hands over the whole turn state about every two seconds, so the
+wrapper scrubs again only the text block that grew since the last tick. The
+tools that post for the model (`send_message`, `create_thread`, `edit_message`,
+`rename_thread`, `send_direct_message`, `post_wizard`, `set_display_identity` and
+the GitHub install card's reason), a routine's delivered result, the Discord
+thread title and a Discord reply recovered after a restart pass through it too.
+Stored transcripts, logs and everything sent to the model keep the original text.
+The one deliberate exception is an approval card: it shows exactly what will be
+sent or run, so it is never scrubbed.
 
 **Stage one, `admit()` — `packages/core/daimon/core/turn/admission.py`.** One
 call does identity resolution, config resolution, and every pre-turn gate, and
@@ -260,8 +339,8 @@ event fires only on a direct mention, but installs have reported it arriving
 for thread replies that never mentioned the bot, so `_handle_app_mention`
 checks the text itself, as Discord checks `message.mentions`. The bot's user
 id comes from `auth.test`, cached per workspace. The check runs after the
-token read and before dedup and the Slack Connect rejection, so an external
-sender who never addressed the bot gets no notice. A dropped event is logged as
+token read and before dedup, so a sender (an external member included)
+who never addressed the bot gets no notice. A dropped event is logged as
 `slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
 without an error reply.
 
@@ -326,6 +405,14 @@ message if the answer has not arrived yet. Once an answer is delivered, a
 stale edit is logged and ignored. Stop still interrupts the turn when its
 card has been deleted; restart recovery treats a card deleted between its
 lookup and edit as already resolved. Other edit failures still propagate.
+
+A turn card's Stop is pressed by the person who asked or by a current admin,
+checked on each click: on Discord the owner or a member with
+Administrator or Manage Server, on Slack a host-workspace admin or owner, on
+Teams an owner of the admin team (read through the shared owner cache, as
+every Teams admin check is). When Slack or Teams can't say whether the
+clicker is an admin, the click is refused as "try again", not as "not an
+admin". Each accepted Stop logs `turn.stop_pressed` with who pressed it.
 
 A turn stops when its own thread is lost. Discord answering a write to the
 thread with Unknown Channel (10003), or a thread-delete event for a thread with
@@ -909,13 +996,28 @@ against the fingerprints stored on the mapping row; the outcome rides back on
 
 GitHub App mode uses the agent's live grants when assembling a turn. External
 askers get no App token. Each session gets one write token scoped to the agent's
-live repositories in one installation. The token is recorded before minting
+live repositories in each installation, with a separate token for each exact
+repository group. An agent can hold grants from up to 12 GitHub accounts or
+orgs. The token is recorded before minting
 and checked again after delivery. A repository is live when it remains in both
 the tenant-confirmed Connect set and the
 latest complete GitHub installation snapshot. Until the first refresh, the
 confirmed set applies. A GitHub-confirmed uninstall or suspension disables
 coverage; later refreshes can restore it when the repo is still confirmed.
 The refresh never adds repos to the tenant-confirmed set.
+The browser repo editor lists installations per owner, with at most 20 pages
+(2,000 repos) per owner. A failed owner's list is isolated from the others.
+The form signs both the grant snapshot and the GitHub inventory shown to the
+person. Its one POST resolves each selected repo's installation from the
+verified user lists and applies additions, removals, and the working repo in
+one serializable transaction under the tenant grant lock. A changed inventory
+or grant snapshot returns 409 before any grant changes. Previously granted
+repos missing from the person's verified GitHub listing show as hidden rows and
+can only be removed. A capped owner list explains its 2,000-repo limit without
+revealing names of unlisted grants. A picker save changes only the submitted
+grants; it leaves other grants in place even when their authorization is stale.
+The synthetic browser layout and interaction check is manual:
+`uv run --with playwright==1.58.0 python scripts/check_github_picker.py`.
 If token minting returns 403, 404, or 422 for a repository group, that group's
 pending token is closed, its installation is queued for reconciliation, and
 only successfully minted groups enter the session. The refused group's repos
@@ -997,6 +1099,47 @@ while a long tool call produces no events. Each adapter's own debounce decides
 which calls become platform edits: 10 s on Discord, 5 s on Slack and Teams. The
 finalizers' render after the terminal event stays guarded, so it runs only if
 that event changed the state.
+
+Managed Agents delivers each `agent.message` whole (its streamed deltas are
+previews that never reach the reducer). With `DAIMON_TURN__STATUS_LOG` off, the
+default, the reducer joins consecutive messages into one text block and the
+answer is every text after the last tool call. With it on, the reducer keeps
+every message as its own text block, and an answer of several messages keeps
+every one set apart by a blank line (a run of messages before a tool call is
+one candidate for a sealed answer, joined the same way, so Discord compares
+like with like when it drops a repeat). `daimon.core.turn.status_log` holds the
+switch. Either way the status card on Discord, Slack and Teams shows the last
+three messages as a small log right under the headline, oldest first, each cut
+to one line of 120 characters. The plan and the tool lines follow, in that
+order (`status_lines.CARD_SECTIONS`). On Slack the log's section is also held under
+Slack's 3,000 character limit after escaping. For a non-Anthropic provider,
+each new message item starts a new entry and its previews and snapshots revise
+that entry.
+
+A tool line names the tool and nothing it was called with, with one
+exception: an allowlist in `daimon.core.turn.status_lines` adds one field of a
+built-in tool's input, clipped to one line. `web_search` shows its query,
+`web_fetch` the host name only, and `read`, `write` and `edit` the file's base
+name. Bash, MCP and custom tools stay name-only, so a command, a URL's path or
+query, or a directory never reaches the card.
+
+Progress plans are a second switch on the same scope cascade as thread
+participation (`daimon.core.scope_cascade`): `DAIMON_PROGRESS_PLANS__MODE`,
+then workspace, channel and thread rows in `progress_plan_scopes`, set with the
+`set_progress_plans` tool, Slack included (a Slack thread is keyed
+`<channel>:<thread ts>`). The `update_plan` tool is registered on every turn,
+so the tool list and the system prompt stay the same whether the switch is on
+or off. Before a chat turn `run_prepared_turn` resolves the cascade once; when
+it resolves on, a short `<progress_plans>` block goes in front of the user
+message and the turn's `TurnObservation` is marked, so the card draws the
+latest `update_plan` steps as a checklist under a Plan header, between the
+latest messages and the tool lines' Details, in the card's own icons (☑️ done,
+⏳ in progress, a pending step set in line by figure spaces; finished steps at
+the top fold into one line, at most six lines), and leaves the call out of the
+tool lines. Like the tool lines, each step is drawn in code (a Discord embed
+field, a Slack context block, a Teams monospace block), so the icons of both
+look the same. Off, nothing is added and the call is an
+ordinary tool line.
 
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
 immediate idle acknowledgement is observed. The interrupt and acknowledgement
@@ -1125,6 +1268,14 @@ first message. A non-Anthropic runtime refuses every unattended confirmation
 with a plain explanation that it cannot refresh the tool safety gate. This rule
 applies with safety on or off; the model receives a denial and the turn can
 continue or end. Unattended turns never invoke a human provider-action hook.
+Native providers without host tool inspection must expose a reviewed tool
+configuration and cannot run automatic sandbox, custom tools, ungated MCP
+connections or unreviewed provider options unattended;
+the send boundary refuses before posting a provider message. In particular,
+OpenAI persistent workers that require automatic `bash` are refused.
+Conversation-only workers without those tools remain supported. Selfhosted
+execution inspects every declared tool at the host boundary, even with tool
+safety off, so it can permit allowed reads while refusing sandbox calls.
 Tool rules come from the session's
 conversation channel (`session_rules_channel`), never its budget channel. The decider comes
 from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write
@@ -1292,7 +1443,7 @@ session, starts a worker on the paused turn with the recorded channel, which
 decides from the policy now in force, and, given a message, sends it once
 that turn ends, after repeating every check and the gate.
 
-With both `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
+With both `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true` (the defaults),
 an active chat admin can request an agent backend change through that same
 confirmation hook. The card shows the server's current compatibility and cost
 preview. Confirm rechecks the requester and current admin permission, then
@@ -1318,7 +1469,10 @@ set outside the mapper: `admission_concurrency_shed` by callers when the
 turn queue is full or a queued turn passes its max wait, and `recovery_failed` by `run_prepared_turn` on
 the terminal hook when replacing a lost session raises (the exception it
 re-raises maps to `unknown`). A session MA reports terminated without any terminal
-event for this turn is `session_terminated`, never `completed`.
+event for this turn is `session_terminated`, never `completed`. A turn the model
+refuses ends with an ordinary `end_turn` idle whose `stop_details` says
+`refusal`; the reducer reads it and the turn is `refused`, never an empty
+`completed`.
 `TurnError.kind` is unchanged, and
 every `TurnKind` value is also a `TerminationReason` value with the same
 string.
@@ -1466,7 +1620,8 @@ Isolation is enforced in two places at once.
 `tenants.id`, and stores take `tenant_id` as a parameter rather than reading
 it from anywhere ambient. Erasure is not left to cascades:
 `packages/core/daimon/core/purge.py` deletes every row referencing a principal
-in FK-safe order in one transaction, and
+in FK-safe order in one transaction (a Teams message receipt is cleared of the
+person but kept for 24 hours, as the duplicate guard), and
 `packages/core/daimon/core/privacy.py` is its read-only mirror for the preview
 panel. A schema-reflecting drift-guard test fails when a new person-scoped
 table joins one path and not the other.
@@ -1570,8 +1725,9 @@ one entry in its own journal; the worker row keeps only a pointer to it, with it
 digest and a short excerpt. Every status change is a compare-and-swap on the
 row's version. Worker turns have a concurrency pool of their own, counted from
 these rows per tenant (`DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`) and
-per process, so a fan-out never takes the chat turns' slots. Fleets are off by
-default (`DAIMON_FLEET__ENABLED`).
+per process, so a fan-out never takes the chat turns' slots. Fleets are on by
+default; `DAIMON_FLEET__ENABLED=false` is an emergency stop that refuses new
+workers before they are funded.
 
 A conversation's model choice (`/model`) never reaches a fleet. When the
 answering agent holds a fleet grant, `bind_session_impl` puts the authored agent
@@ -1738,6 +1894,13 @@ Both are FastAPI processes that hold no Anthropic key and no database
 credential; they reach Daimon over HTTP with capability tokens, and the
 `must not import daimon` contracts keep it that way.
 
+`apps/harness/` is a standalone FastAPI agent runtime. It uses the OpenAI Agents SDK
+against Azure OpenAI and imports only mux wire contracts from the Daimon
+workspace. Authenticated HTTP endpoints submit turns, replay durable session
+events, resolve tool approvals and cancel work. Each sandbox owns its workspace
+and SQLite history under its persistent home directory. It needs Azure model
+credentials or managed identity, with no Anthropic dependency.
+
 ## Where to look next
 
 - [routines.md](routines.md) — the scheduler and headless turns.
@@ -1804,6 +1967,21 @@ Operator recovery tools: `daimon backup platform-export` exports the dedicated
 MA workspace through core; `scripts/backup/postgres.sh` backs up/restores Postgres.
 See [self-hosting](self-hosting.md#backup-and-disaster-recovery) for the recovery
 contract and limits.
+
+### Platform words
+
+`daimon.core.platform_words` is one table of what each chat platform calls
+things and how a person reaches each command there: Discord's server, server
+admin and `/agent-setup`, Slack's workspace and `/agent-setup`, Teams'
+organisation, admin and `setup` in a 1:1 chat, and where each command works
+(Discord commands other than `/privacy` are server-only; Teams `setup` and
+`support` work only in the 1:1 chat). Help cards, refusals, the here card and
+routine failure notices read it, and MCP tool results that name who must act
+use the caller's platform (`tools/_words.py`). The model gets the same words per
+turn as `words` in `<turn_controls>` (chat turns, from the origin's platform and
+place: DM, channel or group chat) and in routine controls. The system prompt,
+skills and tool descriptions stay platform-neutral and point at `words`, so
+changing a platform's wording moves no live session to a new workspace.
 
 ### Google tokens in ordinary chat
 
@@ -1924,7 +2102,7 @@ add per-memory author/origin records or rollback tooling.
 
 ### Shared and personal memory
 
-An agent has two kinds of memory store (`packages/core/daimon/core/memory_resource.py`):
+An agent has three kinds of memory store (`packages/core/daimon/core/memory_resource.py`):
 
 - **Shared**: one per agent (`agent_memory_store`). Every session of the agent mounts
   it, for every person and channel. Its instructions keep it to team and agent
@@ -1934,6 +2112,9 @@ An agent has two kinds of memory store (`packages/core/daimon/core/memory_resour
   `/mnt/memory/personal-<account id>/` beside the shared store. Its instructions keep
   it to that person's preferences and facts about them, and forbid copying from it
   into the shared store.
+- **Channel**: one per agent and parent channel (`agent_channel_memory_store`, keyed by
+  platform and channel id), created on the first held session there. It is what a
+  held turn mounts, and nothing else (see below).
 
 A chat session is already keyed on the caller's account (`thread_sessions`), so only
 that person's own sessions (channel threads, DMs, on every platform) mount their
@@ -1964,6 +2145,30 @@ nothing personal is to be recorded. Who else gets one:
   (`cli.local_user`), which is configuration rather than a verified person, so it gets
   no personal store.
 
+**Held turns.** A turn is held (`Admission.hold`) when its requester is from another
+organisation or unknown, or its channel is shared with another organisation. A held
+session mounts its channel's store read-write (read-only when the turn's memory is
+restricted) and no other: not the shared store and no personal store, whoever asks. The
+channel store's instructions tell the agent that everyone in the channel, including
+people from another organisation, sees it and that it must not record anything it would
+not say there. The isolation holds both ways: a held session never has the shared or a
+personal store mounted, and an unheld session never has a channel store. A thread shares
+its parent channel's store, and a shared-thread session (no caller account, so no held
+credential) mounts the place's store too. `desired_snapshot_for` takes the same store, so
+a session still on the shared store when its channel turns shared (or the reverse) is
+replaced, with nothing carried over and refused while a turn is active (the memory
+boundary above); a session already on the channel store is reused. The session snapshot
+also records the isolation scope (`memory_scope`: absent when unheld, else
+`channel:<platform>:<id>`), whether or not a store mounted, so a held place whose store
+failed to provision is still told apart from an unheld one and from another place. Any
+scope change is a boundary, a permitted handoff to another agent included: it carries
+nothing across, though a handoff that stays on one side of the boundary keeps its carry
+rule. The field is omitted when unset, so the previous build reads the stored snapshot. A fleet worker
+captures exactly one memory resource, the shared store, so a held admission never reaches
+that capture. Archiving an agent archives its channel stores with the others. Rolling back
+to a build without channel stores replaces those sessions with shared-store ones (again
+carrying nothing over); the table is ignored.
+
 MA attaches memory stores only when a session is created. A live session recorded
 without a personal store is reused, not replaced, after the caller's store exists
 (`session_compat`); the store is mounted on the caller's next new session. A session
@@ -1976,7 +2181,18 @@ the number of memories, how many look personal and a few redacted examples (pref
 words kept, names, mentions, e-mail addresses and every other word masked). It only lists
 and reads memories; deciding what to do with them is left to the operator.
 
-`/memory` (Discord, Slack) and `memory` (Teams) still show the shared store read-only.
+`/memory` (Discord, Slack) and `memory` (Teams) still show the shared store read-only,
+or in a held place (the channel is recorded as shared, or the person asking is recorded
+as from another organisation) the channel's own store. The command takes the live facts
+from its adapter, not only the recorded ones: who the asker is (a workspace member, from
+another organisation, or unknown) and whether the platform calls the channel shared. Only
+a verified member in a channel neither the platform nor the registry calls shared reads the
+agent-wide store; an unknown asker is held, and nothing is recorded about them. Slack asks
+`users.info` and `conversations.info`; Teams reads the activity's tenant evidence (no
+evidence is unknown) and its channel type; Discord has no other-organisation members and
+uses the registry. In Teams the answer to a command typed in a held channel is never moved
+to the sender's 1:1 chat when the private reply is refused. In a held place `mine` and
+`forget-mine` answer that personal memory is not used there and touch nothing.
 `mine` lists the caller's own personal store and `mine /<path>` shows one file;
 `forget-mine` shows what would be deleted and a six-character code, and
 `forget-mine <code>` deletes every memory in that store. The store is always the one of
@@ -2030,6 +2246,23 @@ can be inserted before a leading table. See the [Slack table block reference](ht
 Streaming status previews and MCP `send_message` remain plain text. Tables inside
 code fences remain literal examples. Other adapters need no renderer changes.
 
+
+### Selfhosted usage reconciliation
+
+Selfhosted billing has a separate transactional path in
+`daimon.core.selfhosted_usage`. The runtime must call its tariff admission API
+before paid model work; this API does not enable the reserved profile by itself.
+Admission saves the deployment, underlying model and effective tariff in the
+operation store. The recorder uses that snapshot for request-level settlement
+and corrections, with one underlying-model accounting identity across native
+deployment/model aliases. Unknown usage or unverified pricing stays pending.
+
+Operators inspect these gaps with `daimon usage pending TENANT_UUID --json`.
+The content-free report includes reasons, tenant-bound cursor pagination and
+an explicit truncation flag; malformed rows are flagged without hiding other
+requests. It is read-only: runtime replay supplies authoritative repairs.
+See [selfhosted billing](billing.md#selfhosted-azure-usage) for admission and
+reconciliation details.
 
 ### Durable turn outcomes
 
@@ -2397,7 +2630,7 @@ runner; core's durable queue handles dispatch. Discord, Slack and Teams share
 compatible readers; CLI and scheduler do not dispatch continuations. Old readers
 ignore the new reason before batching, preserving unrelated work on rollback.
 
-Migration `0119_watches` follows `0118_lead_intake`. The producer setting
+Migration `0142_watches` follows `0141_lead_intake`. The producer setting
 and durable global gate default off. Watch turns explicitly use `attended=False`
 and require the current origin's exact session grant. Registration, key generation,
 owner access, destination, balance, member caps and channel budget are rechecked
@@ -2423,7 +2656,7 @@ start no detached output-file sweeps after their grant ends.
 Revoking a key, stopping a watch or disabling an owner/tenant/global gate cancels
 queued wakes. Re-enabling does not revive them. Evidence expires after seven days;
 independent byte, row and rate quotas prevent a pending batch growing without bound.
-Migration `0120_watch_polling` follows `0119_watches`. Sidecar claims at most four
+Migration `0143_watch_polling` follows `0142_watches`. Sidecar claims at most four
 poll leases through `claim_watch_polls()`, then submits only a watch UUID and opaque
 60-second lease to the separate private `watch-executor:8767` service's
 `/internal/watches/{watch_id}/poll` endpoint. The public MCP app has no poll route.
@@ -2568,3 +2801,44 @@ retains its live recruiter/thread checks.
 Bulk deletion locks every affected recruitment thread in stable order and
 records all source tombstones in one transaction. Its event watermark cannot be
 covered between deleted message IDs, including parent-channel starter events.
+### Self-hosted harness turns
+
+The `selfhosted.loop` turn-runtime entry point composes injected tenant-scoped
+agent/environment ports with the mux HTTP driver. A manifest authorizes the
+exact admitted channel revision and caller. Price admission happens before
+transport use; the host binds a deterministic session without model I/O and
+records sends, receipts and canonical events in the existing fenced mux state
+store. Invocation baselines keep previous roots out of each new reply.
+
+The driver polls the durable harness journal through direct HTTP or Foundry
+invocations. Reconnect reconciles the same root; cancellation holds occupancy
+until a canonical terminal arrives. Model-request observations pass through the
+selfhosted recorder, including unknown observations for unmatched request
+starts. Display conversion uses SDK DTOs for adapter compatibility without
+calling an Anthropic API. Tools and inline skills are assembled under the
+admitted scope, and the host revokes the header-only MCP token in turn cleanup.
+
+With Blob recovery configured, both harness loops depend on Azure Blob Storage
+for turn claims, request inventory and reserved sequence blocks before paid
+model I/O. Journal/history and workspace checkpoints upload asynchronously after
+tool cleanup. Failed write-ahead or reservation commits prevent paid work with
+retryable `durability_unavailable`; failed or degraded workspace snapshots allow
+turns and polling to continue. Storage credentials remain in the service identity.
+
+A degraded snapshot or upload failure queues `checkpoint_warning` for the next
+new turn. The mux driver preserves it as a native event, and core converts it to
+a non-terminal thread notice about possible message/file loss, emitted once per
+session. A local pending marker retains late failures across process restarts;
+a notice not captured in a snapshot can still be lost with a destroyed sandbox.
+
+Recovery authenticates and persists the client cursor, loads remote reservations
+and WAL inventory, restores an empty sandbox, and merges original event identities
+before flushing local pending measurements. It fences new sequences above the
+checkpoint, reservation and cursor, emits covering history gaps, then repairs
+unmatched requests as unknown and unfinished turns as interrupted. A divergent
+journal stays sealed until reconciliation succeeds; cleanup must succeed before
+a terminal or another turn. This ordering preserves I1 (immutable sequences),
+I2 (one usage outcome, preserving measured usage), I3 (one terminal with no later
+turn events), I4 (every claim has an executor or recovery), and I5 (no tool side
+effects after termination). See the harness [recovery order and invariants](https://github.com/pymc-labs/daimon/blob/main/apps/harness/README.md#recovery-order-and-invariants)
+for the complete specification.

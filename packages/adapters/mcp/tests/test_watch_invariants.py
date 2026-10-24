@@ -21,8 +21,8 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import validate_poll
 from daimon.core.stores import watches
 from daimon.core.stores.thread_sessions import create_thread_session
-from daimon.testing.ma_models import ma_session, ma_session_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy import text
 
 from .test_watch_polling import attended_owner, lease, runtime_watch  # noqa: F401

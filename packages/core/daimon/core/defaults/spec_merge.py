@@ -56,7 +56,8 @@ def merge_skills_with_ma(
     """Union resolved spec skills with MA's current skills, keyed by `skill_id`.
 
     Spec wins on collision. Spec entries first, MA-only entries appended in
-    MA order.
+    MA order. A preserved entry keeps the version it is pinned to: MA reads
+    an omitted version as latest, so dropping it would unpin the skill.
     """
     spec_ids = {s.get("skill_id") for s in spec_skills}
     extras: list[BetaManagedAgentsSkillParams] = []
@@ -67,6 +68,8 @@ def merge_skills_with_ma(
             BetaManagedAgentsSkillParams,
             {"skill_id": entry.skill_id, "type": entry.type},
         )
+        if entry.version != "latest":
+            preserved["version"] = entry.version
         extras.append(preserved)
     return list(spec_skills) + extras
 

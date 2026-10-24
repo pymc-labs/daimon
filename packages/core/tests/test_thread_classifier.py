@@ -9,7 +9,7 @@ import httpx
 from anthropic.types import Message, StopReason, TextBlock, Usage
 from daimon.core.thread_classifier import classify
 from daimon.core.thread_participation import SILENCE_ON_ERROR, ClassifierMessage
-from daimon.testing.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
 _MODEL = "claude-haiku-5-5"
 _RESPOND = '{"decision": "respond", "reason": "asked the bot"}'

@@ -65,7 +65,7 @@ def validate_poll(
 def canonical_source_id(value: object) -> str:
     """Accept exactly one spelling; no aliases survive into registration or reads."""
     if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]{0,19}", value) is None:
-        raise ValueError("Poll source requires a canonical Discord resource ID")
+        raise ValueError("Poll source requires a canonical message resource ID")
     return value
 
 

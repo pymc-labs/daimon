@@ -66,6 +66,7 @@ class FleetCardFactory(Protocol):
         turn_card_intent_id: UUID | None = None,
         recorded_post: AgentPostRow | None = None,
         on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
+        wake_id: UUID | None = None,
     ) -> DiscordFleetCard | None: ...
 
 

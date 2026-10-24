@@ -43,7 +43,7 @@ from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, record_continuation
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter
+from mux.testing.drivers.anthropic.ma import MARouter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AGENT_ID, AGENT_TEXT, build_turn_router

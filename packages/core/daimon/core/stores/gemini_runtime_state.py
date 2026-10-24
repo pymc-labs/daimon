@@ -18,6 +18,10 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+PRE_DISPATCH_BUSY_BOUND_S = 5.0
+"""How long a pre-dispatch transaction waits for a busy Records row before it
+gives up. Busy is safely retryable only before the provider POST."""
+
 
 async def complete(operation: Awaitable[None]) -> None:
     """Finish an already-started commit/close before propagating cancellation."""
@@ -157,7 +161,9 @@ class PostgresPayloadDatabase:
         # Before dispatch, busy is safely retryable. After dispatch, keep a long
         # acquisition fallback; the host's enclosing send timeout (120s default,
         # including pre-dispatch work/POST time) or earlier request cancellation binds.
-        deadline = asyncio.get_running_loop().time() + (TURN_CEILING_S if after_dispatch else 5)
+        deadline = asyncio.get_running_loop().time() + (
+            TURN_CEILING_S if after_dispatch else PRE_DISPATCH_BUSY_BOUND_S
+        )
         # Initialization commits its FK/account locks before any provider I/O.
         async with self._locked(deadline, initialize=True, after_dispatch=after_dispatch):
             pass

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email import policy
@@ -22,6 +23,7 @@ from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_deployment import OpenAIDeployment, build_openai_runtime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import admitted_session_scope, bind_session_impl
@@ -33,6 +35,7 @@ from daimon.core.turn.runtime_manifest import (
 )
 from daimon.core.turn.runtimes import build_channel_runtime
 from daimon.testing import f2_mcp_binding
+from daimon.testing.db import sibling_nullpool_engine
 from daimon.testing.f2_mcp_binding import AgentMCPAuthority, AgentMCPBinding
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import ConfigRevision
@@ -77,6 +80,8 @@ class FullWire(Wire):
         self.agent = {}
         self.created = None
         self.posts = []
+        self.vault = None
+        self.vault_credential = None
         config = RECORDED_ENVIRONMENT["config"]
         self.template = {
             "id": "native-template",
@@ -105,6 +110,24 @@ class FullWire(Wire):
 
     def handle(self, request):
         path = request.url.path.removeprefix("/v1")
+        if path == "/vaults":
+            self.requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(200, json={"data": [], "has_more": False})
+            self.vault = {"id": "caller-session-vault", **json.loads(request.content)}
+            return httpx.Response(200, json=self.vault)
+        if path == "/vaults/caller-session-vault":
+            self.requests.append(request)
+            return httpx.Response(200, json=self.vault)
+        if path == "/vaults/caller-session-vault/credentials":
+            self.requests.append(request)
+            self.vault_credential = {
+                "id": "caller-mcp-credential",
+                "vault_id": "caller-session-vault",
+                "created_at": 0,
+                **json.loads(request.content),
+            }
+            return httpx.Response(200, json=self.vault_credential)
         if path.startswith("/skills"):
             self.requests.append(request)
             if request.method == "POST":
@@ -344,7 +367,16 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
     quote = await service.preview(source, "openai")
     expected_drops = ("mcp_tool:daimon-mcp:add_skill", "memory") if gated else ("memory",)
     if native_defaults:
-        expected_drops = ("builtin_tool:web_fetch", *expected_drops)
+        # A pinned row has no confirmation card either: every gated or publishing
+        # tool is a declared loss, exactly as in a template.
+        expected_drops = (
+            "builtin_tool:web_fetch",
+            "mcp_tool:daimon-mcp:add_skill",
+            "mcp_tool:daimon-mcp:create_attachment_upload_url",
+            "mcp_tool:daimon-mcp:create_notebook_upload_url",
+            "mcp_tool:daimon-mcp:publish_report",
+            "memory",
+        )
     assert quote.allowed and quote.declared_drops == expected_drops
     if native_defaults:
         from daimon.core.channel_backend import AgentBackendRefused
@@ -388,7 +420,12 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
     signer.chmod(0o600)
     output = tmp_path / "after-ack"
     output.mkdir(mode=0o700)
-    monkeypatch.setattr(f2_mcp_binding, "create_async_engine", lambda *_, **__: sessions.kw["bind"])
+    # The binding disposes its engine on close; give it a sibling, not the shared pool.
+    monkeypatch.setattr(
+        f2_mcp_binding,
+        "create_async_engine",
+        lambda *_, **__: sibling_nullpool_engine(sessions.kw["bind"]),
+    )
     binding = AgentMCPBinding(
         authority=AgentMCPAuthority(
             provider="openai",
@@ -405,6 +442,12 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
         )
     )
     token = await binding.bind(counterpart.agent.ref)
+    from daimon.core.mcp_auth import token_jti
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    async with sessions() as db:
+        registered = await get_mcp_token(db, jti=token_jti(token))
+    assert registered is not None and registered.surface == "provider_turn"
     credential = tmp_path / "caller.token"
     credential.write_text(token)
     credential.chmod(0o600)
@@ -490,7 +533,11 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
     mcp = body["agent"]["tools"][0]
     import jwt
 
-    installed = mcp["transport"]["authorization"].removeprefix("Bearer ")
+    assert "authorization" not in mcp["transport"]
+    assert body["vault_ids"] == ["caller-session-vault"]
+    assert mcp["credential_id"] == "caller-mcp-credential"
+    installed = wire.vault_credential["auth"]["token"]
+    assert installed not in json.dumps(body) and token not in json.dumps(body)
     claims = jwt.decode(installed, options={"verify_signature": False})
     original = jwt.decode(token, options={"verify_signature": False})
     assert claims.pop("chat_session_id") == prepared.native_chat_session_id
@@ -509,6 +556,16 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
             },
         )
         assert not result["result"].get("isError", False)
+    # The pinned row's credential has no confirmation card: the server refuses
+    # every gated or publishing tool for it by name (the proxy refuses them anyway).
+    for name in ("publish_report", "create_attachment_upload_url", "add_skill"):
+        refused = await mcp_session(
+            source_mcp,
+            token=token,
+            method="tools/call",
+            params={"name": name, "arguments": {}},
+        )
+        assert "confirmation card" in json.dumps(refused), name
     assert "Bearer" not in json.dumps(wire.agent)
 
 
@@ -681,7 +738,9 @@ NATIVE_DEFAULT_PARAMS = {
 
 @pytest.mark.parametrize("consent_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
 @pytest.mark.parametrize("full_openai", ["native-defaults"], indirect=True)
-async def test_live_native_defaults_declare_only_fetch_loss_and_preserve_siblings(full_openai):
+async def test_live_native_defaults_drop_gated_tools_and_preserve_siblings(full_openai):
+    """A pinned row with the full live catalogue still admits and runs: its skills,
+    builtins and non-gated MCP tools stay executable; gated/publishing tools are losses."""
     request, _, canonical, wire, *_ = full_openai
     target = canonical.target_spec
     assert {tool.name for tool in target.tools} == {"bash", "web_search"}
@@ -689,16 +748,13 @@ async def test_live_native_defaults_declare_only_fetch_loss_and_preserve_sibling
     assert target.declared_drops == (
         "builtin_tool:web_fetch",
         "mcp_tool:daimon-mcp:add_skill",
+        "mcp_tool:daimon-mcp:create_attachment_upload_url",
+        "mcp_tool:daimon-mcp:create_notebook_upload_url",
+        "mcp_tool:daimon-mcp:publish_report",
         "memory",
     )
     assert "builtin_tool:web_fetch" in target.system
-    expected = [
-        "call_tool",
-        "create_attachment_upload_url",
-        "create_notebook_upload_url",
-        "publish_report",
-        "search_tools",
-    ]
+    expected = ["call_tool", "search_tools"]
     assert target.mcp_servers[0].tool_policy["allowed_tools"] == expected
     prepared = await bind_session_impl(
         request.deps,
@@ -730,8 +786,8 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
     from daimon.core.turn_origin import execution_origin, turn_origin
     from daimon.testing.asgi import call_mcp_tool
     from daimon.testing.factories import make_platform_principal
-    from daimon.testing.ma import list_response
     from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma import list_response
     from pydantic import SecretStr
 
     request, _, _, wire, source_token, *rest = full_openai
@@ -749,6 +805,23 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             external_id="caller",
         )
     target = ma_agent(id="handoff-target", name="daimon", tenant_id=request.tenant_id)
+    # This test exercises signed-origin authorization, so the destination
+    # shares the source provider. Cross-provider handoffs retain their own fence.
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+
+    async with sessions.begin() as db:
+        await agent_backends.put_revision(
+            db,
+            tenant_id=request.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=target.id),
+            local=1,
+            backend="openai",
+            digest="d" * 64,
+            previous_local=None,
+            agent_name=target.name,
+            preview_digest="p" * 64,
+        )
     router.add(
         "GET",
         r"/v1/agents",
@@ -788,6 +861,8 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             responder_name="test-agent",
             role=Role.USER,
             attended=True,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             # Simulate an inherited parent execution during child construction.
             # Construction must install a fresh slot grant, never this origin's.
@@ -810,6 +885,8 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
                         expires_at=datetime.now(UTC) + timedelta(hours=1),
                         attended=True,
                         chat_session_id=previous_grant,
+                        sender_foreign=False,
+                        shared_channel=False,
                     )
             with execution_origin(parent.id if parent is not None else None):
                 prepared = await bind_session_impl(
@@ -822,9 +899,10 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
                     session_account_id=account_id,
                     reuse_existing=index in (1, 2),
                 )
-            installed = wire.posts[-1]["agent"]["tools"][0]["transport"][
-                "authorization"
-            ].removeprefix("Bearer ")
+            mcp = wire.posts[-1]["agent"]["tools"][0]
+            assert "authorization" not in mcp["transport"]
+            installed = wire.vault_credential["auth"]["token"]
+            assert installed not in json.dumps(wire.posts[-1])
             grant = jwt.decode(installed, options={"verify_signature": False})["chat_session_id"]
             assert grant == prepared.native_chat_session_id and grant != str(origin.id)
             if index in (1, 2):
@@ -884,24 +962,57 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             async def no_recovery():
                 pytest.fail("native session must not recover into another backend")
 
-            outcome = await run_prepared_turn(
-                request.deps,
-                prepared,
-                tenant_id=request.tenant_id,
-                platform=request.platform,
-                thread_id=thread_id,
-                external_user_id="caller",
-                user_message="do requested work",
-                lifecycle=RecordingLifecycle(),
-                cancel=asyncio.Event(),
-                reseed_user_message=no_recovery,
-                recovery_lifecycle=lambda _: RecordingLifecycle(),
-                before_send=before_send,
-                attended=kind == "human",
-                origin="worker" if worker else "chat",
-                operation_key=f"origin-lifecycle:{index}",
-            )
-            assert outcome.state.error is None, (index, kind, outcome.state.error)
+            # Main's signed-grant assertions above still run at before_send.
+            # Preview's default refuses this source's automatic sandbox tools
+            # before a provider message, including timer and child execution.
+            refused = kind != "human"
+            if refused:
+                # Exercise the same signed-grant/handoff assertions independently:
+                # a denied profile never opens its stream or reaches before_send.
+                from daimon.core.stores.turn_origins import bind_origin_session
+
+                if not worker:
+                    async with sessions.begin() as db:
+                        await bind_origin_session(
+                            db, origin_id=origin.id, chat_session_id=grant, attended=False
+                        )
+                await before_send()
+                async with sessions.begin() as db:
+                    await bind_origin_session(db, origin_id=origin.id, chat_session_id=None)
+            sent_before = [
+                call
+                for call in wire.requests
+                if call.method == "POST" and call.url.path.endswith("/events")
+            ]
+            with (
+                pytest.raises(AdmissionDenied, match="backend_unsupported")
+                if refused
+                else nullcontext()
+            ):
+                outcome = await run_prepared_turn(
+                    request.deps,
+                    prepared,
+                    tenant_id=request.tenant_id,
+                    platform=request.platform,
+                    thread_id=thread_id,
+                    external_user_id="caller",
+                    user_message="do requested work",
+                    lifecycle=RecordingLifecycle(),
+                    cancel=asyncio.Event(),
+                    reseed_user_message=no_recovery,
+                    recovery_lifecycle=lambda _: RecordingLifecycle(),
+                    before_send=before_send,
+                    attended=kind == "human",
+                    origin="worker" if worker else "chat",
+                    operation_key=f"origin-lifecycle:{index}",
+                )
+                assert outcome.state.error is None, (index, kind, outcome.state.error)
+            if refused:
+                assert [
+                    call
+                    for call in wire.requests
+                    if call.method == "POST" and call.url.path.endswith("/events")
+                ] == sent_before
             assert (await live_origin()).chat_session_id is None
             assert "isError" in str(await handoff()), (
                 "an ended execution cannot reuse its installed bearer"
@@ -925,3 +1036,37 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
     assert (
         jwt.decode(source_token, options={"verify_signature": False}).get("chat_session_id") is None
     )
+
+
+@pytest.mark.parametrize("consent_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
+@pytest.mark.parametrize("full_openai", ["native-defaults"], indirect=True)
+async def test_live_native_defaults_declare_only_fetch_loss_and_preserve_siblings(full_openai):
+    request, _, canonical, wire, *_ = full_openai
+    target = canonical.target_spec
+    assert {tool.name for tool in target.tools} == {"bash", "web_search"}
+    assert len(target.skills) == 11
+    assert target.declared_drops == (
+        "builtin_tool:web_fetch",
+        "mcp_tool:daimon-mcp:add_skill",
+        "mcp_tool:daimon-mcp:create_attachment_upload_url",
+        "mcp_tool:daimon-mcp:create_notebook_upload_url",
+        "mcp_tool:daimon-mcp:publish_report",
+        "memory",
+    )
+    assert "builtin_tool:web_fetch" in target.system
+    expected = ["call_tool", "search_tools"]
+    assert target.mcp_servers[0].tool_policy["allowed_tools"] == expected
+    prepared = await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=False,
+    )
+    assert prepared.session_ref.provider == "openai"
+    tools = wire.posts[0]["agent"]["tools"]
+    assert any(tool["type"] == "web_search" for tool in tools)
+    assert next(tool for tool in tools if tool["type"] == "mcp")["allowed_tools"] == expected

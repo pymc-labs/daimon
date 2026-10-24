@@ -24,7 +24,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import set_provision_status
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner

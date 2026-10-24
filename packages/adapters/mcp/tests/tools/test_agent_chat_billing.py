@@ -49,10 +49,10 @@ from daimon.core.stores import session_settle_state, tenant_ledger
 from daimon.core.stores.domain import TenantLedgerRow
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_sweep import sweep_headless_usage
-from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     MARouter,
     NotHandled,
@@ -60,7 +60,7 @@ from daimon.testing.ma import (
     combine_handlers,
     list_response,
 )
-from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from mux.testing.drivers.anthropic.ma_models import EMPTY_CLOUD_CONFIG, ma_model_usage, ma_session
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

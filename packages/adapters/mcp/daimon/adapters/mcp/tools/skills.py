@@ -311,7 +311,7 @@ async def _sync_impl(
     attached_ids = {skill.skill_id for agent in agents for skill in agent.skills}
     attached = registry_ids & attached_ids
 
-    library = f"{len(registry_ids)} skill(s) imported into the workspace's shared skill library"
+    library = f"{len(registry_ids)} skill(s) imported into the shared skill library"
     if agent_name is not None:
         summary = f"{library}; {len(attached)} now attached to an agent." + attach_note
     else:
@@ -414,7 +414,7 @@ async def _delete_impl(
         seeded = await load_seeded_skill(session, tenant_id=auth.tenant_id, name=name)
     if seeded is not None:
         raise ToolError(
-            f"skill '{name}' is one of this deployment's default skills and cannot be "
+            f"skill '{name}' is one of Daimon's default skills and cannot be "
             "deleted from chat. Use remove_skill to detach it from an agent you own."
         )
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)

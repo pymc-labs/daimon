@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+import structlog
 from daimon.adapters.slack import credential_submissions as credential_submissions_mod
 from daimon.adapters.slack.credential_requests import (
     run_env_credential_submission,
@@ -51,14 +52,17 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.posted_controls import RECEIVED_FOOTER
+from daimon.core.security_audit import AuditDecision, capture_decision
 from daimon.core.stores.agent_files import get_agent_file, put_agent_file
 from daimon.core.stores.credential_requests import (
+    consume_credential_request,
     create_credential_request,
     peek_credential_request,
 )
 from daimon.core.stores.task_continuations import list_pending_continuations
-from daimon.testing import list_response, ma_agent
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import list_response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -85,6 +89,18 @@ from .credential_helpers import (
 # ---------------------------------------------------------------------------
 
 
+async def _audited(work: Awaitable[None]) -> tuple[list[dict[str, Any]], AuditDecision]:
+    """Run a submission, returning its structured log events and its security-audit decision.
+
+    The events are what an operator reads to see which key was saved and how it ended;
+    the decision is what the audit trail records for a replacement gate. Discord and
+    Teams keep the same contract in their own event names.
+    """
+    with structlog.testing.capture_logs() as logs, capture_decision() as decision:
+        await work
+    return logs, decision
+
+
 async def _agent_file_rows(session: AsyncSession) -> list[Any]:
     result = await session.execute(
         text("SELECT tenant_id, agent_id, key FROM agent_files ORDER BY key")
@@ -93,7 +109,9 @@ async def _agent_file_rows(session: AsyncSession) -> list[Any]:
     for tenant_id, agent_id, key in result:
         row = await get_agent_file(session, tenant_id=tenant_id, agent_id=agent_id, key=key)
         assert row is not None
-        rows.append({"key": row.key, "content": row.content})
+        rows.append(
+            {"key": row.key, "content": row.content, "created_by": row.created_by_account_id}
+        )
     return rows
 
 
@@ -120,22 +138,36 @@ async def test_env_submission_consumes_row_and_writes_the_secret(
     await db_session.commit()
     runtime = _build_runtime(fernet_key, db_session_factory, anthropic_handler=ma_handler)
 
-    await run_env_credential_submission(
-        runtime,
-        team_id=_TEAM_ID,
-        user_id=_USER_ID,
-        channel_id=_CHANNEL_ID,
-        message_ts=_MESSAGE_TS,
-        token=token,
-        value="s3cr3t-value",
-        dispatch_continuations=_noop_dispatch,
+    logs, decision = await _audited(
+        run_env_credential_submission(
+            runtime,
+            team_id=_TEAM_ID,
+            user_id=_USER_ID,
+            channel_id=_CHANNEL_ID,
+            message_ts=_MESSAGE_TS,
+            token=token,
+            value="s3cr3t-value",
+            dispatch_continuations=_noop_dispatch,
+        )
     )
+    assert logs == [
+        {
+            "event": "credential_request.env.submit",
+            "key": "OPENAI_API_KEY",
+            "state": "applied",
+            "log_level": "info",
+        }
+    ], "one event names the key and the card state it ended in, and never the value"
+    assert decision == AuditDecision(), "adding a key records no policy decision"
 
     async with db_session_factory() as s:
         rows = await _agent_file_rows(s)
         row = await peek_credential_request(s, token=token)
     assert rows and rows[0]["key"] == "OPENAI_API_KEY"
     assert rows[0]["content"] == "s3cr3t-value"
+    assert rows[0]["created_by"] == derive_guild_account_uuid(tenant_id=tenant_id), (
+        "the stored key is owned by the account the request was made for"
+    )
     assert row is not None and row.used_at is not None, "the consume must have committed"
     edit = fake_slack_web_client.mock.requests[("POST", _CHAT_UPDATE_URL)][0].kwargs["json"]
     assert edit["text"] == "🔑 tester needs `OPENAI_API_KEY`", (
@@ -277,7 +309,16 @@ async def test_env_file_submission_writes_every_key_and_makes_the_card_the_recei
         fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
     )
 
-    await _run_env_file_submission(runtime, token)
+    logs, decision = await _audited(_run_env_file_submission(runtime, token))
+    assert logs == [
+        {
+            "event": "credential_request.env_file.submit",
+            "key_count": 2,
+            "keys": ["ALPHA_KEY", "BETA_KEY"],
+            "log_level": "info",
+        }
+    ], "the event names the keys saved and never a value"
+    assert decision == AuditDecision()
 
     async with db_session_factory() as s:
         rows = await _agent_file_rows(s)
@@ -286,6 +327,9 @@ async def test_env_file_submission_writes_every_key_and_makes_the_card_the_recei
         ("ALPHA_KEY", "alpha-private"),
         ("BETA_KEY", "beta-private"),
     ], "every key the file declared is stored, parsed by the documented grammar"
+    assert {r["created_by"] for r in rows} == {derive_guild_account_uuid(tenant_id=tenant_id)}, (
+        "every imported key is owned by the account the request was made for"
+    )
     assert row is not None and row.used_at is not None, "the consume commits with the writes"
     assert row.outcome == "applied", "the row records how the import ended"
     edits = _chat_updates(fake_slack_web_client)
@@ -377,7 +421,16 @@ async def test_env_file_submission_refuses_the_whole_import_when_a_key_already_e
         fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
     )
 
-    await _run_env_file_submission(runtime, token)
+    logs, decision = await _audited(_run_env_file_submission(runtime, token))
+    assert logs == [
+        {
+            "event": "credential_request.env_file_collision",
+            "key_count": 2,
+            "collision_count": 1,
+            "log_level": "info",
+        }
+    ], "the event counts keys and collisions and names neither"
+    assert decision == AuditDecision()
 
     async with db_session_factory() as s:
         rows = await _agent_file_rows(s)
@@ -400,6 +453,111 @@ async def test_env_file_submission_refuses_the_whole_import_when_a_key_already_e
         "a refusal names lines and keys, never values"
     )
     assert _ephemeral_texts(fake_slack_web_client), "the person who submitted is told directly too"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["env", "env_file"])
+@pytest.mark.parametrize("validity", ["expired", "used"])
+async def test_an_expired_or_spent_form_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    kind: str,
+    validity: str,
+) -> None:
+    """Neither an expired form nor one already spent stores a key, for a key or a file."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind=kind,
+        target=ENV_FILE_TARGET if kind == "env_file" else "OPENAI_API_KEY",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        expires_in=timedelta(minutes=-1) if validity == "expired" else timedelta(minutes=30),
+    )
+    if validity == "used":
+        await consume_credential_request(db_session, token=token, now=datetime.now(UTC))
+    await db_session.commit()
+    _patch_file_download(monkeypatch, b"ALPHA_KEY=alpha-private\n")
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    if kind == "env":
+        await _run_env(runtime, token, value="s3cr3t-value")
+    else:
+        await _run_env_file_submission(runtime, token)
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        row = await peek_credential_request(s, token=token)
+    assert rows == [], f"a {validity} form must never produce a write"
+    assert row is not None and row.outcome is None, "no outcome is recorded for a dead form"
+    assert not await _pending_continuations(db_session_factory, tenant_id=tenant_id), (
+        "no turn may be queued on a form that stored nothing"
+    )
+    assert any("no longer valid" in text for text in _ephemeral_texts(fake_slack_web_client)), (
+        "the submitter is told the request is dead"
+    )
+
+
+@pytest.mark.asyncio
+async def test_env_file_key_appearing_mid_write_rolls_back_the_whole_file(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The compare-and-set that fails on the second key undoes the first, and the form stays spent.
+
+    A key can be created between the collision read and the write. Slack rolls back the
+    consume with the writes, then spends the form again to record why nothing landed.
+    """
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
+    token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
+    await db_session.commit()
+    _patch_file_download(monkeypatch, b"FIRST_KEY=first-value\nSECOND_KEY=second-value\n")
+    real_put = credential_submit.put_agent_file_if_unchanged
+    seen: list[str] = []
+
+    async def fails_on_the_second_key(session: AsyncSession, **kwargs: Any) -> Any:
+        seen.append(str(kwargs["key"]))
+        return await real_put(session, **kwargs) if len(seen) == 1 else None
+
+    monkeypatch.setattr(credential_submit, "put_agent_file_if_unchanged", fails_on_the_second_key)
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    logs, decision = await _audited(_run_env_file_submission(runtime, token))
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        row = await peek_credential_request(s, token=token)
+    assert seen == ["FIRST_KEY", "SECOND_KEY"], "the write loop reaches the failing key"
+    assert rows == [], "the key written before the failure is undone with it"
+    assert row is not None and row.used_at is not None, "the form is spent either way"
+    assert row.outcome == "stale_replacement", "a key that appeared mid-write is a collision"
+    assert not await _pending_continuations(db_session_factory, tenant_id=tenant_id), (
+        "nothing was saved, so no turn may be queued on it"
+    )
+    rendered = json.dumps(_chat_updates(fake_slack_web_client)[-1]) + " ".join(
+        _ephemeral_texts(fake_slack_web_client)
+    )
+    assert "SECOND_KEY is already set" in rendered, "the refusal names the key that was already set"
+    assert "first-value" not in rendered and "second-value" not in rendered, "no value is shown"
+    assert logs == [
+        {
+            "event": "credential_request.env_file_collision",
+            "key_count": 2,
+            "collision_count": 1,
+            "log_level": "info",
+        }
+    ], "the event counts keys and collisions and names neither"
+    assert decision == AuditDecision()
 
 
 @pytest.mark.asyncio
@@ -830,12 +988,25 @@ async def test_stale_replacement_leaves_the_stored_value_alone_and_renders_super
     )
     await db_session.commit()
 
-    await _run_env(
-        _build_runtime(
-            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
-        ),
-        token,
-        value="my-replacement",
+    logs, decision = await _audited(
+        _run_env(
+            _build_runtime(
+                fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+            ),
+            token,
+            value="my-replacement",
+        )
+    )
+    assert logs == [
+        {
+            "event": "credential_request.env.submit",
+            "key": "OPENAI_API_KEY",
+            "state": "superseded",
+            "log_level": "info",
+        }
+    ], "a replacement that lost the race is logged with the state it rendered"
+    assert decision == AuditDecision(operation="key_replace", reason="policy_allow"), (
+        "the audit records the replacement gate allowing the submitter"
     )
 
     async with db_session_factory() as session:
@@ -895,13 +1066,26 @@ async def test_replacement_needs_admin_at_submit_renders_refused_and_writes_noth
     )
     await db_session.commit()
 
-    await _run_env(
-        _build_runtime(
-            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
-        ),
-        token,
-        value="my-replacement",
+    logs, decision = await _audited(
+        _run_env(
+            _build_runtime(
+                fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+            ),
+            token,
+            value="my-replacement",
+        )
     )
+    assert logs == [
+        {
+            "event": "credential_request.env.submit",
+            "key": "OPENAI_API_KEY",
+            "state": "refused",
+            "log_level": "info",
+        }
+    ], "a refused replacement is logged with the state it rendered"
+    assert decision == AuditDecision(
+        operation="key_replace", denied=True, reason="managed_agent"
+    ), "the audit records the replacement gate refusing a member on a shared agent"
 
     async with db_session_factory() as session:
         rows = await _agent_file_rows(session)
@@ -1314,7 +1498,8 @@ async def test_env_submission_without_crypto_keys_tells_the_person_and_keeps_the
     assert rows == [], "nothing is stored without encryption keys"
     assert row is not None and row.used_at is None, "the request stays live for a retry"
     texts = _ephemeral_texts(fake_slack_web_client)
-    assert texts and "DAIMON_CRYPTO__KEYS" in texts[-1], "the person learns the operator step"
+    assert texts and "no encryption key" in texts[-1], "the person learns the cause"
+    assert "DAIMON_" not in texts[-1], "no operator setting is shown to the person"
 
 
 @pytest.mark.asyncio
@@ -1341,11 +1526,13 @@ async def test_env_file_submission_without_crypto_keys_tells_the_person_and_keep
     assert rows == [], "nothing is stored without encryption keys"
     assert row is not None and row.used_at is None, "the request stays live for a retry"
     texts = _ephemeral_texts(fake_slack_web_client)
-    assert texts and "DAIMON_CRYPTO__KEYS" in texts[-1], "the person learns the operator step"
+    assert texts and "no encryption key" in texts[-1], "the person learns the cause"
+    assert "DAIMON_" not in texts[-1], "no operator setting is shown to the person"
 
 
 @pytest.mark.parametrize(
-    "target", ["R_PROFILE_USER", "TAR_OPTIONS", "SNOWFLAKE_USER", "AWS_REGION"]
+    "target",
+    ["R_PROFILE_USER", "TAR_OPTIONS", "SNOWFLAKE_USER", "AWS_REGION", "1BAD", "LD_PRELOAD"],
 )
 async def test_env_submission_member_cannot_store_a_non_secret_name(
     db_session: AsyncSession,
@@ -1414,6 +1601,43 @@ async def test_env_submission_admin_may_store_an_identity_name(
     async with db_session_factory() as s:
         rows = await _agent_file_rows(s)
     assert [r["key"] for r in rows] == ["SNOWFLAKE_USER"], "an admin may add an identity name"
+
+
+async def test_env_submission_admin_cannot_store_a_tool_control_name(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A name that changes how the agent's tools run is refused to everyone, admins included."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_credentials", name="specialist", tenant_id=tenant_id)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="env",
+        target="LD_PRELOAD",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=live_agent.id),
+        origin_thread_id=_ORIGIN_THREAD,
+        target_ma_agent_id=live_agent.id,
+    )
+    await db_session.commit()
+    _override_users_info_admin(fake_slack_web_client.mock)
+
+    await _run_env(
+        _build_runtime(
+            fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+        ),
+        token,
+    )
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        request_row = await peek_credential_request(s, token=token)
+    assert rows == [], "no one may store LD_PRELOAD"
+    assert request_row is not None and request_row.used_at is None, "a refusal spends nothing"
+    assert any("LD_PRELOAD" in text for text in _ephemeral_texts(fake_slack_web_client)), (
+        "the refusal names the key"
+    )
 
 
 async def test_mcp_attach_failure_publishes_no_token(
@@ -1973,6 +2197,47 @@ async def test_env_submission_decides_a_late_pin_inside_the_consume(
         value="s3cr3t-value",
         dispatch_continuations=_noop_dispatch,
     )
+
+    async with db_session_factory() as s:
+        rows = await _agent_file_rows(s)
+        row = await peek_credential_request(s, token=token)
+    assert rows == [], "nothing is saved"
+    assert row is not None and row.used_at is None, "the refused form was not spent"
+    assert PIN_WRITE_REFUSAL in _ephemeral_texts(fake_slack_web_client)
+
+
+@pytest.mark.asyncio
+async def test_env_file_submission_decides_a_late_pin_inside_the_consume(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pin landing after the early check refuses the file in the consume transaction."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.agent_pins import PIN_WRITE_REFUSAL
+    from daimon.core.stores.access_policy import set_access_policy
+
+    tenant_id, fernet_key = await _seed_team(db_session)
+    live_agent = ma_agent(id="agent_env_file", name="specialist", tenant_id=tenant_id)
+    token = await _seed_env_file_request(db_session, tenant_id=tenant_id, live_agent=live_agent)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(agent_channel_pins={"specialist": ("C_ELSEWHERE",)}),
+    )
+    await db_session.commit()
+    _patch_file_download(monkeypatch, b"ALPHA_KEY=alpha-private\n")
+
+    async def early_check_passes(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(credential_submissions_mod, "request_pin_refusal", early_check_passes)
+    runtime = _build_runtime(
+        fernet_key, db_session_factory, anthropic_handler=_agents_handler(live_agent)
+    )
+
+    await _run_env_file_submission(runtime, token)
 
     async with db_session_factory() as s:
         rows = await _agent_file_rows(s)

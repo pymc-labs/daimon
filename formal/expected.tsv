@@ -342,6 +342,18 @@ github_session_token	SessionToken	UnsafeRemoved	violates:RemovedAccessInvalid	6	
 github_session_token	SessionToken	UnsafeLongLock	violates:NoNetworkUnderLock	5	-	grant lock held across GitHub mint
 github_session_token	GrantInstall	GrantSafe	clean	8	-	locked grants from both installations persist
 github_session_token	GrantInstall	GrantUnsafe	violates:CompletedGrantsPersist	31	-	stale read-then-write loses a completed cross-installation grant
+github_session_token	GrantCap	GrantCapSafe	clean	10	-	locked staging refuses a third distinct installation at the scaled cap of two
+github_session_token	GrantCap	GrantCapUnsafe	violates:WithinCap	8	-	staging without the cap admits a third installation
+github_session_token	GrantAdmission	GrantAdmissionBudgetSafe	clean	2	-	501st repo equivalent is refused before a third named token chunk exceeds the vault budget
+github_session_token	GrantAdmission	GrantAdmissionBudgetUnsafe	violates:WithinBudget	2	-	admitting a new chunk exceeds the vault budget
+github_session_token	GrantAdmission	GrantAdmissionReadSafe	clean	2	-	read-only A grant blocks adding B in multi mode
+github_session_token	GrantAdmission	GrantAdmissionReadUnsafe	violates:MultiWrite	2	-	adding B beside read-only A leaves a session that cannot mint
+github_grant_locks	GrantLocks	GrantLocksSafe	clean	56	-	tenant lock serializes batch activation, cross-agent confirmation and nested completion
+github_grant_locks	GrantLocks	GrantLocksCrossSafe	clean	20	-	tenant lock serializes opposing confirmation agent-lock orders
+github_grant_locks	GrantLocks	GrantLocksNestedSafe	clean	18	-	tenant lock serializes a late draft and nested request completion
+github_grant_locks	GrantLocks	GrantLocksBroken	deadlock	11	-	batch holds x and agent a while confirmation holds y
+github_grant_locks	GrantLocks	GrantLocksCrossBroken	deadlock	16	-	cross-agent confirmations hold opposite agent locks
+github_grant_locks	GrantLocks	GrantLocksNestedBroken	deadlock	11	-	nested completion finds late draft y after agent a lock
 github_session_token	MultiInstallation	MultiSafe	clean	5593	-	per-installation scope and expiry, rotation, B grant remint, helper read/return race
 github_session_token	MultiInstallation	MultiSingleToken	violates:GrantedReachable	3	-	guard removed but only one token leaves B unreachable
 github_session_token	MultiInstallation	MultiFallback	violates:ResultScoped	28	-	helper fallback returns A token for uncovered B repo
@@ -390,3 +402,15 @@ tool_rules	ToolRules	ToolRulesSnapshot	violates:RunAuthorized	37	-	unsafe: rules
 tool_rules	ToolRules	ToolRulesAnyClicker	violates:RunAuthorized	61	-	unsafe: a non-admin's Always allow runs the call
 tool_rules	ToolRules	ToolRulesBlindUpsert	violates:NoResurrection	553	-	unsafe: a save from before a clear restores the rule
 tool_rules	ToolRules	ToolRulesSaveIfLost	violates:SaveFollowsSettlement	534	-	unsafe: a click that lost to expiry or Deny still saves a rule
+# ---- upstream session cleanup when create_ma_session fails after sessions.create ----
+session_create_cleanup	SessionCreateCleanup	CleanupSafe	clean	48	-	create_ma_session archives its session on a failure in the lookup window; every caller archive and the adopt path keep the invariants
+session_create_cleanup	SessionCreateCleanup	CleanupSafeReplay	clean	65	-	fixed rule with a replayed recorded create, row-named or not: the window archives it only when no row names it, and never an adopted session
+session_create_cleanup	SessionCreateCleanup	CleanupReplayUnconditional	violates:WindowNeverArchivesNamed	10	-	rejected rule: the window archives a replayed session without asking whether a row names it
+session_create_cleanup	SessionCreateCleanup	CleanupReplayCallerArchives	violates:NoArchiveNamed	20	-	residual: a caller (native worker, prepare.py) that archives a replayed row-named session it holds on failure
+session_create_cleanup	SessionCreateCleanup	CleanupReplayReadFails	violates:NoOrphan	8	-	accepted trade-off: when the row read fails a replayed session is left alone and stays live
+session_create_cleanup	SessionCreateCleanup	CleanupOldCode	violates:NoOrphan	8	-	pre-fix: a cancel or database error in the personal-memory lookup leaves a live upstream session no row names
+session_create_cleanup	SessionCreateCleanup	CleanupArchivesAdopted	violates:NoArchiveAdopted	7	-	rejected design: a caller that archives whatever it holds on failure archives an adopted session
+session_create_cleanup	SessionCreateCleanup	CleanupCallerNoCleanup	violates:NoOrphan	15	-	residual: a caller with no archive after create_ma_session returns (create_fresh_session) leaks on cancel before the row commits
+session_create_cleanup	SessionCreateCleanup	CleanupAmbiguousCommit	violates:NoArchiveNamed	22	-	residual: a commit that lands but raises makes the caller archive a session its row names
+session_create_cleanup	SessionCreateCleanup	CleanupWitnessWindow	violates:NoWindowCleanup	8	-	witness: the window cleanup is reachable
+session_create_cleanup	SessionCreateCleanup	CleanupWitnessSuccess	violates:NoCreatedSuccess	21	-	witness: a created session reaches a committed row

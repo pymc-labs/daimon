@@ -93,8 +93,12 @@ async def check_channel_access(
     channel: dict[str, Any],
     user_id: str,
     allow_own_im: bool = False,
+    is_client: bool = False,
 ) -> None:
     """Raise ToolError(MISSING_ACCESS) unless ``user_id`` may view ``channel``.
+
+    ``is_client`` marks a caller from another organisation: like a guest, they see a
+    public channel only as a member, whatever ``users.info`` says.
 
     ``channel`` is a ``conversations.info`` channel object. Public channels
     skip the membership scan for full members (one users.info call decides).
@@ -108,7 +112,7 @@ async def check_channel_access(
     if is_im_or_mpim:
         raise ToolError(MISSING_ACCESS)
     is_private = bool(channel.get("is_private"))
-    is_guest = await _is_guest(client, user_id=user_id)
+    is_guest = is_client or await _is_guest(client, user_id=user_id)
     needs_membership = is_private or is_guest
     is_member = (
         await _is_user_in_channel(client, channel_id=str(channel["id"]), user_id=user_id)

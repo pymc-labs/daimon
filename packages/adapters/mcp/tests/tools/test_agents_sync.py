@@ -26,9 +26,10 @@ from daimon.adapters.mcp.tools.agents import (
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.domain import Role
-from daimon.testing import build_fake_anthropic, ma_agent, make_fernet
+from daimon.testing import make_fernet
 from daimon.testing.factories import make_cli_principal
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # ---------------------------------------------------------------------------

@@ -6,12 +6,12 @@ from anthropic import APIStatusError, omit
 from daimon.core.defaults.ma_index import SkillVersionNotFoundError, download_skill_version
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import legacy_call, legacy_iter
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport
 from mux.drivers.anthropic.resources.skills import AnthropicSkillVersions
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 
 async def main_download(client, *, skill_id, version):

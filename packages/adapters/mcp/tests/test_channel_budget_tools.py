@@ -158,6 +158,8 @@ async def _origin(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
             chat_session_id="test-session",
@@ -239,7 +241,7 @@ async def test_mutations_and_listing_are_admin_only(
     async with committing_sessionmaker.begin() as session:
         await make_channel_budget(session, tenant=tenant, channel_id=_PARENT)
 
-    with pytest.raises(ToolError, match="(requires|needs) a workspace or server admin"):
+    with pytest.raises(ToolError, match="(requires|needs) a server admin"):
         if call == "list":
             await _list_channel_budgets_impl(runtime, member)
         elif call == "set":
@@ -300,7 +302,7 @@ async def test_callers_without_a_chat_platform_are_refused(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
-    with pytest.raises(ToolError, match="only for Discord, Slack and Teams channels"):
+    with pytest.raises(ToolError, match="channel budgets aren't available here"):
         await _list_channel_budgets_impl(
             _runtime(committing_sessionmaker),
             _auth(tenant, account_id, admin=True, platform="cli"),

@@ -20,6 +20,23 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+async def lock_for_reconciliation(
+    session: AsyncSession, *, installation_id: int
+) -> GitHubAppInstallation | None:
+    """Lock an installation before its reconciliation row, including absent rows."""
+    # The advisory lock covers a new installation that has no row to lock yet.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"github-installation-reconciliation:{installation_id}"},
+    )
+    return await session.scalar(
+        select(GitHubAppInstallation)
+        .where(GitHubAppInstallation.installation_id == installation_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
 async def upsert(
     session: AsyncSession,
     *,
@@ -28,6 +45,7 @@ async def upsert(
     repo_full_names: list[str],
 ) -> GitHubAppInstallationRow:
     """Replace the cached repository set with a complete trusted snapshot."""
+    await lock_for_reconciliation(session, installation_id=installation_id)
     stmt = (
         pg_insert(GitHubAppInstallation)
         .values(
@@ -63,6 +81,7 @@ async def upsert_github_app(
     suspended_at: datetime | None,
 ) -> GitHubAppInstallationRow:
     """Record new-App metadata and the confirmed repository set in one transaction."""
+    await lock_for_reconciliation(session, installation_id=installation_id)
     await session.flush()
     names = await session.scalars(
         select(TenantGitHubRepo.repo_full_name).where(
@@ -106,6 +125,32 @@ async def get(
     if orm is None:
         return None
     return GitHubAppInstallationRow.model_validate(orm)
+
+
+async def correct_github_app_owner(
+    session: AsyncSession,
+    *,
+    installation_id: int,
+    account_id: int,
+    account_login: str,
+) -> tuple[str, int | None] | None:
+    """Correct a live App row from GitHub's owner identity; return its old identity."""
+    await lock_for_reconciliation(session, installation_id=installation_id)
+    row = await session.scalar(
+        select(GitHubAppInstallation)
+        .where(
+            GitHubAppInstallation.installation_id == installation_id,
+            GitHubAppInstallation.app == "github_app",
+        )
+        .with_for_update()
+    )
+    if row is None or (row.account_id == account_id and row.account_login == account_login):
+        return None
+    previous = (row.account_login, row.account_id)
+    row.account_id = account_id
+    row.account_login = account_login
+    await session.flush()
+    return previous
 
 
 async def get_for_repo(

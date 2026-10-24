@@ -24,16 +24,16 @@ from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     build_no_retry_anthropic,
     json_body,
     list_response,
 )
-from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _ALLOW_ALL: dict[str, Any] = {"enabled": True, "permission_policy": {"type": "always_allow"}}
@@ -276,7 +276,7 @@ async def test_detach_mcp_server_impl_refuses_non_admin_on_the_seeded_agent(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs an admin"):
         await _detach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -343,7 +343,7 @@ async def test_detach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs an admin"):
         await _detach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -608,7 +608,7 @@ async def test_remove_skill_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs its owner or an admin"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -1026,7 +1026,7 @@ async def test_remove_agent_key_impl_refuses_non_admin_on_default_agent_and_dele
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
     runtime = _runtime(client, session_factory=db_session_factory)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs an admin"):
         await _remove_agent_key_impl(runtime, auth, agent_name="scoped-agent", key="SHARED_KEY")
 
     admin = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
@@ -1217,7 +1217,7 @@ async def _assert_remove_then_add_refused(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
 
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs an admin"):
         await _remove_agent_key_impl(runtime, auth, agent_name=agent_name, key="GITLAB_TOKEN")
     async with db_session_factory() as session:
         row = await get_agent_file(
@@ -1323,7 +1323,7 @@ async def test_detach_mcp_server_refused_when_display_and_routing_names_differ(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs an admin"):
         await _detach_mcp_server_impl(
             _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory),
             auth,

@@ -21,8 +21,8 @@ from daimon.core.stores.domain import ChatPlatform, Role
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -81,6 +81,8 @@ async def test_create_list_and_cancel_a_timer_from_a_turn(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         timer = await _create_timer_impl(
             runtime,
@@ -142,6 +144,8 @@ async def test_create_timer_refuses_a_time_without_an_offset(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="UTC offset"):
             await _create_timer_impl(

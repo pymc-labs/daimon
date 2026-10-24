@@ -11,13 +11,15 @@ import binascii
 import json
 import os
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from daimon.core.mcp_server_url import canonical_mcp_url
+from daimon.core.scope_cascade import CascadeMode
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import (
@@ -511,6 +513,27 @@ class HubSettings(BaseModel):
     @property
     def discord_configured(self) -> bool:
         return self.discord_client_id is not None and self.discord_client_secret is not None
+
+
+class ProgressPlansSettings(BaseModel):
+    """Progress plans: the agent keeps a short plan the working card draws.
+
+    `mode` is the deployment tier of the same cascade thread participation
+    uses (deployment, workspace, channel, thread); the agent's
+    `set_progress_plans` tool writes the other tiers when a person asks.
+    """
+
+    mode: CascadeMode = Field(
+        default=CascadeMode.OFF,
+        description=(
+            'Deployment default for progress plans on the "Working on it…" card (Discord, '
+            "Slack and Teams). On, the agent keeps a short checklist of a longer task's "
+            "steps on the card and may add one-line updates on what it found and does "
+            "next. off: shown only where a workspace, channel or thread is turned on. "
+            "disabled: never shown, and cannot be turned on. on: shown everywhere unless "
+            "turned off below."
+        ),
+    )
 
 
 class ThreadParticipationSettings(BaseModel):
@@ -1193,6 +1216,151 @@ class CredentialsSettings(BaseModel):
     )
 
 
+class McpCredentialBinding(BaseModel):
+    """Operator authority for one harness credential, never its secret value."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(pattern=r"^HARNESS_MCP_CRED_[A-Za-z0-9_]+$")
+    origin: str
+    tenants: tuple[UUID, ...] | tuple[Literal["*"],]
+
+    @field_validator("origin")
+    @classmethod
+    def exact_https_origin(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() or ord(char) < 32 for char in value)
+        ):
+            raise ValueError("MCP credential binding requires an exact HTTPS origin")
+        port = parsed.port
+        host = parsed.hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        return f"https://{host}" + (f":{port}" if port not in (None, 443) else "")
+
+    @field_validator("tenants")
+    @classmethod
+    def nonempty_tenants(
+        cls, value: tuple[UUID, ...] | tuple[Literal["*"],]
+    ) -> tuple[UUID, ...] | tuple[Literal["*"],]:
+        if not value:
+            raise ValueError("MCP credential binding requires at least one tenant")
+        return value
+
+
+class HarnessAuthBinding(McpCredentialBinding):
+    """Operator authority for a harness bearer variable or Entra audience."""
+
+    name: str = Field(min_length=1)
+    auth_mode: Literal["bearer_env", "entra"] = "bearer_env"
+
+    @model_validator(mode="after")
+    def valid_reference(self) -> HarnessAuthBinding:
+        from mux.drivers.selfhosted import SESSION_POOL_AUDIENCE, HarnessConfig
+
+        # A binding authorizes an audience/origin, not an environment's routing.
+        # Validate the fixed pool audience in its required routing mode here;
+        # the actual environment must still explicitly opt into session_pool.
+        HarnessConfig(
+            harness_url=self.origin,
+            auth_mode=self.auth_mode,
+            auth_ref=self.name,
+            session_pool=self.auth_mode == "entra" and self.name == SESSION_POOL_AUDIENCE,
+        )
+        if self.auth_mode == "bearer_env" and not self.name.startswith(
+            "DAIMON_SELFHOSTED__HARNESS_TOKEN_"
+        ):
+            raise ValueError("Harness bearer binding requires an operator token variable")
+        return self
+
+
+class SelfHostedSettings(BaseModel):
+    """Operator opt-in for the self-hosted turn runtime."""
+
+    admission_enabled: bool = Field(
+        default=False,
+        description=(
+            "Allow explicitly configured selfhosted channels to pass backend admission. "
+            "Default false. Enabling this still requires the profile's usage observations "
+            "capability and a configured self-hosted core runtime."
+        ),
+    )
+
+    single_tenant: bool = Field(
+        default=False,
+        description=(
+            "Declare this self-hosted installation single-tenant. Required for wildcard "
+            "MCP credential bindings; leave false for shared installations."
+        ),
+    )
+    mcp_allowed_http_hosts: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Operator-authorized exact hostnames or IP literals for credential-free HTTP MCP "
+            "connections to private, link-local or metadata destinations. Empty by default. "
+            "Loopback remains allowed; credential-bearing connections still require HTTPS."
+        ),
+    )
+
+    harness_auth_bindings: tuple[HarnessAuthBinding, ...] = Field(
+        default=(),
+        description=(
+            "JSON list of harness auth bindings: auth_mode (bearer_env or entra), name "
+            "(DAIMON_SELFHOSTED__HARNESS_TOKEN_* variable or exact Entra audience), "
+            "origin (exact HTTPS origin), tenants (UUID list). Unbound names and destinations "
+            "are refused before credential resolution. Wildcards require single_tenant."
+        ),
+    )
+
+    @field_validator("harness_auth_bindings")
+    @classmethod
+    def unique_harness_names(
+        cls, value: tuple[HarnessAuthBinding, ...]
+    ) -> tuple[HarnessAuthBinding, ...]:
+        if len({(binding.auth_mode, binding.name) for binding in value}) != len(value):
+            raise ValueError("Harness credential binding names must be unique")
+        return value
+
+    mcp_credential_bindings: tuple[McpCredentialBinding, ...] = Field(
+        default=(),
+        description=(
+            "JSON list of operator MCP credential bindings: each has name "
+            "(HARNESS_MCP_CRED_*), origin (exact HTTPS origin), and tenants (UUID list). "
+            "Unbound references, other origins and other tenants are refused. "
+            'Use tenants=["*"] only for a single-tenant installation. Configure the '
+            "harness HARNESS_MCP_CRED_BINDINGS from the same operator source."
+        ),
+    )
+
+    @field_validator("mcp_credential_bindings")
+    @classmethod
+    def unique_names(
+        cls, value: tuple[McpCredentialBinding, ...]
+    ) -> tuple[McpCredentialBinding, ...]:
+        if len({binding.name for binding in value}) != len(value):
+            raise ValueError("MCP credential binding names must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def wildcard_requires_single_tenant(self) -> SelfHostedSettings:
+        if not self.single_tenant and any(
+            b.tenants == ("*",)
+            for b in (*self.mcp_credential_bindings, *self.harness_auth_bindings)
+        ):
+            raise ValueError(
+                "Wildcard MCP credential bindings require a single-tenant installation"
+            )
+        return self
+
+
 class GeminiSettings(BaseModel):
     """Optional Gemini API credentials for media MCP tools.
 
@@ -1306,6 +1474,82 @@ class SentrySettings(BaseModel):
     )
 
 
+class SelfhostedModelPrice(BaseModel):
+    """One effective Azure tariff, in USD/M tokens."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    effective_from: date
+    input: Decimal = Field(gt=0, allow_inf_nan=False)
+    output: Decimal = Field(gt=0, allow_inf_nan=False)
+    cache_read: Decimal = Field(ge=0, allow_inf_nan=False)
+    valid_before: date | None = None
+
+    @model_validator(mode="after")
+    def validate_window(self) -> SelfhostedModelPrice:
+        if self.valid_before is not None and self.valid_before <= self.effective_from:
+            raise ValueError("pricing validity must extend beyond its effective date")
+        return self
+
+
+class SelfhostedBillingSettings(BaseModel):
+    """Explicit deployment identities and effective tariff history per model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    admission_clock_skew_s: float = Field(
+        default=5,
+        ge=0,
+        le=60,
+        allow_inf_nan=False,
+        description=(
+            "Maximum harness clock lag in seconds when associating usage with an existing "
+            "tariff admission. Frozen at admission; default 5, maximum 60. "
+            "This tolerance never creates an admission or selects current prices."
+        ),
+    )
+
+    deployments: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "JSON object mapping selfhosted Azure deployment names to underlying model ids. "
+            "Targets must have configured tariffs and aliases cannot shadow another model. "
+            "The runtime must call the tariff admission gate before paid model work; "
+            "these settings alone do not enable refusal or execution."
+        ),
+    )
+    models: dict[str, list[SelfhostedModelPrice]] = Field(
+        default_factory=dict,
+        description=(
+            "JSON object keyed by underlying Azure OpenAI model id, each containing a list "
+            "of historical tariffs. Each requires effective_from (ISO date), input, output "
+            "and cache_read (USD per million tokens); optional valid_before expires a row. "
+            "A newer effective_from ends the previous open window. Retain historical rows. "
+            "Supply verified regional/contract rates; input/output must be positive. "
+            "Runtime admission must persist the selected tariff before paid work."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_tariffs(self) -> SelfhostedBillingSettings:
+        for model, history in self.models.items():
+            if not model.strip() or not history:
+                raise ValueError("models require a nonempty identity and tariff history")
+            ordered = sorted(history, key=lambda rate: rate.effective_from)
+            for previous, following in zip(ordered, ordered[1:], strict=False):
+                if previous.effective_from == following.effective_from or (
+                    previous.valid_before is not None
+                    and previous.valid_before > following.effective_from
+                ):
+                    raise ValueError("model tariff windows must not overlap")
+        for deployment, model in self.deployments.items():
+            if not deployment.strip() or model not in self.models:
+                raise ValueError("deployments must map to a priced underlying model")
+            if deployment in self.models and deployment != model:
+                raise ValueError("deployment alias cannot shadow another model")
+        return self
+
+
 class BillingSettings(BaseModel):
     """Money policy: markup multiplier and trial credit seed.
 
@@ -1321,6 +1565,7 @@ class BillingSettings(BaseModel):
             "the tenant. 1.0 = pass-through."
         ),
     )
+    selfhosted: SelfhostedBillingSettings = Field(default_factory=SelfhostedBillingSettings)
     signup_credit: Decimal = Field(
         default=Decimal("10.00"),
         description=(
@@ -1328,6 +1573,31 @@ class BillingSettings(BaseModel):
             "provisioned, so a freshly-installed tenant can chat immediately "
             "on trial credit before paying. Set to 0 to require payment "
             "before use."
+        ),
+    )
+    gemini_daily_model_cap_usd: Decimal = Field(
+        default=Decimal("20"),
+        ge=0,
+        description=(
+            "Most a tenant may spend each UTC day on any one Gemini model, in provider "
+            "USD at list price, counted across every agent turn and fleet worker. A "
+            "Gemini agent turn has no token envelope and its usage reaches no ledger "
+            "debit, so this is the guard. Checked as each turn or worker starts, for "
+            "its first request's model and any Flash fallback of it, never mid-turn; "
+            "a model with no current tariff is refused, and an unpriced fallback never "
+            "runs. It resets at midnight UTC. 0 allows no Gemini turns."
+        ),
+    )
+    openai_daily_model_cap_usd: Decimal = Field(
+        default=Decimal("20"),
+        ge=0,
+        description=(
+            "Most a tenant may spend each UTC day on any one OpenAI model, in provider "
+            "USD at list price, counted across every agent turn and fleet worker. "
+            "OpenAI sessions carry no native spend limit on this project, so this is "
+            "the guard. Checked as each turn or worker starts, never mid-turn; a model "
+            "with no current tariff is refused. It resets at midnight UTC. 0 allows no "
+            "OpenAI turns."
         ),
     )
 
@@ -1435,13 +1705,19 @@ class SupportSettings(BaseModel):
 
 
 class TurnSettings(BaseModel):
-    """Experimental neutral turn ports; legacy remains the default."""
+    """Neutral turn ports. mux and backend selection are on by default.
+
+    `path`, `channel_backends` and `agent_backends` are emergency stops, not setup:
+    a fresh install needs none of them. Setting one off stops new turns at
+    admission and queued or retried work before it is sent again.
+    """
 
     path: Literal["legacy", "mux"] = Field(
-        default="legacy",
+        default="mux",
         description=(
-            "Experimental turn I/O path. legacy (the default) preserves the current "
-            "behavior; mux opts into neutral Events/Sessions ports. Off by default."
+            "Turn I/O path. mux (the default) runs turns through the neutral "
+            "Events/Sessions ports. Emergency stop only: legacy returns every turn "
+            "to the Managed Agents-only path."
         ),
     )
 
@@ -1456,30 +1732,45 @@ class TurnSettings(BaseModel):
     )
 
     channel_backends: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Read each channel's backend configuration at admission. Off by default: "
-            "no channel's configuration is read and every turn runs as before. On: a "
-            "channel with no backend configuration is unchanged; a configured one is "
-            "checked against its profile and refused (backend_unsupported) if the "
-            "profile cannot meet it or this release cannot run it yet."
+            "Read each agent's and channel's backend configuration at admission. On by "
+            "default: a channel with no backend configuration is unchanged; a "
+            "configured one is checked against its profile and refused "
+            "(backend_unsupported) if the profile cannot meet it or this release cannot "
+            "run it yet. Emergency stop only: false reads no backend configuration and "
+            "every turn runs on Anthropic as before."
         ),
     )
 
     agent_backends: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Capture complete scoped source and resource intent for an agent-selected "
             "native backend. Unproved obligations are refused; counterpart identity "
-            "readback alone never authorizes execution. "
-            "Requires mux and channel_backends; off by default."
+            "readback alone never authorizes execution. Requires mux and "
+            "channel_backends; on by default. Emergency stop only: false refuses "
+            "agent-selected native backends."
+        ),
+    )
+
+    status_log: bool = Field(
+        default=False,
+        description=(
+            "Keep each message the agent writes apart in its answer. Off by default: "
+            "consecutive messages from the agent are joined into one block of text. On: an "
+            "answer made of several messages keeps every one, set apart by a blank line "
+            'instead of being run together. Either way the "Working on it…" card shows the '
+            "last three messages the agent wrote, oldest first, one line each (cut at 120 "
+            "characters)."
         ),
     )
 
     @field_validator("path", mode="before")
     @classmethod
-    def _empty_path_is_legacy(cls, value: object) -> object:
-        return "legacy" if value == "" else value
+    def _empty_path_is_the_default(cls, value: object) -> object:
+        # An empty value is how compose passes an unset variable: the default, not a stop.
+        return "mux" if value == "" else value
 
 
 class ThreadNamingSettings(BaseModel):
@@ -1557,15 +1848,43 @@ class PrivacySettings(BaseModel):
 class ArtifactsSettings(BaseModel):
     """Optional private object storage for hosted-client artifacts."""
 
+    backend: Literal["s3", "azure_blob"] = Field(
+        default="s3",
+        description="Artifact storage backend: s3 (default) or azure_blob.",
+    )
     endpoint_url: HttpUrl = Field(
-        description="S3-compatible bucket endpoint; used for uploads and presigned GET URLs.",
+        description=(
+            "S3-compatible endpoint or Azure Blob account URL "
+            "(https://<account>.blob.core.windows.net); used for uploads and signed GET URLs."
+        ),
     )
     bucket: str = Field(
         min_length=1,
-        description="Private bucket name. Daimon never applies a public-read ACL.",
+        description="Private S3 bucket or Azure Blob container name; provision it before startup.",
     )
-    access_key_id: SecretStr = Field(description="S3-compatible access key id.")
-    secret_access_key: SecretStr = Field(description="S3-compatible secret access key.")
+    access_key_id: SecretStr = Field(
+        default=SecretStr(""), description="S3 access key id; required only for the s3 backend."
+    )
+    secret_access_key: SecretStr = Field(
+        default=SecretStr(""), description="S3 secret access key; required only for the s3 backend."
+    )
+    azure_connection_string: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Local Azurite connection string only; BlobEndpoint must match the loopback "
+            "endpoint_url. Leave unset on Azure; managed identity signs user-delegation SAS "
+            "without account keys."
+        ),
+    )
+    azure_client_id: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "User-assigned managed identity client id; required for azure_blob except local "
+            "Azurite. ManagedIdentityCredential uses only this identity, with no environment "
+            "service-principal or developer-login fallback."
+        ),
+    )
     region: str = Field(
         default="us-east-1",
         min_length=1,
@@ -1584,6 +1903,56 @@ class ArtifactsSettings(BaseModel):
             "when a hosted client cannot accept image content."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_backend(self) -> ArtifactsSettings:
+        if self.backend == "azure_blob":
+            if self.access_key_id.get_secret_value() or self.secret_access_key.get_secret_value():
+                raise ValueError(
+                    "azure_blob artifacts reject S3 access_key_id and secret_access_key"
+                )
+            if (
+                self.endpoint_url.query is not None
+                or self.endpoint_url.fragment is not None
+                or self.endpoint_url.username is not None
+                or self.endpoint_url.password is not None
+                or (
+                    self.azure_connection_string is None
+                    and self.endpoint_url.path not in {None, "/"}
+                )
+            ):
+                raise ValueError(
+                    "Azure endpoint_url must be an account URL without path, query or userinfo"
+                )
+        if self.backend == "s3":
+            if (
+                not self.access_key_id.get_secret_value()
+                or not self.secret_access_key.get_secret_value()
+            ):
+                raise ValueError("s3 artifacts require access_key_id and secret_access_key")
+            if self.azure_connection_string is not None:
+                raise ValueError("azure_connection_string requires the azure_blob backend")
+        elif self.azure_connection_string is not None:
+            parts = {
+                key.upper(): value
+                for part in self.azure_connection_string.get_secret_value().split(";")
+                if "=" in part
+                for key, value in [part.split("=", 1)]
+            }
+            endpoint = parts.get("BLOBENDPOINT", "")
+            parsed = urlsplit(endpoint)
+            if (
+                parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+                or endpoint.rstrip("/") != str(self.endpoint_url).rstrip("/")
+                or "BLOBSECONDARYENDPOINT" in parts
+                or "USEDEVELOPMENTSTORAGE" in parts
+            ):
+                raise ValueError("Azurite BlobEndpoint must match the loopback endpoint_url")
+        elif self.endpoint_url.scheme != "https":
+            raise ValueError("Azure Blob managed identity requires an HTTPS endpoint_url")
+        elif not self.azure_client_id:
+            raise ValueError("azure_blob artifacts require DAIMON_ARTIFACTS__AZURE_CLIENT_ID")
+        return self
 
 
 class DirectMessagePolicy(BaseModel):
@@ -1684,16 +2053,23 @@ class TurnQueueSettings(BaseModel):
 
 
 class FleetSettings(BaseModel):
-    """Orchestrated worker fleets (``DAIMON_FLEET__*``). Off by default.
+    """Orchestrated worker fleets (``DAIMON_FLEET__*``). On by default.
 
     An orchestrator turn fans out to worker turns on any enabled backend. Their
     concurrency is a pool of its own, counted from the durable worker rows, so a
-    fan-out never takes the chat turns' slots.
+    fan-out never takes the chat turns' slots. Each agent still needs its own fleet
+    grant and stays inside the tenant's budgets.
     """
 
     enabled: bool = Field(
-        default=False,
-        description="Allow orchestrator turns to start worker fleets. Off by default.",
+        default=True,
+        description=(
+            "Allow orchestrator turns to start worker fleets. On by default. Emergency "
+            "stop only: false refuses new fleets and new workers before they are funded, "
+            "and holds finished-worker wakes until it is on again; the run's deadline "
+            "sweep ends what is left. Fleets also stop when the turn path or either "
+            "backend flag is off."
+        ),
     )
     max_workers_per_run: int = Field(
         default=8,
@@ -1928,6 +2304,10 @@ class Settings(BaseSettings):
         default_factory=ThreadParticipationSettings,
         description="Replying in threads unprompted. See ThreadParticipationSettings.",
     )
+    progress_plans: ProgressPlansSettings = Field(
+        default_factory=ProgressPlansSettings,
+        description="The agent's plan on the working card. See ProgressPlansSettings.",
+    )
     slack: SlackSettings | None = None
     teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
@@ -1935,6 +2315,7 @@ class Settings(BaseSettings):
     microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
+    selfhosted: SelfHostedSettings = Field(default_factory=SelfHostedSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     notebook: NotebookSettings = Field(default_factory=NotebookSettings)
     report_host: ReportHostSettings = Field(default_factory=ReportHostSettings)
@@ -1960,7 +2341,7 @@ class Settings(BaseSettings):
     artifacts: ArtifactsSettings | None = Field(
         default=None,
         description=(
-            "Optional private S3-compatible store for presigned chart links. "
+            "Optional private S3-compatible or Azure Blob store for signed chart links. "
             "Bounded image embeds still run when this is unset."
         ),
     )
@@ -2101,3 +2482,39 @@ class _WatchesSettingsSource(BaseSettings):
 def load_watches_settings() -> WatchesSettings:
     """Read the producer gate without loading unrelated credentials or local dotenv files."""
     return _WatchesSettingsSource().watches
+
+
+class _SelfHostedSettingsSource(BaseSettings):
+    """Admission settings without unrelated API or database configuration."""
+
+    selfhosted: SelfHostedSettings = Field(default_factory=SelfHostedSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+
+def load_selfhosted_settings(*, _env_file: str | None = ".env") -> SelfHostedSettings:
+    """Read the operator admission switch without constructing provider clients."""
+    return _SelfHostedSettingsSource(_env_file=_env_file).selfhosted  # pyright: ignore[reportCallIssue]
+
+
+class _BillingSettingsSource(BaseSettings):
+    """Tariff discovery without unrelated provider or database configuration."""
+
+    billing: BillingSettings = Field(default_factory=BillingSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+
+def load_billing_settings(*, _env_file: str | None = ".env") -> BillingSettings:
+    """Read billing policy without constructing a host or provider clients."""
+    return _BillingSettingsSource(_env_file=_env_file).billing  # pyright: ignore[reportCallIssue]

@@ -10,13 +10,16 @@ import anthropic
 import httpx
 import pytest
 from daimon.core.memory_resource import (
+    CHANNEL_MEMORY_INSTRUCTIONS,
     MEMORY_INSTRUCTIONS,
     PERSONAL_MEMORY_INSTRUCTIONS,
+    READ_ONLY_CHANNEL_MEMORY_INSTRUCTIONS,
     READ_ONLY_MEMORY_INSTRUCTIONS,
     READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS,
     SHARED_ONLY_MEMORY_INSTRUCTIONS,
     archive_memory_store_for_agent,
     delete_personal_memory_stores_for_account,
+    ensure_channel_memory_store_and_mount,
     ensure_memory_store_and_mount,
     ensure_personal_memory_store_and_mount,
 )
@@ -25,9 +28,10 @@ from daimon.core.stores.agent_memory_stores import (
     get_personal_memory_store_id,
     insert_memory_store,
     insert_personal_memory_store,
+    list_channel_memory_stores_for_agent,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     make_fake_memory_store_handler,
@@ -497,13 +501,13 @@ async def test_one_failed_personal_archive_does_not_leave_the_others_live(
 
 @pytest.mark.parametrize("change", (None, "clear", "rebind"))
 async def test_exact_warm_memory_refuses_changed_binding_without_provisioning(
-    db_preflight, db_nullpool_engine, change
+    db_preflight, db_committing_engine, change
 ):
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.errors import ScopeViolation
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
     async with sm.begin() as db:
         tenant = await make_tenant(db)
@@ -557,3 +561,90 @@ async def test_exact_warm_memory_refuses_changed_binding_without_provisioning(
     async with sm() as db:
         assert await get_memory_store_id(db, tenant_id=tenant.id, agent_id=agent_id) == before
     await client.close()
+
+
+async def test_channel_store_is_provisioned_once_per_channel_and_tells_the_agent_it_is_shared(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id = uuid.uuid4()
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+
+    async def mount(channel_id: str, *, platform: str = "slack", read_only: bool = False):
+        return await ensure_channel_memory_store_and_mount(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            platform=platform,
+            channel_id=channel_id,
+            agent_name="daimon",
+            read_only=read_only,
+        )
+
+    first = await mount("C-SYN-1")
+    again = await mount("C-SYN-1")
+    other = await mount("C-SYN-2")
+    teams = await mount("C-SYN-1", platform="teams")
+    read_only = await mount("C-SYN-1", read_only=True)
+
+    assert again["memory_store_id"] == first["memory_store_id"], "a warm channel reuses its store"
+    assert len({first["memory_store_id"], other["memory_store_id"], teams["memory_store_id"]}) == 3
+    assert len(state.stores) == 3, "only the cold mounts created a store"
+    assert first["access"] == "read_write" and first["instructions"] == CHANNEL_MEMORY_INSTRUCTIONS
+    assert "including people from another organisation" in CHANNEL_MEMORY_INSTRUCTIONS
+    assert "would not say in this channel" in CHANNEL_MEMORY_INSTRUCTIONS
+    assert read_only["access"] == "read_only"
+    assert read_only["instructions"] == READ_ONLY_CHANNEL_MEMORY_INSTRUCTIONS
+    metadata = state.stores[first["memory_store_id"]]["metadata"]
+    assert metadata["daimon_tenant"] == str(tenant.id)
+    assert metadata["daimon_agent"] == str(agent_id)
+    assert metadata["daimon_platform"] == "slack" and metadata["daimon_channel"] == "C-SYN-1"
+    async with db_session_factory() as s:
+        assert await get_memory_store_id(s, tenant_id=tenant.id, agent_id=agent_id) is None, (
+            "a channel store never stands in for the agent-wide one"
+        )
+
+
+async def test_archiving_an_agent_archives_its_channel_stores_and_no_other_agents(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent_id, other_agent = uuid.uuid4(), uuid.uuid4()
+    state = FakeMemoryStoreState()
+    client = build_fake_anthropic(make_fake_memory_store_handler(state))
+    mounts = {}
+    for agent, channel in ((agent_id, "C-SYN-1"), (agent_id, "C-SYN-2"), (other_agent, "C-SYN-1")):
+        mounts[(agent, channel)] = await ensure_channel_memory_store_and_mount(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_id=agent,
+            platform="slack",
+            channel_id=channel,
+            agent_name="daimon",
+        )
+
+    await archive_memory_store_for_agent(
+        client, db_session_factory, tenant_id=tenant.id, agent_id=agent_id
+    )
+
+    for key, mount in mounts.items():
+        archived = state.stores[mount["memory_store_id"]]["archived_at"] is not None
+        assert archived is (key[0] == agent_id)
+    async with db_session_factory() as s:
+        assert (
+            await list_channel_memory_stores_for_agent(s, tenant_id=tenant.id, agent_id=agent_id)
+            == []
+        )
+        assert (
+            len(
+                await list_channel_memory_stores_for_agent(
+                    s, tenant_id=tenant.id, agent_id=other_agent
+                )
+            )
+            == 1
+        )

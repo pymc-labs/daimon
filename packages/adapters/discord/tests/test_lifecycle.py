@@ -46,10 +46,12 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
+from daimon.core.turn.status_log import status_log_override
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -1273,6 +1275,7 @@ class TestCleanReplace:
 _NOTICE_REASONS = [
     TerminationReason.CONNECTION_LOST,
     TerminationReason.UPSTREAM,
+    TerminationReason.REFUSED,
     TerminationReason.INTERRUPTED,
     TerminationReason.INTERRUPT_TIMEOUT,
     TerminationReason.REQUIRES_ACTION,
@@ -1797,7 +1800,7 @@ class TestStatusEmbedFromTurnState:
         assert "private words" not in description, "a tool line never shows its arguments"
 
     async def test_message_draft_shares_the_status_embed(self) -> None:
-        """The latest agent.message text is quoted under the tool lines, in the
+        """The latest agent.message text is quoted under the headline, in the
         same embed rather than a second one."""
         lc, sends, edits = _make_lifecycle()
 
@@ -1809,7 +1812,7 @@ class TestStatusEmbedFromTurnState:
         embeds = edits[-1][1]["embeds"]
         assert len(embeds) == 1, "the draft rides the status embed"
         assert (embeds[0].description or "").endswith("> Let me check the workspace config"), (
-            "agent.message text must be quoted at the bottom of the status embed"
+            "agent.message text must end the status embed's description"
         )
 
 
@@ -3220,6 +3223,69 @@ async def test_final_response_preserves_whitespace_between_distinct_blocks():
     assert edits[-1][1]["content"] == "Hello world."
 
 
+@pytest.mark.usefixtures("status_log_on")
+async def test_consecutive_final_messages_collapse_but_distinct_answers_survive_with_the_log_on():
+    lc, _, edits = _make_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="First part.\nMore of the first.\n"),
+                TextBlock(kind="text", text="First part.\nMore of the first.\n"),
+                TextBlock(kind="text", text="Second part.\nMore of the second."),
+            ]
+        )
+    )
+    assert (
+        edits[-1][1]["content"]
+        == "First part.\nMore of the first.\n\nSecond part.\nMore of the second."
+    )
+
+
+@pytest.mark.usefixtures("status_log_on")
+async def test_final_response_keeps_every_message_set_apart_by_a_blank_line():
+    lc, _, edits = _make_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="⚠️ Do not run this against production."),
+                TextBlock(kind="text", text="Run it against staging."),
+            ]
+        )
+    )
+    assert (
+        edits[-1][1]["content"]
+        == "⚠️ Do not run this against production.\n\nRun it against staging."
+    )
+
+
+def _repeated_run_state(*, merged: bool) -> tuple[TurnState, str]:
+    """An answer of two messages, sealed by a tool call, then said again after it."""
+    first = "First part of the answer. " * 12
+    second = "Second part of the answer. " * 12
+    tool = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    messages = (
+        [TextBlock(kind="text", text=first + second)]
+        if merged
+        else [
+            TextBlock(kind="text", text=first),
+            TextBlock(kind="text", text=second),
+        ]
+    )
+    return TurnState(content=[*messages, tool, *messages]), first.strip()
+
+
+@pytest.mark.parametrize("log_on", [True, False])
+async def test_an_answer_repeated_after_a_tool_is_not_posted_twice(log_on: bool):
+    with status_log_override(log_on):
+        lc, sends, edits = _make_lifecycle()
+        state, first = _repeated_run_state(merged=not log_on)
+        await lc.on_render(state)
+        await lc.on_terminal_success(state)
+    posted = [s["content"] for s in sends if "content" in s]
+    posted += [e[1]["content"] for e in edits if e[1].get("content")]
+    assert sum(text.count(first) for text in posted) == 1, "the repeated answer posts once"
+
+
 @pytest.mark.parametrize("notice", ["cancel", "degraded", "continuity"])
 async def test_overflow_keeps_operational_notices_visible(notice):
     lc, _, edits = _make_lifecycle()
@@ -3370,3 +3436,36 @@ async def test_watch_revocation_between_chunks_rechecks_each_discord_write():
         )
     assert count() - before == 1
     assert guard.failed
+
+
+class TestOtherAppsNeverNamed:
+    """What a person on Discord reads never names Slack or Teams."""
+
+    async def test_draft_tool_lines_and_answer_are_posted_without_other_apps(self) -> None:
+        inner, sends, edits = _make_lifecycle()
+        lc = OtherAppsScrubbedLifecycle(inner, "discord")
+        await lc.on_sse_event(_message_event("Checking Slack and Microsoft Teams for it"))
+        tool = ToolUseBlock(
+            kind="tool_use", id="t1", type="agent.tool_use", name="slack_search", input={}
+        )
+        await lc.on_render(TurnState(content=[tool]))
+        card_text = sends[0]["embeds"][0].description
+        assert "Slack" not in card_text and "Teams" not in card_text
+        assert "> Checking other apps for it" in card_text
+
+        reply = "Use Discord, not Slack or Teams. See https://acme.slack.com/archives/C1."
+        await lc.on_terminal_success(_make_success_state(reply))
+        posted = "\n".join(
+            str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
+        )
+        assert "Use Discord, not another app. See another app." in posted
+        assert "Slack" not in posted and "Teams" not in posted
+
+    async def test_a_sealed_answer_before_a_tool_call_is_scrubbed(self) -> None:
+        inner, sends, edits = _make_lifecycle()
+        lc = OtherAppsScrubbedLifecycle(inner, "discord")
+        sealed = "Here is the longer answer, which names Slack so that it is long enough. " * 10
+        tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+        await lc.on_render(TurnState(content=[TextBlock(kind="text", text=sealed), tool]))
+        posted = "\n".join(str(kwargs.get("content", "")) for kwargs in sends)
+        assert "another app" in posted and "Slack" not in posted

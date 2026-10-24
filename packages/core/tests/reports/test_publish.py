@@ -41,8 +41,8 @@ from daimon.core.stores.mcp_tokens import (
     list_mcp_tokens,
 )
 from daimon.testing.factories import make_account, make_mcp_token, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

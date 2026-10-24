@@ -409,7 +409,7 @@ async def test_keyless_write_fails_closed_without_the_plaintext_opt_in(
     args = dict(tenant_id=tenant.id, agent_id=uuid.uuid4(), key="TOKEN")
 
     assert agent_env_writes_allowed(db_session) is False
-    with pytest.raises(AgentEnvEncryptionRequiredError, match="DAIMON_CRYPTO__KEYS"):
+    with pytest.raises(AgentEnvEncryptionRequiredError, match="no encryption key yet"):
         if conditional:
             await put_agent_file_if_unchanged(
                 db_session,

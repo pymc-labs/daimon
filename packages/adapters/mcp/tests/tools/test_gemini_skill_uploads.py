@@ -36,12 +36,9 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_origin import turn_origin
-from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine, require_owned_sessionmaker
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.isolated_sdk import build_gemini_client
-from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ModelRef, Scope
@@ -50,6 +47,9 @@ from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
 from mux.drivers.gemini.transport import Object
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
+from mux.testing.isolated_sdk import build_gemini_client
 from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -222,6 +222,8 @@ class Case:
             responder_ma_agent_id=self.native_id,
             responder_name="helper",
             role=self.auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             message_text=message,
             chat_session_id="test-session",
         ) as origin:
@@ -372,6 +374,8 @@ async def case(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIte
                 configuration_target_ma_agent_id=None,
                 configuration_target_name=None,
                 role=auth.role,
+                sender_foreign=False,
+                shared_channel=False,
                 now=datetime.now(UTC),
                 expires_at=datetime.now(UTC) + timedelta(minutes=10),
                 chat_session_id="test-session",
@@ -460,7 +464,7 @@ async def test_a_polite_reply_is_read_by_the_shared_matcher(
             added = await case.call(origin=reply, content_hash=preview.preview.content_hash)
             assert added.status == "added" and added.added is not None
         else:
-            with pytest.raises(ToolError, match="did not start with the person replying"):
+            with pytest.raises(ToolError, match="is not the person replying"):
                 await case.call(origin=reply, content_hash=preview.preview.content_hash)
             assert not case.wire.requests
     assert case.world.created == [], "the Anthropic upload path was not entered"
@@ -489,7 +493,7 @@ async def test_returned_foreign_host_refuses_before_catalog_read_or_write(
         raise AssertionError("foreign returned host must be refused before catalog read")
 
     monkeypatch.setattr(NeutralResourceHost, "find", forbidden_find)
-    with pytest.raises(ToolError, match="different tenant, account or workspace"):
+    with pytest.raises(ToolError, match="belong to someone else"):
         await case.call()
     assert not case.wire.requests and await case.pending() == 0
 

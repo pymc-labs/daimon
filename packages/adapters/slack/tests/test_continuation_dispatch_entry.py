@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -26,6 +27,7 @@ import httpx
 import pytest
 from aioresponses import CallbackResult
 from daimon.adapters.slack import app as slack_app
+from daimon.adapters.slack.admin import SlackRequester
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.continuity.continuation import ContinuationRequest, record_continuation
@@ -37,18 +39,46 @@ from daimon.core.stores.domain import ContinuationReason, Role, TaskContinuation
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TurnState
-from daimon.testing import build_fake_anthropic, ma_agent, ma_environment, resolved_agent_env_router
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import resolved_agent_env_router
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .harness import register_conversations_info
 
 _AGENT_ID = "agent_continuation_entry"
 _ENV_ID = "env_continuation_entry"
 _CHANNEL = "C_CONT_ENTRY"
 _THREAD_ID = "9300000001.000001"
+
+
+def _requester(
+    *, is_admin: bool = False, team_id: str | None = "T_CONT_ENTRY", is_stranger: bool = False
+) -> SlackRequester:
+    """What `users.info` says about the requester; the host workspace is T_CONT_ENTRY."""
+    return SlackRequester(
+        is_admin=is_admin and team_id == "T_CONT_ENTRY" and not is_stranger,
+        display_name=None,
+        team_id=team_id,
+        is_stranger=is_stranger,
+        host_team_id="T_CONT_ENTRY",
+    )
+
+
+def _register_host_member_users_info(mock: Any) -> None:
+    """Re-register users.info after a ``mock.clear()``: the requester is a host member."""
+    mock.get(
+        re.compile(r"https://slack\.com/api/users\.info.*"),
+        payload={"ok": True, "user": {"id": "U_REQUESTER", "team_id": "T_CONT_ENTRY"}},
+        repeat=True,
+    )
 
 
 def _thread_key(team_id: str) -> tuple[str, str, str]:
@@ -331,9 +361,9 @@ async def _run_continuation_and_capture_controls(
 
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=admin_status,
+            return_value=None if admin_status is None else _requester(is_admin=admin_status),
         ),
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
         patch(
@@ -560,15 +590,10 @@ async def test_continuation_turn_runs_as_admin_when_requester_is_a_workspace_adm
     )
 
 
-@pytest.mark.parametrize(
-    "admin_status",
-    [pytest.param(False, id="non-admin"), pytest.param(None, id="lookup-failed")],
-)
-async def test_continuation_turn_never_runs_as_admin_without_a_live_admin_requester(
+async def test_continuation_turn_never_runs_as_admin_for_a_non_admin_requester(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
-    admin_status: bool | None,
 ) -> None:
     """A non-admin's form never produces an admin continuation -- even when
     the requester's account was admin on an earlier turn."""
@@ -578,12 +603,175 @@ async def test_continuation_turn_never_runs_as_admin_without_a_live_admin_reques
         fake_slack_web_client,
         workspace_id="T_CONT_ROLE_USER",
         reason="private_input_applied",
-        admin_status=admin_status,
+        admin_status=False,
         prior_role=Role.ADMIN,
     )
     assert '"current_role": "user"' in controls, f"continuation must run as user, got {controls}"
     assert await _requester_role(db_session_factory) == [Role.USER], (
         "a stale admin stamp must not survive into the continuation"
+    )
+
+
+@pytest.mark.parametrize("reason", ["timer", "task_handoff"])
+async def test_continuation_whose_requester_lookup_failed_is_denied_and_runs_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    reason: ContinuationReason,
+) -> None:
+    """A failed users.info proves nothing about the requester, so the follow-up is denied.
+
+    It raises `AdmissionDenied`, which core dispatch settles as
+    `admission_denied:<reason>` without a retry. No account is admitted, no role
+    written, no session bound.
+    """
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_CONT_DENIED_{reason}")
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await set_role(db_session, principal.account_id, Role.USER)
+    await db_session.commit()
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=principal.account_id, reason=reason
+    )
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_requester",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock) as admit,
+        patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as bind,
+        patch("daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock) as run_turn,
+        pytest.raises(AdmissionDenied) as denied,
+    ):
+        await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+            row,
+            "finish the migration",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+            team_id="T_CONT_ENTRY",
+        )
+
+    assert denied.value.reason == "invoker_not_allowed"
+    admit.assert_not_awaited()
+    bind.assert_not_awaited()
+    run_turn.assert_not_awaited()
+    assert await _requester_role(db_session_factory) == [Role.USER], "no role may be written"
+
+
+@pytest.mark.parametrize(
+    ("requester", "org", "home"),
+    [
+        pytest.param(
+            _requester(is_admin=True, team_id="T_OTHER"),
+            RequesterOrg.OTHER,
+            "T_OTHER",
+            id="external-workspace-admin",
+        ),
+        pytest.param(
+            _requester(is_admin=True, is_stranger=True), RequesterOrg.UNKNOWN, None, id="stranger"
+        ),
+        pytest.param(
+            _requester(is_admin=True, team_id=None), RequesterOrg.UNKNOWN, None, id="no-team-id"
+        ),
+        pytest.param(_requester(), RequesterOrg.HOST, None, id="host-member"),
+    ],
+)
+async def test_continuation_runs_with_the_requesters_organisation_from_users_info(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    requester: SlackRequester,
+    org: RequesterOrg,
+    home: str | None,
+) -> None:
+    """An external requester's queued follow-up is admitted as another organisation
+    (held, never an admin) instead of being denied; a host member keeps running as one."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_CONT_ENTRY")
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await db_session.commit()
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    register_conversations_info(fake_slack_web_client.mock, is_ext_shared=True)
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=principal.account_id, reason="timer"
+    )
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_requester",
+            new_callable=AsyncMock,
+            return_value=requester,
+        ),
+        patch(
+            "daimon.adapters.slack.app.admit",
+            new_callable=AsyncMock,
+            side_effect=AdmissionDenied(reason="cap_exceeded"),
+        ) as admit,
+        pytest.raises(AdmissionDenied),
+    ):
+        await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+            row,
+            "finish the migration",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+            team_id="T_CONT_ENTRY",
+        )
+
+    kwargs = admit.await_args.kwargs  # pyright: ignore[reportOptionalMemberAccess]
+    assert kwargs["requester_org"] is org
+    assert kwargs["requester_home_id"] == home
+    assert kwargs["role"] is (
+        Role.ADMIN if org is RequesterOrg.HOST and requester.is_admin else Role.USER
+    )
+    assert kwargs["channel_shared"] is True
+
+
+async def test_a_failed_requester_lookup_settles_the_queued_follow_up_as_admission_denied(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """End to end through core dispatch: the row is settled, not retried."""
+    tenant_id, account_id, key = await _seed_pending_row(
+        db_session,
+        db_session_factory,
+        workspace_id="T_CONT_ENTRY",
+        requested_work="pick up the report",
+    )
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_requester",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock) as run_turn,
+    ):
+        await app.dispatch_continuations_in_thread(
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+            account_id=account_id,
+            team_id="T_CONT_ENTRY",
+        )
+
+    run_turn.assert_not_awaited()
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    assert row.skip_reason == "admission_denied:invoker_not_allowed", (
+        f"the follow-up must settle as denied, got {row.status} / {row.skip_reason}"
     )
 
 
@@ -665,6 +853,7 @@ async def test_continuation_commits_intent_before_post_and_records_response_id(
         return CallbackResult(payload={"ok": True, "ts": message_ts, "channel": _CHANNEL})
 
     fake_slack_web_client.mock.clear()
+    _register_host_member_users_info(fake_slack_web_client.mock)
     fake_slack_web_client.mock.post(
         "https://slack.com/api/chat.postMessage", callback=verify_committed_intent
     )
@@ -707,6 +896,7 @@ async def test_continuation_retains_prepared_intent_when_slack_accepts_then_lose
         raise TimeoutError("accepted post response was lost")
 
     fake_slack_web_client.mock.clear()
+    _register_host_member_users_info(fake_slack_web_client.mock)
     fake_slack_web_client.mock.post(
         "https://slack.com/api/auth.test", payload={"ok": True, "user_id": "U_BOT"}
     )
@@ -843,7 +1033,6 @@ async def test_dispatch_skipped_while_processing_runs_when_the_turn_releases_the
 
     with (
         patch.object(app, "_run_thread_turn", side_effect=_turn_whose_tail_already_ran),
-        patch.object(app, "_maybe_post_connect_nudge", new_callable=AsyncMock),
     ):
         await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
             {"ts": _THREAD_ID, "user": "U_REQUESTER", "text": "hi"},
@@ -1013,9 +1202,9 @@ async def test_a_timer_set_with_another_agent_is_refused_before_bind(
 
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=_requester(),
         ),
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
         patch(
@@ -1075,9 +1264,9 @@ async def test_continuation_admits_a_dm_scope_as_a_dm(
 
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=_requester(),
         ),
         patch(
             "daimon.adapters.slack.app.admit", new_callable=AsyncMock, side_effect=_StopAtAdmit
@@ -1146,9 +1335,9 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
 
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=_requester(),
         ),
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as resolve_agent,
         patch(

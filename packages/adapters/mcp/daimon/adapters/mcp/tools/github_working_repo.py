@@ -5,6 +5,7 @@ from __future__ import annotations
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     require_turn_origin,
@@ -38,7 +39,7 @@ async def set_working_repo_impl(
     expected_ma_agent_id: str | None = None,
 ) -> WorkingRepoResult:
     if auth.platform not in ("discord", "slack", "teams"):
-        raise ToolError("GitHub setup needs a member of this Discord, Slack or Teams workspace.")
+        raise ToolError("GitHub setup needs a person in a chat.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     target_name = agent_name or origin.configuration_target_name or origin.responder_name
     target_id = expected_ma_agent_id
@@ -81,7 +82,7 @@ async def set_working_repo_impl(
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )
         if not manages:
-            raise ToolError("Ask a server admin.")
+            raise ToolError(f"Ask {admin_noun(auth.platform)}.")
         try:
             saved = await set_working_repo(
                 session,
@@ -89,6 +90,7 @@ async def set_working_repo_impl(
                 agent_id=agent_id,
                 repo_name=selected,
                 account_id=auth.account_id,
+                agent_name=agent.name,
             )
         except ValueError as error:
             raise ToolError(str(error)) from error
@@ -117,7 +119,7 @@ def register_github_working_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         A clear ask is enough: set it right away and reply with the returned
         line. Ask once in plain words during agent setup. Use an owner/repo already on
         this agent's list. Other repos have token access; clone one with gh repo clone when
-        asked. Only a server admin may change this setting. Pass the current turn origin and the
+        asked. Only an admin may change this setting. Pass the current turn origin and the
         selected agent's name and MA id. If the repo is not on its list, offer
         the single Connect GitHub link.
         """

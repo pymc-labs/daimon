@@ -54,15 +54,15 @@ from daimon.core.stores.agent_files import list_agent_files, put_agent_file
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
     combine_handlers,
     make_fake_ma_handler,
 )
-from daimon.testing.ma_models import ma_agent
-from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)

@@ -91,7 +91,6 @@ async def test_transient_orphan_recovery_failure_retries_before_admission(
         ),
         patch("daimon.adapters.slack.app.decrypt_token", return_value="xoxb-test"),
         patch("daimon.adapters.slack.app.AsyncWebClient", return_value=MagicMock()),
-        patch("daimon.adapters.slack.app.is_slack_connect_external", return_value=False),
     ):
         recovery = app.start_orphan_recovery()
         await asyncio.wait_for(entered.wait(), timeout=1.0)

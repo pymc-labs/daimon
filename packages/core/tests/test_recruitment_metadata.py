@@ -153,6 +153,9 @@ async def test_waiting_panel_omits_reserved_request_labels(monkeypatch):
 
 
 async def test_here_from_ordinary_channel_filters_reserved_sibling_names(monkeypatch):
+    monkeypatch.setattr(
+        "daimon.core.channel_backend.effective_thread_backend", AsyncMock(return_value="anthropic")
+    )
     from contextlib import asynccontextmanager
 
     from daimon.adapters.discord.commands import here as module

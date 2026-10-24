@@ -56,7 +56,11 @@ from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import build_test_engine
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.contracts.ids import Scope
+from mux.errors import UnsupportedCapability
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
@@ -65,9 +69,7 @@ from daimon.testing.ma import (
     send_events_response,
     sse_response,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
-from daimon.testing.turn_fakes import RecordingLifecycle
-from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -192,7 +194,8 @@ def _router(
                 "id": new_id,
                 "type": "session",
                 "agent": {
-                    "id": body["agent"],
+                    # A bare id, or `agent_with_overrides` carrying one.
+                    "id": body["agent"]["id"] if isinstance(body["agent"], dict) else body["agent"],
                     "mcp_servers": [],
                     "model": {"id": created_model},
                     "name": "daimon",
@@ -1892,6 +1895,7 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
         tool_confirmation: object = None,
         before_send: object = None,
         send_guard: object = None,
+        path: object = None,
     ) -> TurnState:
         nonlocal call_count
         privacy.check()
@@ -1986,6 +1990,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
 
     dead_session_cause = _api_status_error(404, "not found")
     call_count = 0
+    recovery_started = asyncio.Event()
 
     async def _fake_run_turn(
         *,
@@ -2003,6 +2008,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         tool_confirmation: object = None,
         before_send: object = None,
         send_guard: object = None,
+        path: object = None,
     ) -> TurnState:
         nonlocal call_count
         privacy.check()
@@ -2020,6 +2026,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         # run_prepared_turn built for the recovery turn) -- block until it
         # fires, proving the mirror is what unblocks it, since the ORIGINAL
         # event is never passed to this call directly.
+        recovery_started.set()
         await cancel.wait()
         return TurnState(error=TurnError(kind="interrupted", message="interrupted during recovery"))
 
@@ -2028,7 +2035,9 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
     original_cancel = asyncio.Event()
 
     async def _cancel_soon() -> None:
-        await asyncio.sleep(0.02)
+        # Cancel while the recovery turn is in flight, not after a fixed delay:
+        # a slow runner may not have reached the recovery attempt in 20 ms.
+        await asyncio.wait_for(recovery_started.wait(), 10)
         original_cancel.set()
 
     caller_lifecycle = RecordingLifecycle()
@@ -2746,6 +2755,235 @@ async def test_two_turns_recovering_one_dead_session_leave_one_live_row(
     )
 
 
+@dataclasses.dataclass
+class _QueuedTurn:
+    outcome: RunOutcome
+    rows: list[ThreadSession]
+    requests: list[str]
+    usage_after_waiter: list[Any]
+    usage_after_holder: list[Any]
+
+
+async def _run_turn_behind_a_busy_lease(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    thread_id: str,
+    cancel: asyncio.Event,
+    deadline: datetime | None,
+    stop_after_s: float | None = None,
+) -> _QueuedTurn:
+    """Run user B's mux turn on a thread whose lease user A's turn always holds.
+
+    The session has one model call upstream that A's stream has not recorded.
+    After B's turn ends, A settles the session as its holder would; the usage
+    rows are read after each step."""
+    from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
+        BetaManagedAgentsSpanModelRequestEndEvent,
+    )
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from daimon.core.turn.prepare import admitted_session_scope as scope_for
+    from mux.state.lease import LeaseBusy
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id=thread_id,
+        ma_session_id="sess_live",
+    )
+    await db_session.commit()
+    unrecorded = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_span_of_a",
+        is_error=False,
+        model_request_start_id="start_1",
+        model_usage=ma_model_usage(input_tokens=10, output_tokens=20),
+        processed_at=datetime.now(UTC),
+        type="span.model_request_end",
+    )
+    router = _router(
+        session_bodies=[],
+        dead_session_ids=set(),
+        events_by_session={"sess_live": [unrecorded.model_dump(mode="json")]},
+    )
+    requests: list[str] = []
+
+    async def busy(self: object, slot: Any, **_: object) -> NoReturn:
+        raise LeaseBusy(slot.describe(), "another-turn")
+
+    monkeypatch.setattr(PostgresStateStore, "acquire_lease", busy)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(f"{request.method} {request.url.path}")
+        return router.dispatch(request)
+
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, poolclass=NullPool
+    )
+    try:
+        sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
+        deps = dataclasses.replace(
+            _deps(sessionmaker=sessionmaker, router=router),
+            turn_path="mux",
+            channel_backends=True,
+            anthropic=anthropic.AsyncAnthropic(
+                api_key="test",
+                http_client=httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                ),
+                max_retries=0,
+            ),
+        )
+        agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+        env = ma_environment(id="env_1", tenant_id=tenant.id)
+        admission = _admission(account_id=account.id, agent=agent, env=env)
+        prepared = _prepared_turn(
+            deps=deps,
+            admission=admission,
+            tenant_id=tenant.id,
+            external_user_id="user-b",
+            ma_session_id="sess_live",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        )
+        if stop_after_s is not None:
+            asyncio.get_running_loop().call_later(stop_after_s, cancel.set)
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=thread_id,
+            external_user_id="user-b",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+            deadline=deadline,
+        )
+        async with sessionmaker() as s:
+            rows = list(
+                (await s.execute(select(ThreadSession).where(ThreadSession.tenant_id == tenant.id)))
+                .scalars()
+                .all()
+            )
+            usage_after_waiter = list(await usage_events.list_for_tenant(s, tenant_id=tenant.id))
+        requests_by_waiter = list(requests)
+        await run_module._settle(  # pyright: ignore[reportPrivateUsage]
+            deps,
+            session_id="sess_live",
+            scope=scope_for(admission, tenant_id=tenant.id, session_id="sess_live"),
+            record=bind_recorder(
+                deps,
+                tenant_id=tenant.id,
+                external_user_id="user-a",
+                ma_session_id="sess_live",
+                model_id=agent.model.id,
+            ),
+        )
+        async with sessionmaker() as s:
+            usage_after_holder = list(await usage_events.list_for_tenant(s, tenant_id=tenant.id))
+    finally:
+        await engine.dispose()
+    return _QueuedTurn(outcome, rows, requests_by_waiter, usage_after_waiter, usage_after_holder)
+
+
+def _assert_usage_belongs_to_the_holder(queued: _QueuedTurn) -> None:
+    assert queued.usage_after_waiter == [], "a turn that never held the lease records no usage"
+    assert [(u.managed_session_id, u.platform_user_id) for u in queued.usage_after_holder] == [
+        ("sess_live", "user-a")
+    ], "the holder's own settlement records the call once, under the holder"
+
+
+def _record_native_abandons(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Give every turn I/O the optional `abandon_native` hook a native codec
+    (Gemini) has, recording each call. A queued turn never started the work the
+    lease holder is running, so it must never stop it."""
+    from daimon.core.turn.io import LegacyTurnIO, MuxTurnIO
+
+    calls: list[str] = []
+
+    async def abandon_native(self: object) -> None:
+        calls.append(type(self).__name__)
+
+    for cls in (LegacyTurnIO, MuxTurnIO):
+        monkeypatch.setattr(cls, "abandon_native", abandon_native, raising=False)
+    return calls
+
+
+async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring_the_session(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the mux path a turn that finds the thread's lease held waits for it, at
+    most until its own ceiling, then ends through the ordinary ceiling outcome. It
+    never ran on the mapping, whose holder is using it, so the mapping stays live."""
+    abandons = _record_native_abandons(monkeypatch)
+    started = asyncio.get_running_loop().time()
+    queued = await _run_turn_behind_a_busy_lease(
+        db_session,
+        db_schema,
+        monkeypatch,
+        thread_id="thread-queued-ceiling",
+        cancel=asyncio.Event(),
+        deadline=datetime.now(UTC) + timedelta(seconds=0.5),
+    )
+    waited = asyncio.get_running_loop().time() - started
+    outcome, rows, requests = queued.outcome, queued.rows, queued.requests
+
+    assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert outcome.state.termination == TerminationReason.CEILING
+    assert 0.4 <= waited < 5, "the wait is bounded by the turn's ceiling"
+    assert [(r.ma_session_id, r.status) for r in rows] == [("sess_live", "live")]
+    assert not [r for r in requests if r.startswith("POST")], "a queued turn sends nothing"
+    assert not [r for r in requests if r == "GET /v1/sessions/sess_live/events"], (
+        "a queued turn does not read the session's events to settle them"
+    )
+    assert abandons == [], "a queued turn does not stop the holder's native work"
+    _assert_usage_belongs_to_the_holder(queued)
+
+
+async def test_a_turn_stopped_while_queued_behind_a_lease_ends_as_an_interrupt(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    abandons = _record_native_abandons(monkeypatch)
+    queued = await _run_turn_behind_a_busy_lease(
+        db_session,
+        db_schema,
+        monkeypatch,
+        thread_id="thread-queued-stop",
+        cancel=asyncio.Event(),
+        deadline=None,
+        stop_after_s=0.2,
+    )
+
+    outcome, rows, requests = queued.outcome, queued.rows, queued.requests
+    assert outcome.state.termination == TerminationReason.INTERRUPTED
+    assert not outcome.recovered
+    assert [(r.ma_session_id, r.status) for r in rows] == [("sess_live", "live")]
+    assert not [r for r in requests if r.startswith("POST")]
+    assert not [r for r in requests if r == "GET /v1/sessions/sess_live/events"]
+    assert abandons == [], "a queued turn does not stop the holder's native work"
+    _assert_usage_belongs_to_the_holder(queued)
+
+
+# Both ceiling tests below aim the real turn ceiling at `link_replacement`, which they
+# make sleep 30s, so the ceiling lands after the replacement session exists. Everything
+# before it (the first attempt, the 404, transcript read, session and memory-store
+# creation) has to finish inside the deadline: at 1s it did not on a loaded CI runner, and
+# the ceiling fired inside `create_ma_session` instead. Each test waits out the full value.
+RECOVERY_CEILING_S = 5.0
+
+
 async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement(
     db_session: AsyncSession,
     db_schema: str,
@@ -2775,7 +3013,10 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
 
     real_link = run_module.link_replacement
 
+    linking = asyncio.Event()
+
     async def slow_link(*args: object, **kwargs: object) -> None:
+        linking.set()
         await asyncio.sleep(30)  # the ceiling fires here, after the replacement exists
         await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
@@ -2812,7 +3053,7 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
             render_interval_s=0.001,
-            deadline=datetime.now(UTC) + timedelta(seconds=1.0),
+            deadline=datetime.now(UTC) + timedelta(seconds=RECOVERY_CEILING_S),
         )
         async with sessionmaker() as s:
             rows = (
@@ -2831,6 +3072,7 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
         await engine.dispose()
 
     assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert linking.is_set(), "the ceiling must land in link_replacement, not before it"
     live = [(r.ma_session_id, r.replaced_by_id) for r in rows if r.status == "live"]
     assert live == [], f"a replacement survived the rolled-back recovery: {live}"
     assert [r.ma_session_id for r in rows] == ["sess_old"], (
@@ -2871,7 +3113,10 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
 
     real_link = run_module.link_replacement
 
+    linking = asyncio.Event()
+
     async def slow_link(*args: object, **kwargs: object) -> None:
+        linking.set()
         await asyncio.sleep(30)  # the ceiling fires here, after the session exists
         await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
@@ -2919,17 +3164,47 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
             render_interval_s=0.001,
-            deadline=datetime.now(UTC) + timedelta(seconds=5.0),
+            # The turn ceiling fires while link_replacement sleeps; the archive
+            # answers at once, so only this deadline is waited out.
+            deadline=datetime.now(UTC) + timedelta(seconds=RECOVERY_CEILING_S),
         )
     finally:
         await engine.dispose()
 
     assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert linking.is_set(), "the ceiling must land in link_replacement, not before it"
     assert len(session_bodies) == 1, "recovery created one upstream session"
     assert archived == ["sess_1"], (
         "the session the rolled-back recovery created must be archived; "
         "a failing archive call is logged, not raised (this one answers 500)"
     )
+
+
+@pytest.mark.parametrize(
+    ("error", "event"),
+    [
+        (
+            UnsupportedCapability(("session_archive",), "gemini.inline_reuse"),
+            "turn.recovery_orphan_archive_skipped",
+        ),
+        (
+            UnsupportedCapability(("session_delete",), "gemini.inline_reuse"),
+            "turn.recovery_orphan_archive_failed",
+        ),
+        (RuntimeError("archive 500"), "turn.recovery_orphan_archive_failed"),
+    ],
+)
+async def test_a_profile_without_an_archive_skips_the_orphan_cleanup_quietly(
+    error: Exception, event: str
+) -> None:
+    async def archive() -> object:
+        raise error
+
+    with structlog.testing.capture_logs() as logs:
+        await run_module._archive_orphaned_session(
+            cast(anthropic.AsyncAnthropic, None), session_id="sess_orphan", archive=archive
+        )
+    assert [e["event"] for e in logs if "orphan" in e["event"]] == [event]
 
 
 async def test_orphan_archive_timeout_does_not_wait_and_logs_late_failure(
@@ -2988,7 +3263,7 @@ import asyncio
 import anthropic
 import httpx
 from daimon.core.turn.run import _archive_orphaned_session
-from daimon.testing.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_models import ma_session
 
 async def handler(_request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json=ma_session(id="sess_orphan").model_dump(mode="json"))
@@ -3371,10 +3646,10 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
     from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
     from daimon.core.turn.posture import PolicyApproval
     from daimon.core.turn.prepare import admitted_session_scope
-    from daimon.testing.ma_models import ma_session
     from mux.contracts.config import ConfigRevision, ResolvedBackend
     from mux.contracts.ids import ChannelRef, ResourceRef
     from mux.errors import UnsupportedCapability
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     from .conftest import make_end_turn, make_mcp_tool_use, make_requires_action
 
@@ -3494,6 +3769,8 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         role=Role.USER,
         attended=False,
         chat_session_id="timer-session",
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         await _hand_off_task_impl(
             handoff_runtime,
@@ -3554,11 +3831,19 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
             ChannelRef(tenant_id=str(tenant.id), platform=platform, channel_id="C1"),
             1,
             ResolvedBackend(
-                backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"
+                backend="openai", profile="openai.conversation_only", model="gpt-6-luna"
             ),
         )
+        from mux.contracts.ids import ModelRef
+        from mux.contracts.resources import AgentSpec
+
         prepared = dataclasses.replace(
             prepared,
+            # A supported tool-less profile may run, but even an unexpected
+            # provider confirmation must still be refused without a host gate.
+            _native_spec=AgentSpec(
+                name="native-wake", model=ModelRef(provider="openai", id="gpt-6-luna"), tools=()
+            ),
             admission=dataclasses.replace(
                 admission, backend_revision=revision, backend_revision_origin="channel"
             ),
@@ -3573,6 +3858,8 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         )
 
         class NativePersistence:
+            lease_acquired = True
+
             def activate(self) -> contextlib.AbstractContextManager[None]:
                 return contextlib.nullcontext()
 
@@ -3589,7 +3876,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
                 ToolCall(tool_use_id="native-call", server_name="linear", tool_name="get_issue")
             )
             assert not decision.allow and decision.deny_message is not None
-            assert "cannot refresh the session's tool safety gate" in decision.deny_message
+            assert "cannot refresh the conversation's tool safety gate" in decision.deny_message
             order.append("native denied")
             return TurnState()
 
@@ -3654,9 +3941,10 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
     from daimon.core.tool_safety import ToolSafetyPolicy
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.prepare import admitted_session_scope
-    from daimon.testing.ma_models import ma_session, with_coordinator
+    from daimon.testing.ma_models import with_coordinator
     from mux.drivers.anthropic.sessions_lifecycle import SessionReads
     from mux.errors import UnsupportedCapability
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -3753,9 +4041,11 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
     "kind,origin_attended,caller_attended",
     [("chat", True, True), ("chat", True, False), ("chat", False, True), ("worker", True, False)],
 )
+@pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    path: str,
     kind: str,
     origin_attended: bool,
     caller_attended: bool,
@@ -3769,7 +4059,7 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
     from daimon.core.stores.thread_sessions import record_snapshot
     from daimon.core.stores.turn_origins import create_origin, get_active_origin
     from daimon.core.turn_origin import current_execution_origin_id, turn_origin
-    from daimon.testing.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -3814,6 +4104,8 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
         expires_at=datetime.now(UTC) + timedelta(hours=1),
         attended=True,
         chat_session_id=grant,
+        sender_foreign=False,
+        shared_channel=False,
     )
     await db_session.commit()
     router = _router(session_bodies=[], dead_session_ids=set())
@@ -3825,7 +4117,7 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
         ),
     )
     deps = dataclasses.replace(
-        _deps(sessionmaker=db_session_factory, router=router), turn_path="legacy"
+        _deps(sessionmaker=db_session_factory, router=router), turn_path=path
     )
     admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
     prepared = _prepared_turn(
@@ -3849,6 +4141,8 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
         responder_name="daimon",
         role=Role.USER,
         attended=origin_attended,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
 
         async def read_origin():
@@ -3926,7 +4220,7 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_builtins(
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.posture import PolicyApproval
     from daimon.core.turn.unattended import session_gate
-    from daimon.testing.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -4037,7 +4331,7 @@ async def test_unattended_prepared_turn_makes_every_mcp_call_pause(
     from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
     from daimon.core.turn import driver
     from daimon.core.turn.posture import PolicyApproval
-    from daimon.testing.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     public_url = "https://daimon.example/mcp"
     tenant = await make_tenant(db_session)
@@ -4138,3 +4432,323 @@ async def test_unattended_prepared_turn_makes_every_mcp_call_pause(
         ToolCall(tool_use_id="tu", server_name=server, tool_name="list_agents")
     )
     assert decision.allow
+
+
+async def test_a_card_posted_inside_the_turn_never_shows_a_time_past_its_deadline(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ROOT 2: run_prepared_turn sets the turn's deadline; a 24h card asked for inside
+    the turn expires 5 s before it, and nothing is set once the turn has ended."""
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.approvals import CARD_TURN_MARGIN
+    from daimon.core.turn.ceiling import current_turn_deadline
+    from daimon.core.turn.posture import PolicyApproval
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-card-deadline",
+        ma_session_id="sess_card_deadline",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=True, confirmation_timeout_s=86_400),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_card_deadline",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    prompts: list[ConfirmationPrompt] = []
+    deadlines: list[object] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        posture = kwargs["tool_confirmation"]
+        assert isinstance(posture, PolicyApproval)
+        deadlines.append(current_turn_deadline.get())
+        # The model asks for a gated write mid-turn.
+        await posture.decide(
+            ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
+        )
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    deadline = datetime.now(UTC) + timedelta(minutes=30)
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-card-deadline",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        confirm_write=card,
+        deadline=deadline,
+    )
+    assert deadlines == [deadline]
+    (prompt,) = prompts
+    # A 24h policy, but the card shows (and keeps) the turn's end, less the margin.
+    assert prompt.expires_at <= deadline - CARD_TURN_MARGIN
+    assert prompt.expires_at > deadline - CARD_TURN_MARGIN - timedelta(seconds=5)
+    assert current_turn_deadline.get() is None
+
+
+@pytest.mark.parametrize("waiter_end", ["acquire", "stop", "cancel"])
+async def test_queued_attended_turn_cannot_borrow_or_revoke_unattended_holders_grant(
+    db_committing_engine: AsyncEngine,
+    db_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
+    waiter_end: str,
+) -> None:
+    """Two real mux executions share a Postgres slot and a signed session grant."""
+    from daimon.core.session_snapshot import (
+        fingerprint_identity,
+        fingerprint_mutable,
+        snapshot_from_created_session,
+    )
+    from daimon.core.stores import mux_state
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.thread_sessions import record_snapshot
+    from daimon.core.stores.turn_origins import get_active_origin, get_session_origin
+    from daimon.core.turn_origin import current_execution_origin_id, turn_origin
+    from mux.state.lease import LeaseBusy
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with sessions.begin() as db_session:
+        tenant = await make_tenant(db_session)
+        account = await make_account(db_session, tenant=tenant)
+        grant = str(uuid.uuid4())
+        row = await make_thread_session(
+            db_session,
+            tenant=tenant,
+            account=account,
+            platform="discord",
+            thread_id="thread-1",
+            ma_session_id="sess_1",
+        )
+        agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+        snapshot = snapshot_from_created_session(
+            ma_session(id="sess_1", agent=agent, metadata={"daimon_chat_session_id": grant}),
+            env_sha256=None,
+            env_file_id=None,
+            repo_token_issued_at=None,
+            vault_id="vlt_own",
+            sent_skills=(),
+        )
+        await record_snapshot(
+            db_session,
+            id=row.id,
+            snapshot=snapshot,
+            identity_fingerprint=fingerprint_identity(snapshot),
+            mutable_fingerprint=fingerprint_mutable(snapshot),
+        )
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(session_bodies=[], dead_session_ids=set(), sent_batches=sent)
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_1",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_1", agent=agent).model_dump(mode="json")
+        ),
+    )
+    deps = dataclasses.replace(_deps(sessionmaker=sessions, router=router), turn_path="mux")
+    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id=row.ma_session_id,
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    running = {name: asyncio.Event() for name in ("holder", "waiter")}
+    finish = {name: asyncio.Event() for name in running}
+    ids: dict[str, uuid.UUID] = {}
+    queued = asyncio.Event()
+    stop = asyncio.Event()
+    real_acquire = mux_state.PostgresStateStore.acquire_lease
+    real_release = mux_state.PostgresStateStore.release_lease
+    released: list[uuid.UUID] = []
+
+    async def observe_acquire(self: Any, slot: Any, **kwargs: Any) -> Any:
+        assert current_execution_origin_id.get() is None
+        try:
+            return await real_acquire(self, slot, **kwargs)
+        except LeaseBusy:
+            queued.set()
+            raise
+
+    async def observe_release(self: Any, lease: Any) -> None:
+        # Revocation must precede release, not happen later in the outer shell.
+        assert current_execution_origin_id.get() is None
+        name = "holder" if lease.turn_id.endswith(":holder") else "waiter"
+        async with sessions() as db:
+            origin = await get_active_origin(
+                db,
+                origin_id=ids[name],
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert origin is not None and origin.chat_session_id is None
+        released.append(origin.id)
+        await real_release(self, lease)
+
+    monkeypatch.setattr(mux_state.PostgresStateStore, "acquire_lease", observe_acquire)
+    monkeypatch.setattr(mux_state.PostgresStateStore, "release_lease", observe_release)
+
+    async def assert_grant(name: str) -> None:
+        async with sessions() as db:
+            active = await get_session_origin(
+                db,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                chat_session_id=grant,
+                now=datetime.now(UTC),
+            )
+            own = await get_active_origin(
+                db,
+                origin_id=ids[name],
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+            if name == "holder" and "waiter" in ids:
+                waiter = await get_active_origin(
+                    db,
+                    origin_id=ids["waiter"],
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+                assert waiter is None or waiter.chat_session_id is None
+        assert own is not None and own.chat_session_id == grant
+        assert active is not None and active.id == ids[name]
+        assert active.attended is (name == "waiter")
+
+    async def run(name: str) -> RunOutcome:
+        async with turn_origin(
+            sessions,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            platform="discord",
+            parent_channel_id="C1",
+            thread_id="thread-1",
+            responder_ma_agent_id=agent.id,
+            responder_name="daimon",
+            role=Role.USER,
+            attended=name == "waiter",
+            sender_foreign=False,
+            shared_channel=False,
+        ) as origin:
+            ids[name] = origin.id
+
+            async def before_send() -> None:
+                assert current_execution_origin_id.get() == ids[name]
+                await assert_grant(name)
+                running[name].set()
+                await finish[name].wait()
+
+            return await run_prepared_turn(
+                deps,
+                prepared,
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id="thread-1",
+                external_user_id="user-1",
+                user_message=name,
+                lifecycle=RecordingLifecycle(),
+                cancel=stop if name == "waiter" else asyncio.Event(),
+                reseed_user_message=_reseed,
+                recovery_lifecycle=_recovery_lifecycle,
+                attended=name == "waiter",
+                origin="chat",
+                operation_key=name,
+                render_interval_s=0.001,
+                before_send=before_send,
+            )
+
+    tasks = [asyncio.create_task(run("holder"))]
+    try:
+        await asyncio.wait_for(running["holder"].wait(), timeout=30)
+        tasks.append(asyncio.create_task(run("waiter")))
+        await asyncio.wait_for(queued.wait(), timeout=30)
+        assert not running["waiter"].is_set()
+        await assert_grant("holder")
+        assert sent == [], "neither blocked pump has sent input"
+        if waiter_end == "acquire":
+            finish["holder"].set()
+            assert (await asyncio.wait_for(tasks[0], timeout=30)).state.error is None
+            await asyncio.wait_for(running["waiter"].wait(), timeout=30)
+            await assert_grant("waiter")
+            assert released == [ids["holder"]]
+            finish["waiter"].set()
+            assert (await asyncio.wait_for(tasks[1], timeout=30)).state.error is None
+            assert released == [ids["holder"], ids["waiter"]]
+            assert len(sent) == 2
+        else:
+            if waiter_end == "stop":
+                stop.set()
+                outcome = await asyncio.wait_for(tasks[1], timeout=30)
+                assert outcome.state.termination == TerminationReason.INTERRUPTED
+            else:
+                tasks[1].cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await tasks[1]
+            assert not running["waiter"].is_set()
+            assert released == [], "a waiter never releases the holder's lease"
+            await assert_grant("holder")
+            assert sent == []
+            finish["holder"].set()
+            assert (await asyncio.wait_for(tasks[0], timeout=30)).state.error is None
+            assert released == [ids["holder"]]
+            assert len(sent) == 1
+        async with sessions() as db:
+            assert (
+                await get_session_origin(
+                    db,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    chat_session_id=grant,
+                    now=datetime.now(UTC),
+                )
+                is None
+            )
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

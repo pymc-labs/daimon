@@ -15,6 +15,7 @@ from daimon.core.routing_facts import (
     build_routing_request,
     build_set_default_note,
     build_unrouted_note,
+    precedence_line,
 )
 
 
@@ -104,3 +105,12 @@ def test_build_unrouted_note_falls_back_to_the_generic_step_when_no_channel_is_k
     assert "Tell Daimon" not in admin, (
         "with no channel to name, the note must not spell out a request to make"
     )
+
+
+def test_the_notes_name_the_space_they_are_given() -> None:
+    assert "whole server" in build_set_default_note(
+        agent_name="writer", scope_label="server", space="server"
+    )
+    assert "whole workspace" in build_clear_default_note(scope_label="workspace", cleared=True)
+    assert precedence_line("server") == "A channel's own choice beats the server default."
+    assert precedence_line() == "A channel's own choice beats the workspace default."

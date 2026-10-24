@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
@@ -105,6 +106,33 @@ def test_routine_controls_name_the_destination_and_schedule() -> None:
     assert '"channel_id": "C1"' in text and '"schedule": "0 9 * * 1"' in text
     assert "posts your full final reply there" in text
     assert text.endswith("</turn_controls>")
+
+
+@pytest.mark.parametrize(
+    ("platform", "setup", "admin"),
+    [
+        ("discord", "run `/agent-setup`", "Manage Server"),
+        ("slack", "run `/agent-setup`", "workspace admin"),
+        ("teams", "send `setup` in a 1:1 chat with Daimon", "admin team"),
+    ],
+)
+def test_routine_controls_carry_the_destination_platforms_words(
+    platform: str, setup: str, admin: str
+) -> None:
+    text = render_routine_controls(_row(), platform=platform)
+    controls = json.loads(text.split("\n")[1])
+
+    assert controls["words"]["setup"] == setup
+    assert admin in controls["words"]["admin"]
+    assert "use `words` from these controls" in text
+    assert "Never name or hint at another chat app" in text
+    assert "only place" not in text
+
+
+def test_routine_controls_for_an_unknown_platform_carry_no_words() -> None:
+    text = render_routine_controls(_row(), platform="cli")
+
+    assert '"words"' not in text and "use `words`" not in text
 
 
 def _post_block(
@@ -748,3 +776,22 @@ async def test_delivery_failure_never_logs_signed_upload_url(db_session, db_sess
     assert sentinel not in str(logs)
     failures = [entry for entry in logs if entry["event"] == "routine.delivery_failed"]
     assert failures[0]["error_type"] == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    ("platform", "payload", "scrubbed"),
+    [
+        ("discord", "Sent to Discord, Slack and Teams.", "Sent to Discord, other apps."),
+        ("slack", "Sent to Discord or Microsoft Teams.", "Sent to another app."),
+        ("teams", "Sent to Discord and Slack.", "Sent to other apps."),
+    ],
+)
+def test_a_routine_result_never_names_another_chat_app(
+    platform: str, payload: str, scrubbed: str
+) -> None:
+    row = _row(delivery_payload=payload)
+    assert render_fallback_post(row, platform=platform).endswith(f"\n\n{scrubbed}")
+    assert render_fallback_post(row, as_agent=True, platform=platform).endswith(f"\n\n{scrubbed}")
+    dm = render_fallback_dm(row, "destination_unavailable", platform=platform)
+    assert dm.endswith(f"\n\n{scrubbed}")
+    assert render_fallback_post(row).endswith(payload), "no platform, no scrubbing"

@@ -91,7 +91,7 @@ async def create_setup_conversation(
     opener = build_setup_opener(
         target_display=escape_mrkdwn(target_name) if target_name else None,
         bot_mention=f"<@{bot_user_id}>",
-        is_admin=await resolve_is_admin(client, user_id=user_id),
+        is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
         admin_noun=ADMIN_NOUN,
     )
     posted = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs

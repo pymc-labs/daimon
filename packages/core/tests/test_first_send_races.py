@@ -27,10 +27,10 @@ _CASES = {
 
 
 @pytest.mark.parametrize("case", list(_CASES))
-async def test_normal_turn_policy_change_during_stream_open(db_session, db_nullpool_engine, case):
+async def test_normal_turn_policy_change_during_stream_open(db_session, db_committing_engine, case):
     change, is_dm, read_only, error = _CASES[case]
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     prepared = await bind(admitted(is_dm=is_dm, memory_read_only=read_only))
     inner = deps.anthropic._client._transport
@@ -94,7 +94,7 @@ async def test_normal_turn_policy_change_during_stream_open(db_session, db_nullp
 
 @pytest.mark.parametrize("case", list(_CASES))
 async def test_checkpoint_policy_change_during_checkpoint_stream_open(
-    db_session, db_nullpool_engine, monkeypatch, case
+    db_session, db_committing_engine, monkeypatch, case
 ):
     from unittest.mock import AsyncMock
 
@@ -105,7 +105,7 @@ async def test_checkpoint_policy_change_during_checkpoint_stream_open(
 
     change, is_dm, read_only, error = _CASES[case]
     tenant, account, factory, transport, deps, admitted, bind, policy = await setup(
-        db_session, db_nullpool_engine
+        db_session, db_committing_engine
     )
     first = await bind(admitted(is_dm=is_dm, memory_read_only=read_only))
     moved = _agent(model_id="claude-opus-4-6")

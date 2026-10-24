@@ -146,7 +146,7 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
         admitted.append(kwargs)
         if over_budget:
             raise AdmissionDenied(reason="channel_budget_exceeded")
-        return MagicMock(source_sealed=False)
+        return MagicMock(source_sealed=False, source_shared=False)
 
     client = MagicMock()
     client.conversations_history = AsyncMock(return_value={"messages": []})

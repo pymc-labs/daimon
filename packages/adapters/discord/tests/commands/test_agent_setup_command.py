@@ -25,8 +25,8 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_label
 from daimon.core.stores.tenants import set_provision_status
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

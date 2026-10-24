@@ -165,18 +165,29 @@ async def require_file_source(
                     continue
                 if channel_id not in viewable:
                     viewable[channel_id] = await _can_view(
-                        client, channel_id=channel_id, requester_id=requester_id
+                        client,
+                        channel_id=channel_id,
+                        requester_id=requester_id,
+                        is_client=read_policy.subject.client,
                     )
                 if viewable[channel_id]:
                     return
     raise ToolError(_SOURCE_REFUSED_MSG)
 
 
-async def _can_view(client: AsyncWebClient, *, channel_id: str, requester_id: str) -> bool:
+async def _can_view(
+    client: AsyncWebClient, *, channel_id: str, requester_id: str, is_client: bool
+) -> bool:
     try:
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel = cast(dict[str, Any], info["channel"])
-        await check_channel_access(client, channel=channel, user_id=requester_id, allow_own_im=True)
+        await check_channel_access(
+            client,
+            channel=channel,
+            user_id=requester_id,
+            allow_own_im=True,
+            is_client=is_client,
+        )
     except (ToolError, SlackApiError):
         return False
     return True

@@ -32,6 +32,7 @@ from daimon.core.turn.prepare import (
 )
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.state import extract_final_response
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.admin_bindings import AdminBindings, AdminCommand
 from daimon.testing.admin_resources import ResourceAdminBindings
 from daimon.testing.anthropic_fixtures import AnthropicTape, anthropic_replay
@@ -178,6 +179,7 @@ class ProductContext:
         try:
             admission = await admit(
                 deps,
+                requester_org=RequesterOrg.HOST,
                 tenant_id=tenant,
                 platform=self.admin.platform,
                 external_user_id=self.external_user_id,

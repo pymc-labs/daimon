@@ -24,6 +24,7 @@ from daimon.adapters.mcp.tools.teams._tidy import (
     _teams_delete_message_impl,  # pyright: ignore[reportPrivateUsage]
     _teams_edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.platform_words import scrub_other_platforms
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -41,20 +42,21 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Use it to correct or update your own post instead of posting again.
         Your own posts are those you sent with send_message or create_thread
-        and, on Discord, your chat replies and status cards (a status card's
-        embed is replaced by the new text). A person's message, another
+        and, where the chat shows them, your chat replies and status cards (a status
+        card's embed is replaced by the new text). A person's message, another
         agent's or another bot's is refused. A reply or card is refused while
         its turn is still running, and unless the person asking started that
-        turn, opened the thread, or is a server admin. channel_id is where
-        the message is (Discord: the thread id for a message in a thread;
-        Slack: the channel id, and message_id is the message ts; Teams: the
-        conversation_id and activity_id send_message returned). Pass this
+        turn, opened the thread, or is an admin. channel_id is where the message is,
+        as send_message or a read tool returned it (the thread id for a message in a
+        thread; the channel id with message_id as the message ts; or the
+        conversation_id with the activity_id send_message returned). Pass this
         turn's origin_context_id. Limited to 10 edits or deletes per turn and
         40 per hour. Refused in protected channels, channels you may not post
         in, sealed channels outside their own conversations and the support
         escalation channel.
         """
         auth = await _auth(ctx)
+        content = scrub_other_platforms(content, auth.platform)
         if auth.platform == "teams":
             return await _teams_edit_message_impl(
                 runtime,
@@ -89,7 +91,7 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         message_id: str,
         origin_context_id: str | None = None,
     ) -> TidyResult:
-        """Delete one message you posted, or on Discord one of your replies or status cards.
+        """Delete one message you posted, or one of your replies or status cards.
 
         Use it for your own stale, empty or failed posts, one message per
         call. The same rules as edit_message: only your own posts and
@@ -132,14 +134,13 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Its messages stay readable and a new post reopens it. Use it for a
         finished or abandoned thread of yours that others wrote in. A thread
         opened from someone's mention can be archived only when that person
-        or a server admin asks. The thread you are answering in is archived
+        or an admin asks. The thread you are answering in is archived
         when your turn ends (action "archive_scheduled"), so say it will be
-        archived rather than that it is. Pass origin_context_id. Discord-only:
-        Slack threads cannot be archived.
+        archived rather than that it is. Pass origin_context_id.
         """
         auth = await _auth(ctx)
         if auth.platform != "discord":
-            raise ToolError("archive_thread is Discord-only")
+            raise ToolError("archive_thread isn't available here")
         return await _archive_thread_impl(
             runtime, auth, thread_id=thread_id, origin_context_id=origin_context_id
         )
@@ -152,22 +153,20 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> TidyResult:
         """Remove your own messages from a thread you opened.
 
-        Discord: a thread from create_thread or from a mention (the latter
-        only when the person who mentioned you or a server admin asks); your
-        posts, replies and status cards go, except the running turn's and
-        replies to someone the person asking cannot speak for.
-        Discord keeps the thread and everyone else's messages. Slack refuses
-        a thread with other people's replies. Reads at most 50 messages.
+        A thread from create_thread or from a mention (the latter only when the
+        person who mentioned you or an admin asks); your posts, replies and status
+        cards go, except the running turn's and replies to someone the person asking
+        cannot speak for. The thread and everyone else's messages stay; a thread
+        with other people's replies may be refused. Reads at most 50 messages.
         Each deletion is checked, audited and counted against the 10 per turn
         and 40 per hour limits. A refusal stops with the number deleted.
-        Discord: thread_id is the thread id. Slack: channel_id:thread_ts.
+        thread_id is the thread id as turn_controls or create_thread gives it.
         Pass this turn's origin_context_id.
         """
         auth = await _auth(ctx)
         if auth.platform == "teams":
             raise ToolError(
-                "delete_thread is not supported on Teams; delete your own posts there "
-                "with delete_message"
+                "delete_thread isn't available here; delete your own posts with delete_message"
             )
         if auth.platform == "slack":
             return await _slack_delete_thread_impl(

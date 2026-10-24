@@ -8,6 +8,7 @@ import yaml
 from daimon.adapters.teams.commands import parse_command
 from daimon.adapters.teams.help import COMMAND_HELP
 from daimon.adapters.teams.private_replies import IN_THREAD
+from daimon.core.platform_words import DESCRIPTIONS, WORDS
 from jsonschema import Draft4Validator
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -75,6 +76,20 @@ def test_manifest_offers_what_the_adapter_answers() -> None:
     assert _basic(lists[("groupChat", "slash")]) == slash, "a group chat's too"
     for title in slash:
         assert parse_command(title, dict.fromkeys(COMMAND_HELP, _noop)) == (title, ""), title
+
+
+def test_manifest_command_descriptions_equal_the_shared_table() -> None:
+    """Both lists describe a command in the table's words, as help and the other platforms do."""
+    by_word = {c.word: DESCRIPTIONS[action] for action, c in WORDS["teams"].commands.items()}
+    lists = _lists()
+    for key in (("personal", "mention"), ("team", "slash"), ("groupChat", "slash")):
+        described = {
+            c["title"]: c["description"] for c in lists[key] if c.get("type", "basic") == "basic"
+        }
+        assert described == {title: by_word[title] for title in described}, key
+    assert {
+        title: description for title, description in by_word.items() if title in COMMAND_HELP
+    } == COMMAND_HELP, "help describes commands in the table's words too"
 
 
 async def _noop(_: object) -> None:

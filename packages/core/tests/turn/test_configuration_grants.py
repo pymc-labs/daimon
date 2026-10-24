@@ -126,7 +126,10 @@ async def test_actual_loaders_refuse_unproven_agent_counterpart_before_manifest_
     selected, loader, _row = planned
     # Preserve the actual fixture admission, changing only the trusted selection origin.
     origin = replace(selected.admission, backend_revision_origin="agent")
-    selected = replace(selected, admission=origin)
+    # Agent backends are on by default; this is the operator stop.
+    selected = replace(
+        selected, admission=origin, deps=replace(selected.deps, agent_backends=False)
+    )
     monkeypatch.setattr(
         os.environ,
         "get",

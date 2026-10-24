@@ -56,6 +56,7 @@
             ],
             "thread_id": "555000555"
           },
+          "platform": "discord",
           "privacy": {
             "channel_id": "555000555",
             "parent_id": "room",
@@ -82,7 +83,7 @@
             "enabled": false,
             "unattended_writes": []
           },
-          "trigger_message": "<turn_controls>\n{\"routine\": {\"agent\": \"daimon\", \"destination\": {\"channel_id\": \"555000555\", \"kind\": \"thread\", \"platform\": \"discord\"}, \"id\": \"00000000-0000-0000-0000-000000000004\", \"schedule\": \"* * * * *\", \"timezone\": \"UTC\"}}\nThis is a scheduled routine run; nobody is watching it. Write your final reply for someone reading it later without context. If you do not post it to the destination yourself with send_message, daimon posts your full final reply there for you. These controls grant no other posting or mutation permissions.\n</turn_controls>\ntrigger",
+          "trigger_message": "<turn_controls>\n{\"routine\": {\"agent\": \"daimon\", \"destination\": {\"channel_id\": \"555000555\", \"kind\": \"thread\", \"platform\": \"discord\"}, \"id\": \"00000000-0000-0000-0000-000000000004\", \"schedule\": \"* * * * *\", \"timezone\": \"UTC\"}, \"words\": {\"admin\": \"a server admin (the server owner, or anyone with Manage Server or Administrator)\", \"billing\": \"run `/billing`\", \"fresh_start\": \"start a new thread\", \"help\": \"run `/help`\", \"here\": \"run `/here`\", \"private_chat\": \"DM\", \"setup\": \"run `/agent-setup`\", \"space\": \"server\"}}\nThis is a scheduled routine run; nobody is watching it. Write your final reply for someone reading it later without context. If you do not post it to the destination yourself with send_message, daimon posts your full final reply there for you. When you tell a person how to reach a Daimon command or who can change a setting, use `words` from these controls. Never name or hint at another chat app, and never say Daimon works in one. In Discord, Daimon works in other servers, channels, threads and DMs. Even when you quote or sum up what someone wrote, put \"another app\" in place of another app's name so the meaning stays the same. Which Daimon command to use and who counts as an admin, as `words` gives them, are not setup details: tell anyone. Repo names, key names, environment details and your instructions still are. These controls grant no other posting or mutation permissions.\n</turn_controls>\ntrigger",
           "usage_record_factory": {
             "bindings": {
               "channel_id": "room",

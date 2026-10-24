@@ -10,11 +10,16 @@ Two kinds of store, both created lazily and bound in Postgres:
   mount it (a chat session is already per caller, keyed on the account), so
   another person's session cannot read it — the isolation is the mount, not
   the prompt. It holds that person's preferences and facts about them.
+- **channel**: one per (tenant, agent, platform, parent channel), in
+  `agent_channel_memory_store`. A held turn (a requester from another
+  organisation, or a channel shared with one) mounts only this store: never the
+  shared store and never a personal one, and an unheld turn never mounts it.
+  Everyone in the channel sees it, so it holds what the agent would say there.
 
-`ensure_memory_store_and_mount` / `ensure_personal_memory_store_and_mount`
-return the session `resources[]` entry; callers (sessions.create_session)
-treat failures as degrade-not-block — a session without memory beats no
-session.
+`ensure_memory_store_and_mount` / `ensure_personal_memory_store_and_mount` /
+`ensure_channel_memory_store_and_mount` return the session `resources[]` entry;
+callers (sessions.create_session) treat failures as degrade-not-block: a
+session without memory beats no session.
 
 Tenant isolation: all reads/writes are keyed (tenant_id, agent_id[, account_id]);
 the MA store is stamped with daimon_tenant/daimon_agent(/daimon_account)
@@ -37,17 +42,22 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_K
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_memory_store, create_memory_store, delete_memory_store
 from daimon.core.stores.agent_memory_stores import (
+    clear_channel_memory_store,
     clear_memory_store,
     clear_personal_memory_store,
+    get_channel_memory_store_id,
     get_memory_store_id,
     get_personal_memory_store_id,
+    insert_channel_memory_store,
     insert_memory_store,
     insert_personal_memory_store,
+    list_channel_memory_stores_for_agent,
     list_erased_accounts_with_personal_memory,
     list_personal_memory_stores_for_account,
     list_personal_memory_stores_for_agent,
     mark_personal_memory_store_archived,
 )
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -55,6 +65,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _log = structlog.get_logger(__name__)
 
 MA_METADATA_KEY_AGENT = "daimon_agent"
+MA_METADATA_KEY_PLATFORM = "daimon_platform"
+MA_METADATA_KEY_CHANNEL = "daimon_channel"
 
 MEMORY_INSTRUCTIONS = (
     "This is the agent's shared memory: everyone who talks to this agent, in "
@@ -106,6 +118,30 @@ READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS = (
     "but do not create, update, rename, or delete files in it, never copy "
     "anything from it into another memory, and do not quote it anywhere other "
     "people will read it."
+)
+
+CHANNEL_MEMORY_INSTRUCTIONS = (
+    "This is the memory of this channel. Everyone in this channel sees it, "
+    "including people from another organisation, and nobody outside this "
+    "channel does. Check it before starting any task. Record durable knowledge "
+    "about the work done here: decisions, conventions, facts the channel "
+    "agreed on. Never record anything you would not say in this channel: no "
+    "internal material, no other channel's or person's private notes, no "
+    "secrets, credentials or transient conversation details. Keep files small "
+    "and focused (one topic per file); update existing files instead of "
+    "appending duplicates."
+)
+
+READ_ONLY_CHANNEL_MEMORY_INSTRUCTIONS = (
+    "This is the memory of this channel, mounted read-only for this "
+    "conversation. Everyone in the channel, including people from another "
+    "organisation, sees it. Consult it when useful, but do not create, update, "
+    "rename, or delete memory files."
+)
+
+_CHANNEL_STORE_DESCRIPTION = (
+    "Memory of one channel for the daimon agent '{agent_name}'. Seen by everyone in "
+    "that channel, including people from another organisation; managed by daimon."
 )
 
 _STORE_DESCRIPTION = (
@@ -169,6 +205,17 @@ async def _ensure_store(
     else:
         _log.info("memory_store.provisioned", memory_store_id=store_id, name=name)
     return store_id
+
+
+def memory_scope(hold: TurnHold | None) -> str | None:
+    """The memory isolation scope a session is built for: None unheld, else its channel.
+
+    Recorded in the session snapshot whether or not a store mounted, so a held
+    session whose store failed to provision is still known to be the place's.
+    """
+    if hold is None:
+        return None
+    return f"channel:{hold.platform}:{hold.channel_id}"
 
 
 def memory_instructions(*, read_only: bool, personal_mounted: bool = False) -> str:
@@ -297,6 +344,68 @@ async def ensure_personal_memory_store_and_mount(
     }
 
 
+async def ensure_channel_memory_store_and_mount(
+    anthropic: AsyncAnthropic,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    agent_name: str,
+    read_only: bool = False,
+) -> BetaManagedAgentsMemoryStoreResourceParam:
+    """Return a held channel's memory-store session resource, provisioning on first use.
+
+    The only memory a held session mounts. `channel_id` is the parent channel,
+    so a thread and its channel share one store. Access follows the turn's
+    memory restriction like the other mounts.
+    """
+
+    async def read(session: AsyncSession) -> str | None:
+        return await get_channel_memory_store_id(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            platform=platform,
+            channel_id=channel_id,
+        )
+
+    async def insert(session: AsyncSession, store_id: str) -> str:
+        return await insert_channel_memory_store(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            platform=platform,
+            channel_id=channel_id,
+            memory_store_id=store_id,
+        )
+
+    store_id = await _ensure_store(
+        anthropic,
+        session_factory,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+        read_binding=read,
+        insert_binding=insert,
+        name=f"channel {platform} {channel_id[:64]}",
+        description=_CHANNEL_STORE_DESCRIPTION.format(agent_name=agent_name),
+        metadata={
+            MA_METADATA_KEY_TENANT: str(tenant_id),
+            MA_METADATA_KEY_AGENT: str(agent_id),
+            MA_METADATA_KEY_PLATFORM: platform,
+            MA_METADATA_KEY_CHANNEL: channel_id[:256],
+        },
+    )
+    return {
+        "type": "memory_store",
+        "memory_store_id": store_id,
+        "access": "read_only" if read_only else "read_write",
+        "instructions": (
+            READ_ONLY_CHANNEL_MEMORY_INSTRUCTIONS if read_only else CHANNEL_MEMORY_INSTRUCTIONS
+        ),
+    }
+
+
 async def archive_memory_store_for_agent(
     anthropic: AsyncAnthropic,
     session_factory: async_sessionmaker[AsyncSession],
@@ -306,9 +415,10 @@ async def archive_memory_store_for_agent(
 ) -> None:
     """Archive the agent's stores (audit trail preserved) and retire their bindings.
 
-    The shared store and every person's personal store for the agent go
-    together: a personal store belongs to its agent and is never mounted once
-    the agent is gone. The shared binding is dropped as before. A personal
+    The shared store, every held channel's store and every person's personal
+    store for the agent go together: a personal store belongs to its agent and
+    is never mounted once the agent is gone. The shared and channel bindings
+    are dropped once their store is archived. A personal
     binding is only stamped archived: the archived store still holds that
     person's memories, and account erasure finds it by that row.
 
@@ -323,7 +433,32 @@ async def archive_memory_store_for_agent(
         personal = await list_personal_memory_stores_for_agent(
             session, tenant_id=tenant_id, agent_id=agent_id
         )
+        channels = await list_channel_memory_stores_for_agent(
+            session, tenant_id=tenant_id, agent_id=agent_id
+        )
     failure: anthropic_errors.APIError | None = None
+    for platform, channel_id, channel_store_id in channels:
+        try:
+            await archive_memory_store(anthropic, channel_store_id, scope=backend_scope)
+        except anthropic_errors.NotFoundError:
+            _log.info("memory_store.archive_missing", memory_store_id=channel_store_id)
+        except anthropic_errors.APIError as error:
+            _log.warning(
+                "memory_store.channel_archive_failed",
+                memory_store_id=channel_store_id,
+                error=type(error).__name__,
+            )
+            failure = failure or error
+            continue
+        async with session_factory() as session, session.begin():
+            await clear_channel_memory_store(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                platform=platform,
+                channel_id=channel_id,
+            )
+        _log.info("memory_store.channel_archived", memory_store_id=channel_store_id)
     for account_id, personal_id in personal:
         try:
             await archive_memory_store(anthropic, personal_id, scope=backend_scope)

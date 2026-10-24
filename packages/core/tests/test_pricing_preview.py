@@ -57,7 +57,7 @@ def test_injected_native_tariff_is_exact_and_context_independent(provider: str, 
         "input $0.123456789, output $3.75, cache-read $0.075, cache-write inapplicable" in preview
     )
     assert "checked 2026-10-12; supplied request tier" in preview
-    assert "Worst-case per turn: unknown" in preview
+    assert "Worst case per reply: unknown" in preview
     assert "Excludes billing markup, hosted runtime, external tools and cache storage" in preview
 
 
@@ -65,7 +65,7 @@ def test_missing_tariff_is_not_free_or_a_fallback_model() -> None:
     preview = list_price_preview("unconfigured-model", None)
     assert preview.startswith("unconfigured-model: list price unknown.")
     assert "$" not in preview
-    assert "Worst-case per turn: unknown" in preview
+    assert "Worst case per reply: unknown" in preview
 
 
 def test_unverified_tariff_cannot_be_presented_as_a_verified_list_price() -> None:

@@ -15,7 +15,8 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.pricing import AGENT_MODEL_PRICING
-from daimon.testing.ma_models import (
+from daimon.testing.ma_models import ma_agent, ma_environment, tenant_metadata
+from mux.testing.drivers.anthropic.ma_models import (
     DEFAULT_AGENT_ID,
     DEFAULT_ENV_ID,
     DEFAULT_MODEL_ID,
@@ -23,14 +24,11 @@ from daimon.testing.ma_models import (
     EMPTY_CLOUD_CONFIG,
     FIXED_TS,
     FIXED_TS_STR,
-    ma_agent,
-    ma_environment,
     ma_model_config,
     ma_model_usage,
     ma_session,
     ma_session_agent,
     ma_session_agent_from,
-    tenant_metadata,
 )
 
 

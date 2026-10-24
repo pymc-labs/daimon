@@ -19,6 +19,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._words import space_noun
 from daimon.core.channel_environments import (
     archive_needs_confirm,
     build_archive_environment_note,
@@ -240,7 +241,9 @@ async def _archive_environment_impl(
     return ArchiveEnvironmentResult(
         name=name,
         cleared_picks=cleared,
-        note=build_archive_environment_note(environment_name=name, cleared=cleared),
+        note=build_archive_environment_note(
+            environment_name=name, cleared=cleared, space=space_noun(auth.platform)
+        ),
     )
 
 

@@ -72,6 +72,15 @@ async def test_native_worker_unproved_output_never_binds_or_sends(native_worker,
         call.path == "/v1/sessions" and call.method == "POST" for call in trace.requests
     ) == (1 if fault in {"resource_drift", "source_drift"} else 0)
     assert not any(call.path.endswith("/events") for call in trace.requests)
+    # A refused allocation never leaves its native agent behind (SMOKE-1: one orphan per try).
+    if fault in {"agent_drift", "resource_drift", "source_drift"}:
+        assert (
+            sum(
+                call.method == "POST" and call.path == "/v1/agents/new-worker/archive"
+                for call in trace.requests
+            )
+            == 1
+        )
     async with request.deps.sessionmaker.begin() as db:
         graph, _ = await fleet.lock_budget(
             db, tenant_id=request.tenant_id, actor_id=root.fleet.account_id, run_id=claimed.run_id
@@ -226,7 +235,12 @@ async def test_frozen_session_execution_must_match_the_proved_worker_before_inpu
             cancel=asyncio.Event(),
         )
     assert not any(call.path.endswith("/events") for call in trace.requests)
-    assert sum(call.path.endswith("/archive") for call in trace.requests) == 1
+    archived = [call.path for call in trace.requests if call.path.endswith("/archive")]
+    # The refused session and the agent allocated for it are both archived.
+    assert sorted(archived) == [
+        "/v1/agents/new-worker/archive",
+        "/v1/sessions/worker-session/archive",
+    ]
     async with request.deps.sessionmaker.begin() as db:
         graph, _ = await fleet.lock_budget(
             db, tenant_id=request.tenant_id, actor_id=root.fleet.account_id, run_id=claimed.run_id
@@ -311,7 +325,10 @@ async def test_warm_binding_changed_after_capture_never_provisions_or_sends(
             cancel=asyncio.Event(),
         )
     assert len(changed) == 1
-    assert len(trace.requests) == changed[0][1]
+    # Nothing is provisioned or sent after the change; only our own allocated agent is
+    # archived, so a refused attempt leaves no orphan.
+    after = [(call.method, call.path) for call in trace.requests[changed[0][1] :]]
+    assert after == [("POST", "/v1/agents/new-worker/archive")]
     assert not any(
         call.method == "POST"
         and call.path in {"/v1/memory_stores", "/v1/sessions"}
@@ -384,7 +401,16 @@ async def test_foreign_unproved_session_is_never_archived(native_worker):
             prices=tariffs(root),
             cancel=asyncio.Event(),
         )
-    assert not any(call.path.endswith(("/archive", "/events")) for call in trace.requests)
+    # The foreign session is never touched; the agent we allocated and verified is ours.
+    assert not any(
+        call.path.endswith("/events")
+        or call.path.startswith("/v1/sessions/")
+        and "archive" in call.path
+        for call in trace.requests
+    )
+    assert [call.path for call in trace.requests if call.path.endswith("/archive")] == [
+        "/v1/agents/new-worker/archive"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -442,6 +468,47 @@ async def test_resolved_readback_widening_refuses_before_native_session_allocati
 
     request, root, claimed, trace, controls = native_worker
     controls["fault"] = "builtin_widening"
+    with pytest.raises(AdmissionDenied):
+        await run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Read the facts",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert any(call.method == "POST" and call.path == "/v1/agents" for call in trace.requests)
+    assert not any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
+
+
+@pytest.mark.parametrize("native_worker", ["resolved_readback"], indirect=True)
+async def test_a_url_sources_echo_on_web_fetch_passes_the_readback_and_runs(native_worker):
+    """SMOKE d75 J4: MA echoes url_sources on the web_fetch config; the worker runs."""
+    from daimon.core.headless_runner import run_worker
+
+    request, root, claimed, trace, controls = native_worker
+    controls["fault"] = "echo_url_sources"
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Read the facts",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    assert any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
+
+
+@pytest.mark.parametrize("native_worker", ["resolved_readback"], indirect=True)
+async def test_an_unrepresentable_tool_echo_refuses_instead_of_crashing(native_worker):
+    """SMOKE d75 J4: the allocation readback echoed a tool field the strict native
+    schema lacks, and a raw ValidationError surfaced as "a setup error on our side"."""
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, root, claimed, trace, controls = native_worker
+    controls["fault"] = "echo_unknown_tool_field"
     with pytest.raises(AdmissionDenied):
         await run_worker(
             request,
@@ -541,3 +608,144 @@ async def test_a_native_worker_never_runs_the_root_conversations_model_choice(na
     assert body["agent"] == "new-worker", "the worker session takes no model override"
     assert all(chosen.encode() not in call.body for call in trace.requests)
     trace.assert_consumed()
+
+
+@pytest.mark.parametrize("native_worker", ["clone_source_effort"], indirect=True)
+async def test_a_clone_worker_whose_source_has_native_controls_runs(native_worker):
+    """RESCORE-2 J4: fleet-claude (its own model controls) failed extensions:dict_type."""
+    from daimon.core.headless_runner import run_worker
+
+    request, root, claimed, trace, _ = native_worker
+    assert root.spec.extensions and claimed.spec["extensions"]
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    allocated = next(
+        call.json()
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/agents"
+    )
+    # The source's own controls reach the worker, from the source and not an override.
+    assert allocated["model"]["effort"] == {"type": "medium"}
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (TypeError("a bug on our side"), "setup_error"),
+        (__import__("httpx").ConnectError("provider unreachable"), "provider_error"),
+    ],
+)
+async def test_real_run_worker_records_why_it_failed_before_native_start(
+    native_worker, monkeypatch, error, code
+):
+    """RESCORE-2 J4: run_worker's own handler recorded every pre-native failure as
+    preparation_refused, so a bug read on the card as the model being unable to run."""
+    from daimon.core import headless_runner
+    from daimon.core.fleet import worker_error_text
+
+    request, root, claimed, trace, _ = native_worker
+
+    async def broken(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(headless_runner, "capture_preparation_source", broken)
+    with pytest.raises(type(error)):
+        await headless_runner.run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    _, rows = await fleet.run_status(
+        request.deps.sessionmaker, tenant_id=claimed.tenant_id, run_id=claimed.run_id
+    )
+    (ended,) = [row for row in rows if row.id == claimed.id]
+    assert ended.status == "failed" and ended.error_code == code
+    assert "on that model" not in (worker_error_text(ended.error_code) or "")
+    assert not any(call.method == "POST" for call in trace.requests)
+
+
+async def test_a_task_worker_runs_when_the_provider_echoes_its_default_model_controls(
+    native_worker,
+):
+    """SMOKE-1 J3: an Opus task worker (model controls dropped) was refused because MA
+    echoed its default speed/effort, and its allocated agent was left behind."""
+    from daimon.core.headless_runner import run_worker
+
+    request, root, claimed, trace, controls = native_worker
+    assert not claimed.spec.get("extensions")  # the worker declares no model controls
+    controls["fault"] = "echo_default_controls"
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    assert not any(call.path.endswith("/new-worker/archive") for call in trace.requests)
+
+
+async def _refused_and_archived(native_worker, fault):
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, root, claimed, trace, controls = native_worker
+    controls["fault"] = fault
+    with pytest.raises(AdmissionDenied):
+        await run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert not any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
+    archived = [call.path for call in trace.requests if call.path.endswith("/archive")]
+    assert archived == ["/v1/agents/new-worker/archive"]
+
+
+async def test_an_echoed_default_on_a_different_model_is_still_refused(native_worker):
+    """#1380 review: only the model id may differ in form, never in value."""
+    request, root, claimed, trace, controls = native_worker
+    assert not claimed.spec.get("extensions")
+    await _refused_and_archived(native_worker, "echo_other_model")
+
+
+@pytest.mark.parametrize("native_worker", ["live_root_effort"], indirect=True)
+async def test_a_spec_with_model_controls_needs_an_exact_echo(native_worker):
+    """#1380 review: the id-only comparison applies only when the spec declares no controls."""
+    request, root, claimed, trace, controls = native_worker
+    assert root.spec.extensions  # the worker asked for effort "medium"
+    await _refused_and_archived(native_worker, "echo_other_effort")
+
+
+async def test_an_unknown_agent_create_outcome_never_archives(native_worker):
+    """#1380 review: a lost ACK is retried and must find the same agent, so nothing archives."""
+    from daimon.core.headless_runner import run_worker
+    from mux.errors import ProviderError
+
+    request, root, claimed, trace, controls = native_worker
+    controls["fault"] = "lost_ack"
+    with pytest.raises((ProviderError, Exception)):
+        await run_worker(
+            request,
+            parent=root,
+            worker=claimed,
+            trigger_message="Complete the task",
+            prices=tariffs(root),
+            cancel=asyncio.Event(),
+        )
+    assert sum(call.method == "POST" and call.path == "/v1/agents" for call in trace.requests) == 1
+    assert not any(call.path.endswith("/archive") for call in trace.requests)

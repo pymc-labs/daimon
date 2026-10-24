@@ -56,3 +56,34 @@ async def test_foreign_ack_requires_exact_canonical_association_before_signer(tm
         await binding.bind(native)
     assert binding.engine is None and binding.jti is None and not list(tmp_path.iterdir())
     await binding.close()
+
+
+@pytest.mark.parametrize(
+    ("provider", "chat_execution", "surface"),
+    [
+        ("openai", True, "provider_turn"),
+        ("gemini", True, "provider_turn"),
+        # An Anthropic turn keeps its confirmation card: never the provider-turn surface.
+        ("anthropic", True, None),
+        ("anthropic", False, None),
+        ("openai", False, None),
+    ],
+)
+def test_only_a_non_anthropic_chat_binding_is_a_provider_turn_credential(
+    tmp_path, provider, chat_execution, surface
+):
+    from daimon.testing.f2_mcp_binding import binding_surface
+
+    authority = AgentMCPAuthority(
+        provider=provider,
+        scope=Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="z"),
+        account_scope_id="project",
+        output=tmp_path,
+        deadline_s=60,
+        database_url=None,
+        mcp_signing_secret_file=None,
+        acknowledged=lambda _: True,
+        redact=lambda _: None,
+        chat_execution=chat_execution,
+    )
+    assert binding_surface(authority) == surface

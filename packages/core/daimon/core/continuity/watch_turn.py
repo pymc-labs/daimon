@@ -44,12 +44,10 @@ def watch_posture(
 
     async def read_only(call: ToolCall) -> ToolConfirmationResult:
         if call.server_name in (DAIMON_SERVER_NAME, "sandbox"):
-            return ToolConfirmationResult(
-                allow=False, deny_message="Watch turns only read and report."
-            )
+            return ToolConfirmationResult(allow=False, deny_message="Watches only read and report.")
         assert call.server_name is not None  # Shared capability_posture refused native calls.
         if classify_tool(strict, server_name=call.server_name, tool_name=call.tool_name) != "read":
-            return ToolConfirmationResult(allow=False, deny_message="Watch turns refuse writes.")
+            return ToolConfirmationResult(allow=False, deny_message="Watches refuse writes.")
         return await decide(call)
 
     return capabilities.capability_posture(PolicyApproval(decide=read_only))

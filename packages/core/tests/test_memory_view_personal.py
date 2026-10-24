@@ -11,7 +11,7 @@ from daimon.core.memory_view import (
     parse_memory_args,
     personal_memory_reply,
 )
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     make_fake_memory_store_handler,

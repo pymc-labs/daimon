@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity, fingerprint_mutable
 from daimon.testing.effect_recorder import DB_TABLES, EffectRecorder, Normalizer, database_metadata
-from daimon.testing.ma_transport import Json
+from mux.testing.drivers.anthropic.ma_transport import Json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 

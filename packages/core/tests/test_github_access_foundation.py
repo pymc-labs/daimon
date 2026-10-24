@@ -262,11 +262,15 @@ async def test_copied_agent_identity_starts_without_source_grants(
 
 
 @pytest.mark.asyncio
-async def test_agent_cannot_grant_second_installation(db_session: AsyncSession) -> None:
+async def test_agent_can_grant_second_and_third_installations(db_session: AsyncSession) -> None:
     tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
     db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
     await db_session.flush()
-    for installation_id, repo_id, name in ((71, 101, "first/one"), (72, 102, "second/two")):
+    for installation_id, repo_id, name in (
+        (71, 101, "first/one"),
+        (72, 102, "second/two"),
+        (73, 103, "third/three"),
+    ):
         await github_app_installations.upsert(
             db_session,
             installation_id=installation_id,
@@ -297,24 +301,319 @@ async def test_agent_cannot_grant_second_installation(db_session: AsyncSession) 
         granted_by_account_id=None,
         agent_name="ResearchBot",
     )
-    with pytest.raises(
-        github_access.SecondInstallationError,
-        match="ResearchBot already uses repos from first. One agent can use one GitHub org. Use another agent for repos from a different org.",
-    ):
+    for repo_id in (102, 103):
         await github_access.stage_grant(
             db_session,
             tenant_id=tenant_id,
             agent_id=agent_id,
-            repo_id=102,
+            repo_id=repo_id,
             baseline_access="write",
             ceiling_access="write",
             granted_by_account_id=None,
             agent_name="ResearchBot",
         )
+    assert {
+        grant.repo_id
+        for grant in await github_access.list_agent_grants(
+            db_session, tenant_id=tenant_id, agent_id=agent_id
+        )
+    } == {101, 102, 103}
 
 
 @pytest.mark.asyncio
-async def test_parallel_first_grants_cannot_cross_installations(
+@pytest.mark.parametrize("suspend_existing", [False, True])
+async def test_agent_refuses_thirteenth_installation_but_allows_more_repos_in_existing_one(
+    db_session: AsyncSession,
+    suspend_existing: bool,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    for installation_id in range(1, 14):
+        name = f"owner{installation_id}/repo{installation_id}"
+        await github_app_installations.upsert(
+            db_session,
+            installation_id=installation_id,
+            account_login=f"owner{installation_id}",
+            repo_full_names=[name],
+        )
+        db_session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=installation_id,
+                owner_id=installation_id,
+                installation_id=installation_id,
+                repo_full_name=name,
+                max_access="write",
+                authorized_by_github_user_id=2,
+                status="active",
+                version=1,
+            )
+        )
+    await db_session.flush()
+    for installation_id in range(1, 13):
+        await github_access.stage_grant(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=installation_id,
+            baseline_access="write",
+            ceiling_access="write",
+            granted_by_account_id=None,
+            agent_name="ResearchBot",
+        )
+    if suspend_existing:
+        installation = await db_session.get(GitHubAppInstallation, 1)
+        assert installation is not None
+        installation.suspended_at = datetime.now(UTC)
+        await db_session.flush()
+    with pytest.raises(
+        github_access.InstallationLimitError,
+        match=(
+            r"ResearchBot can use repos from up to 12 GitHub accounts or orgs, "
+            r"and this change would make it 13\. Nothing was saved\."
+        ),
+    ):
+        await github_access.stage_grant(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=13,
+            baseline_access="write",
+            ceiling_access="write",
+            granted_by_account_id=None,
+            agent_name="ResearchBot",
+        )
+    assert (
+        len(
+            await github_access.list_agent_grants(
+                db_session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        )
+        == 12
+    )
+    if suspend_existing:
+        installation = await db_session.get(GitHubAppInstallation, 1)
+        assert installation is not None
+        installation.suspended_at = None
+        await db_session.flush()
+    await github_app_installations.upsert(
+        db_session,
+        installation_id=1,
+        account_login="owner1",
+        repo_full_names=["owner1/repo1", "owner1/extra"],
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=100,
+            owner_id=1,
+            installation_id=1,
+            repo_full_name="owner1/extra",
+            max_access="write",
+            authorized_by_github_user_id=2,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_id=100,
+        baseline_access="write",
+        ceiling_access="write",
+        granted_by_account_id=None,
+        agent_name="ResearchBot",
+    )
+    assert (
+        len(
+            await github_access.list_agent_grants(
+                db_session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        )
+        == 13
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["grant", "suspended", "set_working"])
+async def test_501st_repo_at_twelve_installations_exceeds_session_vault_budget(
+    db_session: AsyncSession,
+    scenario: str,
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    for installation_id in range(1, 13):
+        repo_ids = range(1, 502) if installation_id == 1 else (500 + installation_id,)
+        names = [f"owner{installation_id}/repo{repo_id}" for repo_id in repo_ids]
+        await github_app_installations.upsert(
+            db_session,
+            installation_id=installation_id,
+            account_login=f"owner{installation_id}",
+            repo_full_names=names,
+        )
+        for repo_id, name in zip(repo_ids, names, strict=True):
+            db_session.add(
+                TenantGitHubRepo(
+                    tenant_id=tenant_id,
+                    repo_id=repo_id,
+                    owner_id=installation_id,
+                    installation_id=installation_id,
+                    repo_full_name=name,
+                    max_access="write",
+                    authorized_by_github_user_id=2,
+                    status="active",
+                    version=1,
+                )
+            )
+            if installation_id != 1 or repo_id <= 500:
+                db_session.add(
+                    AgentGitHubGrant(
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        repo_id=repo_id,
+                        baseline_access="write",
+                        ceiling_access="write",
+                        is_working_repo=(
+                            scenario != "set_working" and installation_id == 1 and repo_id == 1
+                        ),
+                    )
+                )
+    await db_session.flush()
+    if scenario == "suspended":
+        installation = await db_session.get(GitHubAppInstallation, 2)
+        assert installation is not None
+        installation.suspended_at = datetime.now(UTC)
+        await db_session.flush()
+    assert (
+        github_access.projected_session_credential_count(
+            12, multi_installation=True, include_alias=True
+        )
+        == 15
+    )
+    if scenario == "set_working":
+        await github_access.stage_grant(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=501,
+            baseline_access="write",
+            ceiling_access="write",
+            granted_by_account_id=None,
+            agent_name="ResearchBot",
+        )
+        with pytest.raises(
+            github_access.SessionVaultBudgetError,
+            match="ResearchBot can't take more GitHub repos: its session would need more than 15 credentials. Remove a repo or an account first.",
+        ):
+            await github_access.set_working_repo(
+                db_session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_name="owner1/repo1",
+                account_id=uuid.uuid4(),
+                agent_name="ResearchBot",
+            )
+        assert not any(
+            grant.is_working_repo
+            for grant in await github_access.list_agent_grants(
+                db_session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        )
+    else:
+        with pytest.raises(
+            github_access.SessionVaultBudgetError,
+            match="ResearchBot can't take more GitHub repos: its session would need more than 15 credentials. Remove a repo or an account first.",
+        ):
+            await github_access.stage_grant(
+                db_session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=501,
+                baseline_access="write",
+                ceiling_access="write",
+                granted_by_account_id=None,
+                agent_name="ResearchBot",
+            )
+    assert len(
+        await github_access.list_agent_grants(db_session, tenant_id=tenant_id, agent_id=agent_id)
+    ) == (512 if scenario == "set_working" else 511)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("read_first", "suspend_existing"), [(True, False), (False, False), (True, True)]
+)
+async def test_multi_installation_grant_refuses_read_only_access(
+    db_session: AsyncSession, read_first: bool, suspend_existing: bool
+) -> None:
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    for installation_id in (1, 2):
+        name = f"owner{installation_id}/repo{installation_id}"
+        await github_app_installations.upsert(
+            db_session,
+            installation_id=installation_id,
+            account_login=f"owner{installation_id}",
+            repo_full_names=[name],
+        )
+        db_session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=installation_id,
+                owner_id=installation_id,
+                installation_id=installation_id,
+                repo_full_name=name,
+                max_access="write",
+                authorized_by_github_user_id=2,
+                status="active",
+                version=1,
+            )
+        )
+    await db_session.flush()
+    await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        repo_id=1,
+        baseline_access="read" if read_first else "write",
+        ceiling_access="read" if read_first else "write",
+        granted_by_account_id=None,
+        agent_name="ResearchBot",
+    )
+    if suspend_existing:
+        installation = await db_session.get(GitHubAppInstallation, 1)
+        assert installation is not None
+        installation.suspended_at = datetime.now(UTC)
+        await db_session.flush()
+    with pytest.raises(
+        github_access.ReadOnlyMultiInstallationError,
+        match="ResearchBot has read-only GitHub repos. Make them read-write or remove them before adding repos from another account or org.",
+    ):
+        await github_access.stage_grant(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=2,
+            baseline_access="write" if read_first else "read",
+            ceiling_access="write" if read_first else "read",
+            granted_by_account_id=None,
+            agent_name="ResearchBot",
+        )
+    assert [
+        grant.repo_id
+        for grant in await github_access.list_agent_grants(
+            db_session, tenant_id=tenant_id, agent_id=agent_id
+        )
+    ] == [1]
+
+
+@pytest.mark.asyncio
+async def test_parallel_first_grants_keep_both_installations(
     db_engine: AsyncEngine, db_clean: None
 ) -> None:
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -381,13 +680,102 @@ async def test_parallel_first_grants_cannot_cross_installations(
     finally:
         release_first.set()
         await first_task
-    with pytest.raises(github_access.SecondInstallationError):
+    await second_task
+    async with factory() as session:
+        grants = await github_access.list_agent_grants(
+            session, tenant_id=tenant_id, agent_id=agent_id
+        )
+    assert {grant.repo_id for grant in grants} == {101, 102}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_twelfth_installation_grants_admit_exactly_one(
+    db_engine: AsyncEngine, db_clean: None
+) -> None:
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    async with factory.begin() as session:
+        session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+        await session.flush()
+        for installation_id in range(1, 14):
+            name = f"owner{installation_id}/repo{installation_id}"
+            await github_app_installations.upsert(
+                session,
+                installation_id=installation_id,
+                account_login=f"owner{installation_id}",
+                repo_full_names=[name],
+            )
+            session.add(
+                TenantGitHubRepo(
+                    tenant_id=tenant_id,
+                    repo_id=installation_id,
+                    owner_id=installation_id,
+                    installation_id=installation_id,
+                    repo_full_name=name,
+                    max_access="write",
+                    authorized_by_github_user_id=2,
+                    status="active",
+                    version=1,
+                )
+            )
+            if installation_id <= 11:
+                session.add(
+                    AgentGitHubGrant(
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        repo_id=installation_id,
+                        baseline_access="write",
+                        ceiling_access="write",
+                        is_working_repo=installation_id == 1,
+                    )
+                )
+    first_staged = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first() -> None:
+        async with factory.begin() as session:
+            await github_access.stage_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=12,
+                baseline_access="write",
+                ceiling_access="write",
+                granted_by_account_id=None,
+            )
+            first_staged.set()
+            await release_first.wait()
+
+    async def second() -> None:
+        await first_staged.wait()
+        async with factory.begin() as session:
+            await github_access.stage_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=13,
+                baseline_access="write",
+                ceiling_access="write",
+                granted_by_account_id=None,
+            )
+
+    first_task = asyncio.create_task(first())
+    second_task = asyncio.create_task(second())
+    try:
+        await asyncio.wait_for(first_staged.wait(), timeout=5)
+        await asyncio.sleep(0.05)
+        assert not second_task.done(), "the second grant waits for the per-agent lock"
+    finally:
+        release_first.set()
+        await first_task
+    with pytest.raises(github_access.InstallationLimitError):
         await second_task
     async with factory() as session:
         grants = await github_access.list_agent_grants(
             session, tenant_id=tenant_id, agent_id=agent_id
         )
-    assert [grant.repo_id for grant in grants] == [101]
+    assert len(grants) == 12
+    assert {grant.repo_id for grant in grants} == set(range(1, 13))
 
 
 @pytest.mark.asyncio

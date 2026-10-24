@@ -283,7 +283,10 @@ def test_render_handoff_acknowledged_without_requested_work() -> None:
     ) == (
         "Ada will handle your next message.\n"
         "Send a message to continue.\n"
-        "Your conversation and files carry over. Ada uses its own connections and memory."
+        "Your conversation and files carry over while Ada stays on this model provider. "
+        "Ada uses its own connections and memory.\n"
+        "Switching Ada to another provider starts it fresh here: earlier messages and files "
+        "don't carry over."
     )
 
 
@@ -293,7 +296,10 @@ def test_render_handoff_acknowledged_appends_requested_work_line() -> None:
     ) == (
         "Ada will handle your next message.\n"
         "Send a message to continue.\n"
-        "Your conversation and files carry over. Ada uses its own connections and memory.\n"
+        "Your conversation and files carry over while Ada stays on this model provider. "
+        "Ada uses its own connections and memory.\n"
+        "Switching Ada to another provider starts it fresh here: earlier messages and files "
+        "don't carry over.\n"
         "Next: finish the report."
     )
 
@@ -307,7 +313,7 @@ def test_render_fresh_start() -> None:
         "Leaves behind: this task's working files and unfinished work.\n"
         "Keeps: everything already posted here, and Ada's saved memory, "
         "keys and connections.\n"
-        "Nothing is removed until the new workspace is ready."
+        "Nothing is removed until the new working files are ready."
     ), "fresh start copy is fixed four lines naming the target"
 
 
@@ -328,9 +334,9 @@ def test_render_preparation_failed() -> None:
 
 def test_render_unexpected_loss_transcript() -> None:
     assert render_unexpected_loss("transcript") == (
-        "I lost the workspace this task was running in and started a new one.\n"
+        "I lost this task's working files and started with new ones.\n"
         "I have this conversation and the files that were saved to your task.\n"
-        "Anything unsaved in the old workspace is gone, and nothing that was running "
+        "Anything unsaved there is gone, and nothing that was running "
         "came across.\n"
         "Tell me what to re-check and I'll go from there."
     ), "transcript recovery should mention the saved task files"
@@ -338,9 +344,9 @@ def test_render_unexpected_loss_transcript() -> None:
 
 def test_render_unexpected_loss_history() -> None:
     assert render_unexpected_loss("history") == (
-        "I lost the workspace this task was running in and started a new one.\n"
+        "I lost this task's working files and started with new ones.\n"
         "I have what was posted here, but not the earlier conversation.\n"
-        "Anything unsaved in the old workspace is gone, and nothing that was running "
+        "Anything unsaved there is gone, and nothing that was running "
         "came across.\n"
         "Tell me what to re-check and I'll go from there."
     ), "history-only recovery should say the earlier conversation is missing"
@@ -433,7 +439,7 @@ def test_render_replacement_summary_joins_multiple_lost_items_with_commas() -> N
 
 def test_render_tool_refusal_unreachable() -> None:
     assert render_tool_refusal_unreachable("Ada", "#data") == (
-        "'Ada' does not answer anywhere in this workspace, so it cannot be handed a task.\n"
+        "'Ada' does not answer anywhere here, so it cannot be handed a task.\n"
         "Tell the caller an admin can say: make Ada answer in #data. Then the handoff "
         "will work.\n"
         "Nothing was changed. Do not retry."

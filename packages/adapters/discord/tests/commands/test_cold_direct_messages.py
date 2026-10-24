@@ -27,6 +27,16 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
 
 
+def assert_generic_guidance(msg, tenants):
+    msg.channel.send.assert_awaited_once()
+    notice = msg.channel.send.await_args.args[0]
+    assert notice == module.cold_dm_text("discord", dms_on=None)
+    for tenant in tenants:
+        assert str(tenant.id) not in notice
+        assert tenant.external_id not in notice
+    assert "private-0" not in notice
+
+
 def private_reply(row, text="private answer"):
     return DirectMessageReply(
         text=text,
@@ -178,7 +188,9 @@ async def test_multiple_tenants_pending_messages_are_silent_and_selection_answer
 
 
 @pytest.mark.parametrize("facts", [Membership(is_member=False), Membership(is_member=True)])
-async def test_no_membership_or_role_is_silent(db_session_factory, monkeypatch, facts):
+async def test_no_membership_or_role_gets_only_generic_guidance(
+    db_session_factory, monkeypatch, facts
+):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     fetch.return_value = facts
     async with db_session_factory.begin() as session:
@@ -187,9 +199,34 @@ async def test_no_membership_or_role_is_silent(db_session_factory, monkeypatch, 
         )
     msg = message()
     await cog.on_message(msg)
-    msg.channel.send.assert_not_awaited()
+    assert_generic_guidance(msg, tenants)
     reply.assert_not_awaited()
     assert await conversation(db_session_factory) is None
+
+
+async def test_generic_notice_does_not_skip_later_eligible_discovery(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    async with db_session_factory.begin() as session:
+        await set_dm_enabled(session, tenant_id=tenants[0].id, enabled=False)
+    initial = message()
+    await cog.on_message(initial)
+    assert_generic_guidance(initial, tenants)
+    reply.assert_not_awaited()
+    cog.bot.get_guild.assert_not_called()
+    async with db_session_factory.begin() as session:
+        await set_dm_enabled(session, tenant_id=tenants[0].id, enabled=True)
+    accepted = message(102)
+    await cog.on_message(accepted)
+    assert (await conversation(db_session_factory)).tenant_id == tenants[0].id
+    reply.assert_awaited_once()
+    assert fetch.await_count >= 2
+    assert all(
+        call.args[0] != module.cold_dm_text("discord", dms_on=None)
+        for call in accepted.channel.send.await_args_list
+        if call.args
+    )
 
 
 async def test_unknown_prevents_assuming_only_verified_candidate(db_session_factory, monkeypatch):
@@ -205,7 +242,9 @@ async def test_unknown_prevents_assuming_only_verified_candidate(db_session_fact
 @pytest.mark.parametrize(
     "change", ["disabled", "archived", "not_ready", "unset", "recipient", "agent"]
 )
-async def test_ineligible_tenant_is_silent(db_session_factory, monkeypatch, change):
+async def test_ineligible_tenant_gets_only_generic_guidance(
+    db_session_factory, monkeypatch, change
+):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     tenant = tenants[0]
     async with db_session_factory.begin() as session:
@@ -230,7 +269,7 @@ async def test_ineligible_tenant_is_silent(db_session_factory, monkeypatch, chan
         )
     msg = message()
     await cog.on_message(msg)
-    msg.channel.send.assert_not_awaited()
+    assert_generic_guidance(msg, tenants)
     reply.assert_not_awaited()
 
 
@@ -416,7 +455,10 @@ async def test_admission_denials_preserve_notices_and_silence_access_failures(
             "runs_elsewhere",
             "own_agents_only",
         }:
-            msg.channel.send.assert_not_awaited()
+            if active_route:
+                msg.channel.send.assert_not_awaited()
+            else:
+                assert_generic_guidance(msg, tenants)
             assert any(entry.get("reason") == reason for entry in logs)
         else:
             msg.channel.send.assert_awaited_once()
@@ -456,7 +498,7 @@ async def test_discovery_operational_failure_stops_before_exposing_other_candida
 
 
 @pytest.mark.parametrize("failure", ["resource", "policy"])
-async def test_discovery_resource_and_unreadable_policy_are_silent(
+async def test_discovery_resource_and_unreadable_policy_get_only_generic_guidance(
     db_session_factory, monkeypatch, failure
 ):
     from daimon.core.ma_resolver import MAResolverMissError
@@ -486,7 +528,7 @@ async def test_discovery_resource_and_unreadable_policy_are_silent(
         msg = message()
         with capture_logs() as logs:
             await cog.on_message(msg)
-        msg.channel.send.assert_not_awaited()
+        assert_generic_guidance(msg, tenants)
         reply.assert_not_awaited()
         assert any(entry.get("event") == "discord.dm.suppressed" for entry in logs)
     finally:

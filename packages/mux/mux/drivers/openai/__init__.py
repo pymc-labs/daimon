@@ -12,13 +12,20 @@ from mux.contracts.profile import Profile
 from mux.drivers.openai._common import Authorization, Context
 from mux.drivers.openai.agents import OpenAIAgents
 from mux.drivers.openai.artifacts import OpenAIArtifacts
+from mux.drivers.openai.deployment import configured_transport
 from mux.drivers.openai.environments import OpenAIEnvironments
 from mux.drivers.openai.mcp_auth import MCPSecretResolver
+from mux.drivers.openai.normalize import SCHEMA_DATE
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.sessions import BindingLookup, OpenAISessions
-from mux.drivers.openai.skills import OpenAISkills
-from mux.drivers.openai.transport import Transport
-from mux.drivers.openai.turn import OpenAIEvents, RecoveryJournal
+from mux.drivers.openai.skills import OpenAISkills, bundle_digest
+from mux.drivers.openai.transport import SDKTransport, Transport, object_json
+from mux.drivers.openai.turn import (
+    MemoryRecoveryJournal,
+    OpenAIEvents,
+    RecoveryJournal,
+    merge_history,
+)
 from mux.drivers.openai.usage import OpenAIUsage, UsageRevisions
 from mux.drivers.openai.vaults import OpenAIVaults, SecretResolver
 from mux.errors import ExtensionVersionError, UnsupportedCapability
@@ -111,3 +118,31 @@ class OpenAIDriver:
 
 if TYPE_CHECKING:
     _checked_factory: Callable[..., ManagedAgents] = OpenAIDriver
+
+__all__ = [
+    "Authorization",
+    "BindingLookup",
+    "Context",
+    "MCPSecretResolver",
+    "MemoryRecoveryJournal",
+    "OpenAIAgents",
+    "OpenAIArtifacts",
+    "OpenAIDriver",
+    "OpenAIEnvironments",
+    "OpenAIEvents",
+    "OpenAISessions",
+    "OpenAISkills",
+    "OpenAIUsage",
+    "OpenAIVaults",
+    "RecoveryJournal",
+    "SCHEMA_DATE",
+    "SecretResolver",
+    "SessionControls",
+    "SDKTransport",
+    "Transport",
+    "UsageRevisions",
+    "bundle_digest",
+    "configured_transport",
+    "merge_history",
+    "object_json",
+]

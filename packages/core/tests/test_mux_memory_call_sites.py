@@ -13,8 +13,8 @@ from daimon.core import mcp_attach, memory_view
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_memory_store, create_memory_store
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 TENANT = uuid.UUID(int=1)
 SCOPE = resource_scope(tenant_id=str(TENANT))
@@ -209,6 +209,7 @@ async def test_memory_archive_keeps_request_and_clears_binding_after_404(
 
     monkeypatch.setattr(host, "get_memory_store_id", binding)
     monkeypatch.setattr(host, "list_personal_memory_stores_for_agent", no_personal)
+    monkeypatch.setattr(host, "list_channel_memory_stores_for_agent", no_personal)
     monkeypatch.setattr(host, "clear_memory_store", clear)
     original_archive = archive_memory_store
 
@@ -477,7 +478,5 @@ async def test_setup_foreign_tag_keeps_exact_unavailable_copy() -> None:
         assert expected.metadata["daimon_tenant"] != str(TENANT)
         with pytest.raises(DaimonError) as error:
             await get_setup_agent(after, tenant_id=TENANT, ma_agent_id="exact")
-        assert str(error.value) == (
-            "That agent is no longer available in this workspace. Choose another agent."
-        )
+        assert str(error.value) == ("That agent is no longer available here. Choose another agent.")
     equal_requests(old, new)

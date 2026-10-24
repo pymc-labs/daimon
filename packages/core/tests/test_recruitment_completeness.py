@@ -126,7 +126,14 @@ async def test_routine_creation_refuses_reserved_source_before_agent_or_row(monk
         session_factory=session,
     )
     auth = SimpleNamespace(
-        tenant_id=uuid4(), platform="discord", external_id="101", platform_user_id="7"
+        tenant_id=uuid4(),
+        platform="discord",
+        external_id="101",
+        platform_user_id="7",
+        agent_id=None,
+        chat_agent_id=None,
+        client=False,
+        hold=None,
     )
     with pytest.raises(ToolError, match="Source unavailable"):
         await routines._create_routine_impl(

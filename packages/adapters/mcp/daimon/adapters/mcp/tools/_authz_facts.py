@@ -17,12 +17,16 @@ def mcp_subject(auth: AuthIdentity, *, is_admin: bool = False) -> Subject:
 
     ``is_admin`` is the gate's own trusted admin signal (the stored role, the
     hub exemption, the configuration guard's `_trusted_credential`); an
-    agent-scoped key is marked so `authorize` never exempts it as an admin.
+    agent-scoped key is marked so `authorize` never exempts it as an admin. A
+    held credential's requester from another organisation is marked a client, which
+    forces ``is_admin`` off. Pass the credential's own hold (``auth.hold``) to every
+    `authorize` call that can run for it.
     """
     return build_subject(
         is_admin=is_admin,
         platform_user_id=auth.platform_user_id,
         via_agent_key=auth.agent_id is not None,
+        client=auth.client,
     )
 
 

@@ -30,12 +30,12 @@ from daimon.testing.discord_runtime_capture import (
     require_discord_runtime_capture as _require_runtime_bound,
 )
 from daimon.testing.discord_surface import DiscordPostEvent, OfflineDiscordGateway
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.membership import FixtureMembershipResolver
 from discord.http import HTTPClient, MultipartParameters
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import Provider, Scope, ThreadRef
 from mux.state.lease import Slot
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 

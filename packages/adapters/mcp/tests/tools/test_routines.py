@@ -45,11 +45,12 @@ from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, list_routines_for_tenant
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.teams_graph import GraphUnavailable
-from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan, call_mcp_tool
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1359,6 +1360,8 @@ async def test_create_routine_without_a_destination_budgets_the_turns_channel(
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         expires_at=now + timedelta(minutes=10),
         now=now,
         chat_session_id="test-session",
@@ -1489,7 +1492,7 @@ async def test_create_routine_refuses_a_member_scheduling_another_projects_agent
     runtime = _runtime(committing_sessionmaker, client=client)
     member = _auth_identity(tenant_id=tenant.id, talking_to="ag_clientb")
 
-    with pytest.raises(ToolError, match="only a workspace or server admin can schedule it"):
+    with pytest.raises(ToolError, match="only a server admin can schedule it"):
         await _create_routine_impl(
             runtime,
             member,
@@ -1543,7 +1546,7 @@ async def test_update_routine_refuses_a_member_moving_it_to_another_projects_age
     runtime = _runtime(committing_sessionmaker, client=client)
     member = _auth_identity(tenant_id=tenant.id, talking_to="ag_clientb")
 
-    with pytest.raises(ToolError, match="only a workspace or server admin"):
+    with pytest.raises(ToolError, match="only a server admin"):
         await _update_routine_impl(
             runtime, member, routine_id=created.id, agent_name="acme-project"
         )
@@ -1970,7 +1973,7 @@ async def test_owner_dm_resolves_recipient_without_channel_lookup(
 @pytest.mark.parametrize("platform", ["slack", "teams"])
 async def test_dm_writes_rejected_on_unsupported_platform(platform):
     auth = _auth_identity(platform=platform, platform_user_id="123")
-    with pytest.raises(ToolError, match="only on Discord"):
+    with pytest.raises(ToolError, match="not supported here"):
         await _routines_mod._check_destination(  # pyright: ignore[reportPrivateUsage]
             MagicMock(), auth, kind="dm", destination_id=None
         )
@@ -2084,6 +2087,8 @@ async def test_mcp_dm_creation_verifies_and_retains_thread_origin(
         expires_at=now + timedelta(minutes=10),
         now=now,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     )
     if restricted:
         await set_access_policy(
@@ -2376,6 +2381,8 @@ async def test_authenticated_routine_creation_preserves_private_or_guild_origin(
         expires_at=now + timedelta(minutes=10),
         now=now,
         chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
     )
     if source == "restricted":
         await set_access_policy(

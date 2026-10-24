@@ -9,13 +9,13 @@ import pytest
 from anthropic import APIStatusError
 from daimon.core import mux_compat as compat
 from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.credential_schemas import CredentialCreate
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.vaults import Vaults
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 MATERIALS = ["dummy-access-material", "dummy-refresh-material", "dummy-client-material"]
 AUTH = {

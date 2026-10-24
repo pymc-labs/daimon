@@ -107,7 +107,7 @@ async def handle_billing_command(
         view_id = open_view.get("id") or ""
 
         # Resolve admin status (fail-closed)
-        is_admin = await resolve_is_admin(client, user_id=user_id)
+        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
 
         # Load billing snapshot from DB
         now = datetime.now(UTC)
@@ -193,7 +193,7 @@ async def handle_topup_select(
 
     try:
         # Re-verify admin at click time (not cached)
-        is_admin = await resolve_is_admin(client, user_id=user_id)
+        is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
         if not is_admin:
             log.warning(
                 "slack.billing_topup.non_admin_refused",
@@ -314,7 +314,7 @@ async def handle_panel_action(runtime: SlackRuntime, payload: dict[str, Any]) ->
             return
         if action_id != LOOKUP_ACTION_ID:
             return
-        if not await resolve_is_admin(client, user_id=user_id):
+        if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
             await client.views_push(  # pyright: ignore[reportUnknownMemberType]
                 trigger_id=trigger_id,
                 view={

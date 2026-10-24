@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 import aiohttp
 import structlog
 from daimon.adapters.slack.agent_post import post_as_agent
+from daimon.adapters.slack.external_access import host_only_notice
+from daimon.adapters.slack.gating import is_external_interactive
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.authz import Subject
 from daimon.core.confirmation import (
@@ -44,6 +46,7 @@ from daimon.core.posted_controls.confirmation import (
     parse_details_custom_id,
 )
 from daimon.core.posted_controls.lifecycle import (
+    STILL_WAITING_MESSAGE,
     PostedConfirmations,
     check_confirmation_admin,
     edit_card_within,
@@ -130,6 +133,7 @@ class SlackConfirmationCards:
         *,
         channel: str,
         thread_ts: str,
+        team_id: str | None = None,
         identity: AgentIdentity | None = None,
         record_post: Callable[[str], Awaitable[None]] | None = None,
         runtime: SlackRuntime | None = None,
@@ -139,7 +143,11 @@ class SlackConfirmationCards:
         prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
         check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
     ) -> ConfirmationHook:
-        """A hook that posts each prompt's card into `channel`/`thread_ts`."""
+        """A hook that posts each prompt's card into `channel`/`thread_ts`.
+
+        `team_id` is the workspace hosting the app, which an admin re-check requires;
+        without it nobody counts as an admin (a card that needs one is never settled).
+        """
 
         if runtime is not None:
             from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
@@ -147,12 +155,15 @@ class SlackConfirmationCards:
             if backend_selection_enabled(runtime.settings.turn):
                 from daimon.adapters.slack.admin import resolve_is_admin
                 from daimon.core.confirmation import backend_switch_callbacks
+                from mux.contracts.ids import ChannelRef
 
                 if tenant_id is None or account_id is None:
                     raise ValueError("Backend confirmation requires an admitted account and tenant")
 
                 async def current_admin(clicker: str) -> bool:
-                    return await resolve_is_admin(client, user_id=clicker)
+                    return team_id is not None and await resolve_is_admin(
+                        client, user_id=clicker, host_team_id=team_id
+                    )
 
                 from functools import partial
 
@@ -176,6 +187,19 @@ class SlackConfirmationCards:
                     tenant_id=tenant_id,
                     account_id=account_id,
                     current_admin=current_admin,
+                    answering_agent_name=(
+                        getattr(getattr(admission, "config", None), "agent_name", None)
+                    ),
+                    default_agent_name=runtime.deployment_default.agent_name,
+                    place_word="workspace",
+                    # A channel-pin card clears only the channel this turn runs in.
+                    pin_channel=ChannelRef(
+                        tenant_id=str(tenant_id),
+                        platform="slack",
+                        channel_id=admission.origin_channel_id,
+                    )
+                    if admission is not None and admission.origin_channel_id is not None
+                    else None,
                 )
 
         rule_factory = runtime.sessionmaker if runtime is not None else None
@@ -186,7 +210,9 @@ class SlackConfirmationCards:
 
             if runtime is None or tenant_id is None:
                 return Subject()
-            admin = await resolve_is_admin(client, user_id=clicker)
+            admin = team_id is not None and await resolve_is_admin(
+                client, user_id=clicker, host_team_id=team_id
+            )
             caller = await admin_caller(
                 runtime, client, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
             )
@@ -243,8 +269,19 @@ class SlackConfirmationCards:
                 posted.retired.set()
                 await _edit(posted, state, answered_by=None)
 
+            async def remind() -> None:
+                # Once, after a while: the requester is pinged in the card's thread.
+                card_ts = posted_cards[0].ts if posted_cards else None
+                await post_as_agent(
+                    client,
+                    identity,
+                    channel=channel,
+                    thread_ts=thread_ts or card_ts,
+                    text=f"<@{prompt.requester_platform_user_id}> {STILL_WAITING_MESSAGE}",
+                )
+
             result = await self._controls.confirm(
-                prompt, post=post, retire=retire, post_errors=(SlackApiError,)
+                prompt, post=post, retire=retire, post_errors=(SlackApiError,), remind=remind
             )
             if result == "approved" and posted_cards:
                 answered_posted = posted_cards[0]
@@ -269,9 +306,22 @@ class SlackConfirmationCards:
             posted = self._controls.cards.get(details_token)
             if posted is not None:
                 details_user: dict[str, Any] = payload.get("user") or {}
+                details_clicker = str(details_user.get("id") or "")
+                if is_external_interactive(payload) and details_clicker != str(
+                    posted.prompt.requester_platform_user_id
+                ):
+                    # What an agent asks to do is for the people who asked it to.
+                    await _ephemeral(
+                        posted,
+                        details_clicker,
+                        NOT_YOURS_MESSAGE.format(
+                            requester=f"<@{posted.prompt.requester_platform_user_id}>"
+                        ),
+                    )
+                    return
                 await _ephemeral(
                     posted,
-                    str(details_user.get("id") or ""),
+                    details_clicker,
                     _plain_message_text("\n".join(posted.prompt.detail_lines))
                     or "No additional details.",
                 )
@@ -309,6 +359,11 @@ class SlackConfirmationCards:
         posted = self._controls.cards.get(token)
         if posted is None:
             await _ephemeral_from_payload(payload, clicker, self._controls.missing_message(token))
+            return
+        if is_external_interactive(payload):
+            # "Always allow" writes a standing rule: admin only, and a member of
+            # another workspace is never one.
+            await _ephemeral(posted, clicker, host_only_notice(None))
             return
         reference = posted.prompt.tool_rule
         if reference is None or posted.rule_factory is None or posted.rule_subject is None:

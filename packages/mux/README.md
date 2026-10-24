@@ -1,5 +1,60 @@
 # mux
 
+Postgres-backed resource ports are available in
+`daimon.core.stores.selfhosted_resources` for host injection. Admission resolves these records after the selected profile passes its
+capability checks. `daimon selfhosted init` initializes matching named records
+and prints their IDs without provider credentials. Both the host and driver use `HarnessConfig`
+from `mux.drivers.selfhosted.config` for `selfhosted.environment` version 1.
+
+The self-hosted driver supports in-place agent edits on an open session. The
+harness takes instructions, model, tool policy, skills and MCP servers on every
+turn, so `sessions.plan_update` returns `in_place` for an edited agent with the
+same environment (revision included) and `refuse` for another agent or
+environment, a changed environment revision, an archived agent, or session
+resources or extensions. `apply_update` makes no harness call: it advances the
+pinned agent revision and config revision on the session's binding (next
+generation, applies at the next turn), which the host persists with the store's
+generation compare-and-swap; replaying an applied plan is a no-op. The driver
+does not look for an active turn. The host defers an update while a turn holds the
+thread's lease.
+
+`HarnessConfig.session_pool` opts direct transport into ACA dynamic-session
+routing. It requires HTTPS and Entra audience `https://dynamicsessions.io`;
+the host binds that audience to the exact pool origin before acquiring tokens.
+`DirectTransport(session_pool=True)` adds the deterministic sandbox identifier
+to every C3 call while preserving polling cursors and request bodies. Ordinary
+direct and Foundry invocation transports retain their existing defaults.
+Its transport fields are `harness_url`, `auth_mode`, `auth_ref`, optional
+`packages_note`, and `transport` (default `direct`). `foundry_invocations`
+requires `agent_name` and `project_endpoint`. Resource `account_scope_id` is
+the tenant UUID. Foundry agent names are 1–63 ASCII letters, digits, underscores
+or hyphens and must start with a letter or digit. Full mux specs are persisted
+as JSONB alongside names,
+revisions and lifecycle timestamps. Active names are unique within a tenant;
+archived names can be reused, and name/ID resolution excludes archived rows.
+Mutations use account- and resource-kind-scoped keys, with principal ownership.
+Receipts contain only resource references/revisions and expire after seven days.
+Account erasure previews and deletes its receipts while retaining tenant-shared
+agent and environment records. Personal writes take the same account lock as
+erasure and require a live account. Deployment bootstrap uses the explicit
+`operator`/`cli`/`cli-deployment-operator` scope without personal attribution.
+Resource retries reread the row and refuse deleted or changed revisions. Writes
+prune expired receipts for their tenant; operators can prune idle tenants with
+`cleanup_expired_receipts` in the store module. Archive preserves historical
+resources; hard deletion invalidates any session still referring to that ID.
+
+The shared resource validator rejects credential-shaped configuration values, credential
+URLs (including package/index/VCS sources), arbitrary extensions and MCP tool-policy dictionaries. Bearer references
+must name environment variables; Entra references must be audience URIs.
+MCP credential references must start with `HARNESS_MCP_CRED_`; credentialed
+MCP endpoints require HTTPS except on loopback.
+Names, instructions, descriptions and package notes remain free text.
+Routing uses HTTPS, with loopback HTTP accepted for local use. Direct HTTP on
+internal service names, RFC1918 IPv4 or ULA IPv6 requires `allow_insecure_http=true`;
+public, link-local and reserved IP addresses are refused, including alternate IPv4 spellings;
+this permits the in-cluster ACA fallback explicitly. Foundry fields are accepted
+only for the Foundry transport.
+
 Source loss consent can name the unsupported native URL-fetch capability as
 `builtin_tool:web_fetch`. This does not waive other builtin tools or authorize
 shell-based emulation of the missing native tool.
@@ -39,7 +94,7 @@ The full description is [docs/mux.md](../../docs/mux.md). Tests:
 `uv run pytest packages/mux`.
 
 OpenAI probe holds can be proposed for reconciliation by the host's offline
-`daimon.testing.conformance.usage_reconciliation` command using captured Admin Usage/Costs
+`mux.testing.conformance.usage_reconciliation` command using captured Admin Usage/Costs
 exports. Only an externally audited isolated project/day window with one run and
 finalized billing qualifies. Unknown or mixed attribution keeps the hold. The
 captured effective requests must cover the full project, and billed line-item
@@ -60,6 +115,17 @@ prices or measurements cannot establish actual spend. A native collector must
 prove the scope before delegation is enabled; this API does not register a
 profile or lift the delegation-disabled host restriction.
 
+The host's `daimon.core.selfhosted_usage` consumes selfhosted incremental
+model-request observations through the transactional usage outbox and credit
+ledger. Before model I/O, runtime admission must persist the deployment,
+underlying model and effective tariff; the recorder settles from that snapshot,
+never current deployment mappings. Deployment/model aliases share the admitted
+underlying-model accounting identity across revisions. Native meters stay
+unchanged and receipt context retains the original aliases. Unknown usage and
+pricing gaps remain pending, visible in the paginated `daimon usage pending`
+report. This host API does not enable execution by itself, and mux continues
+to import no Daimon code.
+
 Conformance adapters can declare individual fixtures PENDING with typed capability,
 live-key or dependency reasons. Declarations remain visible and never certify.
 The host can consume durable accounting outbox rows through its existing database
@@ -68,7 +134,7 @@ The C12 conformance fixture requires a host accounting evidence hook with actual
 usage rows, Decimal ledger amounts, correction totals and rollback/restart facts;
 a transport without that hook remains pending for host billing certification.
 
-`daimon.testing.conformance.budget.BudgetGuard` provides standalone `reserve`/`settle` spend
+`mux.testing.conformance.budget.BudgetGuard` provides standalone `reserve`/`settle` spend
 receipts for authorized manual probes. It requires an explicitly initialized,
 pinned ledger with checkpoint and retained sequence lock, and refuses past 80%
 of provider/total caps. It imports no recorder or provider SDK.
@@ -78,7 +144,7 @@ native version ID, omitting the skills beta header on that request. The ordinary
 pinned-version port and generic recovery download keep their existing SDK requests. Both paths enforce the same
 host-provided scope and skill grant before I/O.
 
-`daimon.testing.conformance.budget` provides standalone manual budget admission and spend
+`mux.testing.conformance.budget` provides standalone manual budget admission and spend
 receipts without recorder or SDK imports. Its pinned ledger, checkpoint and
 stable sequence lock refuse reset/rollback attempts. Authorized operators supply
 reviewed model prices and enforce token bounds across the whole probe. Admission
@@ -97,14 +163,14 @@ output $2.50 per million tokens. Its flat price schema cannot select a tier per
 request, so shorter prompts are overestimated. See the official
 [pricing table](https://platform.claude.com/docs/en/about-claude/pricing#model-pricing).
 
-`daimon.testing.conformance.recording` retains only normalized mux events and request
+`mux.testing.conformance.recording` retains only normalized mux events and request
 metadata, excluding raw HTTP bodies, body values and opaque native provenance.
 Tool/action argument mappings become a fixed omission sentinel; export and replay
 refuse arbitrary mappings outside the closed normalized payload schema.
 An offline event fake re-runs fixture checks with the same credential audit;
 unsupported opaque event content refuses recording. Native codec replay is
 outside this format. `live_probe.run_probe` optionally combines reservation,
-callback, settlement and normalized export. See `../testing/docs/conformance/README.md`.
+callback, settlement and normalized export. See `docs/conformance/README.md`.
 
 ### Anthropic turn event translation
 
@@ -234,7 +300,7 @@ The native session-resources extension adds lazy `walk` and identity-returning
 the first `.env` mount without fetching later pages and records the one add
 response identity without a retrieve. Session and file grants are checked before I/O.
 OpenAI's opt-in offline conformance registration lives in
-`daimon.testing.drivers.openai.conformance`. It exercises the actual pinned SDK and driver
+`mux.testing.drivers.openai.conformance`. It exercises the actual pinned SDK and driver
 over synthetic HTTP/SSE replies, with fresh state per shared fixture. Six probes
 pass; twelve declare typed pending dependencies or unsupported capabilities.
 Broken driver variants must fail shared fixture checks. Registration adds no
@@ -330,7 +396,7 @@ spend ledger. It records the offline C-matrix separately from its narrow SDK
 smoke and cannot issue a full live certificate. Live mode uses the pinned key
 file and reviewed shared-ledger budget configuration ($30 allocation, $24 stop).
 It requires exactly `gemini-3.5-flash-lite` before reading a key or creating a client.
-See `../testing/docs/drivers/gemini/LIVE-CERT.md` for the prepared command and remaining gates.
+See `docs/drivers/gemini/LIVE-CERT.md` for the prepared command and remaining gates.
 MCP repository binding and vault summaries use the verified tenant/account scope
 and an exact account/agent-derived vault-name grant. Repository writes retain
 create-before-commit, compensation and old-credential revocation ordering.
@@ -353,7 +419,7 @@ configuration snapshot backfill, including null channel and thread metadata.
 
 ### Default capability conformance
 
-The supplementary F1 scenario in `daimon.testing.conformance.default_capability` provisions
+The supplementary F1 scenario in `mux.testing.conformance.default_capability` provisions
 the authored Daimon default's eleven skill bundles and immutable pins, mapped
 builtin tools and reserved `daimon-mcp` attachment. One scripted turn loads the
 pinned file-handling skill, invokes the real read-only `describe_agent` and
@@ -369,7 +435,7 @@ typed PENDING before provider I/O. `atomic_revision_pin=False` provisions withou
 a native session revision precondition and adds an explicit capability gap to a
 passing result; immutable skill pins remain mandatory. Replay checks pairings
 and recorded results, while free-form tool arguments remain omitted. See
-`../testing/docs/conformance/README.md` for the contract and offline reproduction command.
+`docs/conformance/README.md` for the contract and offline reproduction command.
 dispatch. Responder identity uses `anthropic.session_reads@1` with the authorized
 row's tenant/account scope, retaining the SDK response for configuration snapshot
 backfill, including null channel and thread metadata, without binding projection
@@ -386,7 +452,7 @@ Gemini's supplementary F1 default-capability adapter is replay-only and returns
 typed PENDING before provisioning until an authorized GCS bundle publisher and
 authenticated MCP/session adapters are supplied. All eleven full bundles have
 offline GCS compilation evidence; that does not certify a live default. See
-`../testing/docs/drivers/gemini/DEFAULT-CAPABILITY.md` for the explicit adapter entry.
+`docs/drivers/gemini/DEFAULT-CAPABILITY.md` for the explicit adapter entry.
 
 Gemini F1 maps bash, read, edit, grep, glob and write through its native
 `code_execution` tool. Native scripted records exercise each route in normalized
@@ -397,14 +463,14 @@ The Gemini live smoke pins `gemini-3.8-flash` and advances to the two reviewed
 Flash fallbacks only after a definite create HTTP 503. Separate reservations,
 fallback receipts and per-response usage counters preserve failed holds and
 settle known cumulative usage once. The moving alias remains estimated until
-its resolved tariff is verified. See `../testing/docs/drivers/gemini/PRICING.md` and
+its resolved tariff is verified. See `docs/drivers/gemini/PRICING.md` and
 `LIVE-CERT.md`; MockTransport preparation reads no real key.
 ### Offline Anthropic C01–C18 registration
 
 The test adapter in `tests/drivers/anthropic/conformance_adapter.py` explicitly
 registers `anthropic.offline` with the shared conformance `Registry`. It creates
 fresh, unmodified `AnthropicManagedAgents` drivers using the real Anthropic SDK
-and `daimon.testing.ma_transport.ScriptedTransport`. The adapter stays in the
+and `mux.testing.drivers.anthropic.ma_transport.ScriptedTransport`. The adapter stays in the
 test tree so production mux does not depend on `daimon.testing`. It does not
 load credentials, discover providers or fall back to a network transport.
 
@@ -445,14 +511,14 @@ reconciliation appends a new receipt and preserves the full ledger history.
 Anthropic MA settlement requires a session allowance and measured runtime;
 missing or empty measurements retain the hold. Known request bounds still
 detect overruns when other usage is missing and block subsequent dispatch.
-See `../testing/docs/conformance/README.md` for the offline settlement and approval API.
+See `docs/conformance/README.md` for the offline settlement and approval API.
 
 ### OpenAI session resource controls
 
 The opt-in OpenAI driver accepts driver-owned `SessionControls` for an explicit
 hosted container size and a strictly positive integer USD-cent session spend
 limit. Omitted controls retain the existing provider/template defaults and request
-bytes. The [driver README](../testing/docs/drivers/openai/README.md) records the official
+bytes. The [driver README](docs/drivers/openai/README.md) records the official
 2026-10-10 protocol audit, SDK binding boundary, nullable usage and separate Admin
 cost-accounting requirements. These controls do not register a host backend.
 
@@ -508,7 +574,8 @@ No unconfigured/default client, backend or Anthropic request bytes change.
 Preparation claims creation once, publishes the actual native binding and
 reuses its hosted workspace. Lost acknowledgements never permit another POST.
 Model overrides use the documented session `agent.model` field and every
-session read verifies the admitted model. Native conditional revision pins are
+session read verifies the admitted model. A chat platform's system prompt
+variant uses the documented `agent.system` override the same way. Native conditional revision pins are
 not claimed. Changed bound configuration/plans, shared threads, sealed/read-only policy,
 publishing restrictions, scoped Slack execution contexts and workspace transfer refuse until a native continuity policy is available.
 
@@ -530,13 +597,15 @@ neutral `StateStore`, transport factory and accounting runtime. Its stream opens
 lazily after interaction acceptance, preserves provider root identities across
 replay/cancel and emits cumulative interaction usage through the neutral host
 recorder. The host configures `gemini-3.8-flash` as primary; only create HTTP503
-permits the reviewed Flash fallback chain. Preparation rejects missing stores,
+permits the reviewed Flash fallback chain. A channel revision may instead pin
+`gemini-4-argon`, which is a single attempt with no fallback. Preparation rejects missing stores,
 foreign bindings, seals and unsupported deployment policies before dispatch.
 Unsupported runtime/model/policy selections return the host's typed
 `backend_unsupported` refusal. Native journal source identities are scoped to
 the interaction, so reused-session turns and function continuations remain
 distinct without changing neutral event IDs or ordering domains.
 Gemini interactions always serialize configured tools explicitly, using `[]` when none are configured. This includes reused sessions and fallback creates; provider default search and URL tools are never enabled by omission.
+A Gemini interaction's `UsageObservation` is `final` only once the interaction's status is terminal (completed, failed, cancelled, incomplete or budget_exceeded) or requires_action (its tool results continue as a new interaction); the interaction ending with an unchanged meter is a new revision, so a host sees the final reading. A running snapshot is never final.
 The host's optional typed provider-action callback keeps browser origin access
 and browser authentication separate. Provider codecs supply validated native
 response objects and send the chosen body through claimed mutations; the mux
@@ -698,7 +767,7 @@ The explicit Gemini `offline_sdk_adapter` component proves the unchanged
 C06/C07 cancellation and usage oracles through actual SDK request/response bytes.
 It retains C08/C09 refusals, declares other component envelopes PENDING and leaves
 the standard offline matrix unchanged. No live settlement or host factory is
-installed. See [SDK conformance component](../testing/docs/drivers/gemini/CONFORMANCE-SDK.md).
+installed. See [SDK conformance component](docs/drivers/gemini/CONFORMANCE-SDK.md).
 The host can register a deployment constructor through
 `daimon.core.turn.runtimes.register_channel_runtime(profile, factory)`. The factory
 receives `ProviderPreparationRequest` only when the selected provider preparer
@@ -722,7 +791,7 @@ pins after publication. The host owns authorized GCS publication/access and
 retention; no publisher or credentials are selected implicitly. Without that
 adapter, binary/oversize bundles refuse `skill_bundle_gcs_deployment`; normal
 text bundles retain inline mounts. See
-[the capability notes](../testing/docs/drivers/gemini/DEFAULT-CAPABILITY.md) for limits and
+[the capability notes](docs/drivers/gemini/DEFAULT-CAPABILITY.md) for limits and
 offline evidence. A scripted publisher does not certify a live full default.
 
 The Gemini F2 offline proof retains the full default skill bundle and maps the
@@ -783,7 +852,7 @@ token/runtime bound; disjoint complete native evidence settles each claimed
 cell exactly once, using decimal precision 80 from measurement through totals.
 Terminal closure releases never-started cells and retains
 unknown usage as held. Runner adoption and native spending controls remain
-separate from this offline API. See the [column admission contract](../testing/docs/conformance/README.md#whole-column-admission).
+separate from this offline API. See the [column admission contract](docs/conformance/README.md#whole-column-admission).
 
 Gemini resource administration can explicitly select
 `resource_catalog_enabled=True` with an owned `AgentCatalogTransport`. The
@@ -797,7 +866,7 @@ requires its explicit default-false capability and the same enabled agent
 adapter with exact Gemini profile/workspace routing; the guard remains effective
 when off or mismatched. Independent readback uses the public verification edge.
 Named-agent turns refuse the inline session plan. Whole D14/D5 cells remain
-PENDING. See [resource catalog capability](../testing/docs/drivers/gemini/RESOURCE-CATALOG.md).
+PENDING. See [resource catalog capability](docs/drivers/gemini/RESOURCE-CATALOG.md).
 
 Manual probes may use `BudgetGuard.reserve_with_hold(..., minimum_hold_usd=Decimal(...))`
 to reserve the larger of a priced token/runtime bound and an explicit cash
@@ -831,7 +900,7 @@ runtime, manifest or credential is discovered for an unconfigured channel.
 Explicit OpenAI deployment transports refuse ambient `OPENAI_*` overrides by
 name before SDK construction and copies. They retain the selected credential,
 project and origin, with request-owned HTTP clients using explicit TLS roots and
-no environment proxies; see [the driver policy](../testing/docs/drivers/openai/README.md).
+no environment proxies; see [the driver policy](docs/drivers/openai/README.md).
 The private Gemini deployment constructor refuses ambient `GOOGLE_`/`GEMINI_`
 settings and TLS/proxy overrides by name before SDK or HTTP allocation. Its
 explicit key uses the Developer API with owned sync/async HTTP clients, an
@@ -851,7 +920,7 @@ Gemini native credential offers have a separate, default-off operator adapter
 and MCP registration edge. They verify the authorized resource scope, durable
 caller/binding/catalog identity and native target readback before posting shared
 cards. Production native origin/registry wiring and timed expiry remain pending;
-see `../testing/docs/drivers/gemini/NATIVE-CREDENTIAL-TARGET.md`.
+see `docs/drivers/gemini/NATIVE-CREDENTIAL-TARGET.md`.
 
 ### Tool-only post history checks
 
@@ -893,16 +962,16 @@ retain mandatory native usage reconciliation.
 Explicit Gemini conformance recovery and inline-skill preparation hooks have
 actual-SDK offline crash and request-byte proofs. They preserve unknown delivery
 and required-action occupancy; C04/C11 remain typed PENDING in the shared matrix.
-See [driver conformance hooks](../testing/docs/drivers/gemini/CONFORMANCE-HOOKS.md). These hooks
+See [driver conformance hooks](docs/drivers/gemini/CONFORMANCE-HOOKS.md). These hooks
 are not installed by the host factory and perform no live key discovery.
 OpenAI also provides the explicit
-`daimon.testing.drivers.openai.conformance_sdk.offline_sdk_adapter()` component. Its fixed
+`mux.testing.drivers.openai.conformance_sdk.offline_sdk_adapter()` component. Its fixed
 SDK MockTransport executes the unchanged C06/C07/C09 oracles and tests C08
 conditional tool/file-mount refusal without update writes. Cancellation EOF
 retains occupancy, synthetic usage corrections survive memory-outbox restart,
 and binary artifacts/shared-vault retention use independent HTTP effects.
 This component changes neither the standard registry nor live certification;
-see [its scope and mutation controls](../testing/docs/drivers/openai/CONFORMANCE-SDK.md).
+see [its scope and mutation controls](docs/drivers/openai/CONFORMANCE-SDK.md).
 
 OpenAI host tests use the shared isolated SDK factory for direct clients and
 inject it into offline C04/component and F1 replay factories. The testing package
@@ -915,7 +984,7 @@ line, and fresh evidence output before key access. Offline SDK proofs retain
 native cancel/EOF occupancy, ambiguous-delivery recovery, all fenced store
 boundaries and monotonic terminal settlement. Historical certificates and
 standard pending declarations are unchanged; see
-[money and scenario boundaries](../testing/docs/drivers/gemini/LIVE-ROUND.md).
+[money and scenario boundaries](docs/drivers/gemini/LIVE-ROUND.md).
 
 Offline Gemini round fixtures stamp workspace creation and activity from current
 UTC time. Stale-response cases use relative offsets so the intended seven-day
@@ -931,15 +1000,60 @@ and remain disabled without an operator delivery grant.
 
 Product modules cannot import test or conformance harnesses. The repository's
 import-linter contract checks direct and transitive imports from core, adapters
-and mux outside its conformance package. Boundary tests run the configured
+and mux outside `mux.testing`. Boundary tests run the configured
 checker against reintroduced imports; the mux initializer and new top-level
 module inventory are covered too. Harness consumers belong in daimon-testing.
 
-Conformance and manual live-probe helpers now live in `daimon.testing.conformance`,
-`daimon.testing.drivers` and `daimon.testing.adapters`, outside the runtime wheels.
-The legacy mux conformance package is removed; its tests, saved receipts and
-reference docs are under `packages/testing` outside the wheel package. CI also
-checks built workspace wheels for test modules, QA helpers and receipt files.
+### Bounded mutation retries
+
+`mux.state.mutation_retry` holds the retry vocabulary and policy for claimed
+provider mutations. A driver classifies each failure at its provider boundary
+as `rejected` (provably not executed), `repeatable` (deduplicated by a
+verified provider contract) or `unknown`, and separately as retryable or not;
+`mux.drivers.anthropic.classify_mutation_failure` is the Anthropic table. The
+host acts on it: Daimon's `TurnPersistence.mutate` retries only a rejected,
+retryable failure, each attempt as its own durable operation claimed under
+the current lease fence, with SDK client retries off. `MutationRetryPolicy`
+bounds attempts and elapsed time, backs off with jitter, never retries before
+`Retry-After` (seconds, milliseconds or HTTP date) and fails at once when the
+wait exceeds the remaining budget. `unknown` is never retried. Every rule is
+read back from the durable attempt records (attempt 0's start, the refusal's
+recorded time and classification), so a restart or a concurrent replay waits
+out the same Retry-After and budget. A claimed Anthropic mutation never follows
+an HTTP redirect, and a failure that belongs to a redirected request is
+`unknown`. Other drivers classify nothing yet, so their failures stay `unknown`.
+
+Ordinary Daimon headless turns use this policy with a private `MemoryStateStore`
+for the running turn. They preserve the caller's SDK attempt allowance and turn
+deadline, and disable hidden SDK retries for each claimed write. They create no
+durable transcript copy and cannot recover claims after a process restart.
+Session assembly and legacy requests retain their existing retry behavior.
+
+## Test doubles: `mux.testing`
+
+`mux.testing` ships in the `daimon-mux` wheel and is never imported by product
+code (an import-linter contract enforces it). It holds the offline conformance
+runner and budget guard (`mux.testing.conformance`), the Gemini fakes and live
+probes (`mux.testing.drivers.gemini`), the OpenAI offline SDK and conformance
+adapters (`mux.testing.drivers.openai`), the Anthropic Managed Agents fakes and
+scripted transport (`mux.testing.drivers.anthropic`) and the isolated SDK client
+builders (`mux.testing.isolated_sdk`). Only `mux.testing.drivers.<provider>` and
+`mux.testing.isolated_sdk` may import a provider SDK. Host-specific doubles (the
+database, tenant factories, platform surfaces) stay in `daimon.testing`.
+
+The mux tests import nothing from `daimon`. CI runs them in an environment that
+holds only `daimon-mux`, its provider extras and the test tools (the
+`mux-standalone` job). To reproduce that locally, install the wheel into a clean
+environment and point pytest at the standalone settings:
+
+```bash
+python -m pytest -c packages/mux/pytest-standalone.ini --rootdir . packages/mux/tests
+```
+
+Saved receipts, replay tapes and recordings live in `tests/fixtures`; the
+reference docs for the conformance kit and each driver are under `docs/`. CI
+also checks built workspace wheels for test modules, QA helpers and receipt
+files; `mux/testing/` is the one wheel directory exempt from the helper-name rule.
 
 ### Implicit execution authority
 
@@ -1091,3 +1205,254 @@ only destination and allowlist; bearer values are resolved afresh for interactio
 requests. `RetainedSkillDeployments` implements the existing publisher contract
 for independently provisioned immutable GCS directories, verifying the complete
 scope, version and every retained file digest without making storage writes.
+
+The opt-in `selfhosted.loop` profile uses per-caller threads and selects
+`gpt-6.1-sol` by default; an environment may use another deployment name. It is
+non-core. Azure deployments can select `gpt-6-luna` for cheap smoke tests;
+see the [model parameters and region guidance](../../deploy/azure/README.md#model-selection).
+Steer, multiagent, vaults, memory stores, workspace export/import and
+native skill versions are explicitly unsupported.
+Its accounting mode is `native_requests`: native settlement over incremental
+model-request observations, matching what its driver emits.
+
+`tests/test_profile_honesty.py` keeps every profile honest. For each capability
+a profile declares `native` or `emulated` it calls the driver's real entry point
+offline and fails if the driver refuses it, and it checks that each
+`accounting_mode.usage_grain` matches the observations the driver emits. A newly
+declared capability needs a probe. The Anthropic profile does not declare
+`steer`, `native_event_replay`, `environments_fork` or `native_schedules`
+because its driver refuses or lacks them.
+
+The self-hosted driver's `SelfHostedDriver` takes injected `Agents` and
+`Environments` ports, an authorization callback and an optional durable binding
+lookup. `DirectTransport` calls the harness `/v0` endpoints;
+`FoundryInvocationsTransport` wraps those same calls in `/invocations` and sends
+one deterministic sandbox id on every call. Both submit turns with JSON
+acknowledgements and poll the durable event log. `open_stream` opens the first
+HTTP replay request before returning its iterator. With no cursor it starts at
+the active turn or resumes after the last event delivered by this driver instance. A turn
+that finished before the reader opened is still delivered. Explicit cursors
+control historical replay and recovery after driver recreation. Idle readers
+may wait for the next turn; individual HTTP requests remain bounded. A lost reader can reconnect
+at a sequence cursor without running the turn again.
+
+Usage identities include the session, turn and model request, so replay preserves
+one observation per request. Missing measurements are unknown observations when
+the harness explicitly reports `usage_unavailable`/`usage_missing`; a terminal
+turn with no measured, unavailable or started request is retained as unresolved (errored unless interrupted)
+for operator reconciliation without blocking later turns. Unmatched
+request starts remain unknown observations; measured revision 2 supersedes an
+unknown revision 1 under the same observation id. Tokens are never
+inferred as zero. Agent/environment revision changes require a new binding.
+Artifacts, session listing/deletion and native skill administration refuse
+explicitly. Built-in `auto`/`ask` and multiple pending approvals are supported.
+Narrowed built-in sets deny omitted tools. MCP permissions use `server/tool`
+and `server/*` keys; `allowed_tools` denies unlisted tools. Credentialed MCP
+servers require an injected tools resolver that enforces tenant/origin bindings.
+Pending approval retries submit the same recorded decision; the harness
+deduplicates identical actions.
+
+`mux.drivers.selfhosted.wire` defines the `daimon-harness/0` HTTP boundary:
+turn requests, approval decisions, durable event replay and typed event data.
+These models require no provider SDK. Inline image parts use `data_b64`;
+credentials in MCP configuration are environment variable names.
+
+Model attempts use `model_request_started` before model I/O; measured usage or
+an explicit `usage_unavailable` error closes the same request id. Approval actions
+use `allow` to execute, `deny` to refuse, and `result` to substitute a host result.
+Only `result` carries a result field; JSON null remains a valid host result.
+
+
+Inline harness skills carry text `files`, base64 `binary_files`, and a verified
+`sha256`. `InlineSkill` computes a missing digest for local builders and rejects
+an explicitly supplied digest that differs from the content. Use the shared
+`skill_sha256(name, decoded_files)` helper: it hashes UTF-8 JSON with sorted keys,
+compact separators and `ensure_ascii=False`, shaped as
+`{"name": name, "files": {path: standard_base64(decoded_bytes)}}`.
+The digest includes all paths and bytes regardless of their text/binary map.
+Paths must be canonical relative POSIX paths; duplicates, traversal and
+file/directory collisions are refused. Limits are 8 MiB decoded per skill and
+24 MiB per turn; seeded names such as `marimo_notebooks` remain valid.
+
+Assistant message deltas and snapshots require the same session-unique
+`message_id`, allowing a driver to accumulate deltas and replace them with the
+final snapshot.
+
+A turn may supply `tool_policy: {tool_name: "auto" | "ask" | "deny"}`. The default is
+empty; unlisted tools execute automatically. Explicit `ask` requires approval.
+`deny` omits the tool from model discovery and refuses any attempted execution.
+Keys are `bash`, `read`, `write`, `edit`, `<server>/<tool>`, or `<server>/*`.
+MCP server/tool components use letters, digits, underscores, hyphens and dots.
+An exact key overrides `<server>/*`, which overrides the default `auto`.
+For example, `{"sample/*": "deny", "sample/search": "ask"}` exposes only
+`sample/search` from that server and requires approval before it runs.
+The driver uses the agent deployment unless `model` is explicitly overridden.
+The host supplies `deployment` for its selected environment; a mismatching
+request refuses before submission. Transport token providers are awaited on
+every HTTP call (use an expiry-aware Entra credential provider). Pass
+`mcp_authorization` per `driver.events.send`, never at transport construction.
+Foundry calls include configurable `api_version` (default `v1`). Authenticated
+HTTP endpoints require HTTPS except on loopback. Replay uses `after_seq` with
+jittered exponential polling and retries 429/502/503/504 with `Retry-After`.
+
+The real harness/driver interop suite must cover:
+
+1. Cancel before the first model request, then a second turn on that session.
+2. MCP or skill setup failure before model I/O.
+3. Harness restart mid-turn and reconcile of unmatched request usage.
+4. Dropped stream reopened at the last sequence across the terminal event, without gaps or duplicates.
+5. Idempotent resend from a fresh driver, one execution, and changed-payload conflict.
+6. Approval that executes a write, denial, and host result substitution.
+7. Per-turn MCP headers absent from journals/logs, with a different token on the second turn.
+8. Foundry invocation envelope with string `query.after_seq`.
+9. Concurrent second send receiving 409.
+10. Two sequential turns on one session.
+
+Session creation uses tenant/account/principal plus the caller's idempotency key,
+independently of renewable authorization grants. The binding retains a separate
+specification digest; a changed specification under that key conflicts, including
+on reconstruction. Durable agent/environment pins retain both local and native
+revisions. Creation replay reuses those pins instead of current resource versions.
+Approval retries reconcile a known call's tool result; an uncertain HTTP reply
+cannot cause another tool execution. Retry-After is capped at 30 seconds and the
+poll deadline; network polling and cancellation observation use bounded backoff.
+
+Host-side MCP and skill preparation lives in
+[`daimon.core.turn.selfhosted_tools`](../core/README.md#self-hosted-tool-preparation).
+It returns credential-free wire fields; the registered Daimon MCP credential
+travels only in the per-turn `X-Daimon-MCP-Authorization` transport header.
+
+`mux.profiles.anthropic.is_builtin_skill` recognizes native built-in skill refs
+by source or reserved id when imported refs omit source. Explicit custom refs
+with reserved names remain custom skills. Hosts can skip native
+bundles on other backends without duplicating provider policy.
+
+Host retained-backend resolution reads the legacy provider from
+`mux.profiles.MANAGED_AGENTS.provider` and the unconfigured-channel default from
+`mux.contracts.config.DEFAULT_BACKEND`.
+
+`apps/harness` is a standalone consumer of `daimon-mux` for the shared self-hosted
+wire models. It does not import Daimon core or adapters. It implements the C3 HTTP
+service, Azure Responses model loop, durable request inventory and per-session
+tool isolation; its README documents deployment and authentication requirements.
+
+Core registers `selfhosted.loop` through its selfhosted deployment runtime.
+The shell authorizes an exact tenant/channel/account configuration, checks
+selfhosted tariffs before HTTP, injects scoped resource ports, and records
+model-request usage through the shared accounting outbox. Its turn codec keeps
+canonical events and fenced idempotency receipts while rendering adapter DTOs;
+no Anthropic API is used for these turns. The MCP credential stays in a turn
+transport closure and is revoked by the prepared-turn finalizer.
+
+Self-hosted replay validates the environment revision pin before transport I/O.
+The usage adapter also exposes `reconcile_turn` for host readers, filtering by
+root turn before applying host bounds, so prior session observations do not
+consume the current turn's usage budget. MCP approval display preserves the
+qualified server/tool identity.
+
+The dynamic-session pool audience requires `session_pool=true`; transport
+requests require a nonempty session ID. The pool container must independently
+validate Entra tokens for that audience and allowlist the invoking host principal.
+
+## Import paths
+
+Each public module declares `__all__`; `tests/test_public_exports.py` checks
+that the names exist and that no name has a second public path. Import contract
+types from the module that defines them (`mux.contracts.ports`,
+`mux.contracts.resources`, ...), `Contract` and `FrozenMap` from `mux.contracts`,
+errors from `mux.errors`, and driver names from the driver package
+(`from mux.drivers.anthropic import AnthropicManagedAgents`), never from a
+driver submodule. The root import-linter contract "Daimon product code imports
+provider drivers through their packages" holds this for Daimon, selfhosted
+included (`from mux.drivers.selfhosted import SelfHostedDriver, HarnessConfig`).
+`mux.drivers.selfhosted.wire` is the one public driver submodule: it is the
+`daimon-harness/0` wire format that the host, the harness and the conformance kit
+share, and it declares its own `__all__`. The exceptions are openai `KEY` and
+`reserved`, gemini `credential` and selfhosted `segment` and `usage` (generic
+names), and the two documented second paths
+`mux.errors` / `mux.contracts.errors` and `RequiredAction` in
+`mux.contracts.events` / `mux.contracts.actions`.
+
+
+Selfhosted C3 transports send the nonsecret `session_id` query parameter on every
+request, including actions/cancel and event polling, so an empty sandbox can
+restore and verify session/turn ownership before handling it. Every C3 request
+also carries `after_seq`, seeded through the injected host-persisted session
+high-water and combined with observed events and explicit stream cursors. A fresh
+driver therefore retains continuity after a host restart. After sandbox
+loss, `history_gap` normalizes to an authoritative `session.history_gap`; recovery
+continues above the client cursor and reconciles interrupted-turn usage. Restores
+announce abandoned remote sequence reservations even when the checkpoint covers
+the client cursor. `checkpoint_warning` maps to a non-terminal native notice.
+
+Event replay may include `replay_after_seq` to read an older range while
+`after_seq` still carries the highest durable client cursor for restore fencing.
+This lets a resumed invocation replay its saved baseline without reusing event
+sequences after sandbox loss.
+
+Self-hosted transport calls require an explicit `after_seq` high-water. Both
+direct and invocation transports retain it with session context and optional
+`replay_after_seq`; cleanup calls must supply the persisted cursor too.
+
+Checkpoint warnings queued after a reader closes attach to the next new turn,
+so the host can show the non-terminal notice within that turn. Recovered remote
+usage keeps its original request identity and measured token counts.
+
+Identical recovered usage (same request identity, model and token counts) is an
+idempotent replay; conflicting counts still fail with `duplicate_usage`. When
+core raises the restore fence above the driver's cursor, it retains the original
+replay range so an accounting receipt cannot hide an answer or terminal event.
+
+The harness records a durable maximum of authenticated `after_seq` cursors for
+the session. This ratchet governs every append, including after an earlier poll
+has already restored the sandbox; any sequence jump emits a covering history
+gap. Lower cursors cannot lower it, and `replay_after_seq` remains read-only.
+
+Selfhosted production profile defaults to `gpt-6.1-sol`. All harness tests,
+interop and live test deployments use `gpt-6-luna`; production defaults are
+asserted as strings only and are never sent to a model in tests.
+
+## Test doubles and the harness conformance kit
+
+`mux.testing` holds test doubles and conformance kits; product code never imports it.
+
+`mux.testing.fake_model_server` is an offline, scripted fake of the OpenAI Responses API
+(including Azure OpenAI deployment URLs), OpenAI Chat Completions and Anthropic Messages, each
+streaming and not. It is a plain ASGI app that needs only httpx and pydantic. A script is a
+queue of steps per conversation (`say`, `call_tool`, `fail`, with per-response usage and delays),
+and the server records every request so a test can assert what an engine sent. Mount it with
+`httpx.ASGITransport`, or serve it on loopback (needs `uvicorn`, which mux does not depend on):
+
+```python
+from mux.testing.fake_model_server import FakeModelServer, call_tool, say
+from mux.testing.fake_model_server.runner import serve
+
+async with serve() as (url, fake):  # point the engine's model base URL at `url`
+    fake.script([call_tool("write", {"path": "a", "content": "b"}), say("done")])
+```
+
+`mux.testing.harness_conformance` checks any `daimon-harness/0` service over HTTP: turn
+lifecycle, idempotent replay and 409 on key reuse, events by sequence, the `after_seq` fence and
+`history_gap` for a cursor ahead of the log, `replay_after_seq`, approvals, cancel, restart
+without re-run, usage per model request, skills, MCP and built-in tool projection. Each case
+reports PASS, SKIP with a reason, or FAIL.
+
+```python
+from mux.testing.harness_conformance import HarnessTarget, format_report, run_conformance
+
+target = HarnessTarget(base_url=harness_url, token=token, model=fake, restart=restart_hook)
+print(format_report(await run_conformance(target)))
+```
+
+Configure the harness under test to use the fake's URL as its model endpoint. The `restart`
+hook stops the harness and starts a new one on the same home, returning the new URL if it
+changed; without it the restart case is skipped. From a shell, with the harness already
+configured:
+
+```sh
+python -m mux.testing.harness_conformance --harness-url http://127.0.0.1:8088 --token "$HARNESS_TOKEN" --fake-port 9099
+```
+
+`HarnessTarget.tool_name` and `mcp_tool_name` map tool names for engines that prefix them.
+`tests/harness_conformance` runs the kit against `apps/harness` offline in CI, once per model
+loop (the Codex loop runs when `HARNESS_CODEX_BINARY` points at the pinned binary).

@@ -19,7 +19,7 @@ from daimon.testing.turn_conformance import (
     termination_evidence,
     wake_evidence,
 )
-from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
+from daimon.testing.turn_fakes import RecordingLifecycle, deps_for_pinned_mux
 from mux.contracts.ids import ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import ScopeViolation
@@ -132,7 +132,7 @@ async def test_collector_joins_actual_host_pump_and_prepared_observation(
 
     async def run():
         return await run_module.run_prepared_turn(
-            replace(deps_for(None, host), running_turns=running),
+            replace(deps_for_pinned_mux(None, host), running_turns=running),
             prepared,
             tenant_id=TENANT,
             platform="slack",

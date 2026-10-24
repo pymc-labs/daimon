@@ -194,9 +194,8 @@ class TestRenderError:
             destination_agent_id="ag_b",
         )
         assert render_error(exc, request_id=TEST_RID) == (
-            "This conversation's session belongs to another responder. "
-            "Your existing work is preserved. Continuing with this responder currently "
-            "requires a new conversation."
+            "This conversation belongs to another agent. Your work is kept. "
+            "To use a different agent, start a new conversation."
         )
 
     def test_lines_are_separated_by_a_blank_line(self) -> None:

@@ -31,8 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 NOT_ALLOWED = "You can't do that on this answer."
 POLICY_UNREADABLE = (
-    "This organisation's access policy could not be read, so nothing was recorded. "
-    "Ask an admin to check it."
+    "This organisation's access settings could not be read, so nothing was recorded. "
+    "Ask an admin to check them."
 )
 IN_DIRECT_CHAT = "(an answer in a 1:1 chat)"
 IN_GROUP_CHAT = "(an answer in a group chat)"

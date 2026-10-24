@@ -41,10 +41,10 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.core.stores.turn_origins import create_origin
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -104,6 +104,8 @@ class _World:
                 configuration_target_ma_agent_id=None,
                 configuration_target_name=None,
                 role=Role.USER,
+                sender_foreign=False,
+                shared_channel=False,
                 expires_at=now + timedelta(hours=1),
                 now=now,
                 chat_session_id="test-session",

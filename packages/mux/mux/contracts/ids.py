@@ -8,10 +8,10 @@ from pydantic import Field, JsonValue, model_validator
 
 from mux.contracts._base import Contract, FrozenMap
 
-Provider = Literal["anthropic", "openai", "gemini"]
+Provider = Literal["anthropic", "openai", "gemini", "selfhosted"]
 """A backend family. One provider can offer several profiles."""
 
-PROVIDERS: tuple[Provider, ...] = ("anthropic", "openai", "gemini")
+PROVIDERS: tuple[Provider, ...] = ("anthropic", "openai", "gemini", "selfhosted")
 
 
 class Scope(Contract):
@@ -160,3 +160,18 @@ class SkillRef(Contract):
     version: str | None = None
     source: str | None = None
     digest: str | None = None
+
+
+__all__ = [
+    "ChannelRef",
+    "ModelRef",
+    "PROVIDERS",
+    "Page",
+    "PageRequest",
+    "Provider",
+    "ResourceRef",
+    "Revision",
+    "Scope",
+    "SkillRef",
+    "ThreadRef",
+]

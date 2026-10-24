@@ -57,8 +57,9 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.channel_environments import EnvironmentPicker
 from daimon.core.errors import DaimonError
+from daimon.core.platform_words import words_for
 from daimon.core.roster import Page, paginate
-from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
+from daimon.core.routing_facts import build_routing_request, precedence_line
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.text_layout import fit_lines
 from sqlalchemy.exc import SQLAlchemyError
@@ -69,6 +70,7 @@ import discord
 log = structlog.get_logger()
 
 BACK_LABEL = "◀ Back"
+PRECEDENCE_LINE = precedence_line(words_for("discord").space)
 SERVER_DEFAULT_LABEL = "Server default"
 DEPLOYMENT_NOT_IN_EFFECT = "Not used while a server default is set."
 MAX_SETUP_CONVERSATION_LINKS = 5
@@ -254,7 +256,7 @@ def _defaults_block(
     else:
         lines.append("-# no server default")
     if deployment_default is not None:
-        lines.append(f"Deployment default → **{deployment_default}**")
+        lines.append(f"Daimon-wide default → **{deployment_default}**")
         if not deployment_in_effect:
             lines.append(f"\n-# {DEPLOYMENT_NOT_IN_EFFECT}")
     return "\n".join(lines)
@@ -271,7 +273,7 @@ def build_environments_block(
     tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment
     defaults = [f"{SERVER_DEFAULT_LABEL} → **{tenant}**" if tenant else "-# no server default"]
     if deployment is not None:
-        defaults.append(f"Deployment default → **{deployment}**")
+        defaults.append(f"Daimon-wide default → **{deployment}**")
         if tenant is not None:
             defaults.append(f"\n-# {DEPLOYMENT_NOT_IN_EFFECT}")
     fixed = len("\n".join([heading, *defaults]))

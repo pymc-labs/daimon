@@ -28,7 +28,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.output_delivery import DeliverableFile, NoticedFiles
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
 NOW = datetime(2026, 8, 25, 12, tzinfo=UTC)
 # The turn's card is message 777; the turn ended a minute after the files were written.
@@ -1202,3 +1202,23 @@ async def test_overlapping_turns_attach_each_file_to_its_own_answer() -> None:
         (_BOB_ANSWER, "bob_dump.pdf"),
         (_ALICE_ANSWER, "alice_report.pdf"),
     ]
+
+
+def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
+    bot = MagicMock(spec=DaimonBot)
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tool", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sh_session_test",
+        None,
+        False,
+    )
+    with patch.object(bot, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
+        DaimonBot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+            bot, outcome, thread=_thread(), tenant_id=uuid.uuid4(), selfhosted=True
+        )

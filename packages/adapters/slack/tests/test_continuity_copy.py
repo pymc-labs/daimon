@@ -59,7 +59,9 @@ from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_origin import turn_origin as real_turn_origin
-from daimon.testing import build_fake_anthropic, ma_agent, ma_environment, resolved_agent_env_router
+from daimon.testing.ma import resolved_agent_env_router
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
@@ -255,10 +257,12 @@ async def test_session_preparation_failed_renders_copy_and_does_not_run_turn(
     assert body["text"] == render_preparation_failed("uat-agent")
 
 
+@pytest.mark.parametrize("selfhosted", [False, True])
 async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_turn(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
+    selfhosted: bool,
 ) -> None:
     team_id = "T_RESPONDER_MISMATCH"
     channel = "C_TEST"
@@ -279,7 +283,27 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
 
     event = _event(channel=channel, thread_ts=thread_ts, user="U_MISMATCH")
 
+    from dataclasses import replace
+
+    from daimon.core.turn.admission import admit as real_admit
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+    from mux.contracts.ids import ChannelRef
+
+    async def admitted(*args: Any, **kwargs: Any) -> Admission:
+        original = await real_admit(*args, **kwargs)
+        if not selfhosted:
+            return original
+        revision = ConfigRevision.create(
+            ChannelRef(tenant_id=str(tenant_id), platform="slack", channel_id=channel),
+            1,
+            resolve_default(
+                BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
+            ),
+        )
+        return replace(original, backend_revision=revision, backend_revision_origin="channel")
+
     with (
+        patch("daimon.adapters.slack.app.admit", side_effect=admitted),
         patch(
             "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
         ) as mock_resolve_agent,
@@ -320,7 +344,10 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
     # renderer call shape, not a distinct owner name (there is only one
     # agent in this fake).
     assert body["text"] == render_responder_changed_without_handoff(
-        new_responder="uat-agent", owner="uat-agent", channel=f"<#{channel}>", offer_button=True
+        new_responder="uat-agent",
+        owner="the previous agent" if selfhosted else "uat-agent",
+        channel=f"<#{channel}>",
+        offer_button=not selfhosted,
     )
     buttons = [
         element
@@ -328,9 +355,9 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
         if block["type"] == "actions"
         for element in block["elements"]
     ]
-    assert [(b["action_id"], b["value"]) for b in buttons] == [("thread_hand_over", _AGENT_ID)], (
-        "the notice carries the Hand over button for the agent the channel answers with"
-    )
+    assert [(b["action_id"], b["value"]) for b in buttons] == (
+        [] if selfhosted else [("thread_hand_over", _AGENT_ID)]
+    ), "the notice carries the Hand over button for the agent the channel answers with"
 
 
 async def test_is_setup_is_false_for_a_handoff_binding(
@@ -1254,3 +1281,33 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         channel,
         thread_ts,
     )
+
+
+def test_selfhosted_tool_turn_skips_output_sweep(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.turn.state import ToolUseBlock
+
+    app = _make_app(db_session_factory, tenant_id_str=str(uuid.uuid4()))
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tool", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sh_session_test",
+        None,
+        False,
+    )
+    with patch.object(app, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
+        app._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+            outcome,
+            MagicMock(),
+            channel="C_TEST",
+            thread_id="1.2",
+            team_id="T_TEST",
+            requester_user_id="U_TEST",
+            selfhosted=True,
+        )

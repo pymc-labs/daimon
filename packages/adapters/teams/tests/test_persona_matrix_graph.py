@@ -16,10 +16,10 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import set_plain_text_mentions
-from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (

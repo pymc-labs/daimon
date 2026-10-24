@@ -98,6 +98,7 @@ _SECRET_NAME_EXACT: frozenset[str] = frozenset(
         "proxy-authorization",
         "set-cookie",
         "x-api-key",
+        "accountkey",
     }
 )
 _SECRET_NAME_PATTERN = re.compile(
@@ -853,7 +854,9 @@ def _scrub_event_fields(event: Event, hint: Hint) -> Event | None:
 
 _ACCESS_LOGGER = "uvicorn.access"
 # Outbound-request loggers that print full URLs at INFO.
-_QUIETED_LOGGERS = ("httpx", "httpcore")
+# google.genai logs full request options (the request body, which can carry a
+# storage-mount or MCP Authorization header) at DEBUG; keep it at WARNING.
+_QUIETED_LOGGERS = ("httpx", "httpcore", "google.genai")
 
 
 def _redact_record_text(record: logging.LogRecord) -> None:

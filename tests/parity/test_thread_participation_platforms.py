@@ -83,7 +83,8 @@ async def test_the_tool_refuses_every_platform_but_discord_and_teams() -> None:
     with pytest.raises(ToolError) as err:
         await _set_thread_participation_impl(runtime, slack_caller, "on", "thread-1", None)
 
-    assert "Discord and Teams" in str(err.value), (
+    assert "isn't available here" in str(err.value), "the refusal names no chat app"
+    assert not any(app in str(err.value) for app in ("Discord", "Teams")), (
         "set_thread_participation must keep refusing Slack callers until the Slack "
         "adapter reads thread_participation_scopes"
     )

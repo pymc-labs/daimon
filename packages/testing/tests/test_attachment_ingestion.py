@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import discord
 import pytest
-from daimon.testing import ma_agent
 from daimon.testing.attachment_ingestion import (
     AttachmentBytes,
     AttachmentCell,
@@ -23,9 +22,8 @@ from daimon.testing.attachment_ingestion import (
     read_attachment,
 )
 from daimon.testing.discord_surface import DiscordSurfaceHarness, OfflineDiscordGateway
-from daimon.testing.ma import FakeMAState, MARouter
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.output_ownership import FilePin, check_pdf
 from daimon.testing.provider_fixtures import ScenarioFixture, load_provider_fixtures
 from discord.http import HTTPClient
@@ -35,6 +33,8 @@ from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.artifacts import AnthropicArtifacts
 from mux.drivers.anthropic.resources.sessions_admin import AnthropicSessionAdmin
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
+from mux.testing.drivers.anthropic.ma import FakeMAState, MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import ValidationError
 
 if TYPE_CHECKING:

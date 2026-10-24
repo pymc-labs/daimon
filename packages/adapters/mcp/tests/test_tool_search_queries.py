@@ -30,19 +30,24 @@ from daimon.core.config import (
     SlackSettings,
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.platform_words import words_for
 from daimon.core.scope import TenantScopeRef
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
-from daimon.testing import ma_agent
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import (
+    build_fake_anthropic,
+    build_stub_anthropic,
+    list_response,
+)
 from pydantic import HttpUrl, PostgresDsn, SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from yarl import URL
 
@@ -208,19 +213,36 @@ def _result_text(response: dict[str, object]) -> str:
     return "\n".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
 
 
+@pytest.fixture(scope="module")
+def search_apps(db_engine: AsyncEngine) -> dict[str, Starlette]:
+    """One real MCP app per platform for every ranking case.
+
+    Building an app registers the whole tool catalogue (about half a second); a search
+    reads that catalogue and nothing else, so the cases share the apps the way requests
+    to a running server do. The sessionmaker draws pooled connections only while a request
+    queues its audit row; each case still requests ``db_clean``, so it starts from a wiped
+    schema and its teardown checks run as before.
+    """
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    return {
+        platform: _make_app(sessionmaker, platform=platform)
+        for platform in ("discord", "slack", "teams")
+    }
+
+
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.query)
+@pytest.mark.usefixtures("db_clean")
 async def test_setup_query_ranks_tool_and_siblings(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    search_apps: dict[str, Starlette],
     platform: str,
     case: SearchCase,
 ) -> None:
     expected = {case.top_hit} if isinstance(case.top_hit, str) else case.top_hit
     if platform == "teams" and (expected | case.co_surface) & _TEAMS_HIDDEN:
         pytest.skip("the case names a tool Teams hides on purpose")
-    app = _make_app(sessionmaker, platform=platform)
     response = await mcp_session(
-        app,
+        search_apps[platform],
         token="test-token",
         method="tools/call",
         params={
@@ -344,8 +366,8 @@ async def test_member_default_agent_edit_refuses_with_admin_handoff(
         },
     )
     text = _result_text(called)
-    assert "research-bot" in text and "admin" in text and "workspace or server admin" in text, (
-        f"handoff must preserve the target and the server or workspace admin requirement: {text}"
+    assert "research-bot" in text and words_for(platform).admin in text, (
+        f"handoff must preserve the target and the platform's admin requirement: {text}"
     )
     assert "/agent-setup" not in text and "DAIMON_" not in text, (
         "refusal must not disclose deployment internals"
@@ -377,6 +399,8 @@ async def test_member_can_request_new_key_on_managed_agent(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + timedelta(minutes=10),
             chat_session_id="test-session",
@@ -497,6 +521,8 @@ async def test_member_cannot_attach_mcp_through_token_request_on_managed_default
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + timedelta(minutes=10),
             chat_session_id="test-session",

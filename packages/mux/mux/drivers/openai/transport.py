@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from typing import IO, Literal, Protocol
+import json
+import re
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import contextmanager
+from typing import IO, Literal, Protocol, cast
 from urllib.parse import quote
 
 import httpx
@@ -76,6 +79,96 @@ def error_category(code: object) -> ProviderErrorCategory:
     return NATIVE_ERROR_CATEGORIES.get(code, "upstream") if isinstance(code, str) else "upstream"
 
 
+def _native_error_details(error: APIStatusError) -> dict[str, str | None]:
+    """Bounded diagnostics; raw bodies, bearer values and URLs never become facts."""
+    body = error.body
+    if not isinstance(body, dict):
+        return {}
+    body = cast(dict[str, object], body)
+    candidate = body.get("error", body)
+    if not isinstance(candidate, dict):
+        return {}
+    raw = cast(dict[str, object], candidate)
+    secrets: set[str] = set()
+    try:
+        request = error.response.request
+        for name, value in request.headers.items():
+            if name.lower() in ("authorization", "x-api-key", "cookie"):
+                secrets.add(value)
+                if value.lower().startswith("bearer "):
+                    secrets.add(value[7:])
+
+        def collect(value: object, private: bool = False) -> None:
+            if isinstance(value, dict):
+                for key, child in cast(dict[object, object], value).items():
+                    collect(
+                        child,
+                        private
+                        or any(
+                            part in str(key).lower()
+                            for part in (
+                                "authorization",
+                                "token",
+                                "secret",
+                                "password",
+                                "api_key",
+                                "headers",
+                            )
+                        ),
+                    )
+            elif isinstance(value, list):
+                for child in cast(list[object], value):
+                    collect(child, private)
+            elif private and isinstance(value, str) and value:
+                secrets.add(value)
+                if value.lower().startswith("bearer "):
+                    secrets.add(value[7:])
+
+        if len(request.content) <= 1024 * 1024:
+            collect(json.loads(request.content))
+    except (RuntimeError, ValueError, httpx.RequestNotRead):
+        pass
+
+    def safe(value: object, *, identifier: bool = False) -> str | None:
+        if not isinstance(value, str):
+            return None
+        for secret in sorted(secrets, key=len, reverse=True):
+            value = value.replace(secret, "[redacted]")
+        value = re.sub(
+            r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|Bearer\s+[^\s\"']+",
+            "[redacted]",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(r"https?://[^\s\"']+", "[redacted URL]", value)
+        if identifier and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,128}", value) is None:
+            return None
+        return " ".join(value.split())[:512]
+
+    return {
+        "native_message": safe(raw.get("message")),
+        "native_error_code": safe(raw.get("code"), identifier=True),
+        "native_param": safe(raw.get("param"), identifier=True),
+    }
+
+
+@contextmanager
+def suppress_mcp_error_details(enabled: bool = True) -> Iterator[None]:
+    """MCP errors can echo credentials from an earlier vault request.
+
+    No pattern can safely identify an opaque bearer or partial credential. Keep
+    only the normalized category/status in this flow, including cleanup errors.
+    """
+    try:
+        yield
+    except ProviderError as error:
+        if enabled:
+            error.native_message = None
+            error.native_error_code = None
+            error.native_param = None
+        raise
+
+
 def provider_error(error: APIError | httpx.HTTPError) -> ProviderError:
     if isinstance(error, APIConnectionError | httpx.HTTPError):
         return ProviderError("transient_network", retryable=True)
@@ -97,9 +190,12 @@ def provider_error(error: APIError | httpx.HTTPError) -> ProviderError:
         503: "overloaded",
     }
     category = categories.get(status, "upstream")
-    # Never retain exception bodies or provider messages: they can contain credentials.
+    # Keep only bounded/redacted diagnostic fields; never retain the raw body.
     return ProviderError(
-        category, retryable=status in (408, 429) or status >= 500, native_code=str(status)
+        category,
+        retryable=status in (408, 429) or status >= 500,
+        native_code=str(status),
+        **_native_error_details(error),
     )
 
 

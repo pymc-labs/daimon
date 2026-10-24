@@ -4,7 +4,7 @@ Contract:
 
 1. `apply(state, event)` returns a new `TurnState`. Never mutates `state`.
 2. If `event.id` is already in `state.seen_event_ids`, returns `state`
-   unchanged (dedup).
+   unchanged, except that a tool permission may become stricter.
 3. Otherwise, records the id and folds the event into state.
 4. Event types outside the dispatched set fall through to a dedup-only
    update, so the driver may forward everything it receives.
@@ -71,8 +71,10 @@ from daimon.core.turn.state import (
     TurnState,
     UsageTotals,
 )
+from daimon.core.turn.status_log import status_log_enabled
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.usage import UsageObservation
+from pydantic import BaseModel
 
 
 def apply_usage_observation(state: TurnState, usage: UsageObservation) -> TurnState:
@@ -87,6 +89,24 @@ def apply(
     `TurnState`. Unhandled `event.type` values fall through to a dedup-only
     update — see contract point 4."""
     if event.id in state.seen_event_ids:
+        if isinstance(
+            event,
+            BetaManagedAgentsAgentToolUseEvent
+            | BetaManagedAgentsAgentCustomToolUseEvent
+            | BetaManagedAgentsAgentMCPToolUseEvent,
+        ):
+            permission = getattr(event, "evaluated_permission", None)
+            rank = {None: 0, "allow": 1, "ask": 2, "deny": 3}
+            content = [
+                dataclasses.replace(block, evaluated_permission=permission)
+                if isinstance(block, ToolUseBlock)
+                and block.id == event.id
+                and rank[permission] > rank[block.evaluated_permission]
+                else block
+                for block in state.content
+            ]
+            if content != state.content:
+                return dataclasses.replace(state, content=content)
         return state
     seen = state.seen_event_ids | {event.id}
 
@@ -112,6 +132,17 @@ def apply(
             return _apply_tool_result(state, event, seen)
         case "session.status_idle":
             assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
+            refusal = refusal_error((event.model_extra or {}).get("stop_details"))
+            if refusal is not None:
+                # A refusal idles as a plain `end_turn`, usually with no text, which
+                # would otherwise finalize as an empty success.
+                return dataclasses.replace(
+                    state,
+                    stop_reason=event.stop_reason,
+                    error=refusal,
+                    termination=TerminationReason.REFUSED,
+                    seen_event_ids=seen,
+                )
             return dataclasses.replace(state, stop_reason=event.stop_reason, seen_event_ids=seen)
         case "session.error":
             assert isinstance(event, BetaManagedAgentsSessionErrorEvent)
@@ -171,19 +202,25 @@ def _apply_agent_message(
     event: BetaManagedAgentsAgentMessageEvent,
     seen: frozenset[str],
 ) -> TurnState:
-    """Concatenate `agent.message` text onto the last `TextBlock`, or open
-    a new one if the last block is a tool use."""
+    """Fold the message into the turn's text.
+
+    With `turn.status_log` on, the message is its own `TextBlock`: an
+    `agent.message` event is a whole message (Managed Agents streams its deltas
+    as separate previews that never reach this reducer), so consecutive messages
+    stay apart and a short status line written just before the answer is not
+    glued to the answer's first word. Off, the text is concatenated onto the last
+    `TextBlock`, or opens a new one if the last block is a tool use.
+    """
     incoming = "".join(part.text for part in event.content)
     if not incoming:
         return dataclasses.replace(state, seen_event_ids=seen)
 
-    if state.content and isinstance(state.content[-1], TextBlock):
+    if not status_log_enabled() and state.content and isinstance(state.content[-1], TextBlock):
         last = state.content[-1]
         grown = TextBlock(kind="text", text=last.text + incoming)
         new_content: list[ContentBlock] = [*state.content[:-1], grown]
     else:
         new_content = [*state.content, TextBlock(kind="text", text=incoming)]
-
     return dataclasses.replace(state, content=new_content, seen_event_ids=seen)
 
 
@@ -269,6 +306,25 @@ def _apply_tool_result(
 
 
 _MCP_FAILURE_TYPES = ("mcp_connection_failed_error", "mcp_authentication_failed_error")
+
+
+class _StopDetails(BaseModel):
+    type: object = None
+    category: object = None
+
+
+def refusal_error(stop_details: object) -> TurnError | None:
+    """The API's refusal from an idle's `stop_details`, which the pinned SDK keeps as an extra.
+
+    Read leniently: an unexpected shape is no refusal, never a crashed turn.
+    """
+    if not isinstance(stop_details, dict):
+        return None
+    details = _StopDetails.model_validate(stop_details)
+    if details.type != "refusal":
+        return None
+    category = details.category if isinstance(details.category, str) else "no category"
+    return TurnError(kind="refused", message=f"the model refused the request ({category})")
 
 
 def _apply_session_error(

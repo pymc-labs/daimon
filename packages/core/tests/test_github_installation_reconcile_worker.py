@@ -32,7 +32,13 @@ def _settings() -> GithubAppSettings:
 
 
 def _github(
-    installation_id: int, repositories: list[str], *, fail: bool = False
+    installation_id: int,
+    repositories: list[str],
+    *,
+    fail: bool = False,
+    missing: bool = False,
+    account_id: int | None = None,
+    account_login: str = "owner",
 ) -> httpx.AsyncClient:
     """Fake GitHub: the installation lookup, listing token and repository page."""
 
@@ -40,7 +46,21 @@ def _github(
         if fail:
             return httpx.Response(503, json={"message": "try again"})
         if request.url.path == f"/app/installations/{installation_id}":
-            return httpx.Response(200, json={"account": {"login": "owner"}, "suspended_at": None})
+            if missing:
+                return httpx.Response(404)
+            return httpx.Response(
+                200,
+                json={
+                    "id": installation_id,
+                    "account": {
+                        "id": account_id or installation_id,
+                        "login": account_login,
+                        "type": "Organization",
+                    },
+                    "repository_selection": "selected",
+                    "suspended_at": None,
+                },
+            )
         if request.url.path == f"/app/installations/{installation_id}/access_tokens":
             return httpx.Response(201, json={"token": "metadata-only-token"})
         if request.url.path == "/installation/repositories":
@@ -113,6 +133,120 @@ async def test_drain_backfills_snapshot_after_old_scheduler_consumed_migration_j
     assert row.github_repo_full_names == ("owner/one", "owner/two")
     job = await _queue_state(db_session_factory, installation_id)
     assert job is not None and job.state == "done" and job.generation == 2
+
+
+async def test_reconcile_corrects_stale_app_owner_and_leaves_matching_owner_unchanged(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    installation_id = 9305
+    await _add_installation(db_session_factory, installation_id)
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as session:
+        row = await session.get(GitHubAppInstallation, installation_id)
+        assert row is not None
+        row.account_login = "old-owner"
+        row.account_id = None
+        await session.flush()
+        assert await installation_store.correct_github_app_owner(
+            session,
+            installation_id=installation_id,
+            account_id=installation_id,
+            account_login="owner",
+        ) == ("old-owner", None)
+        assert (
+            await installation_store.correct_github_app_owner(
+                session,
+                installation_id=installation_id,
+                account_id=installation_id,
+                account_login="owner",
+            )
+            is None
+        )
+        row.account_login = "old-owner"
+        row.account_id = None
+        await session.flush()
+    async with _github(installation_id, ["owner/one"]) as client:
+        assert (
+            await drain_github_installation_reconciliations(
+                sessionmaker=db_session_factory, http_client=client, github_app=_settings(), now=now
+            )
+            == 1
+        )
+    async with db_session_factory() as session:
+        row = await installation_store.get(session, installation_id=installation_id)
+        assert row is not None
+        assert (row.account_login, row.account_id) == ("owner", installation_id)
+        assert (
+            await installation_store.correct_github_app_owner(
+                session,
+                installation_id=installation_id,
+                account_id=installation_id,
+                account_login="owner",
+            )
+            is None
+        )
+
+
+async def test_reconcile_legacy_owner_uses_existing_login_path(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    installation_id = 9306
+    async with db_session_factory.begin() as session:
+        await installation_store.upsert(
+            session,
+            installation_id=installation_id,
+            account_login="old-owner",
+            repo_full_names=["old-owner/repo"],
+        )
+        await session.execute(
+            update(GitHubAppInstallation)
+            .where(GitHubAppInstallation.installation_id == installation_id)
+            .values(github_refreshed_at=datetime.now(UTC))
+        )
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as session:
+        from daimon.core.stores import github_installation_reconciliation as reconciliation_store
+
+        assert await reconciliation_store.enqueue(
+            session,
+            installation_id=installation_id,
+            delivery_id="legacy-owner-refresh",
+            event="installation",
+            deleted=False,
+            now=now,
+        )
+    async with _github(installation_id, ["owner/repo"]) as client:
+        assert (
+            await drain_github_installation_reconciliations(
+                sessionmaker=db_session_factory, http_client=client, github_app=_settings(), now=now
+            )
+            == 1
+        )
+    async with db_session_factory() as session:
+        row = await installation_store.get(session, installation_id=installation_id)
+    assert row is not None
+    assert row.app == "legacy"
+    assert row.account_login == "owner"
+    assert row.account_id is None
+
+
+async def test_reconcile_404_keeps_app_owner_and_marks_installation_removed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    installation_id = 9307
+    await _add_installation(db_session_factory, installation_id)
+    async with _github(installation_id, [], missing=True) as client:
+        assert (
+            await drain_github_installation_reconciliations(
+                sessionmaker=db_session_factory, http_client=client, github_app=_settings()
+            )
+            == 1
+        )
+    async with db_session_factory() as session:
+        row = await installation_store.get(session, installation_id=installation_id)
+    assert row is not None
+    assert (row.account_login, row.account_id) == ("owner", installation_id)
+    assert row.github_removed_at is not None
 
 
 async def test_failing_github_keeps_one_backing_off_job_without_reenqueue(

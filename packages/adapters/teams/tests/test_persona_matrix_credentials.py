@@ -23,8 +23,8 @@ from daimon.core.stores.credential_requests import (
     peek_credential_request,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.testing import build_fake_anthropic, ma_agent
-from daimon.testing.ma import MARouter
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -169,7 +169,7 @@ async def test_credential_request_persona_matrix(
     async with db_session_factory() as session:
         stored = await peek_credential_request(session, token=row.token)
     assert stored is not None
-    assert wrong["task"]["type"] == "message", wrong
+    assert wrong["task"]["type"] == "continue", wrong
     assert "someone else" in json.dumps(wrong).lower(), wrong
     if kind == "mcp_oauth":
         assert opened["task"]["type"] == "continue", opened

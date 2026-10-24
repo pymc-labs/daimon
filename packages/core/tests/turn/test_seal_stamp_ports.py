@@ -17,11 +17,11 @@ from daimon.core.turn import prepare
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError
-from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import deps_for
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -144,7 +144,7 @@ async def test_native_errors_keep_their_existing_seal_policy(
 ) -> None:
     trace: list[str] = []
     transport = ScriptedTransport()
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     transport.queue(
         ScriptedReply(
@@ -199,8 +199,8 @@ async def test_wrong_admission_tenant_refuses_before_publish_or_provider_io(
 
 async def test_native_read_preserves_partial_null_and_unknown_response_fields() -> None:
     from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
-    from daimon.testing.ma_transport import ScriptedReply
     from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     body: dict[str, JsonValue] = {
         "id": "session",
@@ -224,8 +224,8 @@ async def test_native_read_preserves_partial_null_and_unknown_response_fields() 
 @pytest.mark.parametrize("foreign", ["reference", "scope", "record"])
 async def test_native_read_refuses_foreign_identity(foreign: str) -> None:
     from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
-    from daimon.testing.ma_transport import ScriptedReply
     from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     transport = ScriptedTransport()
     scope = resource_scope(tenant_id=str(TENANT), account_id=str(ACCOUNT))
@@ -260,7 +260,7 @@ async def test_native_read_refuses_foreign_identity(foreign: str) -> None:
 async def test_running_update_retains_five_second_busy_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     trace: list[str] = []
     transport = ScriptedTransport()

@@ -17,7 +17,7 @@ from daimon.testing.effect_recorder import (
     LEGACY_DB_COLUMNS,
     EffectRecorder,
 )
-from daimon.testing.ma_transport import Json
+from mux.testing.drivers.anthropic.ma_transport import Json
 from sqlalchemy import Column, Integer, MetaData, String, Table, Uuid, insert, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 

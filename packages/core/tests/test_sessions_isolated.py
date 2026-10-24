@@ -9,8 +9,9 @@ from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaMa
 from anthropic.types.beta.session_create_params import Resource
 from daimon.core.sessions import create_isolated_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session, ma_session_agent
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 
 
 def _make_agent(*, anthropic_id: str = "ag_reader", name: str = "reader") -> BetaManagedAgentsAgent:

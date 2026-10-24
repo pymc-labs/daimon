@@ -35,6 +35,7 @@ from xml.sax.saxutils import escape
 
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
+from daimon.core.turn_origin import redact_turn_origin_text
 from daimon.core.untrusted import untrusted_block
 
 # Model families that accept a mid-conversation `system.message` event. The
@@ -107,6 +108,8 @@ def select_recent_turns(
         else:
             continue
         text = "\n".join(block.text for block in event.content if block.type == "text").strip()
+        # The successor's turn has its own origin; the earlier turn's id is not for it.
+        text = redact_turn_origin_text(text)
         if not text:
             continue
         if len(text) > remaining:

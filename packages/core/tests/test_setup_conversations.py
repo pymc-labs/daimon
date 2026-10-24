@@ -16,8 +16,8 @@ from daimon.core.setup_conversations import (
     setup_thread_name,
     shared_keys_sentence,
 )
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
 
 @pytest.mark.parametrize("missing_target", [False, True])
@@ -76,18 +76,18 @@ async def test_missing_bound_responder_is_explicit_and_does_not_reconcile() -> N
             404, json={"type": "error", "error": {"type": "not_found_error", "message": "missing"}}
         )
     )
-    with pytest.raises(UserFacingError, match="Daimon responder is missing"):
+    with pytest.raises(UserFacingError, match="Daimon agent is missing"):
         await get_setup_responder(client, tenant_id=uuid.uuid4(), ma_agent_id="ag_deleted")
 
 
 def test_setup_thread_name_names_the_target_when_one_is_chosen() -> None:
-    assert setup_thread_name("writer") == "Managing writer", (
-        "the thread name says which agent is being managed"
+    assert setup_thread_name("writer") == "Setting up writer", (
+        "the thread name says which agent is being set up"
     )
 
 
 def test_setup_thread_name_stands_in_for_an_unchosen_target() -> None:
-    assert setup_thread_name(None) == "Managing agents", (
+    assert setup_thread_name(None) == "Setting up agents", (
         "a conversation opened before a target is chosen still needs a readable name"
     )
 
@@ -104,13 +104,13 @@ def test_shared_keys_sentence_names_the_agent_whose_keys_are_shared() -> None:
 
 
 _MEMBER_ROLE_LINE = (
-    "You can make your own agents and add keys or tools to any of them. "
+    "You can make your own agents and add a key to any agent. "
     "Changes to an agent other people use, or to who answers in a channel, "
     "need a workspace admin. Ask anyway and I'll write the request for them."
 )
 _ADMIN_ROLE_LINE = (
     "You can change any agent and choose who answers in each channel. "
-    "Daimon itself can't be edited; ask me to fork it and change the fork."
+    "Daimon itself can't be edited; ask me to make a copy and change the copy."
 )
 
 
@@ -147,6 +147,21 @@ def test_opener_tells_an_admin_what_only_an_admin_can_do() -> None:
     ), "an admin is told they can route channels, and that the starting agent is forked, not edited"
 
 
+def test_opener_names_the_conversation_the_platform_has() -> None:
+    """Teams 1:1 chats have no threads, so the caller passes "chat"."""
+    opener = build_setup_opener(
+        target_display="Researcher",
+        bot_mention=None,
+        is_admin=True,
+        admin_noun="an admin",
+        conversation_noun="chat",
+    )
+    assert opener.startswith(
+        "This chat is about Researcher. Tell me what to change, or name another agent."
+    )
+    assert "thread" not in opener
+
+
 def test_opener_without_a_mention_ends_at_the_role_line() -> None:
     opener = build_setup_opener(
         target_display=None, bot_mention=None, is_admin=True, admin_noun="an admin"
@@ -167,7 +182,7 @@ def test_opener_uses_the_platform_name_for_an_admin() -> None:
 
 
 def test_roster_setup_label_names_the_target_without_changing_its_identity() -> None:
-    assert setup_target_label("Researcher") == "⚙️ Manage Researcher", "name the action's target"
-    assert setup_target_label(None) == "⚙️ Manage agents", "no target opens the chooser"
+    assert setup_target_label("Researcher") == "⚙️ Set up Researcher", "name the action's target"
+    assert setup_target_label(None) == "⚙️ Set up agents", "no target opens the chooser"
     label = setup_target_label("x" * 64)
     assert len(label) == 30 and label.endswith("…"), "long names fit the button with an ellipsis"

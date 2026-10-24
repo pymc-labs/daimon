@@ -109,21 +109,24 @@ def test_incomplete_read_only_projection_is_not_guessed_absent(captured, field):
     assert refused.value.missing == ("source_context",)
 
 
-@pytest.mark.parametrize(
-    "obligation", ["credentials", "private", "model_options", "unknown_extension"]
-)
+def test_a_bare_saved_key_is_a_declared_drop_never_carried(captured):
+    """The built-in agent's saved keys: the target runs without them, and says so."""
+    source = captured.model_copy(
+        update={"resource_requirements": (ResourceBinding(id="key", kind="credential"),)}
+    )
+    for provider, model in (("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")):
+        target = preview_source_drops(source, ModelRef(provider=provider, id=model))
+        assert "credentials" in target.declared_drops
+        assert not target.mcp_servers
+        assert not classify_source_obligations(source, target, environment=None)
+
+
+@pytest.mark.parametrize("obligation", ["private", "model_options", "unknown_extension"])
 def test_nondroppable_obligations_never_become_consent_labels(captured, obligation):
     source = captured
-    if obligation in ("credentials", "private"):
+    if obligation == "private":
         source = source.model_copy(
-            update={
-                "resource_requirements": (
-                    ResourceBinding(
-                        id="protected",
-                        kind="credential" if obligation == "credentials" else "native",
-                    ),
-                )
-            }
+            update={"resource_requirements": (ResourceBinding(id="protected", kind="native"),)}
         )
     elif obligation == "model_options":
         spec = source.effective_spec.model_copy(
@@ -150,7 +153,7 @@ def test_nondroppable_obligations_never_become_consent_labels(captured, obligati
         )
     with pytest.raises(UnsupportedCapability) as refused:
         preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
-    assert set(refused.value.missing) & {"credentials", "source_definition"}
+    assert refused.value.missing and "credentials" not in refused.value.missing
 
 
 def test_dropping_execution_does_not_bypass_publishing_approval(captured):
@@ -171,47 +174,52 @@ def test_instruction_changes_are_not_discharged_by_any_drops(captured):
     assert "instructions" in classify_source_obligations(captured, target, environment=None)
 
 
-@pytest.mark.parametrize("attachment", ["repository", "foreign_file", "opaque_file"])
-def test_dropping_a_connection_or_attachment_never_drops_credentials_or_unknown_resources(
-    captured, attachment
-):
-    if attachment == "repository":
-        captured = captured.model_copy(
-            update={
-                "repository_sources": (
-                    WorkspaceSource(
-                        kind="repository",
-                        target_path=".",
-                        repository_url="https://protected.invalid/repo",
-                        credential_ref="credential",
-                    ),
-                )
-            }
-        )
-    else:
-        ref = captured.source.ref.model_copy(update={"id": "file", "kind": "file"})
-        if attachment == "foreign_file":
-            ref = ref.model_copy(update={"tenant_id": "foreign"})
-        captured = captured.model_copy(
-            update={
-                "resource_requirements": (
-                    ResourceBinding(
-                        id="file",
-                        kind="artifact",
-                        target_path="document.txt",
-                        resource=ref,
-                        native=ExtensionConfig(
-                            namespace="anthropic.private_resource", version=1, value={}
-                        )
-                        if attachment == "opaque_file"
-                        else None,
-                    ),
-                )
-            }
-        )
+def test_a_credentialed_repository_is_lost_only_as_declared_repository_and_credentials(captured):
+    source = captured.model_copy(
+        update={
+            "repository_sources": (
+                WorkspaceSource(
+                    kind="repository",
+                    target_path=".",
+                    repository_url="https://protected.invalid/repo",
+                    credential_ref="credential",
+                ),
+            )
+        }
+    )
+    target = preview_source_drops(source, ModelRef(provider="gemini", id="gemini-3.8-flash"))
+    assert {"credentials", "repository"} <= set(target.declared_drops)
+    only_repository = target.model_copy(
+        update={"declared_drops": tuple(d for d in target.declared_drops if d != "credentials")}
+    )
+    assert "credentials" in classify_source_obligations(source, only_repository, environment=None)
+
+
+@pytest.mark.parametrize("attachment", ["foreign_file", "opaque_file"])
+def test_dropping_a_connection_or_attachment_never_drops_unknown_resources(captured, attachment):
+    ref = captured.source.ref.model_copy(update={"id": "file", "kind": "file"})
+    if attachment == "foreign_file":
+        ref = ref.model_copy(update={"tenant_id": "foreign"})
+    captured = captured.model_copy(
+        update={
+            "resource_requirements": (
+                ResourceBinding(
+                    id="file",
+                    kind="artifact",
+                    target_path="document.txt",
+                    resource=ref,
+                    native=ExtensionConfig(
+                        namespace="anthropic.private_resource", version=1, value={}
+                    )
+                    if attachment == "opaque_file"
+                    else None,
+                ),
+            )
+        }
+    )
     with pytest.raises(UnsupportedCapability) as refused:
         preview_source_drops(captured, ModelRef(provider="gemini", id="gemini-3.8-flash"))
-    assert set(refused.value.missing) & {"credentials", "source_definition"}
+    assert "source_definition" in refused.value.missing
 
 
 @pytest.mark.parametrize(
@@ -369,7 +377,6 @@ def test_public_preview_consent_uses_the_existing_canonical_drop_domain(preview)
 @pytest.mark.parametrize(
     "change",
     [
-        {"declared_drops": ["credentials"]},
         {"declared_drops": ["instructions"]},
         {"declared_drops": ["source_definition"]},
         {"declared_drops": ["memory", "memory"]},
@@ -716,8 +723,8 @@ def test_mcp_loss_never_drops_unpaired_credentials(captured, reference):
     target = preview_source_drops(captured, ModelRef(provider="openai", id="gpt-6-luna"))
     target = target.model_copy(update={"declared_drops": ("mcp", "sandbox")})
     assert "credentials" in classify_source_obligations(source, target, environment=None)
-    with pytest.raises(UnsupportedCapability):
-        preview_source_drops(source, target.model)
+    # Only an explicit `credentials` loss, shown to the requester, discharges it.
+    assert "credentials" in preview_source_drops(source, target.model).declared_drops
 
 
 def test_shared_mcp_credential_cannot_be_lost_with_one_server_retained(captured):
@@ -764,3 +771,24 @@ def test_caller_mcp_pairing_requires_the_complete_known_binding(captured, corrup
     target = preview_source_drops(captured, ModelRef(provider="openai", id="gpt-6-luna"))
     target = target.model_copy(update={"declared_drops": ("mcp", "sandbox", "files")})
     assert "credentials" in classify_source_obligations(source, target, environment=None)
+
+
+def test_a_declared_credentials_loss_never_covers_a_credential_its_kept_connection_needs(captured):
+    """Dropping saved keys can't carry a key: a retained MCP server's credential still refuses."""
+    server = MCPConnection(name="kept", url="https://mcp.invalid/mcp", credential_ref="kept-key")
+    source = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(update={"mcp_servers": (server,)}),
+            "resource_requirements": (
+                ResourceBinding(id="kept-key", kind="credential", credential_ref="kept-key"),
+            ),
+        }
+    )
+    target = preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
+    retained = target.model_copy(
+        update={
+            "mcp_servers": (server,),
+            "declared_drops": tuple(sorted({*target.declared_drops, "credentials"})),
+        }
+    )
+    assert "credentials" in classify_source_obligations(source, retained, environment=None)

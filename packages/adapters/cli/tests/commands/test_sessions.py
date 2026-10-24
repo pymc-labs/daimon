@@ -28,13 +28,9 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.testing import ma_environment
-from daimon.testing.ma import (
-    EMPTY_SESSION_STATS,
-    EMPTY_SESSION_USAGE,
-    MARouter,
-    list_response,
-)
+from daimon.testing.ma_models import ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
 from pydantic import HttpUrl, SecretStr
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

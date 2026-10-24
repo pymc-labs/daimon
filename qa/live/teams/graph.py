@@ -316,6 +316,19 @@ class GraphTeamsDriver:
             path = next_link.removeprefix(BASE)
         return frozenset(seen)
 
+    async def _paged_messages(
+        self, persona: str, path: str, prefix: str, deadline: float | None
+    ) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for _ in range(4):
+            data = await self._request(persona, READ, "GET", path, deadline=deadline)
+            messages.extend(data.get("value", []))
+            next_link = data.get("@odata.nextLink")
+            if not isinstance(next_link, str) or not next_link.startswith(BASE + prefix):
+                break
+            path = next_link.removeprefix(BASE)
+        return messages
+
     async def post_mention(
         self,
         persona: str,
@@ -380,14 +393,8 @@ class GraphTeamsDriver:
         """Read replies to one channel message."""
         if not message_id or "/" in message_id:
             raise ValueError("invalid message id")
-        data = await self._request(
-            persona,
-            READ,
-            "GET",
-            self.channel + f"/messages/{message_id}/replies",
-            deadline=deadline,
-        )
-        return list(data.get("value", []))
+        prefix = self.channel + f"/messages/{message_id}/replies"
+        return await self._paged_messages(persona, prefix, prefix, deadline)
 
     async def wait_for_reply(
         self,

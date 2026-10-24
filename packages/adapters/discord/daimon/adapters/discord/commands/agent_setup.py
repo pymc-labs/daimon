@@ -23,6 +23,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_identity import CUSTOM_PICTURES_OFF
 from daimon.core.errors import DaimonError
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -72,7 +73,7 @@ class AgentSetupCog(commands.Cog):
 
     @app_commands.command(
         name="agent-setup",
-        description="Your agents and where they answer",
+        description=DESCRIPTIONS["setup"],
     )
     @require_registered_guild
     async def agent_setup(

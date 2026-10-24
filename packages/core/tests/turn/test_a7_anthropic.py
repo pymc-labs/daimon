@@ -13,9 +13,9 @@ from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.turn.io import default_mux_turn_io
 from daimon.testing import a7_anthropic as a7
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import send_events_response
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma import send_events_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 TENANT = uuid.UUID(int=4704)

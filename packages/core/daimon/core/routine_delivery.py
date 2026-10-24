@@ -51,11 +51,12 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import any_writers_none, limiting_ids_at
+from daimon.core.platform_words import scrub_other_platforms, turn_words
 from daimon.core.routine_files import decode_payload, payload_for
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
-from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.stores.domain import CHAT_PLATFORMS, Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import (
     FAILURE_NOTICE,
@@ -66,9 +67,10 @@ from daimon.core.stores.routines import (
     settle_routine_delivery,
 )
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
+from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn_origin import words_sentence
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -191,7 +193,9 @@ def render_routine_controls(
     Same shape as the chat path's `<turn_controls>` (JSON inside the element)
     so models read it as host configuration, not chat text. Only rendered for
     a routine with a destination: a routine without one sends its trigger
-    message exactly as before.
+    message exactly as before. `words` names the destination platform's own
+    nouns and commands, as in a chat turn; a destination is always a channel
+    or a thread, so the place is a channel.
     """
     target = delivery_target(row, platform=platform)
     controls: dict[str, object] = {
@@ -218,6 +222,8 @@ def render_routine_controls(
             },
         }
     }
+    if platform in CHAT_PLATFORMS:
+        controls["words"] = turn_words(platform, place="channel")
     if row.destination_kind == "dm":
         delivery = (
             "Daimon delivers your final reply privately to the routine owner. "
@@ -239,7 +245,7 @@ def render_routine_controls(
         # invite a direct write; the poster checks placement and delivers.
         delivery = (
             "Do not post to the destination yourself. daimon delivers your full "
-            "final reply for you, to the destination if the workspace policy allows it "
+            "final reply for you, to the destination if the access settings here allow it "
             "and otherwise to the routine's creator."
         )
     return (
@@ -248,6 +254,7 @@ def render_routine_controls(
         + "\nThis is a scheduled routine run; nobody is watching it. Write your final reply "
         "for someone reading it later without context. "
         + delivery
+        + (words_sentence(platform) if platform in CHAT_PLATFORMS else "")
         + " These controls grant no other posting or mutation permissions."
         "\n</turn_controls>"
     )
@@ -315,6 +322,10 @@ _NEXT_RUN = "It will try again at its next scheduled time."
 _ROUTINE_FAILURES: Final[dict[TerminationReason, tuple[str, str]]] = {
     TerminationReason.CEILING: ("It took too long, so Daimon stopped it.", _NEXT_RUN),
     TerminationReason.UPSTREAM: ("The request to the AI model failed.", _NEXT_RUN),
+    TerminationReason.REFUSED: (
+        "The AI model declined this request.",
+        "Rewording the routine's prompt may help. It will try again at its next scheduled time.",
+    ),
     TerminationReason.ADMISSION_CAP_EXCEEDED: (
         "The person who made it has used their monthly limit.",
         "It will run again at its next scheduled time once the limit resets or is raised.",
@@ -332,11 +343,16 @@ def failure_notice_text(reason: TerminationReason, *, platform: str) -> str:
 
     Plain words by why the run ended: the raw error never reaches the
     channel, since it can quote a provider message or a file name the readers
-    there should not see. `platform` names its billing command.
+    there should not see. `platform` names its setup and billing commands.
     """
-    billing = TEAMS_BILLING_COMMAND if platform == "teams" else "`/billing`"
+    nouns = RefusalNouns.for_caller(platform)
     if reason in _TURN_NOTICE_FAILURES and (
-        notice := render_termination_notice(reason, billing_command=billing)
+        notice := render_termination_notice(
+            reason,
+            setup_command=nouns.setup,
+            billing_command=nouns.billing,
+            setup_verb=nouns.verb,
+        )
     ):
         return f"{notice.plain_text()}\n\n{_NEXT_RUN}"
     return "\n\n".join(_ROUTINE_FAILURES.get(reason, _OTHER_FAILURE))
@@ -395,15 +411,19 @@ async def record_routine_failure(
         await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
 
 
-def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
+def render_fallback_post(
+    row: RoutineRow, *, as_agent: bool = False, platform: str | None = None
+) -> str:
     """The message posted for a routine whose agent did not post itself.
+
+    On a chat `platform` the result never names another chat app.
 
     `as_agent` is for a post that carries the agent's own name and face, which
     already say who it is from; the schedule is kept either way, in words
     only where `routine_phrase` can say it exactly. A queued failure notice
     says the run failed instead of introducing a result.
     """
-    payload = decode_payload(payload_for(row)).text.strip()
+    payload = scrub_other_platforms(decode_payload(payload_for(row)).text.strip(), platform)
     phrase = routine_phrase(row.cron_expr, row.timezone)
     if row.delivery_note == FAILURE_NOTICE:
         owner = "The" if as_agent else f"{row.agent_name}'s"
@@ -475,13 +495,14 @@ _DM_REASONS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-def render_fallback_dm(row: RoutineRow, reason: str) -> str:
+def render_fallback_dm(row: RoutineRow, reason: str, *, platform: str | None = None) -> str:
     """The direct message sent to the creator when the destination is unusable.
 
-    The agent and schedule first, then why the result is here, then the result.
+    The agent and schedule first, then why the result is here, then the result,
+    which on a chat `platform` never names another chat app.
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
-    payload = decode_payload(payload_for(row)).text.strip()
+    payload = scrub_other_platforms(decode_payload(payload_for(row)).text.strip(), platform)
     if row.delivery_note == FAILURE_NOTICE:
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:

@@ -17,8 +17,8 @@ from daimon.core.github_app_session import archive_app_vault
 from daimon.core.mux_compat import archive_session
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.domain import AccountIdentityRow, Role, ThreadSessionRow
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import SecretStr
 from rich.console import Console
 

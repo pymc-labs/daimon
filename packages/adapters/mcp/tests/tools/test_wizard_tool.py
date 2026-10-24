@@ -279,7 +279,9 @@ async def test_post_wizard_returns_the_stop_signal(
         channel_id="222",
     )
     assert result == _STOP_SIGNAL, "the tool must return exactly the module's stop-signal constant"
-    assert "end your turn" in result.lower(), "the stop signal must tell the agent to end its turn"
+    assert "end your reply" in result.lower(), (
+        "the stop signal must tell the agent to end its reply"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +599,7 @@ async def test_post_wizard_refuses_on_slack(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    with pytest.raises(ToolError, match="not supported on Slack"):
+    with pytest.raises(ToolError, match="isn't available here"):
         await _post_wizard_impl(
             _runtime(committing_sessionmaker),
             auth,

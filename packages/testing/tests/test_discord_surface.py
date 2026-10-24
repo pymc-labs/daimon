@@ -18,8 +18,8 @@ from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.discord_surface import DiscordSurfaceCapture, DiscordSurfaceHarness
-from daimon.testing.ma import build_no_retry_anthropic
 from daimon.testing.turn_router import build_turn_router
+from mux.testing.drivers.anthropic.ma import build_no_retry_anthropic
 
 
 class Clock:

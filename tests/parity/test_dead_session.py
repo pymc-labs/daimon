@@ -32,7 +32,7 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, not_found_response
+from mux.testing.drivers.anthropic.ma import MARouter, not_found_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AGENT_ID, build_turn_router

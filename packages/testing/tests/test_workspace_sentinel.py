@@ -11,10 +11,15 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_VALUE_WORKSPACE_DISPOSABLE,
 )
 from daimon.core.ma import WORKSPACE_SENTINEL_AGENT_NAME
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
 from daimon.testing.workspace_sentinel import (
     mark_workspace_disposable,
     require_disposable_workspace,
+)
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    json_body,
+    list_response,
 )
 
 

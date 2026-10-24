@@ -59,15 +59,13 @@ from daimon.core.turn_queue import TurnTicket
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.core.wizard.state import WizardState, WizardStatus, build_custom_id
-from daimon.testing import build_turn_router, ma_session
+from daimon.testing import build_turn_router
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_tenant, make_thread_session, make_wizard_session
-from daimon.testing.ma import (
-    MARouter,
-    build_fake_anthropic,
-)
 from daimon.testing.membership import FixtureMembershipResolver
 from discord.components import ActionRow
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1199,7 +1197,7 @@ async def test_a_submit_over_the_per_tenant_cap_with_a_full_queue_runs_no_turn_a
         for call in channel.send.call_args_list
         if call.args and isinstance(call.args[0], str)
     ]
-    assert any("recorded" in text and "in flight" in text for text in posted_texts), (
+    assert any("recorded" in text and "chats at once" in text for text in posted_texts), (
         f"the refusal must say the answers were recorded and the server is busy, "
         f"got: {posted_texts}"
     )
@@ -1451,7 +1449,7 @@ async def test_a_submitter_over_balance_is_told_and_no_turn_runs(
     assert any("recorded" in text for text in posted_texts), (
         f"the refusal must say the answers were recorded, got: {posted_texts}"
     )
-    assert any("Your team's Daimon credit has run out." in text for text in posted_texts), (
+    assert any("Your team has no Daimon credit yet." in text for text in posted_texts), (
         f"the refusal must reuse the existing credit-depleted copy, got: {posted_texts}"
     )
 

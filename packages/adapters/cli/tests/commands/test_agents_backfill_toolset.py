@@ -25,7 +25,7 @@ from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAge
 from daimon.adapters.cli.commands.agents import agents_backfill_toolset
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.testing.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

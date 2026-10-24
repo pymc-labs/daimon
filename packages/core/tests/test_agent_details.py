@@ -38,8 +38,9 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.thread_agent_bindings import create_binding
-from daimon.testing import MARouter, build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 

@@ -107,6 +107,7 @@ from mux.contracts.resources import (
 )
 from mux.contracts.usage import UsageObservation
 from mux.profiles import MANAGED_AGENTS
+from mux.testing.drivers.gemini.recorded_clock import gemini_recorded_clock as gemini_recorded_clock
 from pydantic import BaseModel
 
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
@@ -359,13 +360,3 @@ def channel() -> ChannelRef:
 @pytest.fixture
 def resolved() -> ResolvedBackend:
     return RESOLVED
-
-
-# Recorded Gemini interactions are stamped 2026-10-10 to 2026-10-12, and the driver
-# expires a workspace seven days after its last activity: replay them at their own time.
-GEMINI_RECORDED_AT = datetime(2026, 10, 13, tzinfo=UTC)
-
-
-@pytest.fixture
-def gemini_recorded_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("mux.drivers.gemini.core.now", lambda: GEMINI_RECORDED_AT)

@@ -23,10 +23,15 @@ from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import McpOAuthFlowRow, Role
-from daimon.testing import ma_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    json_body,
+    list_response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)

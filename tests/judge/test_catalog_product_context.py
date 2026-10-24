@@ -20,19 +20,19 @@ from daimon.testing.anthropic_fixtures import (
     anthropic_turn_tape,
     load_anthropic_fixtures,
 )
-from daimon.testing.isolated_sdk import build_async_anthropic
-from daimon.testing.ma import (
-    FakeMAState,
-    combine_handlers,
-    make_fake_memory_store_handler,
-    resolved_agent_env_router,
-)
+from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from daimon.testing.outcome_oracle import TurnEvidence
 from daimon.testing.provider_fixtures import load_provider_fixtures
 from daimon.testing.provider_replay import SourcePin
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma import (
+    FakeMAState,
+    combine_handlers,
+    make_fake_memory_store_handler,
+)
+from mux.testing.isolated_sdk import build_async_anthropic
 
 from .catalog_product_context import ProductContext, ProductContextPending, ProductTurnRecipe
 from .catalog_runner import Invocation, load_catalog, plan_scenario, sha
@@ -637,7 +637,7 @@ async def test_exact_d1_d7_pair_uses_n6_resource_edge_and_real_readback(
     from daimon.core.defaults.metadata import tenant_scoped_display_title
     from daimon.core.mux_compat import create_skill
     from daimon.core.skills.ingest import bundle_from_markdown
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     ctx = context(binding, tmp_path)
     entry = next(e for e in load_catalog(CATALOG) if e.id == scenario_id)

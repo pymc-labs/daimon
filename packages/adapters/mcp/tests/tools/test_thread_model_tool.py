@@ -84,6 +84,8 @@ async def test_a_persons_turn_switches_its_own_conversation_only(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         result = await _set_thread_model_impl(
             runtime, _auth(tenant.id, caller.id), origin_context_id=str(origin.id), model="opus"
@@ -117,6 +119,8 @@ async def test_an_unattended_run_cannot_change_a_conversations_model(
         role=Role.USER,
         attended=False,
         chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="Only someone in the conversation"):
             await _set_thread_model_impl(
@@ -152,6 +156,8 @@ async def test_a_call_without_this_turns_origin_is_refused(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError):
             await _set_thread_model_impl(
@@ -184,6 +190,8 @@ async def test_a_model_this_deployment_does_not_offer_is_refused(
         responder_name="daimon",
         role=Role.USER,
         chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="isn't a model this conversation can use"):
             await _set_thread_model_impl(

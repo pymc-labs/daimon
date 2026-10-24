@@ -27,11 +27,11 @@ from daimon.core.defaults.sweep import (
 from daimon.core.mux_backend import managed_agents
 from daimon.core.specs import AgentSpec, EnvironmentSpec
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TENANT = uuid.UUID("00000000-0000-0000-0000-000000000001")

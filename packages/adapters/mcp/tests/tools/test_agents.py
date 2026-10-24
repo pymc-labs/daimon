@@ -51,10 +51,14 @@ from daimon.core.stores.access_policy import load_access_policy, set_access_poli
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import upsert_user_skill
-from daimon.testing import ma_agent
 from daimon.testing.asgi import call_mcp_tool
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     MARouter,
     NotHandled,
@@ -65,9 +69,6 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
-from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 
@@ -733,8 +734,10 @@ async def test_update_agent_impl_forwards_only_non_none_fields(
     assert row.applies is None, "a description-only update touches neither model nor system"
 
 
+@pytest.mark.parametrize("requested_model", ["claude-opus-5", "opus 5"])
 async def test_update_agent_impl_returns_applies_for_model_change(
     db_session_factory: async_sessionmaker[AsyncSession],
+    requested_model: str,
 ) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -775,7 +778,7 @@ async def test_update_agent_impl_returns_applies_for_model_change(
         _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
-        model="claude-opus-5",
+        model=requested_model,
         description=None,
         system=None,
         tools=None,
@@ -3726,7 +3729,9 @@ async def test_create_agent_impl_rejects_guild_stamped_name_collision() -> None:
         await _create_agent_impl(_runtime(client), auth, spec)
 
 
-async def test_fork_agent_impl_rejects_guild_stamped_name_collision() -> None:
+async def test_fork_agent_impl_rejects_guild_stamped_name_collision(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """fork_agent raises ToolError when a guild-stamped agent with the fork target name exists."""
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -3761,7 +3766,68 @@ async def test_fork_agent_impl_rejects_guild_stamped_name_collision() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="already exists"):
-        await _fork_agent_impl(_runtime(client), auth, source_name="source", new_name="myfork")
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            source_name="source",
+            new_name="myfork",
+        )
+
+
+async def test_fork_agent_impl_new_copy_if_taken_takes_the_next_free_name(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """J2: "make a copy of yourself" makes a NEW copy beside earlier ones, never reuses them."""
+    tenant_id = uuid.uuid4()
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
+
+    def tagged(agent_id: str, name: str) -> dict[str, Any]:
+        meta = {"daimon_tenant": str(tenant_id), "daimon_name": name}
+        return ma_agent(id=agent_id, name=name, metadata=meta).model_dump(mode="json")
+
+    created: list[dict[str, Any]] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.append(json_body(req))
+        body = ma_agent(id="ag_new", name="daimon-argon-3")
+        return httpx.Response(200, json=body.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _req, _m: list_response(
+            [
+                tagged("ag_src", "daimon"),
+                tagged("ag_old", "daimon-argon"),
+                tagged("ag_old2", "daimon-argon-2"),
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(200, json=tagged("ag_src", "daimon")),
+    )
+    router.add("POST", r"/v1/agents", on_create)
+    client = build_fake_anthropic(router.dispatch)
+
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    result = await _fork_agent_impl(
+        _runtime(client, session_factory=db_session_factory, fernet=fernet),
+        auth,
+        source_name="daimon",
+        new_name="daimon-argon",
+        new_copy_if_taken=True,
+    )
+    assert len(created) == 1, "a new copy is created even though daimon-argon exists"
+    assert created[0]["metadata"]["daimon_name"] == "daimon-argon-3", (
+        "the copy takes the first free name, not an earlier copy's"
+    )
+    assert result.name == "daimon-argon-3", "the result names the new copy"
 
 
 async def test_create_agent_rejects_name_held_by_other_owner() -> None:
@@ -3807,7 +3873,9 @@ async def test_create_agent_rejects_name_held_by_other_owner() -> None:
         await _create_agent_impl(_runtime(client), auth, spec)
 
 
-async def test_fork_agent_rejects_new_name_held_by_other_owner() -> None:
+async def test_fork_agent_rejects_new_name_held_by_other_owner(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """fork_agent raises ToolError when the new name exists for any owner in the tenant.
     Personal-stamped agents now also block — tenant-scoped uniqueness regardless of owner.
     """
@@ -3845,7 +3913,12 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     with pytest.raises(ToolError, match="already exists"):
-        await _fork_agent_impl(_runtime(client), auth, source_name="source", new_name="myfork")
+        await _fork_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            source_name="source",
+            new_name="myfork",
+        )
 
 
 # --- skill-boundary tests -----------------------------------------------------
@@ -4151,7 +4224,7 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     # Exact match
-    with pytest.raises(ToolError, match="deployment's own MCP endpoint"):
+    with pytest.raises(ToolError, match="Daimon's own connection"):
         await _attach_mcp_server_impl(
             _runtime(client, public_url=public_url),
             auth,
@@ -4162,7 +4235,7 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
     assert update_calls == [], "#142: public_url guard must fire before any update call"
 
     # With trailing slash stripped
-    with pytest.raises(ToolError, match="deployment's own MCP endpoint"):
+    with pytest.raises(ToolError, match="Daimon's own connection"):
         await _attach_mcp_server_impl(
             _runtime(client, public_url=public_url),
             auth,
@@ -4755,9 +4828,7 @@ async def test_update_agent_impl_rejects_non_admin_system_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4806,9 +4877,7 @@ async def test_update_agent_impl_rejects_non_admin_skills_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4832,9 +4901,7 @@ async def test_update_agent_impl_rejects_non_admin_mcp_servers_patch_when_agent_
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4858,9 +4925,7 @@ async def test_update_agent_impl_rejects_non_admin_tools_patch_when_agent_reacha
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4938,9 +5003,7 @@ async def test_attach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -5007,7 +5070,7 @@ async def test_fork_agent_impl_refuses_a_non_admin_even_for_the_seeded_agent(
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+    with pytest.raises(ToolError, match="requires an admin"):
         await _fork_agent_impl(
             _runtime(client, session_factory=db_session_factory, fernet=fernet),
             auth,
@@ -5098,7 +5161,7 @@ async def test_fork_agent_impl_refuses_a_non_admin_copying_a_project_agent(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+    with pytest.raises(ToolError, match="requires an admin"):
         await _fork_agent_impl(
             _runtime(client, session_factory=db_session_factory, fernet=fernet),
             auth,
@@ -5520,7 +5583,7 @@ async def test_update_agent_refuses_to_repoint_the_reserved_server(
     client = build_fake_anthropic(router.dispatch)
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
-    with pytest.raises(ToolError, match="reserved|deployment's own"):
+    with pytest.raises(ToolError, match="reserved|Daimon's own"):
         await _update_agent_impl(
             _runtime(client, public_url=public_url),
             auth,
@@ -5726,3 +5789,531 @@ async def test_build_create_spec_refuses_a_server_name_with_a_slash() -> None:
             mcp_servers=[cast(Any, _BRIDGE_SERVER)],
             skill_repos=None,
         )
+
+
+async def _owned_scoped_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """A tenant whose default is 'scoped-agent', owned by one account; and a second member."""
+    from daimon.core.stores import agent_owners
+    from daimon.testing.factories import make_account
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord")
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=tenant.id),
+            tenant_id=tenant.id,
+            agent_name="scoped-agent",
+            mode="agent",
+        )
+        owner = await make_account(session, tenant=tenant)
+        member = await make_account(session, tenant=tenant)
+        await agent_owners.set_owner(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_scoped"),
+            owner_account_id=owner.id,
+            source="admin_assigned",
+        )
+    return tenant.id, owner.id, member.id
+
+
+async def test_the_agents_owner_may_change_its_prompt_and_connections(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, owner_id, _ = await _owned_scoped_agent(db_session_factory)
+    captured, client = _scoped_agent_router(
+        tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
+    )
+    auth = AuthIdentity(
+        account_id=owner_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="owner-user",
+    )
+    await _update_agent_impl(
+        _runtime(client, session_factory=db_session_factory),
+        auth,
+        name="scoped-agent",
+        model=None,
+        description=None,
+        system="the owner's prompt",
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+        expected_ma_agent_id="ag_scoped",
+    )
+    assert captured["system"].endswith("the owner's prompt")
+
+
+@pytest.mark.parametrize("who", ["member", "agent_key", "client"])
+async def test_only_the_owner_person_passes_the_owner_gate(
+    db_session_factory: async_sessionmaker[AsyncSession], who: str
+) -> None:
+    tenant_id, owner_id, member_id = await _owned_scoped_agent(db_session_factory)
+    captured, client = _scoped_agent_router(
+        tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
+    )
+    auth = AuthIdentity(
+        account_id=member_id if who == "member" else owner_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="someone",
+        agent_id=uuid.uuid4() if who == "agent_key" else None,
+        foreign_home_id="other-org" if who == "client" else None,
+    )
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
+        await _update_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            name="scoped-agent",
+            model=None,
+            description=None,
+            system="not theirs",
+            tools=None,
+            mcp_servers=None,
+            skills=None,
+            expected_ma_agent_id="ag_scoped",
+        )
+    assert "system" not in captured
+
+
+async def test_create_agent_records_the_person_who_created_it_as_owner(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.agent_ownership import agent_owner
+    from daimon.core.stores import security_audit
+    from daimon.testing.factories import make_account
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord")
+        creator = await make_account(session, tenant=tenant)
+    created = ma_agent(name="demo")
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
+    router.add(
+        "POST",
+        r"/v1/agents",
+        lambda _req, _m: httpx.Response(200, json=created.model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(200, json=created.model_dump(mode="json")),
+    )
+    auth = AuthIdentity(
+        account_id=creator.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="creator-user",
+    )
+    await _create_agent_impl(
+        _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory),
+        auth,
+        AgentSpec(name="demo", model="claude-opus-4-5"),
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=created.id)
+    assert (
+        await agent_owner(db_session_factory, tenant_id=tenant.id, agent_id=agent_id) == creator.id
+    )
+    async with db_session_factory() as session:
+        rows = await security_audit.list_events(
+            session, tenant_id=tenant.id, agent_id=agent_id, tool_name="agent_owner"
+        )
+    assert [(row.operation, row.account_id) for row in rows] == [("create", creator.id)]
+
+
+async def test_two_people_creating_one_name_get_one_agent_and_one_owner(
+    db_preflight, db_nullpool_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name check and the create run under one lock: the second creator is refused,
+    never made owner of (nor allowed to rewrite) the first one's agent."""
+    import asyncio
+
+    from daimon.core.agent_ownership import agent_owner
+    from daimon.core.defaults import reconcile_agents
+
+    real_create = reconcile_agents.create_agent
+
+    async def slow_create(*args: Any, **kwargs: Any) -> Any:
+        # Widen the gap between finding no agent and creating one, as a slow
+        # provider call does: without the lock both creators would get through.
+        await asyncio.sleep(0.2)
+        return await real_create(*args, **kwargs)
+
+    monkeypatch.setattr(reconcile_agents, "create_agent", slow_create)
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.factories import make_account
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        first = await make_account(session, tenant=tenant)
+        second = await make_account(session, tenant=tenant)
+    stored: list[dict[str, Any]] = []
+    posts: list[str] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        created = ma_agent(id=f"ag_{len(stored)}", name="demo")
+        payload = {**created.model_dump(mode="json"), "metadata": body["metadata"]}
+        stored.append(payload)
+        posts.append(req.url.path)
+        return httpx.Response(200, json=payload)
+
+    def on_get(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        return httpx.Response(200, json=next(a for a in stored if a["id"] == m.group(1)))
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        posts.append(req.url.path)
+        return httpx.Response(500)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response(list(stored)))
+    router.add("POST", r"/v1/agents", on_create)
+    router.add("GET", r"/v1/agents/([^/]+)", on_get)
+    router.add("POST", r"/v1/agents/([^/]+)", on_update)
+    runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=sessions)
+
+    def person(account: uuid.UUID, user: str) -> AuthIdentity:
+        return AuthIdentity(
+            account_id=account,
+            tenant_id=tenant.id,
+            role=Role.USER,
+            is_admin=False,
+            platform="discord",
+            platform_user_id=user,
+        )
+
+    results = await asyncio.gather(
+        _create_agent_impl(
+            runtime, person(first.id, "first"), AgentSpec(name="demo", model="claude-opus-4-5")
+        ),
+        _create_agent_impl(
+            runtime, person(second.id, "second"), AgentSpec(name="demo", model="claude-opus-4-5")
+        ),
+        return_exceptions=True,
+    )
+    refused = [r for r in results if isinstance(r, ToolError)]
+    assert len(refused) == 1 and "already exists" in str(refused[0])
+    assert posts == ["/v1/agents"], "one create, and no update of the created agent"
+    winner = first.id if not isinstance(results[0], ToolError) else second.id
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_0")
+    assert await agent_owner(sessions, tenant_id=tenant.id, agent_id=agent_id) == winner
+
+
+async def test_two_copies_of_yourself_at_once_take_two_new_names(
+    db_preflight, db_nullpool_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The free name is picked and created under the name's lock: two copies at
+    once get daimon-argon-2 and daimon-argon-3, never both the same one."""
+    import asyncio
+
+    from daimon.testing.db import require_owned_sessionmaker
+
+    monkeypatch.setattr(agent_fork, "queue_agent_face", lambda *_a, **_k: None)
+    real_create = agent_fork.create_agent
+
+    async def slow_create(*args: Any, **kwargs: Any) -> Any:
+        # Widen the gap between picking a free name and creating it.
+        await asyncio.sleep(0.2)
+        return await real_create(*args, **kwargs)
+
+    monkeypatch.setattr(agent_fork, "create_agent", slow_create)
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+
+    def tagged(agent_id: str, name: str) -> dict[str, Any]:
+        meta = {"daimon_tenant": str(tenant.id), "daimon_name": name}
+        return ma_agent(id=agent_id, name=name, metadata=meta).model_dump(mode="json")
+
+    stored = [tagged("ag_src", "daimon"), tagged("ag_old", "daimon-argon")]
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        payload = {**tagged(f"ag_{len(stored)}", body["name"]), "metadata": body["metadata"]}
+        stored.append(payload)
+        return httpx.Response(200, json=payload)
+
+    def on_get(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        return httpx.Response(200, json=next(a for a in stored if a["id"] == m.group(1)))
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response(list(stored)))
+    router.add("POST", r"/v1/agents", on_create)
+    router.add("GET", r"/v1/agents/([^/]+)", on_get)
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    runtime = _runtime(
+        build_fake_anthropic(router.dispatch), session_factory=sessions, fernet=fernet
+    )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
+    )
+
+    results = await asyncio.gather(
+        *(
+            _fork_agent_impl(
+                runtime, auth, source_name="daimon", new_name="daimon-argon", new_copy_if_taken=True
+            )
+            for _ in range(2)
+        )
+    )
+    assert sorted(r.name for r in results) == ["daimon-argon-2", "daimon-argon-3"]
+    assert sorted(a["metadata"]["daimon_name"] for a in stored[2:]) == [
+        "daimon-argon-2",
+        "daimon-argon-3",
+    ], "two creates, each under its own new name"
+
+
+async def test_an_agent_named_after_the_check_is_refused_not_rewritten(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Even outside the lock (a creator on another path), create never updates."""
+    from daimon.core.agent_ownership import agent_owner
+    from daimon.testing.factories import make_account
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord")
+        creator = await make_account(session, tenant=tenant)
+    existing = ma_agent(id="ag_theirs", name="demo").model_dump(mode="json")
+    existing["metadata"] = {"daimon_tenant": str(tenant.id), "daimon_name": "demo"}
+    lists = iter([[], [existing]])
+    posts: list[str] = []
+
+    def on_post(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        posts.append(req.url.path)
+        return httpx.Response(500)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response(next(lists)))
+    router.add("POST", r"/v1/agents", on_post)
+    router.add("POST", r"/v1/agents/([^/]+)", on_post)
+    auth = AuthIdentity(
+        account_id=creator.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="creator",
+    )
+    with pytest.raises(ToolError, match="already exists"):
+        await _create_agent_impl(
+            _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory),
+            auth,
+            AgentSpec(name="demo", model="claude-opus-4-5"),
+        )
+    assert posts == []
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_theirs")
+    assert await agent_owner(db_session_factory, tenant_id=tenant.id, agent_id=agent_id) is None
+
+
+def test_native_create_accepts_natural_model_names_and_preserves_controls() -> None:
+    spec = _build_create_spec(
+        name="Writer",
+        model="OPUS 5.5",
+        description=None,
+        system=None,
+        tools=None,
+        mcp_servers=None,
+        skill_repos=None,
+    )
+    assert spec.model == "claude-opus-5-5"
+    from daimon.adapters.mcp.tools.agents import _resolve_native_agent_model
+
+    assert _resolve_native_agent_model({"id": "opus 5.5", "effort": "high"}) == {
+        "id": "claude-opus-5-5",
+        "effort": "high",
+    }
+
+
+@pytest.mark.parametrize("typo", ["opuss", "sonnett", "sonet", "claud sonnet"])
+def test_native_create_refuses_ambiguous_family_typos_before_writing(typo):
+    with pytest.raises(ToolError, match="could mean"):
+        _build_create_spec(
+            name="Writer",
+            model=typo,
+            description=None,
+            system=None,
+            tools=None,
+            mcp_servers=None,
+            skill_repos=None,
+        )
+
+
+@pytest.mark.parametrize("who", ["owner", "member"])
+async def test_the_owner_sees_the_setup_they_edit(
+    db_session_factory: async_sessionmaker[AsyncSession], who: str
+) -> None:
+    tenant_id, owner_id, member_id = await _owned_scoped_agent(db_session_factory)
+    _, client = _scoped_agent_router(
+        tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
+    )
+    auth = AuthIdentity(
+        account_id=owner_id if who == "owner" else member_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id=who,
+    )
+    runtime = _runtime(client, session_factory=db_session_factory)
+    if who == "member":
+        # Someone else's agent that answers nowhere they are stays out of sight.
+        with pytest.raises(ToolError, match="missing or changed"):
+            await _get_agent_impl(runtime, auth, "scoped-agent", expected_ma_agent_id="ag_scoped")
+        assert await _list_agents_impl(runtime, auth, None, mine=True) == []
+        return
+    info = await _get_agent_impl(runtime, auth, "scoped-agent", expected_ma_agent_id="ag_scoped")
+    assert info.owned_by_you is True
+    assert info.system is not None and info.mcp_servers is not None
+    mine = await _list_agents_impl(runtime, auth, None, mine=True)
+    assert [(a.name, a.owned_by_you) for a in mine] == [("scoped-agent", True)]
+    assert mine[0].mcp_servers is not None
+
+
+@pytest.mark.parametrize("named", [True, False])
+async def test_owner_says_who_to_ask_about_changing_an_agent(
+    db_session_factory: async_sessionmaker[AsyncSession], named: bool
+) -> None:
+    """J5: "you" for the owner; the owner's stored name (else "another member") for others."""
+    from daimon.adapters.mcp.tools._owner import owner_labels
+    from daimon.core.stores.accounts import get_account
+    from daimon.core.stores.platform_names import KnownName, upsert_user_names
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.testing.factories import make_platform_principal
+
+    tenant_id, owner_id, member_id = await _owned_scoped_agent(db_session_factory)
+    async with db_session_factory() as session, session.begin():
+        await make_platform_principal(
+            session,
+            platform="discord",
+            external_id="ana",
+            tenant=await get_tenant(session, tenant_id),
+            account=await get_account(session, owner_id),
+        )
+        if named:
+            await upsert_user_names(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                names={"ana": KnownName(display_name="Ana")},
+            )
+    _, client = _scoped_agent_router(
+        tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
+    )
+    runtime = _runtime(client, session_factory=db_session_factory)
+
+    def person(account: uuid.UUID, user: str, *, admin: bool) -> AuthIdentity:
+        return AuthIdentity(
+            account_id=account,
+            tenant_id=tenant_id,
+            role=Role.ADMIN if admin else Role.USER,
+            is_admin=admin,
+            platform="discord",
+            platform_user_id=user,
+        )
+
+    owner, admin = person(owner_id, "ana", admin=False), person(member_id, "bo", admin=True)
+    mine = await _get_agent_impl(runtime, owner, "scoped-agent", expected_ma_agent_id="ag_scoped")
+    assert (mine.owned_by_you, mine.owner) == (True, "you")
+    theirs = await _get_agent_impl(runtime, admin, "scoped-agent", expected_ma_agent_id="ag_scoped")
+    expected = "Ana" if named else "another member"
+    assert (theirs.owned_by_you, theirs.owner) == (False, expected)
+    listed = await _list_agents_impl(runtime, admin, None)
+    assert [(a.name, a.owner) for a in listed] == [("scoped-agent", expected)]
+    # An agent nobody owns has no owner to ask: only an admin changes it.
+    assert await owner_labels(runtime, admin, ["ag_unowned"]) == {}
+
+
+async def test_a_member_who_creates_an_agent_in_chat_lists_gets_and_edits_it(
+    db_preflight, db_nullpool_engine
+) -> None:
+    """The real chat path, with no origin: the owner row (the requester's account,
+    not the workspace account stamped on the agent) is what finds the draft."""
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.factories import make_account
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        creator = await make_account(session, tenant=tenant)
+        other = await make_account(session, tenant=tenant)
+    stored: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        payload = {
+            **ma_agent(id="ag_draft", name=body["name"]).model_dump(mode="json"),
+            "metadata": body["metadata"],
+            "system": body.get("system") or "",
+        }
+        stored.append(payload)
+        return httpx.Response(200, json=payload)
+
+    def on_get(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        return httpx.Response(200, json=stored[0])
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        updates.append(body)
+        stored[0] = {**stored[0], **{k: v for k, v in body.items() if k == "system"}}
+        stored[0]["version"] = stored[0].get("version", 1) + 1
+        return httpx.Response(200, json=stored[0])
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response(list(stored)))
+    router.add("POST", r"/v1/agents", on_create)
+    router.add("GET", r"/v1/agents/([^/]+)", on_get)
+    router.add("POST", r"/v1/agents/([^/]+)", on_update)
+    runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=sessions)
+
+    def person(account: uuid.UUID, user: str) -> AuthIdentity:
+        return AuthIdentity(
+            account_id=account,
+            tenant_id=tenant.id,
+            role=Role.USER,
+            is_admin=False,
+            platform="discord",
+            platform_user_id=user,
+        )
+
+    me, them = person(creator.id, "creator"), person(other.id, "other")
+    await _create_agent_impl(runtime, me, AgentSpec(name="draft", model="claude-opus-4-5"))
+    # The agent is stamped with the workspace account, never the requester's.
+    assert stored[0]["metadata"]["daimon_account"] != str(creator.id)
+
+    listed = await _list_agents_impl(runtime, me, None)
+    assert [(a.name, a.owned_by_you, a.owner) for a in listed] == [("draft", True, "you")]
+    assert [a.name for a in await _list_agents_impl(runtime, me, None, mine=True)] == ["draft"]
+    got = await _get_agent_impl(runtime, me, "draft", expected_ma_agent_id="ag_draft")
+    assert got.owned_by_you is True and got.system is not None
+    await _update_agent_impl(
+        runtime,
+        me,
+        name="draft",
+        model=None,
+        description=None,
+        system="my prompt",
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+        expected_ma_agent_id="ag_draft",
+    )
+    assert updates and updates[-1]["system"].endswith("my prompt")
+
+    # Someone else's draft stays out of sight.
+    assert await _list_agents_impl(runtime, them, None) == []
+    with pytest.raises(ToolError):
+        await _get_agent_impl(runtime, them, "draft", expected_ma_agent_id="ag_draft")

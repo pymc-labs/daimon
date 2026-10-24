@@ -24,6 +24,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._words import admin_noun, space_noun
 from daimon.adapters.mcp.tools.environments import CONFIRM_OPEN_NETWORK_ASK
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
@@ -81,12 +82,13 @@ async def _environment_channel(
     return _Target(target.channel_id, target.thread_id)
 
 
-_NEEDS_ADMIN: str = "This change needs a workspace or server admin. Do not retry."
+def _needs_admin(auth: AuthIdentity) -> str:
+    return f"This change needs {admin_noun(auth.platform)}. Do not retry."
 
 
 def _missing(environment_name: str | None) -> str:
     return (
-        f"No environment named '{environment_name}' exists in this workspace. Nothing was "
+        f"No environment named '{environment_name}' exists here. Nothing was "
         "changed. Use list_environments to pick an existing one, or create_environment first."
     )
 
@@ -123,14 +125,17 @@ async def _require_pick_allowed(
     if not pick.decision and pick.decision.reason != "not_a_reader":
         if target.channel_id is None:
             _require_admin(auth)  # the workspace default's own copy
-        raise ToolError(_NEEDS_ADMIN)
+        raise ToolError(_needs_admin(auth))
     # Only a caller who may make the change learns whether a name exists, and never a hidden one.
     hidden = await load_caller_hidden_environments(runtime, auth)
     if environment_name in hidden:
         raise ToolError(_missing(environment_name))
     if not pick.decision:  # not_a_reader
         raise ToolError(
-            build_limited_network_refusal(environment_name=environment_name) + " Do not retry."
+            build_limited_network_refusal(
+                environment_name=environment_name, admin=admin_noun(auth.platform)
+            )
+            + " Do not retry."
         )
     if pick.missing:
         raise ToolError(_missing(environment_name))
@@ -174,7 +179,9 @@ async def _set_channel_environment_impl(
         environment_name=name,
         previous_environment_name=None if previous in hidden else previous,
         changed=previous != name,
-        note=build_set_environment_note(environment_name=name, channel=target.channel_id),
+        note=build_set_environment_note(
+            environment_name=name, channel=target.channel_id, space=space_noun(auth.platform)
+        ),
     )
 
 
@@ -207,7 +214,9 @@ async def _clear_channel_environment_impl(
         environment_name=None,
         previous_environment_name=None if previous in hidden else previous,
         changed=previous is not None,
-        note=build_clear_environment_note(channel=channel_id, cleared=previous is not None),
+        note=build_clear_environment_note(
+            channel=channel_id, cleared=previous is not None, space=space_noun(auth.platform)
+        ),
     )
 
 
@@ -226,15 +235,13 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         Omit ``channel_id`` to set the workspace default, which every channel without
         its own environment uses. The environment must already exist
         (``list_environments``). Conversations pick it up from their next message.
-        Setting either default requires Manage Server (admin). Unrestricted networking in
-        a sealed channel, which needs a server admin and their confirmation, as does a
+        Setting either default requires an admin. Unrestricted networking in
+        a sealed channel needs an admin and their confirmation, as does a
         workspace default sealed channels would run in: pass
         ``confirm_open_network=true`` only after the caller confirms it.
 
-        Pass the parent channel's id: Discord
-        ``<channel platform="discord" id="..." role="parent_channel">``, Slack
-        ``<channel platform="slack" id="...">``, Teams ``19:…@thread.tacv2``; a thread
-        id resolves to its parent. The caller must be able to see the channel.
+        Pass the parent channel's id: ``parent_channel_id`` from turn_controls; a
+        thread id resolves to its parent. The caller must be able to see the channel.
         """
         return await _set_channel_environment_impl(
             runtime,
@@ -255,8 +262,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         channel has none of its own.
 
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
-        default. Clearing either default requires Manage Server (admin). If sealed, the
-        default has unrestricted networking; then a server admin must confirm it, as
+        default. Clearing either default requires an admin. If sealed, the
+        default has unrestricted networking; then an admin must confirm it, as
         for ``set_channel_environment``, and as when clearing the workspace default
         leaves sealed channels on such a default. A thread id resolves to its parent
         channel.

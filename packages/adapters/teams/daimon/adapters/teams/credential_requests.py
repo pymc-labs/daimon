@@ -29,6 +29,7 @@ from daimon.adapters.teams.card_actions import (
     card_actor,
     dialog,
     dialog_message,
+    dialog_notice,
     error_text,
     submitted_fields,
 )
@@ -37,6 +38,7 @@ from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import (
     FormPinRefused,
     agent_pin_names,
@@ -67,7 +69,7 @@ from daimon.core.credential_submit import (
     write_skill_repo_submit,
 )
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action
 from daimon.core.env_file import (
     MAX_ENV_FILE_BYTES,
@@ -97,7 +99,6 @@ from daimon.core.operation_policy import (
     OperationKind,
     TargetFacts,
     decide_operation,
-    needs_reachability_read,
 )
 from daimon.core.posted_controls import (
     ALREADY_USED_MESSAGE,
@@ -121,7 +122,6 @@ from daimon.core.stores.agent_files import (
     agent_env_writes_allowed,
 )
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
-from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.teams_threads import conversation_of
 from microsoft_teams.api import (
     Attachment,
@@ -156,22 +156,23 @@ _REPO_KINDS = ("repo", "skill_repo")
 _MAX_GITHUB_TOKEN_CHARS = 255
 _COLLISION_LINES_SHOWN = 3
 _SHARED_AGENT = (
-    "Other people use this agent. Changing its repo or keys needs an admin.\n\n"
+    "Changing this agent's keys or connections needs its owner or an admin, "
+    "and connecting a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _SHARED_AGENT_SKILLS = (
-    "Other people use this agent. Adding skills needs an admin.\n\n"
+    "Adding skills from a repo needs an admin.\n\n"
     "Ask me to draft a request for an admin, or to make you a new agent."
 )
 _WRONG_ORG = "This request isn't for this organisation — ask again where it was posted."
 _AGENT_GONE = "That agent no longer exists — ask again and a fresh request will be posted."
 _UNCONFIGURED = (
-    "This deployment is not finished being set up. Ask the operator to finish setup, "
+    "Daimon isn't fully set up yet. Ask the operator to finish setup, "
     "then try again. Nothing was saved."
 )
 _UNCONFIGURED_OAUTH = (
-    "This deployment cannot sign you in yet. Ask the operator to finish the daimon-mcp "
-    "setup, then ask again. Nothing was saved."
+    "Sign-in isn't set up yet. Ask whoever runs Daimon to finish it, "
+    "then ask again. Nothing was saved."
 )
 _MESSAGES: dict[Refusal, str] = {
     "invalid": NO_LONGER_VALID_MESSAGE,
@@ -236,6 +237,8 @@ def _secret_input(kind: str) -> TextInput:
 
 
 def _title(row: CredentialRequestRow) -> str:
+    if row.kind == "mcp_oauth":
+        return f"Connect {row.target}"
     if row.kind == "env":
         return f"{row.target} for {row.target_name or 'the agent'}"
     if row.kind == "mcp":
@@ -278,17 +281,29 @@ def oauthdialog(row: CredentialRequestRow, url: str) -> TaskModuleResponse:
     text = invite_copy(server_name=row.target, agent_name=row.target_name or "the agent")
     link = OpenUrlAction(title=INVITE_BUTTON_LABEL, url=url)
     card = AdaptiveCard(body=[TextBlock(text=text, wrap=True)], actions=[link], fallback_text=text)
-    return dialog(f"Connect {row.target}", card)
+    return dialog(_title(row), card)
 
 
-async def _guarded(work: Awaitable[TaskModuleResponse]) -> TaskModuleResponse:
+_REQUEST_TITLE = "Credential request"
+
+
+def _notice(text: str, row: CredentialRequestRow | None = None) -> TaskModuleResponse:
+    """A refusal that answers the click opening the dialog, titled as the dialog would be."""
+    return dialog_notice(_REQUEST_TITLE if row is None else _title(row), text)
+
+
+async def _guarded(
+    work: Awaitable[TaskModuleResponse], failed: TaskModuleResponse
+) -> TaskModuleResponse:
     """Invoke boundary. The failing frames hold the submitted value, so only the
-    error's class name is recorded: no traceback, no Sentry event."""
+    error's class name is recorded: no traceback, no Sentry event.
+
+    `failed` is the answer to give: a notice for the open, a message for the submit."""
     try:
         return await work
     except SENDING_PANEL_ERRORS as err:
         log.error("teams.credential.failed", err_type=type(err).__name__)
-        return dialog_message(FAILED)
+        return failed
 
 
 class TeamsCredentialRequests:
@@ -305,12 +320,12 @@ class TeamsCredentialRequests:
     async def on_dialog_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._open(ctx.activity))
+        return await _guarded(self._open(ctx.activity), _notice(FAILED))
 
     async def on_dialog_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._submit(ctx.activity))
+        return await _guarded(self._submit(ctx.activity), dialog_message(FAILED))
 
     async def _checked(
         self, activity: InvokeActivity, fields: Mapping[str, object]
@@ -336,14 +351,15 @@ class TeamsCredentialRequests:
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleResponse:
         actor, row, reason = await self._checked(activity, submitted_fields(activity.value.data))
         if actor is None:
-            return dialog_message(DENIED)
+            return _notice(DENIED)
         if row is not None and reason == "expired":
             # The only sweep there is; it runs past the requester check, so a
             # stranger's click cannot change the requester's card.
             self._spawn(self._edit(row, "expired", activity.service_url), name="teams.cred.edit")
-            return dialog_message(card_text(card_for_request(row, state="expired")))
+            return _notice(card_text(card_for_request(row, state="expired")), row)
         if row is None or reason is not None:
-            return dialog_message(_MESSAGES[reason or "invalid"])
+            # Untitled by the row: a stranger's refusal must not name its target.
+            return _notice(_MESSAGES[reason or "invalid"])
         if row.kind == "mcp_oauth":
             return await self._start_oauth(row, activity.service_url)
         if row.kind == "repo":
@@ -353,9 +369,9 @@ class TeamsCredentialRequests:
                 self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
             )
             if agent is None:
-                return dialog_message(_AGENT_GONE)
+                return _notice(_AGENT_GONE, row)
             if await self._attachment_refused(row, agent, "repo_bind", is_admin=actor.is_admin):
-                return dialog_message(_SHARED_AGENT)
+                return _notice(_SHARED_AGENT, row)
         return credential_form(row)
 
     async def _start_oauth(
@@ -364,23 +380,23 @@ class TeamsCredentialRequests:
         mcp = self._runtime.settings.mcp
         root = mcp.app_root_url
         if root is None or mcp.jwt_secret is None or self._runtime.turn_deps.fernet is None:
-            return dialog_message(_UNCONFIGURED_OAUTH)
+            return _notice(_UNCONFIGURED_OAUTH, row)
         agent = await find_agent_by_derived_uuid(
             self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
         )
         async with self._runtime.sessionmaker() as session:
             pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
         if pin_refusal is not None:
-            return dialog_message(pin_refusal)
+            return _notice(pin_refusal, row)
         now = datetime.now(UTC)
         try:
             consumed, flow = await begin_oauth_submit(
                 self._runtime.sessionmaker, row=row, agent=agent, app_root_url=root, now=now
             )
         except FormPinRefused as refused:
-            return dialog_message(refused.refusal)
+            return _notice(refused.refusal, row)
         if consumed is None or flow is None:
-            return dialog_message(NO_LONGER_VALID_MESSAGE)
+            return _notice(NO_LONGER_VALID_MESSAGE, row)
         # The mcp process edits the card again once sign-in completes.
         self._spawn(self._edit(consumed, "received", service_url), name="teams.cred.edit")
         return oauthdialog(consumed, start_url(root, state=flow.state))
@@ -449,7 +465,9 @@ class TeamsCredentialRequests:
         is_admin = actor.is_admin
         work: Awaitable[None]
         if row.kind == "env":
-            work = self._save_env(row, agent, secret, is_admin=is_admin, service_url=url)
+            work = self._save_env(
+                row, agent, secret, is_admin=is_admin, submitter_id=actor.user_id, service_url=url
+            )
         elif row.kind == "env_file":
             work = self._save_env_file(row, agent, entries, service_url=url)
         elif row.kind == "mcp":
@@ -606,27 +624,31 @@ class TeamsCredentialRequests:
             await self._dispatch(row.tenant_id, row.origin_thread_id, service_url)
 
     async def _replacement_refused(
-        self, row: CredentialRequestRow, agent: BetaManagedAgentsAgent, *, is_admin: bool
+        self,
+        row: CredentialRequestRow,
+        agent: BetaManagedAgentsAgent,
+        *,
+        is_admin: bool,
+        submitter_id: str,
     ) -> bool:
-        """Re-decide a replacement's role check against whoever submitted (Slack's rule)."""
-        managed = reachable = False
-        if not is_admin:
-            managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-            if needs_reachability_read("key_replace", is_admin=False, is_daimon_managed=managed):
-                async with self._runtime.sessionmaker() as session:
-                    reachable = await is_agent_shared_for_key_changes(
-                        session,
-                        tenant_id=row.tenant_id,
-                        agent_names=(
-                            agent.name,
-                            str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""),
-                        ),
-                        ma_agent_id=str(agent.id),
-                        default=self._runtime.deployment_default,
-                        caller_account_id=row.account_id,
-                        caller_platform_user_id=row.requester_platform_user_id,
-                    )
-        facts = TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=reachable)
+        """Re-decide a replacement against whoever submitted: an admin, or the agent's owner.
+
+        Ownership is read for the submitter's Teams identity, never the request's account.
+        """
+        managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+        owned = False
+        if not is_admin and not managed:
+            async with self._runtime.sessionmaker() as session:
+                owned = await owns_agent(
+                    session,
+                    tenant_id=row.tenant_id,
+                    ma_agent_id=str(agent.id),
+                    platform="teams",
+                    platform_user_id=submitter_id,
+                )
+        facts = TargetFacts(
+            is_daimon_managed=managed, is_reachable_in_tenant=False, owned_by_caller=owned
+        )
         return decide_operation("key_replace", is_admin=is_admin, target=facts) != "allow"
 
     async def _save_env(
@@ -636,12 +658,15 @@ class TeamsCredentialRequests:
         secret: str,
         *,
         is_admin: bool,
+        submitter_id: str,
         service_url: str | None,
     ) -> None:
         """Consume, write and queue the continuation in one transaction, as Slack does."""
 
         async def replacement_refused() -> bool:
-            return await self._replacement_refused(row, agent, is_admin=is_admin)
+            return await self._replacement_refused(
+                row, agent, is_admin=is_admin, submitter_id=submitter_id
+            )
 
         plan = await prepare_env_submit(
             self._runtime.sessionmaker, row=row, replacement_refused=replacement_refused

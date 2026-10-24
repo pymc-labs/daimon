@@ -21,7 +21,7 @@ def test_declared_mcp_toolset_compiles_server_once() -> None:
     )
     assert compile_agent(spec)["tools"] == [
         {"type": "code_execution"},
-        {"type": "mcp_server", "name": SERVER.name, "url": SERVER.url},
+        {"type": "mcp_server", "name": "daimon_mcp", "url": SERVER.url},
     ]
 
 

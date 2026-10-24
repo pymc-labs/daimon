@@ -1,0 +1,118 @@
+{
+  "backend": "codex",
+  "scenario": "cancel",
+  "model": "gpt-6-luna",
+  "service_uid": 10000,
+  "outcome": "interrupted",
+  "delta_count": 4,
+  "cancel_trigger": "agent_message_delta",
+  "errors": [],
+  "usage_checks": [
+    {
+      "request_id": "12697402-02ba-40b9-9271-29ec89244ecb",
+      "exactly_one_outcome": true,
+      "started_before_network_and_observation": true,
+      "provider_counts_match": false
+    }
+  ],
+  "api_observations": [
+    {
+      "compaction_prompt": true,
+      "compaction_summary": false,
+      "private_paths_absent": true,
+      "turn_id": "codex-cancel",
+      "request_id": "12697402-02ba-40b9-9271-29ec89244ecb",
+      "started_seq_before_network": 98,
+      "stream": true,
+      "http_status": 200
+    }
+  ],
+  "events": [
+    {
+      "seq": 97,
+      "session_id": "luna-live",
+      "turn_id": "codex-cancel",
+      "at": "2026-10-21T09:30:16.945364Z",
+      "type": "status_running",
+      "data": {}
+    },
+    {
+      "seq": 98,
+      "session_id": "luna-live",
+      "turn_id": "codex-cancel",
+      "at": "2026-10-21T09:30:17.078203Z",
+      "type": "model_request_started",
+      "data": {
+        "request_id": "12697402-02ba-40b9-9271-29ec89244ecb",
+        "model": "gpt-6-luna"
+      }
+    },
+    {
+      "seq": 99,
+      "session_id": "luna-live",
+      "turn_id": "codex-cancel",
+      "at": "2026-10-21T09:30:36.315573Z",
+      "type": "agent_message_delta",
+      "data": {
+        "message_id": "codex-cancel:msg_03dab5cd9fa5a417016ad8863c332887d18c6f32fb739a8b40",
+        "text": "I"
+      }
+    },
+    {
+      "seq": 100,
+      "session_id": "luna-live",
+      "turn_id": "codex-cancel",
+      "at": "2026-10-21T09:30:36.321262Z",
+      "type": "agent_message_delta",
+      "data": {
+        "message_id": "codex-cancel:msg_03dab5cd9fa5a417016ad8863c332887d18c6f32fb739a8b40",
+        "text": " can"
+      }
+    },
+    {
+      "seq": 101,
+      "session_id": "luna-live",
+      "turn_id": "codex-cancel",
+      "at": "2026-10-21T09:30:36.322784Z",
+      "type": "agent_message_delta",
+      "data": {
+        "message_id": "codex-cancel:msg_03dab5cd9fa5a417016ad8863c332887d18c6f32fb739a8b40",
+        "text": "\u2019t"
+      }
+    },
+    {
+      "seq": 102,
+      "session_id": "luna-live",
+      "turn_id": "codex-cancel",
+      "at": "2026-10-21T09:30:36.326023Z",
+      "type": "agent_message_delta",
+      "data": {
+        "message_id": "codex-cancel:msg_03dab5cd9fa5a417016ad8863c332887d18c6f32fb739a8b40",
+        "text": " fit"
+      }
+    },
+    {
+      "seq": 103,
+      "session_id": "luna-live",
+      "turn_id": "codex-cancel",
+      "at": "2026-10-21T09:30:36.337933Z",
+      "type": "error",
+      "data": {
+        "kind": "usage_unavailable",
+        "request_id": "12697402-02ba-40b9-9271-29ec89244ecb",
+        "message": "Model request ended without usage",
+        "retryable": false
+      }
+    },
+    {
+      "seq": 104,
+      "session_id": "luna-live",
+      "turn_id": "codex-cancel",
+      "at": "2026-10-21T09:30:36.619575Z",
+      "type": "turn_ended",
+      "data": {
+        "outcome": "interrupted"
+      }
+    }
+  ]
+}

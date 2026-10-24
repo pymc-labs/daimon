@@ -17,8 +17,9 @@ Phase reference:
 
 Status surface shape (non-terminal):
   section  — *Working on it…*  (headline)
-  section  — ```tool lines```  (when the turn has made tool calls)
-  section  — > {escaped draft}  (when text_preview is set; expand=True)
+  section  — > {escaped draft lines}, the last few  (when any; expand=True)
+  context  — *Plan* and the plan, each line in code  (when progress plans are on)
+  context  — *Details* and the tool lines, likewise  (when the turn has made tool calls)
   actions  — Cancel button (action_id="cancel_turn"; style="danger"; no value)
 
 Terminal collapse (DONE/ERROR):
@@ -53,9 +54,14 @@ from daimon.core.turn.card_state import (
 )
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.status_lines import (
+    SECTION_LABELS,
+    CardSection,
+    LabelledSection,
+    draft_log,
     format_duration,
     format_headline,
     format_summary,
+    in_card_order,
 )
 
 EmbedEvent = _CardEvent
@@ -100,6 +106,38 @@ def _headline(state: State, now: float | None, *, bold: Callable[[str], str]) ->
     )
 
 
+# Slack refuses a section whose text is longer than this.
+_SECTION_TEXT_MAX_CHARS = 3000
+
+
+def _code_lines(lines: tuple[str, ...]) -> str:
+    """Each line as escaped inline code, one per line."""
+    return "\n".join(f"`{escape_mrkdwn(line.replace('`', "'"))}`" for line in lines)
+
+
+def _draft_quote(lines: tuple[str, ...]) -> str:
+    """The draft lines as one quoted mrkdwn text of at most `_SECTION_TEXT_MAX_CHARS`.
+
+    Escaping grows a line (``&`` becomes ``&amp;``), so the size is judged after
+    it. Over the limit, the oldest lines go first; a last line that is still too
+    long is cut so that its escaped form fits.
+    """
+    quoted = [f"> {escape_mrkdwn(line)}" for line in lines]
+    while len(quoted) > 1 and len("\n".join(quoted)) > _SECTION_TEXT_MAX_CHARS:
+        quoted.pop(0)
+    text = "\n".join(quoted)
+    if len(text) <= _SECTION_TEXT_MAX_CHARS:
+        return text
+    kept: list[str] = []
+    room = _SECTION_TEXT_MAX_CHARS - len("> …")
+    for char in lines[-1]:
+        room -= len(escape_mrkdwn(char))
+        if room < 0:
+            break
+        kept.append(char)
+    return f"> {escape_mrkdwn(''.join(kept))}…"
+
+
 def to_blocks(
     state: State,
     *,
@@ -121,8 +159,9 @@ def to_blocks(
 
     Non-terminal (THINKING / TOOL_RUNNING):
         - section  : ``*Working on it…*``
-        - section  : the tool lines in a code block  (when there are any)
-        - section  : > {escaped draft}  (when text_preview is set; expand=True)
+        - section  : > {escaped draft lines}, the last three, oldest first  (when any; expand=True)
+        - context  : *Plan* and the plan, each line in code  (when progress plans are on)
+        - context  : *Details* and the tool lines, each in code  (when there are any)
         - actions  : Cancel button  (action_id="cancel_turn", style="danger")
 
     Terminal (DONE / ERROR):
@@ -177,30 +216,30 @@ def to_blocks(
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary}]})
         return blocks
 
-    # Non-terminal: the headline, the tool lines, then the latest draft.
+    # Non-terminal: the headline, then its sections in `CARD_SECTIONS` order.
     headline = _headline(state, now, bold=lambda word: f"*{word}*")
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
     ]
-    if state.tool_lines:
-        tool_lines = "\n".join(
-            f"`{escape_mrkdwn(line.replace('`', "'"))}`" for line in state.tool_lines
-        )
-        blocks.append(
-            {
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"*Details*\n{tool_lines}"}],
-            }
-        )
-    # expand=True keeps Slack from folding the draft behind "see more".
-    if state.text_preview:
-        blocks.append(
-            {
-                "type": "section",
-                "expand": True,
-                "text": {"type": "mrkdwn", "text": f"> {escape_mrkdwn(state.text_preview)}"},
-            }
-        )
+    sections: dict[CardSection, dict[str, Any]] = {}
+    if draft_lines := draft_log(state.earlier_drafts, state.text_preview):
+        # expand=True keeps Slack from folding the draft log behind "see more".
+        sections["updates"] = {
+            "type": "section",
+            "expand": True,
+            "text": {"type": "mrkdwn", "text": _draft_quote(draft_lines)},
+        }
+    # The plan and the tool lines are drawn alike, each line inline code so
+    # their emoji look alike.
+    labelled: dict[LabelledSection, tuple[str, ...]] = {
+        "plan": state.plan_lines,
+        "tools": state.tool_lines,
+    }
+    for name, lines in labelled.items():
+        if lines:
+            text = f"*{SECTION_LABELS[name]}*\n{_code_lines(lines)}"
+            sections[name] = {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}
+    blocks.extend(in_card_order(sections))
 
     # Cancel button — present only while the turn is running (non-terminal).
     # A per-turn value lets the listener route clicks before Slack returns the

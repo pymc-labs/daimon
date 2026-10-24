@@ -31,9 +31,9 @@ from daimon.core.defaults.metadata import (
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import list_response
 from daimon.testing.ma_models import ma_agent
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma import list_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

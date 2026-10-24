@@ -11,6 +11,7 @@ class ProviderDraft:
         self._revisions: dict[str, int] = {}
         self._retired: set[str] = set()
         self._item: str | None = None
+        self._logged_item: str | None = None
         self._parts: dict[int, str] = {}
         self._sequences: dict[int, int] = {}
 
@@ -41,6 +42,17 @@ class ProviderDraft:
             self._parts.get(payload.content_index, "") + payload.text
         )
         return "".join(self._parts[index] for index in sorted(self._parts)).strip()
+
+    def takes_new_item(self) -> bool:
+        """True once for each item, when its first text is about to be shown.
+
+        A card keeping a short log of messages starts a new entry then, and
+        revises the latest entry for every later preview or snapshot of the item.
+        """
+        if self._item is None or self._item == self._logged_item:
+            return False
+        self._logged_item = self._item
+        return True
 
     def _select(self, item: str) -> bool:
         if item in self._retired:

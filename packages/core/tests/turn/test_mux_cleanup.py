@@ -12,12 +12,12 @@ from daimon.core.errors import DaimonError
 from daimon.core.stores.direct_messages import DirectMessageRow
 from daimon.core.turn.io import MuxTurnIO
 from daimon.core.turn.run import _archive_orphaned_session  # pyright: ignore[reportPrivateUsage]
-from daimon.testing.ma import session_response
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.profiles.anthropic import MANAGED_AGENTS
+from mux.testing.drivers.anthropic.ma import session_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 TENANT = UUID(int=7)
 ACCOUNT = UUID(int=8)

@@ -5,10 +5,10 @@ import pytest
 from anthropic import APIStatusError
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.output_ports_compat import list_output_records
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import ResourceRef
 from mux.drivers.anthropic.outputs import Outputs
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 SCOPE = resource_scope(tenant_id="tenant-a", account_id="account-a")
 MA_BETA = "managed-agents-2026-04-01"

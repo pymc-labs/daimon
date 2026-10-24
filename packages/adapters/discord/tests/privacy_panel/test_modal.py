@@ -265,7 +265,7 @@ async def test_on_submit_success_view_reflects_upstream_session_deletion(
     view_text = "\n".join(
         item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
     )
-    assert "3 session transcript(s) deleted" in view_text, (
+    assert "3 conversation transcript(s) deleted" in view_text, (
         f"Post-delete view must report session transcript deletion count; got {view_text!r}"
     )
 

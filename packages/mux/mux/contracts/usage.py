@@ -27,7 +27,8 @@ class UsageObservation(Contract):
     applied. `native_revision` keeps the provider's own version string, if
     any, for audit only. `native_meter`
     keeps the provider's own usage record untouched, so a conversion can be
-    audited against it.
+    audited against it. `final` is the provider saying the measured work has
+    ended: no later revision will add usage. A running snapshot is never final.
     """
 
     id: str
@@ -48,3 +49,9 @@ class UsageObservation(Contract):
     completeness: Literal["partial", "measured", "unknown"]
     observed_at: datetime
     covers: tuple[str, ...] = ()
+    final: bool = Field(default=False, exclude_if=lambda value: not value)
+
+
+__all__ = [
+    "UsageObservation",
+]

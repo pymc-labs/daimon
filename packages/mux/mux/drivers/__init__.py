@@ -17,3 +17,6 @@ def isolated_ssl_context() -> ssl.SSLContext:
     if any(name.upper() == "SSLKEYLOGFILE" for name in os.environ):
         raise ValueError("TLS key logging is unsupported")
     return httpx.create_ssl_context(trust_env=False)
+
+
+__all__ = ["isolated_ssl_context"]

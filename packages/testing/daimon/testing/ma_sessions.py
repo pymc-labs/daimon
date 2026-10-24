@@ -13,7 +13,7 @@ fake MUST be last, since `make_fake_ma_handler` never raises `NotHandled`;
 unmatched requests fall through to its own 404, which would otherwise
 swallow requests meant for this handler):
 
-    from daimon.testing.ma import (
+    from mux.testing.drivers.anthropic.ma import (
         FakeMAState,
         build_fake_anthropic,
         combine_handlers,
@@ -113,17 +113,16 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
 from anthropic.types.beta.sessions.beta_managed_agents_user_tool_confirmation_event import (
     BetaManagedAgentsUserToolConfirmationEvent,
 )
-from daimon.testing.ma import (
-    EMPTY_SESSION_STATS,
-    EMPTY_SESSION_USAGE,
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
-    _ma_id,  # pyright: ignore[reportPrivateUsage]
     json_body,
     list_response,
+    ma_id,
     not_found_response,
     sse_response,
 )
+from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
 
 __all__ = ["FakeSessionsState", "make_fake_sessions_handler", "session_turn_sse"]
 
@@ -202,7 +201,7 @@ class FakeSessionsState:
         brief.
         """
         data = content.encode() if isinstance(content, str) else content
-        file_id = _ma_id("file")
+        file_id = ma_id("file")
         meta = FileMetadata(
             id=file_id,
             created_at=_now(),
@@ -417,7 +416,7 @@ def _materialize_resource(
             )
         now = _now()
         return BetaManagedAgentsFileResource(
-            id=_ma_id("res"),
+            id=ma_id("res"),
             created_at=now,
             file_id=file_id,
             mount_path=mount_path,
@@ -435,7 +434,7 @@ def _materialize_resource(
         url = str(spec["url"])
         default_mount = f"/workspace/{url.rstrip('/').rsplit('/', 1)[-1]}"
         return BetaManagedAgentsGitHubRepositoryResource(
-            id=_ma_id("res"),
+            id=ma_id("res"),
             created_at=now,
             mount_path=spec.get("mount_path") or default_mount,
             type="github_repository",
@@ -470,7 +469,7 @@ def _handle_session_create(state: FakeSessionsState, request: httpx.Request) -> 
         return err
     assert agent is not None
 
-    session_id = _ma_id("session")
+    session_id = ma_id("session")
     resources_out: list[SessionResource] = []
     raw_resources = cast("list[dict[str, Any]]", body.get("resources") or [])
     for raw_resource in raw_resources:
@@ -809,7 +808,7 @@ def _build_response_event(ev: dict[str, Any], event_id: str) -> BaseModel:
             type="user.define_outcome",
             description=ev["description"],
             max_iterations=ev.get("max_iterations"),
-            outcome_id=_ma_id("outc"),
+            outcome_id=ma_id("outc"),
             processed_at=datetime.now(UTC),
             rubric=ev["rubric"],
         )
@@ -866,7 +865,7 @@ def _handle_events_send(
     response_events: list[BaseModel] = []
     stored_events: list[dict[str, Any]] = []
     for ev in events:
-        built = _build_response_event(ev, _ma_id("evt"))
+        built = _build_response_event(ev, ma_id("evt"))
         response_events.append(built)
         stored_events.append(built.model_dump(mode="json"))
 
@@ -924,7 +923,7 @@ def _handle_events_stream(state: FakeSessionsState, session_id: str) -> httpx.Re
     # No script queued: serve a minimal idle-only terminal stream so a
     # driver-driven test doesn't hang waiting for a stream to end.
     idle = BetaManagedAgentsSessionStatusIdleEvent(
-        id=_ma_id("evt"),
+        id=ma_id("evt"),
         processed_at=datetime.now(UTC),
         stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
         type="session.status_idle",
@@ -991,7 +990,7 @@ def _handle_files_list(state: FakeSessionsState, request: httpx.Request) -> http
 
 def _handle_files_upload(state: FakeSessionsState, request: httpx.Request) -> httpx.Response:
     filename, mime_type, content = _parse_multipart_file(request)
-    file_id = _ma_id("file")
+    file_id = ma_id("file")
     meta = FileMetadata(
         id=file_id,
         created_at=_now(),

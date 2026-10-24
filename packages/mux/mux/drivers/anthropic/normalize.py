@@ -198,10 +198,15 @@ class EventNormalizer:
                 payload = {"actions": actions}
             elif reason in {"end_turn", "budget_reached", "retries_exhausted"}:
                 name = "session.turn_ended"
+                # A refusal idles as `end_turn`; only `stop_details` tells it apart.
+                details = data.get("stop_details")
+                refused = isinstance(details, dict) and details.get("type") == "refusal"
                 payload = {
                     "root_turn_id": self.root_turn_id or event_id,
-                    "outcome": "errored" if reason == "retries_exhausted" else "completed",
-                    "native_reason": reason,
+                    "outcome": "errored"
+                    if refused or reason == "retries_exhausted"
+                    else "completed",
+                    "native_reason": "refusal" if refused else reason,
                 }
             else:
                 name, payload = "native.session.status_idle", data

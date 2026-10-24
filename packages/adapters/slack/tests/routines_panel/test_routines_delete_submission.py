@@ -20,8 +20,8 @@ from daimon.adapters.slack.routines_panel.submit import run_routines_delete_subm
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 
 _TEAM_ID = "T_DEL_SUB"
 _USER_ID = "U_DEL_CREATOR"

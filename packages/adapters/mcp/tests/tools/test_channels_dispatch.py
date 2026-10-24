@@ -76,7 +76,7 @@ def _output_text(call_result: dict[str, object]) -> str:
 
 
 def test_slack_unsupported_message() -> None:
-    with pytest.raises(ToolError, match="not supported on Slack yet"):
+    with pytest.raises(ToolError, match="isn't available here yet"):
         _slack_unsupported("search_messages")
 
 
@@ -159,7 +159,7 @@ async def test_slack_caller_tools_list_omits_list_threads(
         f"a hidden tool must be uncallable, not just unlisted; got {call_result!r}"
     )
     output_text = _output_text(call_result)
-    assert "list_threads is not supported on Slack yet" not in output_text, (
+    assert "list_threads isn't available here yet" not in output_text, (
         "a Slack caller calling a hidden tool must hit the registry's unknown-tool "
         f"error, not the runtime gate copy (unreachable through the registered "
         f"surface); got {output_text!r}"
@@ -232,10 +232,12 @@ async def test_search_messages_slack_caller_no_longer_hits_unsupported_branch(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "search_messages is not supported on Slack yet" not in output_text, (
+    assert "search_messages isn't available here yet" not in output_text, (
         "search_messages must no longer hit the Slack-unsupported branch"
     )
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), (
         f"Slack caller's search_messages must hit the Slack-only crypto-keys error; "
         f"got {output_text!r}"
     )
@@ -275,13 +277,12 @@ async def test_send_message_slack_caller_no_longer_hits_unsupported_branch(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "send_message is not supported on Slack yet" not in output_text, (
+    assert "send_message isn't available here yet" not in output_text, (
         "send_message must no longer hit the Slack-unsupported branch"
     )
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
-        f"Slack caller's send_message must hit the Slack-only crypto-keys error; "
-        f"got {output_text!r}"
-    )
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), f"Slack caller's send_message must hit the Slack-only crypto-keys error; got {output_text!r}"
 
 
 @pytest.mark.asyncio
@@ -293,7 +294,7 @@ async def test_read_channel_slack_caller_routes_to_slack_impl_and_fails_on_missi
 
     With no DAIMON_CRYPTO__KEYS configured on the runtime, the Slack impl's
     ``slack_web_client`` fails with a Slack-specific error the Discord impl
-    could never produce ("slack tools require DAIMON_CRYPTO__KEYS"). That
+    could never produce ("Slack tools are unavailable: …no encryption key"). That
     error only surfaces past the identity gates, so the caller needs a linked
     PlatformPrincipal (platform_user_id) for the tenant's platform.
     """
@@ -316,9 +317,9 @@ async def test_read_channel_slack_caller_routes_to_slack_impl_and_fails_on_missi
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
-        f"Slack caller's read_channel must hit the Slack-only crypto-keys error; got {output_text!r}"
-    )
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), f"Slack caller's read_channel must hit the Slack-only crypto-keys error; got {output_text!r}"
 
 
 @pytest.mark.asyncio
@@ -349,7 +350,7 @@ async def test_read_channel_discord_caller_routes_to_discord_impl_and_fails_on_m
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
+    assert "Discord tools are unavailable" in output_text, (
         f"Discord caller's read_channel must hit the Discord-side bot-token error; got {output_text!r}"
     )
 
@@ -383,7 +384,7 @@ async def test_read_channel_slack_caller_rejects_discord_before_param(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "before is Discord-only" in output_text, (
+    assert "before isn't accepted here" in output_text, (
         f"Slack caller's before param must be rejected, not dropped; got {output_text!r}"
     )
 
@@ -417,7 +418,7 @@ async def test_read_channel_discord_caller_rejects_slack_cursor_param(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "cursor is Slack/Teams-only" in output_text, (
+    assert "cursor isn't accepted here" in output_text, (
         f"Discord caller's cursor param must be rejected, not dropped; got {output_text!r}"
     )
 
@@ -451,7 +452,7 @@ async def test_read_thread_slack_caller_rejects_discord_before_param(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "before is Discord-only" in output_text, (
+    assert "before isn't accepted here" in output_text, (
         f"Slack caller's before param must be rejected, not dropped; got {output_text!r}"
     )
 
@@ -485,7 +486,7 @@ async def test_read_thread_discord_caller_rejects_slack_cursor_param(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "cursor is Slack/Teams-only" in output_text, (
+    assert "cursor isn't accepted here" in output_text, (
         f"Discord caller's cursor param must be rejected, not dropped; got {output_text!r}"
     )
 
@@ -523,9 +524,9 @@ async def test_read_channel_slack_caller_treats_empty_pagination_params_as_absen
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
-        f"empty pagination params must read as absent, not as misuse; got {output_text!r}"
-    )
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), f"empty pagination params must read as absent, not as misuse; got {output_text!r}"
 
 
 @pytest.mark.asyncio
@@ -556,7 +557,7 @@ async def test_read_channel_discord_caller_treats_empty_cursor_as_absent(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
+    assert "Discord tools are unavailable" in output_text, (
         f"empty pagination params must read as absent, not as misuse; got {output_text!r}"
     )
 
@@ -591,9 +592,9 @@ async def test_read_thread_slack_caller_treats_empty_before_as_absent(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
-        f"an empty before must read as absent, not as misuse; got {output_text!r}"
-    )
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), f"an empty before must read as absent, not as misuse; got {output_text!r}"
 
 
 @pytest.mark.asyncio
@@ -630,7 +631,9 @@ async def test_create_thread_slack_caller_routes_to_slack_impl_and_fails_on_miss
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
+    assert (
+        "Slack tools are unavailable: this Daimon install has no encryption key" in output_text
+    ), (
         f"Slack caller's create_thread must hit the Slack-only crypto-keys error; got {output_text!r}"
     )
 
@@ -670,7 +673,7 @@ async def test_create_thread_discord_caller_routes_to_discord_impl_and_fails_on_
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "discord tools require DAIMON_DISCORD__BOT_TOKEN" in output_text, (
+    assert "Discord tools are unavailable" in output_text, (
         f"Discord caller's create_thread must hit the Discord-side bot-token error; got {output_text!r}"
     )
 

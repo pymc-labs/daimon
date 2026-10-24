@@ -18,16 +18,16 @@ from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.testing.isolated_sdk import (
-    SDK_ENV_VARS,
-    AmbientSDKConfigurationError,
-    build_async_anthropic,
-)
 from daimon.testing.platform_surface import PlatformSurfaceCapture
 from daimon.testing.slack_surface import SlackSurfaceHarness
 from daimon.testing.teams_surface import TeamsSurfaceHarness
 from daimon.testing.turn_router import build_turn_router
 from microsoft_teams.api import MessageActivityInput
+from mux.testing.isolated_sdk import (
+    SDK_ENV_VARS,
+    AmbientSDKConfigurationError,
+    build_async_anthropic,
+)
 from pydantic import ValidationError
 from slack_sdk.models.blocks import SectionBlock
 

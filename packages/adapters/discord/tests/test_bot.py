@@ -26,7 +26,8 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_agent, ma_environment, ma_session
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -395,8 +396,8 @@ class TestInflightCapRejection:
 
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "too many chats in flight" in sent_text, (
-            f"over-cap reply must contain 'too many chats in flight'; got: {sent_text!r}"
+        assert "too many chats at once" in sent_text, (
+            f"over-cap reply must contain 'too many chats at once'; got: {sent_text!r}"
         )
         # Verify it's a plain send — no ephemeral kwarg.
         call_kwargs = message.channel.send.call_args.kwargs  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
@@ -583,7 +584,7 @@ class TestInflightIsolation:
 
         message_a.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         sent_a: str = message_a.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
-        assert "too many chats in flight" in sent_a, (
+        assert "too many chats at once" in sent_a, (
             f"guild A (saturated) should be rejected; got: {sent_a!r}"
         )
         mock_create_session.assert_not_called(), "guild A must not create a session"  # pyright: ignore[reportUnusedExpression]
@@ -855,7 +856,20 @@ def _make_sweep_guild(guild_id: int) -> MagicMock:
     perms = MagicMock()
     perms.send_messages = True
     sys_ch.permissions_for = MagicMock(return_value=perms)
-    sys_ch.send = AsyncMock()
+    # Everything a reader saw, in order: each post, then each edit of it.
+    sys_ch.shown = []
+
+    async def send(*, embed: discord.Embed) -> MagicMock:
+        sys_ch.shown.append(embed)
+        message = MagicMock(spec=discord.Message)
+
+        async def edit(*, embed: discord.Embed) -> None:
+            sys_ch.shown.append(embed)
+
+        message.edit = AsyncMock(side_effect=edit)
+        return message
+
+    sys_ch.send = AsyncMock(side_effect=send)
     guild.me = me
     guild.system_channel = sys_ch
     guild.text_channels = []
@@ -1015,16 +1029,16 @@ class TestOnReadySweepProvisioning:
             await _asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
 
         sys_ch = mock_guild.system_channel
-        assert sys_ch.send.await_count >= 2, (  # pyright: ignore[reportUnknownMemberType]
+        assert len(sys_ch.shown) >= 2, (  # pyright: ignore[reportUnknownMemberType]
             "sweep-provisioned guild must receive at least the welcome embed + terminal embed"
         )
-        first_embed = sys_ch.send.await_args_list[0].kwargs["embed"]  # pyright: ignore[reportUnknownMemberType]
+        first_embed = sys_ch.shown[0]  # pyright: ignore[reportUnknownMemberType]
         first_text = (first_embed.title or "") + (first_embed.description or "")
         assert "setting up" in first_text.lower(), (
             "#144-3: sweep provision must post the welcome 'setting up' embed first, "
             f"before the terminal embed; got: {first_text!r}"
         )
-        last_embed = sys_ch.send.await_args_list[-1].kwargs["embed"]  # pyright: ignore[reportUnknownMemberType]
+        last_embed = sys_ch.shown[-1]  # pyright: ignore[reportUnknownMemberType]
         last_text = (last_embed.title or "") + (last_embed.description or "")
         assert "ready" in last_text.lower() or "snag" in last_text.lower(), (
             "final embed must be the terminal ready/snag embed"
@@ -2451,6 +2465,7 @@ class TestCredentialButtonRegistration:
             "run_request_expiry_poller",
             "run_connect_notice_poller",
             "run_delivery_poller",
+            "run_run_end_poller",
         ):
             monkeypatch.setattr(bot_module, name, fake_poller(name))
         edits: list[tuple[object, object, str]] = []

@@ -18,8 +18,8 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.turn.errors import SessionAgentMismatch
-from daimon.testing import ma_agent
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -171,3 +171,72 @@ async def test_a_channel_click_without_its_notice_writes_nothing(
 
     assert "something went wrong" in json.dumps(answer), "no thread to name, so it fails"
     assert responder is None, "no binding was written"
+
+
+async def test_selfhosted_mismatch_uses_generic_owner_without_anthropic(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from dataclasses import replace
+    from typing import cast
+
+    from anthropic import AsyncAnthropic
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"selfhosted refusal accessed Anthropic.{name}")
+
+    runtime = replace(
+        build_teams_runtime(db_session_factory), anthropic=cast(AsyncAnthropic, NoAnthropic())
+    )
+    teams = TeamsApp(runtime=runtime, sender=FakeSender(), commands={}, bot_token=bot_token)
+    mismatch = SessionAgentMismatch(
+        mapping_id=uuid.uuid4(),
+        session_id="sh_session",
+        source_agent_id="sh_old",
+        destination_agent_id="sh_new",
+    )
+    text, actions = await teams._refusal(  # pyright: ignore[reportPrivateUsage]
+        mismatch, ma_agent(name="New agent"), direct_chat=False, tenant_id=TENANT, selfhosted=True
+    )
+    assert "the previous agent" in text
+    assert not actions
+
+
+async def test_selfhosted_tool_turn_releases_controls_without_output_sweep(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from typing import cast
+    from unittest.mock import MagicMock
+
+    from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import ToolUseBlock, TurnState
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tool", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sh_session_test",
+        None,
+        False,
+    )
+    final = MagicMock(spec=TeamsTurnLifecycle)
+    final.release_controls = AsyncMock()
+    with patch.object(teams.outputs, "sweep", side_effect=AssertionError("no Anthropic sweep")):
+        await teams._finish_outputs(  # pyright: ignore[reportPrivateUsage]
+            make_inbound(),
+            outcome,
+            cast(TeamsTurnLifecycle, final),
+            selfhosted=True,
+        )
+    final.release_controls.assert_awaited_once()

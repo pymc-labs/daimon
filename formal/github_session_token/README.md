@@ -1,13 +1,15 @@
 # GitHub session tokens across installations
 
-A session with grants in installations A and B needs a separate exact-scope token for each. A repo-aware git credential helper must return B's token for B's repo, and nothing for an uncovered repo. A change to A keeps B's token when the session remains in multi mode. Crossing between one and multiple installations re-mints all remaining groups into the target mode. M1 supplies per-installation token issuance, rotation, and saved issue times behind the existing second-installation grant guard. M2 adds helper routing and M3 removes the guard.
+A session with grants in installations A and B needs a separate exact-scope token for each. A repo-aware git credential helper must return B's token for B's repo, and nothing for an uncovered repo. A change to A keeps B's token when the session remains in multi mode. Crossing between one and multiple installations re-mints all remaining groups into the target mode. M1 supplies per-installation token issuance, rotation, and saved issue times. M2 adds helper routing. M3 allows grants across up to 12 installations.
 
 ## Models and code boundaries
 
 | Model action or state | Code boundary / status |
 | --- | --- |
-| `GrantInstall.LockA/B`, `WriteA/B` | `packages/core/daimon/core/stores/github_access.py:406-415,444-470`; proposed removal of the cross-installation rejection at `:416-428` |
+| `GrantInstall.LockA/B`, `WriteA/B` | `packages/core/daimon/core/stores/github_access.py:stage_grant` holds the per-agent grant lock while enforcing the installation cap and writing a grant |
 | `GrantInstall.UnsafeReadA/B`, `UnsafeWriteA/B` | Rejected split read/write of the same grant operation; `lock_agent_grants` at `github_access.py:406` prevents this |
+| `GrantCap.Stage` | `github_access.py:stage_grant` counts distinct installations and stages one grant under the per-agent lock; three model installations with a cap of two stand in for production's cap of 12 |
+| `GrantAdmission.Stage` | `github_access.py:stage_grant` checks projected vault chunks and read-only access under the same lock before insertion; `projected_session_credential_count` is shared with `github_app_session.py` |
 | `MultiInstallation.Init`, `Eligible`, `ExactLiveScope` | `_effective_rows`, `prepare_app_access`, and `group_repository_access` create an exact-scope token per installation and 500-repo chunk; `stores/github_issued_tokens.py:create_pending` records scope and expiry |
 | `ClearWorking`, `AliasSelected` | `prepare_app_access` records the full desired working repo; `_combine_app_access` selects the alias only from its token group; `add_app_credentials` omits `GH_TOKEN` and Copilot when no alias exists |
 | `FailChunkZero`, `MintAllChunks`, `RebuildAfterBRotation` | `prepare_app_access` discards every chunk of a failed installation; `create_pending` saves the chunk label with the inventory row; `_current_app_access` reads that label, and `add_app_credentials` syncs its credential name |
@@ -19,7 +21,7 @@ A session with grants in installations A and B needs a separate exact-scope toke
 | `Read(r)`, `Return` | `credential_env.py:render_github_repo_map` and `github_repo.sh` select the exact `GH_TOKEN_I<installation>_<chunk>` placeholder by normalized owner/repo. Ordinary `gh` lookups deny unknown repos; Git credential `get` returns nothing unless HTTPS, github.com, and the requested path match the map and clone origin. `github_app_session.py:add_app_credentials` supplies the per-token variables. A helper read racing with revocation keeps the captured scope, while freshness still relies on GitHub-side revocation. |
 | `RevokeA` | `github_access.py:remove_grant` changes the grant; `stores/github_issued_tokens.py:select_stale_tokens` identifies A's row; `github_app_session.py:revoke_app_access` revokes the selected token without touching B |
 | `ReassignA` | `session_snapshot.py:fingerprint_identity` and `session_compat.py:identity_change_reasons` compare canonical `token_scopes` even when repo URLs are unchanged |
-| `AddRepoB` | `github_access.py:stage_grant` still rejects a second installation in M1; with a seeded second-installation grant, `session_compat.py:decide_session_compatibility` selects an in-place B refresh for a new unmounted repo, and `rotate_live_app_tokens(installation_ids=(B,))` mints B's new scope while retaining A |
+| `AddRepoB` | `github_access.py:stage_grant` allows B while the agent stays under the cap; `session_compat.py:decide_session_compatibility` selects an in-place B refresh for a new unmounted repo, and `rotate_live_app_tokens(installation_ids=(B,))` mints B's new scope while retaining A |
 | `Expire(i)`, `Rotate(i)` | `github_app_session.py:prepare_app_access` records a conservative 55-minute expiry; `turn/prepare.py` saves per-installation issue times; `session_compat.py:decide_session_compatibility` selects due installation IDs; `session_update_ops.py` passes them to `rotate_live_app_tokens` |
 | `SessionToken.VersionBump`, `Mint`, `SwapResource`, `SwapVault` | Grant version update in `github_access.py:stage_grant`; `prepare_app_access` mints; `rotate_live_app_tokens` swaps resources and `add_app_credentials` syncs the vault |
 | `SessionToken.LockDelivery`, `Deliver`, `LockRetire`, `RetireOld` | `finish_app_delivery` locks grants and delivers new rows; `rotate_live_app_tokens` locks again before `mark_session_tokens_superseded` |
@@ -27,6 +29,10 @@ A session with grants in installations A and B needs a separate exact-scope toke
 | `SessionToken.Crash`, `Unsafe*` | Existing crash, cleanup, rollback and long-lock fault witnesses; see `SessionToken.tla` and the prior single-token lifecycle paths above |
 
 `GrantInstall` allows both installations and checks that completed grants persist. `MultiInstallation` has token scope, validity, expiry and generation per installation, plus separate chunk detection, age, and vault delivery actions. `Read` captures the helper's token selection; `Return` may run after a revocation. A fresh read never selects an expired or revoked token. A token selected before revocation can still be returned, but `ResultScoped` requires the captured token to have belonged to the requested repository and installation. `NoStaleUsable` assumes GitHub invalidates the token at revocation, so the returned placeholder cannot authenticate. `AddRepoB` re-mints B with its new exact scope and leaves A unchanged. `SessionToken` retains the detailed mint, delivery, and rollback races for one token. The multi-installation model still treats each token's rotation as one atomic transition.
+
+`GrantCap` checks three distinct installations against a scaled cap of two. Its unsafe variant admits the third. The production limit is 12 (`github_access.py:MAX_AGENT_INSTALLATIONS`); the model checks the same count-before-insert rule under the per-agent lock, without enumerating all 13 installations. `test_github_access_foundation.py` replays the boundary with 13 installations and confirms that another repo in an existing installation still succeeds.
+
+`GrantAdmission` uses two repositories per token chunk and a vault cap of five, scaled from 500 and 15. Its budget start has two full token chunks, a working-repo alias, Copilot and the reserved chat MCP credential. A new A repo requires a third chunk and is refused. Its read start has a read-only A grant, so a B grant is refused before multi mode. The model makes each admission atomic, as the per-agent grant lock does in `stage_grant`; the 11-installation concurrency test checks that lock against PostgreSQL.
 
 For multi-installation sessions, each saved `token_scopes` entry contains `(installation_id, chunk, repo_ids, issued_at, token_id)`. The token ID joins the snapshot entry to its encrypted inventory row. `create_pending` saves `chunk` under the reserved `__credential_chunk__` key in that row's existing JSONB `grant_versions` column; version checks read only the `grant:<repo>` and `authorization:<repo>` keys. A B-only rotation within multi mode uses the saved chunk of each retained A row. A mode transition re-mints every remaining group. Single mode keeps the old snapshot shape, inventory rows without chunk labels, and refresh timestamp. A failed read-group mint does not advance the healthy write token's refresh deadline.
 
@@ -55,6 +61,12 @@ Run `TLA2TOOLS_JAR=/home/derick/scratch/daimon-os-devenv/tla2tools.jar FORMAL_CH
 | --- | --- | ---: | --- |
 | `GrantSafe` | clean | 8 | Both concurrent grants persist |
 | `GrantUnsafe` | `CompletedGrantsPersist` | 31 | A stale write loses a granted installation |
+| `GrantCapSafe` | clean | 10 | A third installation is refused at the scaled cap |
+| `GrantCapUnsafe` | `WithinCap` | 8 | Without the cap, a third installation is granted |
+| `GrantAdmissionBudgetSafe` | clean | 2 | A new chunk is refused when the vault is full |
+| `GrantAdmissionBudgetUnsafe` | `WithinBudget` | 2 | Admitting that chunk exceeds the vault cap |
+| `GrantAdmissionReadSafe` | clean | 2 | Read-only A blocks a B grant |
+| `GrantAdmissionReadUnsafe` | `MultiWrite` | 2 | B joins a read-only A grant and token minting cannot proceed |
 | `MultiSafe` | clean | 5,593 | Exact scope, independent expiry/rotation, B re-mint, and read/return race |
 | `MultiSingleToken` | `GrantedReachable` | 3 | B repo cannot be reached after the guard is removed |
 | `MultiFallback` | `ResultScoped` | 28 | Helper returns A's token for uncovered B repo `c` |

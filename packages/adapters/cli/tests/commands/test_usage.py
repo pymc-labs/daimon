@@ -204,3 +204,51 @@ def test_settle_backlog_is_a_dry_run_unless_applied(
     assert settle.await_args.kwargs["apply"] is apply
     assert settle.await_args.kwargs["markup"] == Decimal("1.1")
     engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_pending_billing_command_exposes_unknown_usage_without_anthropic(monkeypatch, as_json):
+    from daimon.core.stores.accounting_outbox import PendingUsagePage, PendingUsageRow
+
+    tenant = uuid4()
+    row = PendingUsageRow(
+        binding_id="binding",
+        session_id="session",
+        observation_id="selfhosted:request:request-1",
+        revision=1,
+        model=None,
+        completeness="unknown",
+        reason="usage_unknown",
+        observed_at=datetime(2026, 10, 20, tzinfo=UTC),
+    )
+    page = PendingUsagePage(rows=[row], next_cursor="next-page", truncated=True)
+    query = AsyncMock(return_value=page)
+    session = object()
+
+    @asynccontextmanager
+    async def sessionmaker():
+        yield session
+
+    engine = SimpleNamespace(dispose=AsyncMock())
+    monkeypatch.setattr(
+        usage,
+        "load_settings",
+        lambda: SimpleNamespace(
+            database=SimpleNamespace(url="unused", pool_size=5, max_overflow=10, pool_timeout=30.0)
+        ),
+    )
+    monkeypatch.setattr(usage, "build_engine", lambda url, **kwargs: engine)
+    monkeypatch.setattr(usage, "build_session_factory", lambda engine: sessionmaker)
+    monkeypatch.setattr(usage, "list_pending_usage", query)
+    args = ["usage", "pending", str(tenant), "--limit", "10", "--cursor", "previous-page"]
+    if as_json:
+        args.append("--json")
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    if as_json:
+        assert json.loads(result.output) == page.model_dump(mode="json")
+    else:
+        assert "truncated: true" in result.output
+        assert "next_cursor: next-page" in result.output
+    query.assert_awaited_once_with(session, tenant_id=tenant, limit=10, cursor="previous-page")
+    engine.dispose.assert_awaited_once()

@@ -7,6 +7,7 @@ Only the shapes the reducer tests actually need.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -72,6 +73,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_custom_tool_result_e
 from anthropic.types.beta.sessions.beta_managed_agents_user_tool_confirmation_event import (
     BetaManagedAgentsUserToolConfirmationEvent,
 )
+from daimon.core.turn.status_log import status_log_override
 
 _T = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -197,15 +199,20 @@ def make_status_idle(
     *,
     event_id: str,
     stop_reason: StopReason | None = None,
+    stop_details: object = None,
 ) -> BetaManagedAgentsSessionStatusIdleEvent:
+    """`stop_details` is not modelled by the pinned SDK; it validates as an extra field."""
     if stop_reason is None:
         stop_reason = BetaManagedAgentsSessionEndTurn(type="end_turn")
-    return BetaManagedAgentsSessionStatusIdleEvent(
-        id=event_id,
-        type="session.status_idle",
-        stop_reason=stop_reason,
-        processed_at=_T,
-    )
+    raw: dict[str, object] = {
+        "id": event_id,
+        "type": "session.status_idle",
+        "stop_reason": stop_reason.model_dump(mode="json"),
+        "processed_at": _T,
+    }
+    if stop_details is not None:
+        raw["stop_details"] = stop_details
+    return BetaManagedAgentsSessionStatusIdleEvent.model_validate(raw)
 
 
 def make_tool_confirmation(
@@ -265,3 +272,17 @@ def make_overloaded_error(*, message: str = "overloaded") -> BetaManagedAgentsMo
 def native_budget():
     """Imported worker fixtures retain ordinary behavior unless explicitly budgeted."""
     return None
+
+
+@pytest.fixture(autouse=True)
+def _status_log_off() -> Iterator[None]:
+    """Pin `turn.status_log` off, so the environment cannot change what a test sees."""
+    with status_log_override(False):
+        yield
+
+
+@pytest.fixture
+def status_log_on(_status_log_off: None) -> Iterator[None]:
+    """Run a test with `turn.status_log` on; every other test runs with it off."""
+    with status_log_override(True):
+        yield

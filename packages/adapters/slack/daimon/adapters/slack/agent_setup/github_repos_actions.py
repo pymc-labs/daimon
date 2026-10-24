@@ -47,7 +47,7 @@ async def handle(
                 tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
                 meta=meta,
                 agent_name=meta.agent_name,
-                is_admin=await resolve_is_admin(client, user_id=user_id),
+                is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
             )
             if view is not None:
                 await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -57,7 +57,7 @@ async def handle(
         return True
     name = str(action.get("value") or meta.agent_name or "")
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,

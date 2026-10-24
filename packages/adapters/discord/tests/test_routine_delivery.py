@@ -937,7 +937,8 @@ async def test_generated_files_share_the_at_most_once_outbox(
     from daimon.core.routine_delivery import poll_deliveries_once
     from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
     from daimon.core.stores.routines import get_routine, update_routine
-    from daimon.testing.ma import MARouter, build_fake_anthropic
+    from daimon.testing.ma import MARouter
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
     row = await _routine(db_session)
     payload = (
@@ -1025,7 +1026,7 @@ async def test_destination_change_between_text_and_file_cancels_payload(
     from daimon.core.routine_delivery import poll_deliveries_once
     from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
     from daimon.core.stores.routines import get_routine, update_routine
-    from daimon.testing.ma import build_fake_anthropic
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
     row = await _routine(db_session)
     payload = (
@@ -1215,3 +1216,36 @@ async def test_reserved_routine_source_or_destination_never_falls_back(
     assert outcome.note == "Source unavailable."
     dm.assert_not_awaited()
     target.send.assert_not_called()
+
+
+@pytest.mark.parametrize("marked", ["destination", "parent-found-at-delivery"])
+async def test_a_shared_channels_routine_never_leaves_it_by_dm(
+    marked: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The fire ran held to the channel. A thread saved without its parent is
+    placed at delivery, and the parent's recorded sharing holds it too."""
+    from daimon.core.stores.shared_channels import mark_channel_shared
+
+    row = await _routine(db_session)
+    await mark_channel_shared(
+        db_session,
+        tenant_id=row.tenant_id,
+        platform="discord",
+        channel_id="555" if marked == "destination" else "444",
+        source="platform",
+    )
+    await db_session.commit()
+    dms = _Dms()
+    if marked == "destination":
+        channels: object = discord.NotFound(MagicMock(status=404, reason="Not Found"), "gone")
+        expected = "destination_unavailable"
+    else:
+        channels = {555: _uncached_thread(private=True), 444: _text_channel()}
+        expected = "creator_cannot_post"
+
+    outcome = await _poster(db_session_factory, channels, dms=dms)(row)
+
+    assert (outcome.status, outcome.note) == ("skipped", expected)
+    assert dms.sent == [], "the result never goes by DM"

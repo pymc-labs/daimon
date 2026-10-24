@@ -19,6 +19,7 @@ from pydantic import ValidationError
         ("openai.persistent_workspace", AccountingMode.NATIVE_ROOT_TOTALS, True, True),
         ("openai.conversation_only", AccountingMode.NATIVE_ROOT_TOTALS, True, True),
         ("gemini.inline_reuse", AccountingMode.NATIVE_TOTALS, True, False),
+        ("selfhosted.loop", AccountingMode.NATIVE_REQUESTS, True, False),
     ],
 )
 def test_declared_profile_accounting_preserves_existing_policy(id_, mode, native, root):
@@ -27,6 +28,19 @@ def test_declared_profile_accounting_preserves_existing_policy(id_, mode, native
     assert accounting_mode_for(profile.provider) is mode
     assert mode.settles_natively is native
     assert mode.supports_root_usage is root
+
+
+@pytest.mark.parametrize(
+    "mode,grain",
+    [
+        (AccountingMode.REQUEST_SPANS, "model_request"),
+        (AccountingMode.NATIVE_REQUESTS, "model_request"),
+        (AccountingMode.NATIVE_TOTALS, "turn"),
+        (AccountingMode.NATIVE_ROOT_TOTALS, "turn"),
+    ],
+)
+def test_each_accounting_mode_names_the_grain_it_settles(mode, grain):
+    assert mode.usage_grain == grain
 
 
 def test_unknown_provider_has_no_accounting_fallback():

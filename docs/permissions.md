@@ -111,8 +111,10 @@ rules on two channels, a thread, a category and two agents with rules.
 
 Native OpenAI session credentials carry an isolated session grant installed
 during preparation. Preparation alone grants no origin authority: the driver
-binds the grant to the current execution and its attendance, and revokes that
-binding when the turn ends. Reuse binds a new origin; child sessions receive
+binds the grant to the current execution and its attendance only after acquiring
+the conversation lease, and revokes that binding before releasing the lease.
+Queued turns have no execution grant; stopping, cancelling or expiring a waiter
+does not change the running turn’s grant or attendance. Reuse binds a new origin; child sessions receive
 a separate grant and cannot borrow a parent execution.
 
 Agent chat and the hub can drive only sessions created through agent chat.
@@ -239,6 +241,15 @@ without a confirmation gate still refuses unattended confirmations during a
 normal, uninterrupted decision. Cancellation during decision-task
 or card cleanup also finishes bounded interrupt cleanup before propagating.
 
+Native OpenAI workers and unattended wakes cannot use a profile that needs
+automatic sandbox, bash, custom tools, or other capabilities without host
+inspection. Daimon refuses before sending a message to the provider. An
+operator's approval of a native profile does not opt it into unattended
+sandbox execution. Conversation-only native workers and attended native
+conversations remain supported. Selfhosted runs inspect every tool through
+the host's current policy, so allowed reads can continue while unattended
+sandbox calls and unapproved writes are refused.
+
 Reading a session never answers a tool call. If the service restarts while an
 agent-chat turn waits on one, the turn stays paused, and `get_session` and
 `get_my_session` report `status: paused` with the hint "paused: call
@@ -352,14 +363,39 @@ allow.
 
 ## Changing agent setup
 
-Server or workspace admins may change an agent's setup. A non-admin must
-administer every channel named by the agent's rule, and every place the agent
-answers or runs must stay inside those channels. This applies to instructions,
-model, description, tools, skills and MCP server attachments, including token
-forms and OAuth connections. Unbound agents, tenant defaults and agents serving
-other channels require a server or workspace admin. Creation metadata and a
-channel default alone do not grant permission to edit setup. Defaults-managed
-specs retain their existing protections, including for admins.
+Server or workspace admins may change an agent's setup, and so may the
+agent's **owner**. The owner is the person who created the agent, from chat
+or the setup panel's New agent button, or who copied it with `fork_agent`; a
+channel's own copy of an agent keeps that agent's owner. An admin can also
+name one with `daimon agents owner set`. An agent has at most one owner.
+Agents created before owners existed have none and stay admin-only.
+
+The owner may change the agent's instructions, model, description, tools,
+skills, MCP server attachments (including token forms and OAuth connections),
+keys, model provider, its required capabilities, and its fleet, from chat and
+from the Discord, Slack and Teams setup panels. They see their agent's setup
+(its prompt and connections) and find it with `list_agents` (`mine=true`), even
+while it answers nowhere. An owner reaches their own agents past channel
+isolation too, including a channel's copy they own, since the copy keeps its
+source's owner. Because the owner can rewrite the prompt, keys an admin added
+to that agent are not secret from its owner: the agent can be told to use or
+reveal them. Give an agent's keys only to an agent whose owner may hold them.
+A person from another organisation is never an agent's owner. Making the agent share threads stays with admins,
+because it applies in every channel the agent answers in that doesn't pin a
+backend; the owner may keep an admin's choice or return to one thread per
+person. If two people create agents of the same name at once, one is refused;
+nobody becomes the owner of an agent someone else created. Ownership is read
+again when a change is written, when a form is submitted and when a
+confirmation card is clicked, always for the person acting, so a change of
+owner applies at once. An agent key or a requester from another organisation
+is never the owner.
+
+The owner may not change what the whole workspace shares: the provider
+allowlist, channel budgets, GitHub access (repo and skill-repo binds, grants),
+deleting a skill from the workspace, archiving or copying the agent, and its
+tool rules stay with admins. A channel default alone does not grant
+permission to edit setup. Defaults-managed specs retain their existing
+protections, including for admins.
 
 When approval cards are off, a skill add needs a preview followed by the
 requester's next message of `yes` in that thread. Only one preview is active
@@ -383,6 +419,40 @@ with `approved=True`. A session without that card, an agent key or a run
 nobody watches is refused, so a plumbing failure refuses rather than
 publishes.
 
+## Held turns
+
+A turn is **held** to the channel it was asked in when the requester belongs
+to another organisation than the one that added Daimon (a *client*), or when
+the channel is shared with another organisation. A requester whose
+organisation the platform could not determine is treated as a client for that
+turn only; nothing about them is stored.
+
+A held turn reads and posts only inside its channel and the threads under it.
+It cannot send direct messages, save routines, create agents or start
+workers, and publishing needs the requester's Approve. It reads only sessions
+that ran inside the same channel. No admin exemption applies, whatever the
+requester's stored role. A client also cannot change any agent, channel,
+budget or rule, and cannot start a turn in a DM, hub, routine or agent chat;
+Daimon answers them in the channel they share.
+
+Admission records what the platform verified. A person verified as belonging
+to another organisation is stored as a plain user and marked foreign; the mark
+is never cleared, so they stay a client when a later lookup cannot say. A
+channel found to be shared, by the platform's own signal or by a verified
+client asking there, is remembered, so every later turn in it is held.
+
+A held turn's MCP credential carries the hold itself, so the tools never rely
+on what other turns are running. It sees a short list of tools (channel reads
+and posts, timers, its own sessions, publishing), and each applies the hold
+before any rule: channel lists, search hits and where-am-I name only the held
+channel, timers and sessions are limited to it, and posting into the
+requester's own DM is refused. A client's credential that carries no hold is
+refused every channel tool, and a model-supplied `origin_context_id` can only
+narrow what the credential allows, never widen it.
+
+The hold is separate from agent rules: the default agent and an agent
+bound to several channels still run, read and post inside a held channel.
+
 ## Exemptions
 
 - **Server admins** are exempt where the output reaches them alone: their own
@@ -395,7 +465,8 @@ publishes.
 - A **setup thread** under a `readers: own` channel answers as the built-in
   agent.
 
-Agent keys and tokens with no person behind them are never exempt.
+Agent keys and tokens with no person behind them are never exempt, and no
+exemption applies to a held turn.
 [Trust model](architecture.md#trust-model) has the full table.
 
 ## Changing the rules

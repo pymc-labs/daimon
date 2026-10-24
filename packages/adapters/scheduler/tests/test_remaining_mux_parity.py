@@ -20,8 +20,8 @@ from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores import github_issued_tokens as tokens
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TENANT = UUID(int=7)

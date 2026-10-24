@@ -19,6 +19,7 @@ from daimon.core.continuity.dispatch import (
 from daimon.core.continuity.dispatch import (
     dispatch_pending_continuations as dispatch_core,
 )
+from daimon.core.neutral_resources import WorkerSpecRefused
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.errors import AdmissionDenied
@@ -168,7 +169,8 @@ async def dispatch_pending_continuations(
         decision_context=context,
         notice=post,
         settle_before_notice=False,
-        dispatch_errors=(discord.HTTPException,),
+        # A refused fleet wake settles its row; its card is ended by the turn's own surface.
+        dispatch_errors=(discord.HTTPException, WorkerSpecRefused),
         now=now,
         worker_finished_decision=worker_finished_decision,
     )

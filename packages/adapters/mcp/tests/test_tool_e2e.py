@@ -20,12 +20,12 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp import Client
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.middleware import MiddlewareContext
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

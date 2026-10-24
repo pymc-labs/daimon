@@ -58,6 +58,7 @@ from daimon.core.routine_delivery import (
     tenant_dm_still_open,
 )
 from daimon.core.routine_files import decode_payload, deliver_routine_files, payload_for
+from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import RoutineRow
@@ -186,7 +187,7 @@ def make_discord_routine_poster(
     def refusal(row: RoutineRow, reason: str) -> DeliveryOutcome:
         private_reasons = {
             "invoker_not_allowed": "The owner is no longer a verified, allowed server member.",
-            "access_policy_unreadable": "The server access policy could not be read.",
+            "access_policy_unreadable": "The server access settings could not be read.",
             "routine_dms_disabled": "Routine DMs are disabled for this server.",
             "restricted_source": "A restricted source cannot deliver by DM.",
             "agent_not_allowed": "The agent is not allowed to run privately.",
@@ -336,7 +337,9 @@ def make_discord_routine_poster(
                 return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
             dm = await open_dm(int(guild_id), int(creator))
             for chunk in split_fenced(
-                render_fallback_dm(row, reason), _DISCORD_MAX_CHARS, word_boundary=True
+                render_fallback_dm(row, reason, platform="discord"),
+                _DISCORD_MAX_CHARS,
+                word_boundary=True,
             ):
                 async with sessionmaker() as session:
                     if not await dm_enabled(session, tenant_id=row.tenant_id):
@@ -388,10 +391,14 @@ def make_discord_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return refusal(row, cleared)
         policy = cleared
-        keep_inside = keeps_routine_inside(policy, row)
+        # An isolated or shared channel's result never leaves it, not even by DM.
+        held = await result_is_held(sessionmaker, row, platform="discord")
+        keep_inside = keeps_routine_inside(policy, row) or held
         parent_channel_id: str | None = None
 
         async def fallback_guard() -> bool:
+            if await result_is_held(sessionmaker, row, platform="discord"):
+                return False
             if await creator_still_cleared(row) is not None:
                 return False
             if not await tenant_dm_still_open(sessionmaker, row, tenant.external_id):
@@ -407,7 +414,7 @@ def make_discord_routine_poster(
             )
 
         async def fallback(reason: str) -> DeliveryOutcome:
-            if keep_inside:  # an isolated channel's result never leaves it, not even by DM
+            if keep_inside:
                 return DeliveryOutcome(status="skipped", note=reason)
             return await _dm_fallback(row, reason, tenant.external_id, fallback_guard)
 
@@ -454,7 +461,10 @@ def make_discord_routine_poster(
             return await fallback("destination_unavailable")
         parent_channel_id, category_id, _guild_id, permission_source = placement
         # The parent is known now, also for a thread saved without it.
-        keep_inside = keeps_routine_inside(policy, row, parent_channel_id=parent_channel_id)
+        held = held or await result_is_held(
+            sessionmaker, row, platform="discord", parent_channel_id=parent_channel_id
+        )
+        keep_inside = keeps_routine_inside(policy, row, parent_channel_id=parent_channel_id) or held
         creator = row.created_by_user_id
         if (
             creator is None
@@ -504,7 +514,9 @@ def make_discord_routine_poster(
         )
         if client is None or identity is None or identity.builtin:
             for chunk in split_fenced(
-                render_fallback_post(row), _DISCORD_MAX_CHARS, word_boundary=True
+                render_fallback_post(row, platform="discord"),
+                _DISCORD_MAX_CHARS,
+                word_boundary=True,
             ):
                 if (refused := await creator_still_cleared(row)) is not None:
                     return refused
@@ -525,7 +537,11 @@ def make_discord_routine_poster(
             identity_enabled=True,
         )
         for index, chunk in enumerate(
-            split_fenced(render_fallback_post(row, as_agent=True), limit, word_boundary=True)
+            split_fenced(
+                render_fallback_post(row, as_agent=True, platform="discord"),
+                limit,
+                word_boundary=True,
+            )
         ):
             if (refused := await creator_still_cleared(row)) is not None:
                 return refused

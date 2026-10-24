@@ -368,13 +368,13 @@ async def test_upload_env_and_mount_never_logs_secret_values(
 
 
 async def test_owned_env_metadata_projection_never_selects_or_decodes_content(
-    db_preflight, db_nullpool_engine, monkeypatch
+    db_preflight, db_committing_engine, monkeypatch
 ):
     from daimon.core.stores import agent_files
     from daimon.testing.db import require_owned_sessionmaker
     from sqlalchemy import event
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     agent_id = uuid.uuid4()
     async with sessions.begin() as db:
@@ -402,14 +402,14 @@ async def test_owned_env_metadata_projection_never_selects_or_decodes_content(
     def capture(connection, cursor, statement, parameters, context, many):
         queries.append(statement)
 
-    event.listen(db_nullpool_engine.sync_engine, "before_cursor_execute", capture)
+    event.listen(db_committing_engine.sync_engine, "before_cursor_execute", capture)
     try:
         async with sessions() as db:
             refs = await agent_files.list_agent_file_revisions(
                 db, tenant_id=tenant.id, agent_id=agent_id
             )
     finally:
-        event.remove(db_nullpool_engine.sync_engine, "before_cursor_execute", capture)
+        event.remove(db_committing_engine.sync_engine, "before_cursor_execute", capture)
     assert [key for key, _ in refs] == ["OWNED"]
     assert all(
         "agent_files.content" not in sql and "agent_files.encoding" not in sql for sql in queries

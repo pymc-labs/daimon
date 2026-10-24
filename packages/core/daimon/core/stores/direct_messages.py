@@ -150,7 +150,7 @@ async def claim_message(
             "Run /dm-me in the channel you want to continue from."
         )
     if row.scope_id != expected_scope_id:
-        raise UserFacingError("The selected workspace changed. Please send your message again.")
+        raise UserFacingError("That private conversation changed. Please send your message again.")
     if message_id in row.recent_message_ids:
         return None
     if row.active_until is not None and row.active_until > now:

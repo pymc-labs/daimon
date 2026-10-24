@@ -7,10 +7,10 @@ import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState, UsageTotals
-from daimon.testing.ma_models import ma_model_usage
 from mux.contracts.ids import ResourceRef
 from mux.contracts.usage import UsageObservation
 from mux.drivers.anthropic.usage import observation_from_event
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 SESSION = ResourceRef(

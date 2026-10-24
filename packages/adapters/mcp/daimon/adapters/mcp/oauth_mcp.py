@@ -82,7 +82,7 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
         400,
     ),
     "unconfigured": (
-        "This deployment cannot finish sign-in",
+        "Daimon cannot finish sign-in yet",
         "Ask the operator to finish the daimon setup, then try again.",
         500,
     ),
@@ -110,9 +110,9 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
     ),
     "client_misconfigured": (
         "Sign-in to this server is not set up correctly",
-        "The OAuth client this deployment is configured to use for it was refused or does "
-        "not fit the server, so nothing was connected. Ask the operator to check that "
-        "client; signing in again will not help until it is fixed.",
+        "Daimon's sign-in with this server was refused or does not fit it, so nothing was "
+        "connected. Ask the operator to check it; signing in again will not help until it "
+        "is fixed.",
         502,
     ),
     "agent_gone": (

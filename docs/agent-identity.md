@@ -82,6 +82,10 @@ default) posts with no override, so it keeps the app's own name and icon.
 
 ### Discord
 
+Self-hosted agents posting through Discord MCP tools resolve their name and
+avatar from tenant-local records. Archived or unresolved agents keep the bot
+identity; the lookup makes no Anthropic request.
+
 - One webhook per text or forum channel, created by the bot with
   `channel.create_webhook(name="Daimon agents")`, so it is application-owned:
   it can carry buttons and select menus, and their interactions come to the

@@ -123,7 +123,7 @@ def test_unregistered_profile_is_redacted_before_and_after_production_scrubbing(
     # Diagnostic redaction does not rewrite the original exception or its chain.
     if enabled:
         assert refused.value.__cause__ is None
-        assert str(refused.value) == "This backend is not enabled for this workspace."
+        assert str(refused.value) == "That model provider isn't turned on here. Pick another."
     else:
         assert isinstance(refused.value.__cause__, InvalidConfig)
         assert private in str(refused.value.__cause__)

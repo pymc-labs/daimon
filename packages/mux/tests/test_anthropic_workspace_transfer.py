@@ -3,13 +3,13 @@
 import pickle
 
 import pytest
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.sessions_lifecycle import WorkspaceTransfer, WorkspaceTransferConfig
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import JsonValue, ValidationError
 
 SCOPE = Scope(

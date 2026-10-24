@@ -62,12 +62,13 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_session
 from daimon.testing.asgi import asgi_lifespan
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.turn_leg import turn_leg
 from microsoft_teams.apps.token_manager import TokenManager
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http.client import MiddlewareContext
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -89,7 +90,7 @@ _POSTED_MESSAGE_ID = "1700000000200"
 _LIFECYCLE_TENANT = str(uuid.UUID(int=0xA11CE))
 _LIFECYCLE_USER = str(uuid.UUID(int=0xB0B))
 
-_BALANCE_BLOCKED_TEXT = "Your team's Daimon credit has run out.\n\nAn admin can top up with `billing` in a 1:1 chat with me."
+_BALANCE_BLOCKED_TEXT = "Your team has no Daimon credit yet.\n\nAn admin can add some with `billing` in a 1:1 chat with me."
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 
 #: The label each `PanelAction` wears on the Teams card, once emoji are stripped.
@@ -304,6 +305,7 @@ class TeamsDriver:
             admin_team_id=_ADMIN_TEAM if admins else None,
         )
         settings.crypto.keys = (SecretStr(self._fernet_key),)
+        settings.turn = turn_leg()  # the selected leg, a real TurnSettings
         settings.mcp.public_url = None if turn else "https://mcp.example.com/mcp"
         settings.mcp.jwt_secret = None if turn else SecretStr("x" * 32)
         settings.mcp.app_root_url = None
@@ -510,6 +512,8 @@ class TeamsDriver:
                 configuration_target_ma_agent_id=agent_id,
                 configuration_target_name=agent_name,
                 role=Role.ADMIN,
+                sender_foreign=False,
+                shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
                 chat_session_id="parity-card-session",
@@ -559,7 +563,15 @@ class TeamsDriver:
         task = await self._card_invoke(
             sessionmaker, router, "task/fetch", data, workspace_id, channel_id, user_id
         )
-        return None if task.get("type") == "continue" else str(task.get("value"))
+        if task.get("type") != "continue":
+            return str(task.get("value"))
+        # A refusal is a one-line dialog (Teams rejects a message answering the open);
+        # the form itself carries inputs or actions.
+        card = cast(dict[str, Any], task["value"]["card"]["content"])
+        body = cast(list[dict[str, Any]], card.get("body") or [])
+        if card.get("actions") or len(body) != 1 or body[0].get("type") != "TextBlock":
+            return None
+        return str(body[0]["text"])
 
     async def submit_private_input(
         self,

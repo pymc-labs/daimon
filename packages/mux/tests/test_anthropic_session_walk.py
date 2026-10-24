@@ -3,13 +3,13 @@
 import httpx
 import pytest
 from anthropic import NotFoundError
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions, SessionWalk
 from mux.errors import ProviderError, ScopeViolation
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"

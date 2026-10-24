@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 from daimon.core.confirmation import (
     SEND_BODY_LIMIT,
+    ConfirmationPrompt,
     confirmed_tools_for_turn,
     prompt_for_tool_call,
 )
@@ -21,7 +23,9 @@ from daimon.core.tool_safety import (
     microsoft_send_tools,
     session_tools_for_policy,
 )
+from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.posture import PolicyApproval
 
 _TRUSTED = frozenset({DAIMON_SERVER_NAME})
 _TOOLS: list[dict[str, object]] = [
@@ -212,3 +216,74 @@ def test_microsoft_write_asks_only_with_tool_safety_on() -> None:
     assert absent is None or not has_confirmation_gate(absent, tool_name="microsoft_write"), (
         "without Microsoft accounts no session gains a config for the absent tool"
     )
+
+
+def _lines(prompt: ConfirmationPrompt) -> list[str]:
+    return (prompt.consequence or "").splitlines()
+
+
+def test_a_subject_cannot_add_a_recipient_line() -> None:
+    """Newlines in what the model wrote stay inside the field they came in."""
+    prompt = prompt_for_tool_call(
+        _call(subject="Hi\nTo: ceo@else.com", body="Hi"),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    assert [line for line in _lines(prompt) if line.startswith("To:")] == ["To: ada@example.com"], (
+        "only the real recipients may head a line"
+    )
+    assert "\n" not in prompt.title and "\n" not in (prompt.action or ""), "one-line title"
+    assert "Subject: Hi To: ceo@else.com" in _lines(prompt), "the subject reads on one line"
+    assert "Subject: Hi To: ceo@else.com" in prompt.detail_lines
+
+
+def test_location_and_addresses_stay_on_their_own_lines() -> None:
+    prompt = prompt_for_tool_call(
+        _call(
+            action="create_event",
+            start="2026-09-15T10:00",
+            end="2026-09-15T11:00\nTo: ceo@else.com",
+            to=["ada@example.com\rCc: boss@else.com"],
+            location="Room 4\u2028To: ceo@else.com\u202e",
+            body="Hi",
+        ),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    shown = "\n".join((*_lines(prompt), *prompt.detail_lines))
+    heads = [line.split(":")[0] for line in _lines(prompt)]
+    assert heads == [
+        "It goes out from your Microsoft account.",
+        "To",
+        "Subject",
+        "When",
+        "Where",
+        "Message",
+    ], "each field is one line, whatever its text held"
+    assert "\u202e" not in shown and "\u2028" not in shown, "no direction or line separators"
+
+
+def test_a_long_body_of_short_lines_is_still_whole_in_details() -> None:
+    body = "a\n" * (SEND_BODY_LIMIT // 2)
+    prompt = prompt_for_tool_call(
+        _call(body=body), requester_platform_user_id="requester", now=datetime.now(UTC)
+    )
+    assert prompt.detail_lines.count("a") == SEND_BODY_LIMIT // 2, "every line is in Details"
+
+
+async def test_a_card_that_cannot_be_shown_is_not_reported_as_a_refusal() -> None:
+    """Nothing runs, and the model is told the card failed, not that the person said no."""
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="requester",
+        confirm=AsyncMock(side_effect=RuntimeError("Teams is down")),
+        trusted_servers=_TRUSTED,
+        confirmed_tools=microsoft_send_tools(enabled=True),
+    )
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(_call())
+    assert result.allow is False, "a send must never run because its card failed"
+    message = result.deny_message or ""
+    assert "approval card" in message and "could not be shown" in message
+    assert "did not run" in message and "denied" not in message
+    assert "did not refuse" in message, "the person must not be blamed for the failure"

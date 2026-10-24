@@ -44,13 +44,9 @@ from daimon.core.stores.turn_card_intents import (
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.protection import ConfirmedProtection, ProtectionState
 from daimon.core.turn_queue import TurnTicket
-from daimon.testing import (
-    DEFAULT_MODEL_ID,
-    ma_agent,
-    ma_environment,
-    ma_session,
-)
 from daimon.testing.factories import make_channel_budget
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_MODEL_ID, ma_session
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -2616,11 +2612,7 @@ class TestResolverSelfHeal:
         return the live id. Discord replies (no 'no longer exists' error)."""
         import httpx
         from daimon.core.ma_resolver import new_resolver_cache
-        from daimon.testing.ma import (
-            MARouter,
-            build_fake_anthropic,
-            list_response,
-        )
+        from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
@@ -2723,11 +2715,7 @@ class TestResolverSelfHeal:
         import httpx
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.ma_resolver import new_resolver_cache
-        from daimon.testing.ma import (
-            MARouter,
-            build_fake_anthropic,
-            list_response,
-        )
+        from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
         workspace_id = "123456"
         tenant = await make_tenant(db_session, platform="discord", workspace_id=workspace_id)

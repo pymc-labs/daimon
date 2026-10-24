@@ -32,8 +32,8 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
 _TEAM_ID = "T_RC"
 _USER_ID = "U_RC_CREATOR"
@@ -196,6 +196,7 @@ def _override_users_info_admin(mock: Any) -> None:
             "user": {
                 "id": _USER_ID,
                 "name": "admin",
+                "team_id": _TEAM_ID,
                 "is_admin": True,
                 "is_owner": False,
                 "is_primary_owner": False,
@@ -266,6 +267,8 @@ async def test_run_routines_create_when_admin_creates_row_with_creator_user_id(
     )
     texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
     assert any("✅ Routine created for" in t for t in texts)
+    assert any("every day at 18:00 UTC" in t for t in texts), "schedule is shown in words"
+    assert not any("0 18 * * *" in t for t in texts), "the raw cron is not echoed"
 
 
 @pytest.mark.asyncio

@@ -55,14 +55,14 @@ ArchiveRefusal = Literal[
 ]
 
 _REFUSALS: dict[ArchiveRefusal, str] = {
-    "admin_required": "Only a workspace or server admin can archive an agent.",
+    "admin_required": "Only an admin can archive an agent.",
     "not_found": "There is no agent by that name.",
     "ambiguous": "More than one agent has that name, or it changed: list the agents again.",
     "not_channel_copy": (
         "That agent wasn't made as a channel's own copy, so this tool doesn't archive it."
     ),
     "other_channel": "That agent was made for another channel.",
-    "default_agent": "That agent is a workspace or deployment default.",
+    "default_agent": "That agent is a default for everyone here, or for all of Daimon.",
     "has_rule": (
         "That agent still has a rule naming a channel. Name the channel being closed, or "
         "drop its rule first."

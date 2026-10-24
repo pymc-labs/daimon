@@ -364,7 +364,9 @@ async def _slack_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
     )
     try:
         channel = await _channel_info(bot_client, channel_id=channel_id)
-        await check_channel_access(bot_client, channel=channel, user_id=user_id)
+        await check_channel_access(
+            bot_client, channel=channel, user_id=user_id, is_client=auth.client
+        )
         read_policy.require(channel_id)
         return _withhold_sealed_threads(
             read_policy,
@@ -498,7 +500,9 @@ async def _slack_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
     )
     try:
         channel = await _channel_info(bot_client, channel_id=channel_id)
-        await check_channel_access(bot_client, channel=channel, user_id=user_id)
+        await check_channel_access(
+            bot_client, channel=channel, user_id=user_id, is_client=auth.client
+        )
         read_policy.require(f"{channel_id}:{thread_ts}", channel_id)
         result = await _fetch_thread_replies(
             bot_client,
@@ -604,7 +608,9 @@ async def _slack_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
     )
     try:
         channel = await _channel_info(bot_client, channel_id=channel_id)
-        await check_channel_access(bot_client, channel=channel, user_id=user_id)
+        await check_channel_access(
+            bot_client, channel=channel, user_id=user_id, is_client=auth.client
+        )
         read_policy.require(channel_id)
         return _require_thread_readable(
             read_policy,

@@ -15,6 +15,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import AdmissionDenied, admit, reauthorize
+from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_admission import (
@@ -37,6 +38,7 @@ async def _admit(db_session_factory, tmp_path: Path, tenant, *, role=Role.USER, 
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="member-1",
         channel_id="chan-1",
@@ -283,6 +285,7 @@ async def test_role_removed_after_admission_refuses_reauthorization(
         external_user_id="member-1",
         channel_id="chan-1",
         now=_NOW,
+        requester_org=RequesterOrg.HOST,
     )
     facts[0] = Membership(is_member=True)
     resolver.invalidate(tenant.id, tenant.external_id, "member-1")
@@ -325,6 +328,7 @@ async def test_concurrent_role_admissions_do_not_need_nested_pool_connections(
                     external_user_id=user,
                     channel_id="chan-1",
                     now=_NOW,
+                    requester_org=RequesterOrg.HOST,
                 )
                 for user in ("one", "two")
             )

@@ -15,16 +15,16 @@ from unittest.mock import Mock
 import httpx
 import pytest
 from daimon.testing import anthropic_live as live
-from daimon.testing.conformance.budget import BudgetConfig
-from daimon.testing.isolated_sdk import TLS_PROXY_ENV_VARS
-from daimon.testing.ma import send_events_response
-from daimon.testing.ma_models import ma_session
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import SessionSpec
 from mux.errors import ProviderError
+from mux.testing.conformance.budget import BudgetConfig
+from mux.testing.drivers.anthropic.ma import send_events_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.isolated_sdk import TLS_PROXY_ENV_VARS
 
-from packages.testing.tests.conformance.test_budget import receipts
-from packages.testing.tests.conformance.test_exact_spend import anthropic_session_guard
+from packages.mux.tests.testing.conformance.test_budget import receipts
+from packages.mux.tests.testing.conformance.test_exact_spend import anthropic_session_guard
 
 SCOPE = Scope(
     tenant_id="test-tenant",
@@ -356,8 +356,8 @@ async def test_real_f2_scripted_flow_uploads_default_skills_and_uses_ports(
     from pathlib import Path
 
     from daimon.testing.anthropic_live_cases import default_manifest, f2_default
-    from daimon.testing.ma import sse_response
     from mux.contracts.ids import ModelRef
+    from mux.testing.drivers.anthropic.ma import sse_response
 
     root = Path(__file__).resolve().parents[3]
     spec = importlib.util.spec_from_file_location(
@@ -569,7 +569,7 @@ async def test_create_only_acceptance_callback_reserves_and_retires_without_mode
 
 
 async def test_sse_monitor_triggers_interrupt_archive_before_another_session(tmp_path, monkeypatch):
-    from daimon.testing.ma import sse_response
+    from mux.testing.drivers.anthropic.ma import sse_response
 
     args, guard, _ = admission(tmp_path, monkeypatch)
     native = Native()
@@ -677,8 +677,8 @@ async def test_actual_a7_host_pair_uses_two_fresh_sessions_and_mux_journal(
     from daimon.testing import anthropic_live_cases as cases
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.factories import make_tenant
-    from daimon.testing.ma import sse_response
     from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma import sse_response
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -953,7 +953,7 @@ async def test_export_credential_refusal_preserves_settlement_and_no_secret(tmp_
 
 
 async def test_caught_stream_stop_cannot_start_a_second_leg_after_archive(tmp_path, monkeypatch):
-    from daimon.testing.ma import sse_response
+    from mux.testing.drivers.anthropic.ma import sse_response
 
     args, guard, _ = admission(tmp_path, monkeypatch)
     native = Native()
@@ -989,7 +989,7 @@ async def test_monitor_signal_cleans_up_a_catching_callback_and_preserves_overru
     tmp_path, monkeypatch
 ):
     from daimon.testing.anthropic_live_cases import collect_usage
-    from daimon.testing.ma import sse_response
+    from mux.testing.drivers.anthropic.ma import sse_response
 
     args, guard, _ = admission(tmp_path, monkeypatch)
     native = Native()
@@ -1072,8 +1072,8 @@ async def test_cancellation_resistant_callback_cannot_grow_inventory_or_mutate_a
 
 async def test_stream_and_final_walk_merge_each_native_request_once(tmp_path, monkeypatch):
     from daimon.testing.anthropic_live import merged_usage
-    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
     from mux.drivers.anthropic.usage import observation_from_event
+    from mux.testing.conformance.usage_settlement import AnthropicSessionSpend
 
     args, _, _ = admission(tmp_path, monkeypatch)
     native = Native()
@@ -1166,8 +1166,8 @@ async def test_sdk_decoded_fragmentation_never_bypasses_the_signed_stop(case, si
 async def test_fragmented_stream_conflicting_walk_and_failed_fetch_keep_verified_floor(
     tmp_path, monkeypatch, case
 ):
-    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
     from mux.drivers.anthropic.usage import observation_from_event
+    from mux.testing.conformance.usage_settlement import AnthropicSessionSpend
 
     args, guard, _ = admission(tmp_path, monkeypatch)
     native = Native()
@@ -1301,8 +1301,8 @@ async def test_late_inflight_create_ack_is_quarantined_and_retired_without_anoth
 async def test_conflicting_more_expensive_walk_cannot_erase_stream_input_limit_latch(
     tmp_path, monkeypatch
 ):
-    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
     from mux.drivers.anthropic.usage import observation_from_event
+    from mux.testing.conformance.usage_settlement import AnthropicSessionSpend
 
     args, guard, _ = admission(tmp_path, monkeypatch)
     native = Native()
@@ -1346,9 +1346,9 @@ async def test_conflicting_more_expensive_walk_cannot_erase_stream_input_limit_l
 async def test_cross_session_native_id_collision_quarantines_provenance_and_keeps_floor_and_latch(
     tmp_path, monkeypatch, collision_source
 ):
-    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
-    from daimon.testing.ma import sse_response
     from mux.drivers.anthropic.usage import observation_from_event
+    from mux.testing.conformance.usage_settlement import AnthropicSessionSpend
+    from mux.testing.drivers.anthropic.ma import sse_response
 
     args, guard, _ = admission(tmp_path, monkeypatch)
     native = Native()
@@ -1587,8 +1587,8 @@ async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_ent
     tmp_path, monkeypatch, arrival, package, credential=None, credential_format="plain"
 ):
     from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
-    from daimon.testing.ma import sse_response
-    from daimon.testing.ma_models import ma_model_usage
+    from mux.testing.drivers.anthropic.ma import sse_response
+    from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
     args, guard, _ = admission(tmp_path, monkeypatch, package)
     late_input = 1000000 if package == "A7" else 2000000
@@ -1769,8 +1769,8 @@ async def test_late_active_stream_usage_is_durable_and_blocks_both_admission_ent
 async def test_unknown_cache_ttl_original_keeps_the_pinned_guard_monetary_floor(
     tmp_path, monkeypatch
 ):
-    from daimon.testing.conformance.usage_settlement import AnthropicSessionSpend
     from mux.drivers.anthropic.usage import observation_from_event
+    from mux.testing.conformance.usage_settlement import AnthropicSessionSpend
 
     args, guard, _ = admission(tmp_path, monkeypatch)
     native = Native()
@@ -1967,8 +1967,8 @@ def test_real_a7_cache_write_counts_keep_unknown_ttl_and_use_conservative_monito
 ):
     from pathlib import Path
 
-    from daimon.testing.conformance.budget import TokenUsage
     from mux.drivers.anthropic.usage import observation_from_event
+    from mux.testing.conformance.budget import TokenUsage
 
     config = BudgetConfig.load(Path(__file__).parent / "fixtures/anthropic-live/host-config.json")
     provider = config.providers["anthropic"]
@@ -2003,7 +2003,7 @@ def test_real_a7_cache_write_counts_keep_unknown_ttl_and_use_conservative_monito
 def test_complete_ttl_split_keeps_exact_pricing_and_stale_price_stays_unknown():
     from pathlib import Path
 
-    from daimon.testing.conformance.budget import TokenUsage
+    from mux.testing.conformance.budget import TokenUsage
 
     price = (
         BudgetConfig.load(Path(__file__).parent / "fixtures/anthropic-live/host-config.json")
@@ -2069,7 +2069,7 @@ def test_unknown_ttl_does_not_accept_invalid_splits(invalid, tmp_path, monkeypat
     "suffix,method", [("events/stream", "GET"), ("events", "POST"), ("archive", "POST")]
 )
 def test_real_length_session_paths_have_audited_typed_receipt_metadata(suffix, method):
-    from daimon.testing.conformance.recording import Audit, RecordingError
+    from mux.testing.conformance.recording import Audit, RecordingError
 
     id_ = "sesn_" + "A" * 26
     path = f"/v1/sessions/{id_}/{suffix}"
@@ -2089,7 +2089,7 @@ def test_real_length_session_paths_have_audited_typed_receipt_metadata(suffix, m
 
 @pytest.mark.parametrize("id_", ["Bearer " + "synthetic-only-secret", "sk-" + "x" * 40])
 def test_typed_receipt_resource_identity_never_exempts_credentials(id_):
-    from daimon.testing.conformance.recording import Audit, RecordingError
+    from mux.testing.conformance.recording import Audit, RecordingError
 
     projected = live.request_metadata(
         [("GET", f"/v1/sessions/{id_}/events/stream")], frozenset({("session", id_)})
@@ -2099,7 +2099,7 @@ def test_typed_receipt_resource_identity_never_exempts_credentials(id_):
 
 
 def test_thread_stream_receipt_audits_identity_and_requires_accepted_parent():
-    from daimon.testing.conformance.recording import Audit, RecordingError
+    from mux.testing.conformance.recording import Audit, RecordingError
 
     id_ = "sesn_" + "A" * 26
     thread_id = "thread_" + "B" * 26
@@ -2130,7 +2130,7 @@ def test_thread_stream_receipt_audits_identity_and_requires_accepted_parent():
     ],
 )
 def test_receipt_metadata_refuses_unknown_routes_and_foreign_identities(method, path, resources):
-    from daimon.testing.conformance.recording import RecordingError
+    from mux.testing.conformance.recording import RecordingError
 
     if path == "/v1/sessions":
         assert live.request_metadata([(method, path)], resources)[0]["resource_id"] is None
@@ -2160,7 +2160,7 @@ def test_unknown_ttl_monitor_never_prices_missing_aggregate_counts(field, tmp_pa
 async def test_real_length_native_session_and_unknown_write_ttl_export_without_changing_hold(
     tmp_path, monkeypatch
 ):
-    from daimon.testing.ma import sse_response
+    from mux.testing.drivers.anthropic.ma import sse_response
 
     args, guard, _ = admission(tmp_path, monkeypatch)
     native = Native()
@@ -2327,8 +2327,8 @@ async def late_credential_probe(
 ):
 
     from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
-    from daimon.testing.ma import sse_response
-    from daimon.testing.ma_models import ma_model_usage
+    from mux.testing.drivers.anthropic.ma import sse_response
+    from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
     classification, canary = LATE_CREDENTIAL_ROLES[role]
     if id_fragments:

@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.platform_words import DESCRIPTIONS, WORDS
 from yarl import URL
 
 _MANIFEST = Path(__file__).resolve().parents[4] / "docs" / "slack-app-manifest.yaml"
@@ -46,6 +47,26 @@ def test_build_help_blocks_contains_all_commands_and_at_bot_entrypoint() -> None
         "build_help_blocks() must include the @bot configure-by-chat entrypoint "
         "(_CONVERSATIONAL constant from Discord help.py)"
     )
+
+
+def test_manifest_and_help_descriptions_equal_the_shared_table() -> None:
+    """Slack registers `/github`; the table's word for it is `/github connect`."""
+    manifest = cast(dict[str, Any], yaml.safe_load(_MANIFEST.read_text()))
+    registered = {
+        entry["command"]: entry["description"] for entry in manifest["features"]["slash_commands"]
+    }
+    expected = {
+        command.word.split()[0]: DESCRIPTIONS[action]
+        for action, command in WORDS["slack"].commands.items()
+    }
+    assert registered == expected, "the manifest says what the table says, on every command"
+
+    from daimon.adapters.slack.help import build_help_blocks
+
+    lines = build_help_blocks()[2]["text"]["text"].splitlines()
+    for action, command in WORDS["slack"].commands.items():
+        line = next(line for line in lines if line.startswith(command.word + " "))
+        assert line.removeprefix(command.word).strip() == DESCRIPTIONS[action]
 
 
 async def test_handle_help_command_posts_ephemeral_and_no_views_open(

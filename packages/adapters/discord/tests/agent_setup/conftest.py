@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
-from daimon.testing.ma import make_stub_anthropic, stub_anthropic  # noqa: F401
+from mux.testing.drivers.anthropic.ma import make_stub_anthropic, stub_anthropic  # noqa: F401
 
 
 @pytest.fixture

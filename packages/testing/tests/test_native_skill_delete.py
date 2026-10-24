@@ -41,10 +41,6 @@ from daimon.core.stores.neutral_catalog import (
 )
 from daimon.testing.admin_bindings import AdminBindings, AdminCommand
 from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
-from daimon.testing.isolated_sdk import build_async_openai
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.skill_delete_bindings import SkillDeleteAdminBindings
 from mux.contracts.ids import ModelRef, Scope, SkillRef
 from mux.contracts.ports import ManagedAgents
@@ -56,6 +52,10 @@ from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ScopeViolation
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
+from mux.testing.isolated_sdk import build_async_openai
 from openai import AsyncOpenAI
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -640,8 +640,8 @@ async def test_admin_delete_accepts_only_the_authored_literal_shape(
 
 
 async def test_anthropic_binding_only_observes_actual_sdk_and_scoped_references(case: Case) -> None:
-    from daimon.testing.ma import list_response
     from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma import list_response
 
     router = case.trace.router
     assert router is not None

@@ -319,7 +319,7 @@ async def handle(
     if action_id not in ACTIONS:
         return False
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
     async with runtime.sessionmaker.begin() as session:
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id

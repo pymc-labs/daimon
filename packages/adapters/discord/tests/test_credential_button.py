@@ -41,10 +41,10 @@ from daimon.core.stores.credential_requests import (
     peek_credential_request,
 )
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -663,7 +663,7 @@ async def test_callback_mcp_oauth_kind_refuses_the_click_when_the_deployment_has
     )
 
     text = interaction.followup.send.call_args.args[0]
-    assert "cannot sign you in" in text, "the person learns the operator must finish setup"
+    assert "isn't set up yet" in text, "the person learns the operator must finish setup"
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=token)
     assert spent is not None and spent.used_at is None, "the request survives for a later click"

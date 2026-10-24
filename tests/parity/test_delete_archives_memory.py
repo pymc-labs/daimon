@@ -20,7 +20,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.agent_memory_stores import get_memory_store_id, insert_memory_store
 from daimon.core.stores.domain import Platform
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     MARouter,
     build_fake_anthropic,

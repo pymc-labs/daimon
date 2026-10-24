@@ -11,6 +11,7 @@ from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTING = "daimon-testing"
+MUX_TESTING_PREFIX = "mux/testing/"
 HARNESS_PARTS = {
     "conformance",
     "backend_conformance",
@@ -29,7 +30,9 @@ def file_violation(member: str, *, testing: bool) -> str | None:
     path = PurePosixPath(member)
     if path.name.startswith("test_") and path.suffix == ".py" or path.name == "conftest.py":
         return "test module inside wheel package"
-    if testing:
+    if testing or member.startswith(MUX_TESTING_PREFIX):
+        # `mux.testing` is the test-double package that ships inside daimon-mux
+        # on purpose; import-linter keeps product modules from importing it.
         return None
     if any(
         PurePosixPath(part).stem in HARNESS_PARTS or part.startswith("conformance_")

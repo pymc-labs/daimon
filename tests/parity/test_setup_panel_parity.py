@@ -33,20 +33,21 @@ from daimon.adapters.teams.setup_card import PAGE_SIZE as TEAMS_PAGE_SIZE
 from daimon.core.agent_detail_lists import DETAIL_LIST_COLLAPSED_COUNT
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.platform_words import words_for
 from daimon.core.routing_facts import (
-    PRECEDENCE_LINE,
     UNROUTED_LINE,
     build_routing_request,
     build_unrouted_note,
+    precedence_line,
 )
 from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, shared_keys_sentence
 from daimon.core.stores.agent_files import put_agent_file
-from daimon.core.stores.domain import Platform
+from daimon.core.stores.domain import ChatPlatform, Platform
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing import ma_agent, tenant_metadata
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent, tenant_metadata
+from mux.testing.drivers.anthropic.ma import MARouter, list_response, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .drivers.protocol import PlatformDriver
@@ -82,7 +83,8 @@ _CHANNEL_LABEL: Final = "#here"
 #: How each sentence names the place the panel is in, per `_DIVERGENCES["channel"]`.
 _NOTE_LABEL: Final[Mapping[str, str | None]] = {"teams": None}
 _REQUEST_LABEL: Final[Mapping[str, str]] = {"teams": "a channel"}
-_HERE: Final[Mapping[str, str]] = {"teams": "Channel here"}
+#: Teams names a channel, never its id; the parity driver stores no channel names.
+_HERE: Final[Mapping[str, str]] = {"teams": "Channel name unavailable"}
 
 _ANSWERING = "answers-here"
 _BUILT_IN = "daimon"
@@ -120,6 +122,11 @@ _DETAILS_SECTIONS: Final[tuple[str, ...]] = (
 )
 
 
+# The provider picker rendered where channel backends are on. It is a control, not a Details
+# section, and Slack draws it outside `fields`; its label also starts with "Model".
+_BACKEND_PICKER: Final = "Model provider"
+
+
 def _section_headings(details: CapturedView) -> tuple[str, ...]:
     """The Details section headings, in the order the screen emitted them.
 
@@ -130,6 +137,7 @@ def _section_headings(details: CapturedView) -> tuple[str, ...]:
     return tuple(
         heading
         for text in details.fields
+        if not text.startswith(_BACKEND_PICKER)
         for heading in _DETAILS_SECTIONS
         if text.startswith(heading)
     )
@@ -307,7 +315,7 @@ async def test_roster_lists_the_same_agents_in_the_same_order_on_both_platforms(
         "Details",
         "Details",
         "Details",
-        f"Manage {_ANSWERING}",
+        f"Set up {_ANSWERING}",
         "New agent",
         "Who answers where",
         *(("GitHub",) if driver.param_id in ("discord", "slack") else ()),
@@ -377,7 +385,7 @@ async def test_empty_roster_shows_the_setup_copy_and_keeps_the_setup_action(
     assert view.rows == (EMPTY_ROSTER_COPY,), (
         f"{driver.param_id}: an empty roster says what to do next, and lists nothing else"
     )
-    assert "Manage agents" in view.action_labels, (
+    assert "Set up agents" in view.action_labels, (
         f"{driver.param_id}: setup stays available with no agent answering here"
     )
     assert view.page is None, f"{driver.param_id}: an empty roster needs no pager"
@@ -765,7 +773,8 @@ async def test_who_answers_where_states_the_precedence_and_the_routing_request(
     )
     label = _REQUEST_LABEL.get(driver.param_id, _CHANNEL_LABEL)
     request = build_routing_request(agent_name=_UNROUTED, channel_label=label)
-    assert routing.says(f"{PRECEDENCE_LINE} Tell Daimon: {request}"), (
+    rule = precedence_line(words_for(cast(ChatPlatform, driver.param_id)).space)
+    assert routing.says(f"{rule} Tell Daimon: {request}"), (
         f"{driver.param_id}: the map states the rule, then the request that acts on it"
     )
     here = _HERE.get(driver.param_id, _CHANNEL_LABEL)

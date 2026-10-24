@@ -25,6 +25,14 @@ from slack_sdk.http_retry.builtin_async_handlers import (
 )
 from slack_sdk.web.async_client import AsyncWebClient
 
+# Shown to the person through the model, so it names the cause and who can fix it,
+# never the operator setting (`DAIMON_CRYPTO__KEYS`).
+_NO_ENCRYPTION_KEY = (
+    "Slack tools are unavailable: this Daimon install has no encryption key yet, so it "
+    "can't read its Slack connection. Whoever runs this Daimon install must add an "
+    "encryption key."
+)
+
 
 def _require_slack_identity(auth: AuthIdentity) -> str:  # pyright: ignore[reportUnusedFunction]  # consumed by tools/slack/_read.py (Task 4)
     if auth.platform_user_id is None:
@@ -63,7 +71,7 @@ async def slack_web_client(runtime: McpRuntime, *, team_id: str) -> AsyncWebClie
     so no close/context-manager is needed.
     """
     if runtime.fernet is None:
-        raise ToolError("slack tools require DAIMON_CRYPTO__KEYS")
+        raise ToolError(_NO_ENCRYPTION_KEY)
     async with runtime.session_factory() as session:
         row = await get_slack_bot_token(session, team_id=team_id)
     if row is None:
@@ -100,7 +108,7 @@ async def slack_read_client(
     call rather than a proactive refresh — see ``map_slack_api_error``.
     """
     if runtime.fernet is None:
-        raise ToolError("slack tools require DAIMON_CRYPTO__KEYS")
+        raise ToolError(_NO_ENCRYPTION_KEY)
     async with runtime.session_factory() as session:
         user_row = await get_slack_user_token(session, team_id=team_id, slack_user_id=slack_user_id)
     if user_row is not None:

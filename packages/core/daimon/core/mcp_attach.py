@@ -63,8 +63,8 @@ class McpServerReplaceRefusedError(DaimonError):
 
     def __init__(self, *, server_name: str) -> None:
         super().__init__(
-            f"The agent already has an MCP server named '{server_name}' at a different URL. "
-            "Replacing it needs a server or workspace admin. Nothing was changed."
+            f"The agent already has a connection named '{server_name}' at a different address. "
+            "Replacing it needs an admin. Nothing was changed."
         )
         self.server_name = server_name
 
@@ -89,6 +89,7 @@ async def decide_mcp_replacement(
     agent: BetaManagedAgentsAgent,
     caller: AdminCaller,
     default: DeploymentDefault,
+    owned: bool = False,
 ) -> PolicyOutcome:
     """Attachment-family decision for replacing one of ``agent``'s MCP servers.
 
@@ -99,7 +100,9 @@ async def decide_mcp_replacement(
     answer depends on them.
     """
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    facts = TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
+    facts = TargetFacts(
+        is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False, owned_by_caller=owned
+    )
     if needs_reachability_read(
         "mcp_replace", is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
     ):
@@ -115,6 +118,7 @@ async def decide_mcp_replacement(
                 caller=caller,
                 is_daimon_managed=is_daimon_managed,
             )
+            facts = facts.model_copy(update={"owned_by_caller": owned or facts.owned_by_caller})
     return decide_operation("mcp_replace", is_admin=caller.is_server_admin, target=facts)
 
 
@@ -144,6 +148,7 @@ async def decide_mcp_connect(
     caller: AdminCaller,
     default: DeploymentDefault,
     shares_token: bool,
+    owned: bool = False,
 ) -> McpConnectDecision:
     """Decide connecting ``server_name`` at ``url`` to ``agent`` for this caller.
 
@@ -153,6 +158,8 @@ async def decide_mcp_connect(
     token for a URL the agent already uses or already has a token for. An
     OAuth grant lands only in the requester's own vault, so only the first
     applies to it. Pass
+    ``owned`` says the caller owns the agent, when the caller already knows it
+    (an authenticated MCP caller); otherwise it is read from ``caller``. Pass
     ``replace_allowed`` on to `attach_mcp_server_to_agent`, which re-checks
     the first against the fresh agent. Every connection checks mutation ownership,
     including connections using a new name.
@@ -187,6 +194,7 @@ async def decide_mcp_connect(
         agent=agent,
         caller=caller,
         default=default,
+        owned=owned,
     )
     return McpConnectDecision(
         replaces=replaces,

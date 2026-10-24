@@ -279,7 +279,7 @@ UNWALKED_NODES: Final[frozenset[str]] = frozenset(
 )
 
 #: The refusal detail for a coordinator, which delegates to other agents.
-COORDINATOR_DETAIL: Final[str] = "delegation to other agents (session.agent.multiagent)"
+COORDINATOR_DETAIL: Final[str] = "delegation to other agents"
 
 
 def _refuse(detail: str) -> NoReturn:
@@ -684,7 +684,7 @@ def require_allowed_capabilities(
     ):
         _unreviewed_value("session.agent.execution_identity.type")
     if agent.skills and not allow_skills:
-        _refuse("skills (session.agent.skills)")
+        _refuse("skills")
     _only(agent.model, _MODEL, "session.agent.model")
     for index, skill in enumerate(agent.skills):
         _only(skill, _SKILL, f"session.agent.skills.{index}")
@@ -692,10 +692,10 @@ def require_allowed_capabilities(
             _unreviewed_value(f"session.agent.skills.{index}.type")
     names = [server.name for server in agent.mcp_servers]
     if len(set(names)) != len(names):
-        _refuse("duplicate server names (session.agent.mcp_servers)")
-    for index, name in enumerate(names):
+        _refuse("duplicate connection names")
+    for name in names:
         if SERVER_SEPARATOR in name:
-            _refuse(f"a server name holding '/' (session.agent.mcp_servers.{index}.name)")
+            _refuse(f"a connection name containing '/': {name}")
     for index, server in enumerate(agent.mcp_servers):
         _only(server, _SERVER, f"session.agent.mcp_servers.{index}")
         if server.type != "url":
@@ -1018,7 +1018,7 @@ def capability_posture(
                 allow=False,
                 deny_message=(
                     f"Refused {call.tool_name}: built-in sandbox tools are off for this "
-                    "unattended turn. The tool call did not run."
+                    "unattended reply. The tool call did not run."
                 ),
             )
         if (
@@ -1029,7 +1029,7 @@ def capability_posture(
             return ToolConfirmationResult(
                 allow=False,
                 deny_message=(
-                    f"Refused {call.key}: this unattended turn may only use its listed "
+                    f"Refused {call.key}: this unattended reply may only use its listed "
                     "tools. The tool call did not run."
                 ),
             )

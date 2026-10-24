@@ -7,6 +7,7 @@ from typing import Literal
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     require_turn_origin,
@@ -44,7 +45,7 @@ async def remove_repo_impl(
     confirmed: bool = False,
 ) -> RemoveRepoResult:
     if auth.platform not in ("discord", "slack", "teams") or not auth.platform_user_id:
-        raise ToolError("GitHub setup needs a member of this Discord, Slack or Teams workspace.")
+        raise ToolError("GitHub setup needs a person in a chat.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     target_name = agent_name or origin.configuration_target_name or origin.responder_name
     target_id = expected_ma_agent_id
@@ -84,7 +85,7 @@ async def remove_repo_impl(
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         )
         if not manages:
-            raise ToolError("Ask a server admin.")
+            raise ToolError(f"Ask {admin_noun(auth.platform)}.")
         repo_id = await repo_id_for_agent_removal(
             session, tenant_id=auth.tenant_id, agent_id=agent_id, repo_name=requested
         )

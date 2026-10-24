@@ -16,23 +16,26 @@ from __future__ import annotations
 
 from typing import Final
 
+from daimon.core.platform_words import NEUTRAL_SPACE
 
-def build_set_default_note(*, agent_name: str, scope_label: str) -> str:
+
+def build_set_default_note(*, agent_name: str, scope_label: str, space: str = NEUTRAL_SPACE) -> str:
     """Routing truth shown after a default is set at ``scope_label``.
 
     States both facts: members reach ``agent_name`` only by @mentioning the
-    bot in the channel, and there is one bot user for the whole workspace —
-    not one per agent — so setting a default did not add a new bot member.
+    bot in the channel, and there is one bot user for the whole ``space`` (the
+    platform's word for it: server, workspace, organisation) — not one per
+    agent — so setting a default did not add a new bot member.
     """
     return (
         f"{agent_name} is now the default for {scope_label}. Members still "
         f"reach it only by @mentioning the bot in that channel — there is one "
-        f"bot for the whole workspace, not one bot per agent, so this did not "
-        f"add a new member to the server."
+        f"bot for the whole {space}, not one bot per agent, so this did not "
+        f"add a new member to the {space}."
     )
 
 
-def build_clear_default_note(*, scope_label: str, cleared: bool) -> str:
+def build_clear_default_note(*, scope_label: str, cleared: bool, space: str = NEUTRAL_SPACE) -> str:
     """Routing truth shown after a default is cleared at ``scope_label``.
 
     When ``cleared`` is False, ``scope_label`` had no default and nothing
@@ -43,14 +46,16 @@ def build_clear_default_note(*, scope_label: str, cleared: bool) -> str:
     if not cleared:
         return f"{scope_label} had no default agent to clear — nothing changed."
     return (
-        f"{scope_label} no longer has a default agent; resolution now falls "
-        f"through to the next tier. Whichever agent answers is still reached "
+        f"{scope_label} no longer has a default agent; it now falls "
+        f"back to the next default. Whichever agent answers is still reached "
         f"only by @mentioning the bot in that channel — there is one bot for "
-        f"the whole workspace, not one bot per agent."
+        f"the whole {space}, not one bot per agent."
     )
 
 
-def build_resolution_note(*, agent_name: str | None, tier: str | None, channel_id: str) -> str:
+def build_resolution_note(
+    *, agent_name: str | None, tier: str | None, channel_id: str, space: str = NEUTRAL_SPACE
+) -> str:
     """Explain which agent answers in ``channel_id`` and which tier decided it.
 
     The tier is the whole point: "daimon answers here" is not actionable, but
@@ -60,20 +65,20 @@ def build_resolution_note(*, agent_name: str | None, tier: str | None, channel_i
     if agent_name is None:
         return (
             f"No agent resolves for channel {channel_id} — the channel, the "
-            f"workspace, and the deployment default are all unset, so a mention "
+            f"{space}, and the Daimon-wide default are all unset, so a mention "
             f"there has nothing to answer it."
         )
     where = {
         "channel": f"this channel's own default (channel {channel_id})",
-        "tenant": "the workspace default, since this channel has none of its own",
+        "tenant": f"the {space} default, since this channel has none of its own",
         "deployment": (
-            "the deployment default, since neither this channel nor the workspace sets one"
+            f"the Daimon-wide default, since neither this channel nor the {space} sets one"
         ),
-    }.get(tier or "", "an unrecognised tier")
+    }.get(tier or "", "an unknown setting")
     return (
         f"{agent_name} answers in channel {channel_id}, from {where}. Members "
         f"reach it only by @mentioning the bot there — there is one bot for the "
-        f"whole workspace, not one bot per agent."
+        f"whole {space}, not one bot per agent."
     )
 
 
@@ -83,7 +88,11 @@ def build_resolution_note(*, agent_name: str | None, tier: str | None, channel_i
 # concrete request instead of the generic one.
 UNROUTED_LINE: Final = "Not answering in any channel yet."
 UNROUTED_NEXT_STEP: Final = "An admin can ask Daimon to make it answer in a channel."
-PRECEDENCE_LINE: Final = "A channel's own choice beats the workspace default."
+
+
+def precedence_line(space: str = NEUTRAL_SPACE) -> str:
+    """The tier order in one sentence, naming the platform's word for its space."""
+    return f"A channel's own choice beats the {space} default."
 
 
 def build_routing_request(*, agent_name: str, channel_label: str) -> str:

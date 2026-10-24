@@ -26,8 +26,10 @@ from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, Serve
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
+    ColdDmNotices,
     DirectMessageAccessRevoked,
     admit_cold_dm,
+    cold_dm_text,
     load_dm_access_policy,
     reply_to_dm_result,
     require_dm_delivery,
@@ -42,6 +44,7 @@ from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.setup_conversations import BoundAgentUnavailable
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.direct_messages import (
@@ -57,6 +60,7 @@ from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
+from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -110,13 +114,16 @@ class _PendingSelection:
 def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
     """Person-facing copy for a failure; an admission refusal is never shown as its code."""
     if isinstance(exc, AdmissionDenied):
-        return admission_refusal_message(exc.reason, settings, in_dm=True)
+        return admission_refusal_message(
+            exc.reason, settings, in_dm=True, cause=exc.cause, provider=exc.provider
+        )
     return str(exc) if isinstance(exc, DaimonError) else fallback
 
 
 class DirectMessageCog(commands.Cog):
     def __init__(self, bot: DaimonBot) -> None:
         self.bot = bot
+        self._cold_dm_notices = ColdDmNotices()
         self._unloaded = False
         self._locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
         self._pending: dict[tuple[int, int], _PendingSelection] = {}
@@ -264,6 +271,7 @@ class DirectMessageCog(commands.Cog):
             return None
         if not candidates:
             self._suppress(message, "no_eligible_tenant")
+            await self._explain_no_private_chat(message, dms_on=None)
             return None
         if len(candidates) == 1 and expected_scope_id is None:
             tenant, admission = candidates[0]
@@ -436,7 +444,7 @@ class DirectMessageCog(commands.Cog):
             self._switch_views[key] = view
         return view
 
-    @app_commands.command(name="dm-me", description="Continue privately (an admin turns it on)")
+    @app_commands.command(name="dm-me", description=DESCRIPTIONS["dm_me"])
     @app_commands.guild_only()
     @require_registered_guild
     async def dm(
@@ -502,6 +510,7 @@ class DirectMessageCog(commands.Cog):
             admission = await admit(
                 runtime.turn_deps,
                 tenant_id=tenant_id,
+                requester_org=RequesterOrg.HOST,
                 platform="discord",
                 external_user_id=str(member.id),
                 channel_id=source_channel_id,
@@ -585,6 +594,19 @@ class DirectMessageCog(commands.Cog):
                         user_id=str(message.author.id),
                         reason="discovery_unavailable",
                     )
+
+    async def _explain_no_private_chat(
+        self, message: discord.Message | _DmRequest, *, dms_on: bool | None
+    ) -> None:
+        """Answer a DM that has no conversation to continue, once per person per process."""
+        person = str(message.author.id)
+        if not self._cold_dm_notices.first_time(person):
+            return
+        try:
+            await message.channel.send(cold_dm_text("discord", dms_on=dms_on))
+        except discord.HTTPException as exc:
+            self._cold_dm_notices.forget(person)
+            log.warning("discord.dm.cold_notice_failed", error_type=type(exc).__name__)
 
     async def _reply(
         self, message: discord.Message | _DmRequest, *, expected_scope_id: str | None = None

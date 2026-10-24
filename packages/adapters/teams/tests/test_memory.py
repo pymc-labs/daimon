@@ -7,6 +7,7 @@ import json
 
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.memory import EMPTY, KEPT_INSIDE
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -14,7 +15,7 @@ from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     combine_handlers,
@@ -29,6 +30,7 @@ from .conftest import (
     TeamsApiFake,
     build_teams_runtime,
     make_channel_activity,
+    make_inbound,
     make_message_activity,
     post_activity,
     running_service,
@@ -113,13 +115,16 @@ async def test_memory_without_a_store_says_so(
 
 
 async def _chat_card(
-    db_factory: async_sessionmaker[AsyncSession], fake: TeamsApiFake, anthropic: AsyncAnthropic
+    db_factory: async_sessionmaker[AsyncSession],
+    fake: TeamsApiFake,
+    anthropic: AsyncAnthropic,
+    text: str = "memory",
 ) -> str:
-    """Send `memory` in a channel post; the JSON of the card only its sender sees there."""
+    """Send `text` in a channel post; the JSON of the card only its sender sees there."""
     async with running_service(
         build_teams_runtime(db_factory, anthropic=anthropic), fake
     ) as service:
-        await post_activity(service, make_channel_activity(text="memory"))
+        await post_activity(service, make_channel_activity(text=text))
         async with asyncio.timeout(10):
             while not (chat := fake.private_requests):
                 await asyncio.sleep(0.01)
@@ -273,3 +278,138 @@ async def test_a_long_forget_preview_shows_every_file_before_its_code(
         assert any(path in card for card in cards), f"{path} was not shown"
     assert code in cards[-1] and not any(code in card for card in cards[:-1])
     assert "truncated" not in "".join(cards)
+
+
+async def _share_channel_with_store(
+    db_factory: async_sessionmaker[AsyncSession], anthropic: AsyncAnthropic, files: dict[str, str]
+) -> None:
+    """Record the channel as shared and bind its own store holding `files`."""
+    from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+    from daimon.core.stores.agent_memory_stores import insert_channel_memory_store
+    from daimon.core.stores.shared_channels import mark_channel_shared
+
+    agent = await find_agent_by_daimon_tag(anthropic, tenant_id=TENANT, name="daimon")
+    assert agent is not None
+    store = await anthropic.beta.memory_stores.create(name="channel")
+    for path, content in files.items():
+        await anthropic.beta.memory_stores.memories.create(store.id, path=path, content=content)
+    async with db_factory.begin() as session:
+        await insert_channel_memory_store(
+            session,
+            tenant_id=TENANT,
+            agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=str(agent.id)),
+            platform="teams",
+            channel_id=CHANNEL_ID,
+            memory_store_id=store.id,
+        )
+        await mark_channel_shared(
+            session, tenant_id=TENANT, platform="teams", channel_id=CHANNEL_ID, source="platform"
+        )
+
+
+async def test_memory_in_a_shared_channel_shows_the_channel_store_not_the_agent_wide_one(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    anthropic = await _anthropic(db_session_factory, {"/wide.md": "internal"})
+    await _share_channel_with_store(db_session_factory, anthropic, {"/channel.md": "agreed here"})
+
+    card = await _chat_card(db_session_factory, teams_api_fake, anthropic)
+
+    assert "/channel.md" in card and "/wide.md" not in card
+
+
+async def test_personal_memory_commands_say_it_is_not_used_in_a_shared_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    anthropic = await _anthropic(db_session_factory, {"/wide.md": "internal"})
+    await _share_channel_with_store(db_session_factory, anthropic, {"/channel.md": "agreed here"})
+
+    card = await _chat_card(db_session_factory, teams_api_fake, anthropic, text="memory mine")
+
+    assert "Personal memory isn't used in this channel." in card
+
+
+async def _run_memory(
+    db_factory: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    inbound: TeamsInbound,
+    *,
+    args: str = "",
+    asked_in: TeamsInbound | None = None,
+) -> str:
+    """Run `memory` directly; everything it sends, as JSON."""
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.teams.commands import CommandContext
+    from daimon.adapters.teams.memory import show_memory
+
+    sent = AsyncMock()
+    await show_memory(
+        CommandContext(
+            inbound=inbound,
+            tenant_id=TENANT,
+            args=args,
+            is_admin=False,
+            runtime=build_teams_runtime(db_factory, anthropic=anthropic),
+            send=sent,
+            asked_in=asked_in,
+        )
+    )
+    return json.dumps([call.args[0].model_dump(by_alias=True) for call in sent.await_args_list])
+
+
+def _channel_asker(**changes: object) -> TeamsInbound:
+    import dataclasses
+
+    base = make_inbound("memory", conversation=CHANNEL_ID, kind="channel")
+    return dataclasses.replace(base, **changes)  # type: ignore[arg-type]
+
+
+async def _bind_channel_store(
+    db_factory: async_sessionmaker[AsyncSession], anthropic: AsyncAnthropic
+) -> None:
+    """A channel store for CHANNEL_ID, recorded nowhere as shared."""
+    from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+    from daimon.core.stores.agent_memory_stores import insert_channel_memory_store
+
+    agent = await find_agent_by_daimon_tag(anthropic, tenant_id=TENANT, name="daimon")
+    assert agent is not None
+    store = await anthropic.beta.memory_stores.create(name="channel")
+    await anthropic.beta.memory_stores.memories.create(
+        store.id, path="/channel.md", content="agreed here"
+    )
+    async with db_factory.begin() as session:
+        await insert_channel_memory_store(
+            session,
+            tenant_id=TENANT,
+            agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id=str(agent.id)),
+            platform="teams",
+            channel_id=CHANNEL_ID,
+            memory_store_id=store.id,
+        )
+
+
+async def test_memory_in_a_held_channel_is_never_carried_to_the_1_1_chat(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """When the private answer in the channel is refused the command is answered in
+    the sender's 1:1 chat: for a held channel that would carry its store out, host
+    member or not, so it says so instead."""
+    import dataclasses
+
+    from daimon.adapters.teams.memory import HELD_INSIDE
+    from daimon.core.stores.shared_channels import mark_channel_shared
+
+    anthropic = await _anthropic(db_session_factory, {"/wide.md": "internal"})
+    await _bind_channel_store(db_session_factory, anthropic)
+    async with db_session_factory.begin() as session:
+        await mark_channel_shared(
+            session, tenant_id=TENANT, platform="teams", channel_id=CHANNEL_ID, source="platform"
+        )
+    asked = _channel_asker()
+    chat = dataclasses.replace(asked, kind="dm", conversation_id="a:direct", channel_id="a:direct")
+
+    for args in ("", "/channel.md", "mine"):
+        sent = await _run_memory(db_session_factory, anthropic, chat, args=args, asked_in=asked)
+        assert json.dumps(HELD_INSIDE)[1:-1] in sent
+        assert "agreed here" not in sent and "internal" not in sent

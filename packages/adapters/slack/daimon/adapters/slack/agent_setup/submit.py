@@ -60,6 +60,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.rule_views import load_rule_viewer
+from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -268,6 +269,10 @@ async def run_new_agent_submission(
         account_id = derive_guild_account_uuid(tenant_id=tenant_id)
 
         try:
+            async with runtime.sessionmaker() as session, session.begin():
+                creator = await get_or_create_platform_principal(
+                    session, tenant_id=tenant_id, platform="slack", external_id=user_id
+                )
             outcome = await create_blank_agent(
                 runtime.anthropic,
                 tenant_id=tenant_id,
@@ -276,6 +281,8 @@ async def run_new_agent_submission(
                 model=model or DEFAULT_AGENT_MODEL,
                 account_id=account_id,
                 public_url=public_mcp_url(runtime),
+                sessionmaker=runtime.sessionmaker,
+                creator_account_id=creator.account_id,
             )
             if outcome.anthropic_id is None:
                 raise UserFacingError(
@@ -308,7 +315,7 @@ async def run_new_agent_submission(
         )
 
         async with runtime.sessionmaker() as session:
-            is_admin = await resolve_is_admin(web_client, user_id=user_id)
+            is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
             roster = await load_panel_roster(
                 session,
                 runtime.anthropic,

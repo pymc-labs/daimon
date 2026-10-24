@@ -1,12 +1,12 @@
 """Additive mount methods reject untrusted references before provider I/O."""
 
 import pytest
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import ResourceBinding
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.resources.sessions_admin import AnthropicSessionAdmin
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"

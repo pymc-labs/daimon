@@ -53,7 +53,7 @@ def build_hub_app(
         name=f"daimon-{platform}",
         auth=auth,
         instructions=(
-            f"Every daimon reachable here lives in a {platform.title()} workspace. "
+            "Every daimon reachable here belongs to a chat space. "
             "Call list_daimons first; every other tool takes a daimon_id from that list."
         ),
     )

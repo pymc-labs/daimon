@@ -1,6 +1,6 @@
 """Opt-in real Anthropic SDK adapter for the unchanged C01–C18 runner.
 
-This is a test adapter: the shared ScriptedTransport belongs to daimon.testing,
+This is a test adapter: the shared ScriptedTransport belongs to mux.testing,
 which production mux must never import. Native replies cross the actual SDK;
 only the N9 fixtures supply verdicts. No live keys, discovery or socket fallback.
 """
@@ -14,7 +14,13 @@ from dataclasses import asdict
 from types import MappingProxyType, TracebackType
 
 import httpx
-from daimon.testing.conformance.runner import (
+from mux.contracts.ids import ResourceRef, Revision, Scope
+from mux.contracts.resources import SessionSpec, SkillUpload
+from mux.drivers.anthropic import AnthropicManagedAgents
+from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
+from mux.state.memory import CrashPoint
+from mux.state.store import StateStore
+from mux.testing.conformance.runner import (
     Adapter,
     PendingKind,
     PendingReason,
@@ -23,14 +29,8 @@ from daimon.testing.conformance.runner import (
     SendEvidence,
     run,
 )
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
-from mux.contracts.ids import ResourceRef, Revision, Scope
-from mux.contracts.resources import SessionSpec, SkillUpload
-from mux.drivers.anthropic import AnthropicManagedAgents
-from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
-from mux.state.memory import CrashPoint
-from mux.state.store import StateStore
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 SCRIPTED_FIXTURES = frozenset({"C15", "C16"})
 PENDING: Mapping[str, PendingReason] = MappingProxyType(
@@ -53,7 +53,7 @@ PENDING: Mapping[str, PendingReason] = MappingProxyType(
         ),
         "C05": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
-            "Events.reconcile is unavailable; host paged journal/gap/root projection adapter absent",
+            "driver reconcile projects native state, but the host paged journal/gap/root projection adapter is absent",
         ),
         "C06": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,

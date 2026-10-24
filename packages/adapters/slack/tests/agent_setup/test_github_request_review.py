@@ -13,6 +13,7 @@ from daimon.adapters.mcp.tools.github_request_delivery import _slack_blocks
 from daimon.adapters.slack.agent_setup import github_requests as module
 from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.github_request_cards import RequestCard
+from daimon.core.stores.github_access import InstallationLimitError
 
 
 class _Sessions:
@@ -115,6 +116,29 @@ async def test_review_requires_card_ts_and_live_admin(monkeypatch: pytest.Monkey
     await module.handle_action(runtime, modal_payload)  # type: ignore[arg-type]
     client.views_update.assert_awaited_once()
     assert "unavailable" in str(client.views_update.await_args.kwargs["view"])
+
+    client.views_update.reset_mock()
+    monkeypatch.setattr(
+        module,
+        "find_platform_principal",
+        AsyncMock(return_value=SimpleNamespace(account_id=uuid.uuid4())),
+    )
+    monkeypatch.setattr(module, "get_delivery", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        module,
+        "approve_connected_request",
+        AsyncMock(
+            side_effect=InstallationLimitError(
+                "Helper already uses repos from 12 GitHub accounts or orgs, "
+                "the most one agent can hold. Remove one first."
+            )
+        ),
+    )
+    modal_payload["view"]["private_metadata"] = json.dumps(  # type: ignore[index]
+        {"request_id": str(request_id), "channel_id": "C1", "message_id": "123.456"}
+    )
+    await module.handle_action(runtime, modal_payload)  # type: ignore[arg-type]
+    assert "Remove one first." in str(client.views_update.await_args.kwargs["view"])
 
 
 @pytest.mark.asyncio

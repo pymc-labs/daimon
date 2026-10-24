@@ -41,9 +41,9 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -67,6 +67,7 @@ def _users_info_payload(*, is_admin: bool) -> dict[str, Any]:
         "user": {
             "id": _USER_ID,
             "name": "admin" if is_admin else "member",
+            "team_id": _TEAM_ID,
             "is_admin": is_admin,
             "is_owner": False,
             "is_primary_owner": False,

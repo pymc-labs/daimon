@@ -205,9 +205,9 @@ async def test_deleted_delivery_fences_a_delayed_repository_snapshot(
 
 
 async def test_delete_and_snapshot_completion_serialize_without_restoring_cache(
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
 ) -> None:
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     now = datetime.now(UTC)
     owner = uuid.uuid4()
     async with sessions.begin() as session:
@@ -272,6 +272,83 @@ async def test_delete_and_snapshot_completion_serialize_without_restoring_cache(
     assert installation is None, "a deletion must not leave a completed snapshot in cache"
     assert current_job is not None and current_job.generation == 2
     assert current_job.state == "pending"
+
+
+async def test_confirmation_and_reconcile_same_installation_complete_without_deadlock(
+    db_nullpool_engine: AsyncEngine,
+) -> None:
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    installation_id = 8813
+    now = datetime.now(UTC)
+    owner = uuid.uuid4()
+    async with sessions.begin() as session:
+        await installation_store.upsert_github_app(
+            session,
+            installation_id=installation_id,
+            account_id=55,
+            account_login="owner",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+        assert await store.enqueue(
+            session,
+            installation_id=installation_id,
+            delivery_id="before-confirmation",
+            event="installation",
+            deleted=False,
+            now=now,
+        )
+    async with sessions.begin() as session:
+        job = await store.claim_due(
+            session, lease_owner=owner, lease_for=timedelta(minutes=1), now=now
+        )
+    assert job is not None
+    installation_locked, worker_started = asyncio.Event(), asyncio.Event()
+
+    async def confirm() -> None:
+        async with sessions.begin() as session:
+            await installation_store.upsert_github_app(
+                session,
+                installation_id=installation_id,
+                account_id=55,
+                account_login="owner",
+                account_type="Organization",
+                repository_selection="selected",
+                suspended_at=None,
+            )
+            installation_locked.set()
+            await worker_started.wait()
+            await asyncio.sleep(0.05)
+            assert await store.enqueue(
+                session,
+                installation_id=installation_id,
+                delivery_id="during-confirmation",
+                event="connect",
+                deleted=False,
+                now=now + timedelta(seconds=1),
+            )
+
+    async def reconcile() -> bool:
+        await installation_locked.wait()
+        async with sessions.begin() as session:
+            worker_started.set()
+            return await store.finish(
+                session,
+                job=job,
+                lease_owner=owner,
+                account_login="owner",
+                repos=["owner/repo"],
+                now=now + timedelta(seconds=2),
+            )
+
+    confirmed, finished = await asyncio.wait_for(asyncio.gather(confirm(), reconcile()), timeout=10)
+    assert confirmed is None and not finished
+    async with sessions() as session:
+        current = await store.get(session, installation_id=installation_id)
+        installation = await installation_store.get(session, installation_id=installation_id)
+    assert current is not None and current.generation == 2 and current.state == "pending"
+    assert installation is not None and installation.app == "github_app"
 
 
 async def test_enqueue_never_refreshed_only_queues_idle_unrefreshed_live_installations(

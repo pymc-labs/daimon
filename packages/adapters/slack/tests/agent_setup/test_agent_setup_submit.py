@@ -37,8 +37,8 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -246,6 +246,17 @@ def _build_runtime_with_db(
     )
 
 
+async def _workspace(db_session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """The workspace's tenant row: the person who presses New agent becomes its owner."""
+    async with db_session_factory.begin() as session:
+        await make_tenant(
+            session,
+            platform="slack",
+            workspace_id=_TEAM_ID,
+            id=derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID),
+        )
+
+
 def _ephemeral_texts(client_fake: Any) -> list[str]:
     ephemeral_key = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
     return [
@@ -270,6 +281,7 @@ async def test_run_new_agent_when_member_creates_confirms_and_refreshes_root_pag
 ) -> None:
     """Creation stays open, while unrouted details stay out of the member roster."""
     client_fake: Any = fake_slack_web_client
+    await _workspace(db_session_factory)
     runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
 
     await run_new_agent_submission(
@@ -311,6 +323,7 @@ async def test_run_new_agent_when_member_details_carries_admin_routing_sentence(
     member is asking an admin rather than a control they do not have.
     """
     client_fake: Any = fake_slack_web_client
+    await _workspace(db_session_factory)
     runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
 
     await run_new_agent_submission(
@@ -384,6 +397,7 @@ async def test_run_new_agent_when_name_collides_restores_form_with_inputs_and_ba
     purpose they already wrote is the kind of loss this panel exists to avoid.
     """
     client_fake: Any = fake_slack_web_client
+    await _workspace(db_session_factory)
     runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
 
     common: dict[str, Any] = {
@@ -422,6 +436,7 @@ async def test_run_new_agent_never_consults_admission(
     balance can stop someone creating an agent and reading its Details.
     """
     client_fake: Any = fake_slack_web_client
+    await _workspace(db_session_factory)
     paths: list[str] = []
     base = make_fake_ma_handler()
 
@@ -471,6 +486,7 @@ async def test_run_new_agent_queues_its_face_once_it_exists(
         lambda _factory, *, tenant_id, agent_name, **_: queued.append((tenant_id, agent_name)),
     )
     client_fake: Any = fake_slack_web_client
+    await _workspace(db_session_factory)
     runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
     common: dict[str, Any] = {
         "team_id": _TEAM_ID,
@@ -497,6 +513,7 @@ async def test_run_new_agent_when_the_provider_fails_shows_plain_lines_not_its_b
 ) -> None:
     """A provider body (URLs, tokens, long JSON) never reaches the form banner."""
     client_fake: Any = fake_slack_web_client
+    await _workspace(db_session_factory)
     runtime = _build_runtime_with_db(db_session_factory, fernet_key=Fernet.generate_key().decode())
     leak = "https://api.internal.example/v1?access_token=sk-ant-private-0000 " + "x" * 4000
     provider_error = anthropic.APIStatusError(

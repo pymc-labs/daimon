@@ -10,7 +10,7 @@ from daimon.adapters.cli.commands.memory import memory_list_impl, memory_show_im
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     combine_handlers,

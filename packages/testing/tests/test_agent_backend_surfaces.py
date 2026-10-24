@@ -54,12 +54,12 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_tenant,
 )
-from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import BaseModel
 from rich.console import Console
 from slack_sdk.errors import SlackApiError
@@ -80,9 +80,10 @@ class Preview(BaseModel):
     unsupported_mcps: tuple[str, ...] = ("private connector",)
     unsupported_capabilities: tuple[str, ...] = ("native schedules",)
     shared_thread_limits: tuple[str, ...] = ("per caller only",)
-    cost_line: str = "List price: unknown. Worst-case per turn: unknown."
+    cost_line: str = "List price: unknown. Worst case per reply: unknown."
     allowed: bool = True
     digest: str = "d" * 64
+    target_model: str | None = None
     # Mirrors `_BackendConsentFacts` on the real `CompatibilityPreview`: no
     # drops are declared in these stubs, so the CLI's drop-consent gate reads
     # the same "nothing to accept" shape it reads from the real preview.
@@ -141,20 +142,34 @@ def seam(monkeypatch):
     )
     service = SimpleNamespace(enabled=True, _sessions=factory)
     service.preview = AsyncMock(
-        side_effect=lambda actual, target: Preview(target_backend=target or DEFAULT_BACKEND)
+        side_effect=lambda actual, target, model=None, settings=None: Preview(
+            target_backend=target or DEFAULT_BACKEND
+        )
     )
     service.current = AsyncMock(return_value=None)
+    # The owner-or-admin read; this fake has no owners, so admins only.
+    service.may_edit = AsyncMock(side_effect=lambda actual, actor: actor.subject.is_admin)
     service.tenant_policy = AsyncMock(
         return_value=SimpleNamespace(enabled_backends=("anthropic", "openai"))
     )
     service.read_selection = cb.AgentBackendService.read_selection.__get__(service)
     service.refused = None
 
-    async def change(actual, target, local, actor, *, expected_preview_digest):
+    async def change(
+        actual,
+        target,
+        local,
+        actor,
+        *,
+        expected_preview_digest,
+        model=None,
+        settings=None,
+        accepted_drops=None,
+    ):
         calls.append((actual, target, local, actor, expected_preview_digest))
         if service.refused:
             raise Refused(service.refused)
-        return SimpleNamespace(backend=target, local=local + 1)
+        return SimpleNamespace(backend=target, local=local + 1, model=model)
 
     async def clear(actual, local, actor, *, expected_preview_digest):
         return await change(
@@ -281,7 +296,7 @@ async def test_flag_off_panels_and_mcp_registration_do_not_expose_backend_contro
     seam.settings.turn = TurnSettings(path=path, channel_backends=enabled)
     view = discord_view(seam)
     assert not any(
-        isinstance(item, discord.ui.Select) and item.placeholder == "Model backend"
+        isinstance(item, discord.ui.Select) and item.placeholder == "Model provider"
         for item in view.walk_children()
     )
     mcp = FastMCP()
@@ -327,7 +342,11 @@ async def test_direct_mcp_refuses_untrusted_admin_evidence_before_lookup(seam, a
     )
     with pytest.raises(ToolError):
         await mcp_agents._set_agent_backend_impl(seam.runtime, auth, "analyst", backend="openai")
-    seam.loader.assert_not_awaited()
+    if agent_key:
+        seam.loader.assert_not_awaited()
+    else:
+        # Whether a member owns the agent is known only once it is resolved.
+        seam.service.preview.assert_not_awaited()
     assert seam.calls == []
 
 
@@ -412,7 +431,7 @@ async def test_discord_preview_renders_all_shared_facts(seam):
         "native schedules",
         "per caller only",
         "List price",
-        "Worst-case",
+        "Worst case",
     ):
         assert fact in text
 
@@ -548,9 +567,9 @@ def test_slack_teams_unconfigured_renderers_keep_backend_control_absent():
         channel_id="C1",
         attribution=None,
     )
-    teams = tc.details_card(details(), here="chat", page=0, coding_tools=False)
-    assert "Model backend" not in json.dumps(slack)
-    assert "Model backend" not in teams.model_dump_json()
+    teams = tc.details_card(details(), here="chat", page=0, coding_tools=False, is_admin=True)
+    assert "Model provider" not in json.dumps(slack)
+    assert "Model provider" not in teams.model_dump_json()
 
 
 @pytest.fixture
@@ -659,7 +678,7 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
             # chat Confirm card is for), so a target that needs declared drops
             # always refuses here -- never a silent drop, never a guessed
             # accept.
-            with pytest.raises(ToolError, match="drops required"):
+            with pytest.raises(ToolError, match="drops_required"):
                 await mcp_agents._set_agent_backend_impl(
                     rt, auth, "analyst", backend=backend, expected_revision=0
                 )
@@ -783,7 +802,7 @@ async def test_changed_actual_sdk_agent_refuses_direct_write_without_audit(persi
         # Anthropic (same profile as the source): no drops are declared, so
         # this exercises the digest-staleness refusal alone, independent of
         # the drop-consent gate exercised elsewhere.
-        with pytest.raises(ToolError, match="stale preview"):
+        with pytest.raises(ToolError, match="stale_preview"):
             await mcp_agents._set_agent_backend_impl(
                 runtime(persisted, client), auth, "analyst", backend="anthropic"
             )
@@ -879,7 +898,7 @@ async def test_large_preview_lists_keep_cost_and_thread_limits_visible(seam):
         assert "truncated" in text
         assert "List price: unknown" in text
         assert "per caller only" in text
-        assert "Existing threads keep their backend" in text
+        assert "Existing threads keep their provider" in text
 
 
 async def test_missing_actual_sdk_agent_is_a_typed_mcp_refusal(persisted):
@@ -892,7 +911,7 @@ async def test_missing_actual_sdk_agent_is_a_typed_mcp_refusal(persisted):
             role=Role.ADMIN,
             is_admin=True,
         )
-        with pytest.raises(ToolError, match="agent not found"):
+        with pytest.raises(ToolError, match="agent_not_found"):
             await mcp_agents._set_agent_backend_impl(
                 runtime(persisted, client), auth, "missing", backend="openai"
             )
@@ -942,8 +961,9 @@ print(json.dumps({"groups": [name for name in command.list_commands(context)
     return json.loads(result.stdout)
 
 
+# Unset now means on (the default); each case here is an operator stop.
 @pytest.mark.parametrize(
-    "path,enabled", [(None, None), ("legacy", "false"), ("mux", "false"), ("legacy", "true")]
+    "path,enabled", [("legacy", "false"), ("mux", "false"), ("legacy", "true")]
 )
 def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path, enabled):
     actual = cli_registration_probe(tmp_path, path=path, enabled=enabled)
@@ -953,14 +973,22 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
         (Path(__file__).parent / "data/agent_backend_cli_legacy_help.json").read_text()
     )
     assert actual["exit"] == actual["root_exit"] == 0
-    assert actual["groups"] == ["rule", "tool-rules"]
+    assert actual["groups"] == ["rule", "owner", "tool-rules"]
     # This checks that enabling the backend feature does not alter the
-    # pre-existing CLI surface. The tool-rules command is independently added.
-    tool_rule_lines = [
-        line for line in actual["help"].splitlines(keepends=True) if "│ tool-rules " in line
+    # pre-existing CLI surface. The tool-rules and owner commands are
+    # independently added.
+    added_lines = [
+        line
+        for line in actual["help"].splitlines(keepends=True)
+        if "│ tool-rules " in line or "│ owner " in line
     ]
-    assert len(tool_rule_lines) == 1
-    assert actual["help"].replace(tool_rule_lines[0], "") == reference["stdout"]
+    assert len(added_lines) == 2
+    assert (
+        "".join(
+            line for line in actual["help"].splitlines(keepends=True) if line not in added_lines
+        )
+        == reference["stdout"]
+    )
     assert actual["backend_exit"] == 2
     assert [
         line.strip("│ ")
@@ -974,7 +1002,7 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
 def test_enabled_cli_registers_backend_set_clear_once(tmp_path):
     actual = cli_registration_probe(tmp_path, path="mux", enabled="true")
     assert actual["exit"] == actual["root_exit"] == actual["backend_exit"] == 0
-    assert actual["groups"] == ["rule", "backend", "tool-rules"]
+    assert actual["groups"] == ["rule", "backend", "owner", "tool-rules"]
     assert "backend" in actual["help"] and "backend" in actual["root_help"]
     assert "set" in actual["backend_help"] and "clear" in actual["backend_help"]
 
@@ -1057,7 +1085,7 @@ async def test_discord_stale_selection_refuses_without_losing_details(seam):
     view.swap_to = AsyncMock()
     await view._on_backend_select(event, select=selected)
     event.followup.send.assert_awaited_once()
-    assert "unavailable" in event.followup.send.await_args.args[0]
+    assert "isn't available" in event.followup.send.await_args.args[0]
     view.swap_to.assert_not_awaited()
     assert seam.calls == []
 
@@ -1079,7 +1107,7 @@ async def test_slack_stale_selection_refuses_without_mutating_or_replacing_modal
     )
     client.views_update.assert_not_awaited()
     sa.post_ephemeral.assert_awaited_once()
-    assert "unavailable" in sa.post_ephemeral.await_args.kwargs["text"]
+    assert "isn't available" in sa.post_ephemeral.await_args.kwargs["text"]
     assert seam.calls == []
 
 
@@ -1097,7 +1125,7 @@ async def test_teams_stale_selection_returns_toast_without_mutation(seam, monkey
         )
     )
     response = await tp.SetupPanel(seam.runtime)._act(ctx)
-    assert "unavailable" in str(response)
+    assert "isn't available" in str(response)
     assert seam.calls == []
 
 

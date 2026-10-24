@@ -20,8 +20,9 @@ from daimon.core.turn.unattended import (
     protected_tools,
     unattended_posture,
 )
-from daimon.testing import ma_agent, ma_session
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body
+from daimon.testing import ma_agent
+from daimon.testing.ma import MARouter
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, json_body, ma_session
 
 _LINEAR = {
     "type": "mcp_toolset",

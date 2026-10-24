@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
@@ -21,17 +22,19 @@ from daimon.core._models import ThreadSession
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.mcp_tokens import get_mcp_token, list_mcp_tokens
+from daimon.core.stores.platform_names import upsert_channel_names
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.thread_agent_bindings import list_active_bindings
-from daimon.testing import build_fake_anthropic, ma_agent
-from daimon.testing.ma import FakeMAState, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -47,6 +50,7 @@ from .conftest import (
     make_card_action,
     make_invoke,
     make_message_activity,
+    notice_text,
     patched_turns,
     post_activity,
     running_service,
@@ -134,7 +138,10 @@ async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
             agent_name="analyst",
             mode="agent",
         )
-    async with _running(db_session_factory, teams_api_fake) as (service, _):
+    async with _running(db_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as (
+        service,
+        _,
+    ):
         details = await post_activity(service, _click("details", agent="analyst"))
         routing = await post_activity(service, _click("routing"))
         gone = await post_activity(service, _click("details", agent="deleted-one"))
@@ -143,6 +150,61 @@ async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
     assert "Model:" in json.dumps(details) and "Use from your coding tools" in json.dumps(details)
     assert "Organisation default" in json.dumps(routing)
     assert setup_panel.GONE in json.dumps(gone), "the roster returns with a notice"
+
+
+async def test_details_offers_a_member_no_coding_tools_button_that_could_only_refuse(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=TENANT, channel_id=CONVERSATION_ID),
+            tenant_id=TENANT,
+            agent_name="analyst",
+            mode="agent",
+        )
+    async with _running(db_session_factory, teams_api_fake) as (service, _):
+        details = json.dumps(await post_activity(service, _click("details", agent="analyst")))
+
+    assert "Model:" in details, "the member still reads the agent"
+    assert "Use from your coding tools" not in details
+    assert "Coding-tool access isn't set up" not in details
+    assert "Set up " in details, "the way to ask for a change stays"
+
+
+async def test_routing_and_details_name_channels_from_the_stored_names_not_their_ids(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Who answers where and Details say `Research` or a neutral label, never the Teams id."""
+    named, unnamed = "19:research@thread.tacv2", "19:unseen@thread.tacv2"
+    async with db_session_factory.begin() as session:
+        await upsert_channel_names(
+            session, tenant_id=TENANT, platform="teams", names={named: "Research"}
+        )
+        for channel, agent in ((named, "analyst"), (unnamed, "analyst")):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
+                tenant_id=TENANT,
+                agent_name=agent,
+                mode="agent",
+                environment_name="lobby-env",
+            )
+    async with _running(db_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as (
+        service,
+        _,
+    ):
+        routing = json.dumps(await post_activity(service, _click("routing")), ensure_ascii=False)
+        details = json.dumps(
+            await post_activity(service, _click("details", agent="analyst")), ensure_ascii=False
+        )
+
+    assert "Research → **analyst**" in routing and "Research → **lobby-env**" in routing
+    assert "Channel name unavailable → **analyst**" in routing, "no stored name: a neutral label"
+    answers_in = details.partition("**Answers in:** ")[2].partition('"')[0]
+    assert sorted(answers_in.split(", ")) == ["Channel name unavailable", "Research"]
+    for card in (routing, details):
+        assert "19:" not in card, "no Teams conversation id"
 
 
 @pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
@@ -175,6 +237,47 @@ async def test_routing_hides_an_isolated_channels_environment_from_outside(
 
     assert "lobby-env" in routing, "an open channel's environment is listed"
     assert ("vault-env" in routing) is admin, "the isolated channel's shows only to an admin"
+
+
+@pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
+async def test_details_hides_an_isolated_channels_name_from_a_member(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    admin: bool,
+) -> None:
+    """Answers in follows Who answers where: a member never learns an isolated
+    channel's name, or that the agent answers there; an admin sees it."""
+    isolated, open_channel = "19:vault@thread.tacv2", "19:lobby@thread.tacv2"
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(isolated,), isolated_channel_ids=(isolated,)
+            ),
+        )
+        await upsert_channel_names(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            names={isolated: "Secret Vault", open_channel: "Lobby"},
+        )
+        for channel in (CONVERSATION_ID, isolated, open_channel):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
+                tenant_id=TENANT,
+                agent_name="analyst",
+                mode="agent",
+            )
+    admins = (AAD_OBJECT_ID,) if admin else ()
+    async with _running(db_session_factory, teams_api_fake, admins=admins) as (service, _):
+        details = json.dumps(
+            await post_activity(service, _click("details", agent="analyst")), ensure_ascii=False
+        )
+
+    assert "Lobby" in details, "an open channel's name is listed"
+    assert ("Secret Vault" in details) is admin, "the isolated channel's shows only to an admin"
 
 
 @pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
@@ -223,6 +326,9 @@ async def test_manage_switches_the_chat_into_setup_until_new_ends_it(
     assert binding.configuration_target_ma_agent_id == ANALYST_ID
     assert binding.thread_id.startswith(f"{CONVERSATION_ID};setup=")
     assert setup_thread_name("analyst") in json.dumps(teams_api_fake.activity_requests[0].body)
+    opener = json.dumps(teams_api_fake.activity_requests[0].body)
+    assert "This chat is about analyst." in opener, "a 1:1 chat has no threads"
+    assert "This thread" not in opener
     origins = [t["user_message"].replace(" ", "") for t in turns]
     assert ['"is_setup":true' in o for o in origins] == [True, False], "setup, then the usual"
     assert after == [], "new ends the setup conversation"
@@ -298,7 +404,7 @@ async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
             mine = await post_activity(service, _dialog("submit", revoke))
             again = await post_activity(service, _dialog("submit", revoke))
 
-    assert refused["task"]["value"] == setup_panel.NEEDS_ADMIN.format(name="analyst")
+    assert notice_text(refused) == setup_panel.NEEDS_ADMIN.format(name="analyst")
     assert minted["task"]["type"] == "continue" and "claude mcp add" in card
     token = card.split("Bearer ")[1].split("\\")[0]
     assert token not in json.dumps(logs, default=str), "the token value is never logged"
@@ -323,6 +429,32 @@ async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
 PINNED, ELSEWHERE = "19:pinned@thread.tacv2", "19:elsewhere@thread.tacv2"
 
 
+async def test_a_member_opening_the_operator_dialog_is_refused_as_a_one_line_dialog(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    fetch = {"dialog_id": setup_card.OPERATOR_DIALOG}
+    async with _running(db_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as (service, _):
+        refused = await post_activity(service, _dialog("fetch", fetch, user=OTHER_AAD_OBJECT_ID))
+
+    assert notice_text(refused) == setup_panel.OPERATOR_NEEDS_ADMIN
+
+
+@pytest.mark.parametrize(
+    "dialog_id", [setup_card.TOKEN_DIALOG, setup_card.OPERATOR_DIALOG, setup_card.SKILL_DIALOG]
+)
+async def test_a_failure_opening_a_dialog_answers_as_a_one_line_dialog(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    dialog_id: str,
+) -> None:
+    boom = AsyncMock(side_effect=DaimonError("boom"))
+    async with _running(db_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as (service, _):
+        with patch.object(setup_panel, "card_actor", boom):
+            failed = await post_activity(service, _dialog("fetch", {"dialog_id": dialog_id}))
+
+    assert notice_text(failed) == setup_panel.FAILED
+
+
 async def test_an_admin_mints_lists_and_revokes_operator_tokens_and_a_member_cannot(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
@@ -339,7 +471,9 @@ async def test_an_admin_mints_lists_and_revokes_operator_tokens_and_a_member_can
         revoked = await post_activity(service, _dialog("submit", revoke))
 
     assert refused["task"]["value"] == setup_panel.OPERATOR_NEEDS_ADMIN
-    assert "mint-operator-token" in json.dumps(forged), "the deployment scope stays with the CLI"
+    assert "can't be granted from here" in json.dumps(forged), (
+        "the deployment scope stays with the operator"
+    )
     assert "Shown once" in json.dumps(minted) and row.kind == "operator"
     assert set(row.scopes) == {"tenant:read", "promo:redeem"}
     listed = json.dumps(listing)

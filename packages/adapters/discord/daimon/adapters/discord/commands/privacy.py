@@ -23,6 +23,7 @@ from daimon.adapters.discord.privacy_panel.panel import PrivacyPanelView
 from daimon.adapters.discord.privacy_panel.read import resolve_privacy_account
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
+from daimon.core.platform_words import DESCRIPTIONS
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -44,23 +45,10 @@ class PrivacyCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         super().__init__()
         self.bot: commands.Bot = bot
-        # The slash-command description is Discord API metadata registered once at
-        # cog-init time (before tree.sync()) — not re-rendered per invocation like the
-        # panel body, so the operator-configured name is read here instead of at
-        # call-time.
-        runtime = cast(DiscordRuntime, bot.runtime)  # type: ignore[attr-defined]  # DaimonBot.runtime not on Bot type
-        bot_display_name = (
-            runtime.settings.discord.bot_display_name
-            if runtime.settings.discord is not None
-            else "daimon"
-        )
-        self.privacy.description = (
-            f"See, export, or delete what {bot_display_name} stores about you"
-        )
 
     @app_commands.command(
         name="privacy",
-        description="See, export or delete your data",
+        description=DESCRIPTIONS["privacy"],
     )
     # discord.py 2.4+ replaces dm_permission with allowed_contexts; explicitly
     # enable guilds + DMs + private channels so /privacy is invocable from both

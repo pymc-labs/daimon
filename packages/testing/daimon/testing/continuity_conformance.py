@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from daimon.testing.conformance.runner import require
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import (
     AgentMessagePayload,
@@ -26,6 +25,7 @@ from mux.contracts.ids import PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.resources import Session
 from mux.errors import ContinuityLost
+from mux.testing.conformance.runner import require
 
 
 @dataclass

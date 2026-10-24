@@ -122,7 +122,7 @@ async def test_a_form_is_a_card_stored_where_it_lives(
     ("channel_id", "step", "match"),
     [
         ("19:group@thread.v2", _STEP, "not a group chat"),
-        (_CHANNEL, _STEP.model_copy(update={"image_handle": "h1"}), "Discord-only"),
+        (_CHANNEL, _STEP.model_copy(update={"image_handle": "h1"}), "step images aren't available"),
     ],
 )
 async def test_a_form_is_refused_in_a_group_chat_or_with_images(

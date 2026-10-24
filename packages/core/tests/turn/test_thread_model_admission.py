@@ -11,6 +11,7 @@ from pathlib import Path
 from daimon.core.stores.thread_models import set_thread_model
 from daimon.core.thread_models import choose_thread_model
 from daimon.core.turn.admission import Admission, admit
+from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_admission import _NOW, _admittable_router, _deps, _seed_admittable_tenant
@@ -34,6 +35,7 @@ async def _admit_in(
         thread_id=thread_id,
         now=_NOW,
         verified_membership=True,
+        requester_org=RequesterOrg.HOST,
     )
 
 

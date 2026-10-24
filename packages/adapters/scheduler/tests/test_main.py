@@ -63,13 +63,13 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.usage_recording import record_turn_usage
-from daimon.testing import ma_model_usage
 from daimon.testing.factories import (
     make_account,
     make_channel_budget,
     make_ledger_entry,
     make_tenant,
 )
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -78,14 +78,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 @pytest.fixture
 def db_session_factory(
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     db_session: AsyncSession,
 ) -> async_sessionmaker[AsyncSession]:
     """Concurrent fire finalizers need independent connections, as in production.
 
     db_session triggers schema cleanup; these tests commit setup before dispatch.
     """
-    return async_sessionmaker(bind=db_nullpool_engine, expire_on_commit=False)
+    return async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
 
 
 _TEST_BILLING = BillingConfig(
@@ -1142,7 +1142,7 @@ async def test_fire_records_error_and_skips_run_turn_when_created_by_user_id_is_
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_fire records 'routine has no created_by_user_id' and does NOT call run_turn
+    """_fire records 'This routine has no owner. Create it again.' and does NOT call run_turn
     when the RoutineRow has created_by_user_id=None (main.py:152-160 bail branch)."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
 
@@ -1186,8 +1186,8 @@ async def test_fire_records_error_and_skips_run_turn_when_created_by_user_id_is_
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=tenant.id)
     assert fetched is not None, "routine row must still exist after bail"
-    assert fetched.last_error == "routine has no created_by_user_id", (
-        f"routine must record 'routine has no created_by_user_id'; got {fetched.last_error!r}"
+    assert fetched.last_error == "This routine has no owner. Create it again.", (
+        f"routine must record 'This routine has no owner. Create it again.'; got {fetched.last_error!r}"
     )
 
     await fake_client.close()
@@ -1231,7 +1231,7 @@ async def test_fire_rejects_tenant_archived_after_claim(
     run_turn.assert_not_called()
     async with db_session_factory() as session:
         saved = await get_routine(session, row.id, tenant_id=tenant.id)
-    assert saved is not None and saved.last_error == "routine tenant archived"
+    assert saved is not None and saved.last_error == "Daimon was removed from here."
     await client.close()
 
 
@@ -1511,7 +1511,8 @@ async def test_fire_checks_the_agent_pin_before_the_channel_budget(
     the budget gate runs last, after the pin is checked on the resolved agent."""
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
-    from daimon.testing import MARouter, build_fake_anthropic, ma_agent
+    from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 
     now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
@@ -2669,6 +2670,10 @@ async def test_fire_does_not_invite_a_post_when_placement_cannot_be_checked(
         policy=TenantAccessPolicy(**policy_kwargs),
     )
 
+    if kind == "thread":
+        assert after.last_error == "routine_destination_parent_unknown"
+        assert not seen, "unknown parent must refuse before starting the provider turn"
+        return
     trigger = str(seen["trigger_message"])
     assert "Do not post to the destination yourself" in trigger
     assert "posts your full final reply there" not in trigger
@@ -2754,7 +2759,7 @@ async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_
     it is skipped too while anything is isolated."""
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
-    from daimon.testing import ma_agent
+    from daimon.testing.ma_models import ma_agent
 
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
@@ -2822,7 +2827,8 @@ async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_
 
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=tenant.id)
-    assert fetched is not None and fetched.last_error == "own_agents_only"
+    expected = "routine_destination_parent_unknown" if channel_id is None else "own_agents_only"
+    assert fetched is not None and fetched.last_error == expected
     await client.close()
 
 
@@ -2842,7 +2848,7 @@ async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_nam
     The fire must check the resolved agent's names, not the saved name alone."""
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
-    from daimon.testing import ma_agent
+    from daimon.testing.ma_models import ma_agent
 
     now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
@@ -3018,6 +3024,90 @@ async def test_channel_and_destination_free_routines_have_no_personal_memory_opt
 
     assert len(calls) == 2 and all("personal_memory" not in call for call in calls)
     assert calls[0]["account_id"] is not None, "owner credentials still use the owner account"
+
+
+async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A destination recorded as shared is read by people from another
+    organisation, so its fire runs held to that channel (its own memory, the held
+    credential). A destination elsewhere runs as before, and a thread whose parent
+    is unknown is refused (before any hold) rather than run unheld."""
+    from daimon.core.stores.shared_channels import mark_channel_shared
+    from daimon.core.turn_hold import TurnHold
+
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u-owner",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+    )
+    await mark_channel_shared(
+        db_session,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        channel_id="chan-shared",
+        source="platform",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    calls: list[dict[str, object]] = []
+
+    async def capturing_run_turn(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "tail"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_z"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+
+    def to_channel(channel: str) -> RoutineRow:
+        return row.model_copy(
+            update={"destination_kind": "channel", "destination_id": channel, "channel_id": channel}
+        )
+
+    unplaced_thread = row.model_copy(
+        update={"destination_kind": "thread", "destination_id": "thread-1", "channel_id": None}
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
+    ):
+        await fire(to_channel("chan-shared"))
+        await fire(to_channel("chan-private"))
+        await fire(row)
+        await fire(unplaced_thread)
+    await fake_client.close()
+
+    assert [call.get("hold") for call in calls] == [
+        TurnHold(tenant.platform, "chan-shared", client=False),
+        None,
+        None,
+    ], "the unplaceable thread never reached run_turn"
+    assert "personal_memory" not in calls[0]
+    async with db_session_factory() as session:
+        refused = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert refused is not None and refused.last_error == "routine_destination_parent_unknown"
 
 
 async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
@@ -3244,8 +3334,10 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
     from daimon.core.routine_files import decode_payload
     from daimon.core.stores.domain import SandboxPin
     from daimon.core.stores.routines import set_sandbox_tools
-    from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, sse_response
-    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+    from daimon.testing.ma import MARouter
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response, sse_response
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     environment = ma_environment(id="env")
     approved = SandboxPin(
@@ -3489,3 +3581,141 @@ async def test_saved_recruitment_routine_stops_after_settings_restart(
     async with db_session_factory() as session:
         saved = await get_routine(session, row.id, tenant_id=tenant.id)
     assert saved.last_error == "Source unavailable."
+
+
+@pytest.mark.parametrize("at_destination", [False, True], ids=["origin", "destination"])
+async def test_selfhosted_routine_refuses_before_any_anthropic_access(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    at_destination: bool,
+) -> None:
+    from typing import cast
+
+    from daimon.core.channel_backend import channel_ref, set_channel_backend
+    from mux.contracts.config import BackendConfig
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"selfhosted routine accessed Anthropic.{name}")
+
+    tenant = await make_tenant(db_session)
+    await set_channel_backend(
+        db_session,
+        channel_ref(tenant.id, tenant.platform, "dest" if at_destination else "origin"),
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
+    )
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="owner",
+        agent_id="sh_agent_test",
+        agent_name="test",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="private scheduled content",
+        channel_id="origin",
+        destination_kind="channel",
+        destination_id="dest",
+    )
+    await db_session.commit()
+    fire = await _build_fire(
+        client=cast(AsyncAnthropic, NoAnthropic()),
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    await fire(row)
+    after = await get_routine(db_session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.last_error == "selfhosted_routines_unsupported"
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("backend_case", ["legacy", "current", "retained"])
+async def test_thread_routine_checks_parent_and_retained_backend_before_anthropic(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    platform: Literal["discord", "slack", "teams"],
+    backend_case: str,
+) -> None:
+    from typing import cast
+
+    from daimon.core.anthropic_guard import without_anthropic
+    from daimon.core.channel_backend import channel_ref, set_channel_backend
+    from daimon.core.stores import mux_state
+    from daimon.testing.factories import make_account, make_platform_principal
+    from mux.contracts.config import BackendConfig
+    from mux.contracts.ids import ThreadRef
+    from mux.contracts.resources import ProviderBinding
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"thread routine accessed Anthropic.{name}")
+
+    tenant = await make_tenant(db_session, platform=platform)
+    parent = "19:room@thread.tacv2" if platform == "teams" else "4200"
+    thread_id = f"{parent};messageid=4242" if platform == "teams" else "4242"
+    destination = f"{parent}:{thread_id}" if platform == "slack" else thread_id
+    channel = channel_ref(tenant.id, platform, parent)
+    revision = await set_channel_backend(
+        db_session,
+        channel,
+        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"),
+    )
+    if backend_case == "retained":
+        account = await make_account(db_session, tenant=tenant)
+        await make_platform_principal(
+            db_session, tenant=tenant, account=account, platform=platform, external_id="owner"
+        )
+        await mux_state.put_binding(
+            db_session,
+            ProviderBinding(
+                id="routine-selfhosted",
+                thread=ThreadRef(channel=channel, thread_id=thread_id),
+                provider=revision.backend,
+                profile=revision.profile,
+                native_refs={},
+                generation=1,
+                config_revision=revision.local,
+                legacy_account_id=str(account.id),
+            ),
+            expected_generation=0,
+        )
+        await set_channel_backend(db_session, channel, BackendConfig())
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="owner",
+        agent_id="agt_saved",
+        agent_name="test",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="private scheduled content",
+        # Discord's legacy destination does not carry its parent. Other
+        # platforms encode the parent and can still resolve retained bindings.
+        channel_id=None if backend_case == "legacy" else parent,
+        destination_kind="thread",
+        destination_id=destination,
+    )
+    await db_session.commit()
+    fire = await _build_fire(
+        client=cast(AsyncAnthropic, NoAnthropic()),
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with without_anthropic():
+        await fire(row)
+    after = await get_routine(db_session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    expected = (
+        "routine_destination_parent_unknown"
+        if platform == "discord" and backend_case == "legacy"
+        else "selfhosted_routines_unsupported"
+    )
+    assert after.last_error == expected
+    assert after.last_result_tail is None

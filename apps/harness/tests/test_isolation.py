@@ -1,0 +1,260 @@
+"""Probe startup isolation in a fresh Linux process, with synthetic secrets only."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or os.geteuid() != 0,
+    reason="root Linux process sandbox; image CI always exercises it",
+)
+def test_tools_cannot_read_startup_credentials_or_harness_proc(tmp_path: Path) -> None:
+    script = tmp_path / "probe.py"
+    script.write_text("""
+import asyncio
+import os
+from pathlib import Path
+from daimon_harness.service import create_app
+from daimon_harness.runtime import TurnContext, discard_event
+from mux.drivers.selfhosted.wire import TurnRequest, InlineSkill
+
+secrets = [os.environ[name] for name in ("AZURE_OPENAI_API_KEY", "HARNESS_TOKEN", "HARNESS_MCP_CRED_TEST")]
+app = create_app(home=Path(os.environ["PROBE_HOME"]))
+assert app.state.supervisor.adapter.key == secrets[0]
+assert app.state.supervisor.operator_credentials["HARNESS_MCP_CRED_TEST"] == secrets[2]
+assert not any(name in os.environ for name in ("AZURE_OPENAI_API_KEY", "HARNESS_TOKEN", "HARNESS_MCP_CRED_TEST"))
+request = TurnRequest(session_id="s", turn_id="t", idempotency_key="k", model="gpt-6-luna", instructions="", input=[], mcp_servers=[], skills=[], limits={"max_tool_calls": 1, "deadline_s": 5})
+context = TurnContext(request, Path(os.environ["PROBE_HOME"]), discard_event)
+command = "env; cat /proc/%d/environ 2>/dev/null; cat /proc/%d/cmdline 2>/dev/null; dd if=/proc/%d/mem of=/dev/null bs=1 count=1 2>/dev/null || echo memory-protected; echo writable > allowed.txt" % (os.getpid(), os.getpid(), os.getpid())
+request.skills = [InlineSkill(name="analysis", files={"SKILL.md": "readable-skill"})]
+asyncio.run(context.skills())
+command += '; cat "$HOME/../skills/analysis/SKILL.md"; id -u'
+output = asyncio.run(context.bash(command))
+assert all(secret not in output for secret in secrets)
+assert "memory-protected" in output, output
+assert "readable-skill" in output, output
+if os.geteuid() == 0:
+    assert "10001" in output, output
+assert (context.work / "allowed.txt").read_text().strip() == "writable"
+app.state.supervisor.journal.close()
+""")
+    env = {
+        name: value for name, value in os.environ.items() if name in {"PATH", "PYTHONPATH", "HOME"}
+    }
+    env.update(
+        AZURE_OPENAI_API_KEY="synthetic-model-secret",
+        HARNESS_TOKEN="synthetic-harness-secret",
+        HARNESS_MCP_CRED_TEST="synthetic-mcp-secret",
+        PROBE_HOME=str(tmp_path / "sandbox"),
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script)], env=env, capture_output=True, text=True, timeout=60
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("hidepid", ["0", "1", "2", "invisible"])
+@pytest.mark.parametrize("exempt_group", [None, 10001, 60002])
+def test_proc_mount_requires_reserved_verifier_group(tmp_path, hidepid, exempt_group):
+    from daimon_harness.isolation import proc_hides_other_users
+
+    mountinfo = tmp_path / "mountinfo"
+    options = f"rw,hidepid={hidepid}" + (f",gid={exempt_group}" if exempt_group else "")
+    mountinfo.write_text(f"25 24 0:22 / /proc rw,nosuid - proc proc {options}\n")
+    assert proc_hides_other_users(mountinfo) == (
+        hidepid in {"2", "invisible"} and exempt_group == 60002
+    )
+
+
+def test_multi_mode_refuses_unsafe_proc_tmp_and_missing_uid_switch(tmp_path, monkeypatch):
+    from daimon_harness import isolation
+
+    monkeypatch.delenv("HARNESS_TEST_MODE")
+    monkeypatch.setenv("HARNESS_SESSION_MODE", "multi")
+    monkeypatch.setattr(isolation, "can_switch_uid", lambda: True)
+    mountinfo = tmp_path / "mountinfo"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o755)
+    mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw\n")
+    with pytest.raises(RuntimeError, match="hidepid"):
+        isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))
+    mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw,hidepid=2,gid=60002\n")
+    scratch.chmod(0o1777)
+    with pytest.raises(RuntimeError, match="not writable"):
+        isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))
+    scratch.chmod(0o755)
+    assert isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,)) == "multi"
+    monkeypatch.setattr(isolation, "can_switch_uid", lambda: False)
+    with pytest.raises(RuntimeError, match="UID switching"):
+        isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))
+
+
+def test_multi_app_refuses_startup_without_verified_isolation(tmp_path, monkeypatch):
+    from daimon_harness import isolation
+    from daimon_harness.service import create_app
+
+    from .conftest import FakeModelAdapter
+
+    monkeypatch.delenv("HARNESS_TEST_MODE")
+    monkeypatch.setenv("HARNESS_SESSION_MODE", "multi")
+    monkeypatch.setattr(isolation, "can_switch_uid", lambda: True)
+    monkeypatch.setattr(isolation, "proc_hides_other_users", lambda path: False)
+    monkeypatch.setattr("daimon_harness.service.can_switch_uid", lambda: True)
+    monkeypatch.setattr("daimon_harness.service.validate_credential_files", lambda **kwargs: None)
+    with pytest.raises(RuntimeError, match="hidepid"):
+        create_app(home=tmp_path, token="test", adapter=FakeModelAdapter())
+    assert not (tmp_path / ".daimon").exists()
+
+
+@pytest.mark.parametrize(
+    "location", ["var/tmp", "dev/shm", "run/lock", "var/lock", "volume/scratch"]
+)
+def test_multi_refuses_every_shared_scratch_directory(tmp_path, location):
+    from daimon_harness.isolation import validate_shared_directories
+
+    scratch = tmp_path / location
+    scratch.mkdir(parents=True)
+    scratch.chmod(0o1777)
+    with pytest.raises(RuntimeError, match="not writable"):
+        validate_shared_directories((tmp_path,))
+    scratch.chmod(0o755)
+    validate_shared_directories((tmp_path,))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "AZURE_FEDERATED_TOKEN_FILE",
+        "AZURE_CLIENT_CERTIFICATE_PATH",
+        "KUBECONFIG",
+        "HARNESS_SECRET_FILE",
+        "OPERATOR_CREDENTIAL_PATH",
+    ],
+)
+def test_startup_refuses_file_backed_credentials_even_with_an_api_key(
+    tmp_path, monkeypatch, source
+):
+    from daimon_harness.service import create_app
+
+    from .conftest import FakeModelAdapter
+
+    token = tmp_path / "projected-token"
+    token.write_text("synthetic-projected-token")
+    token.chmod(0o644)
+    monkeypatch.setenv(source, str(token))
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "synthetic-key")
+    with pytest.raises(RuntimeError, match="file-based credentials"):
+        create_app(home=tmp_path / "home", token="test", adapter=FakeModelAdapter())
+    assert not (tmp_path / "home").exists()
+
+
+def test_readable_secret_mount_refused_without_an_environment_reference(tmp_path, monkeypatch):
+    from daimon_harness import isolation
+
+    # Use the current identity to exercise traversal through pytest's private root.
+    monkeypatch.setattr(isolation, "TOOL_UID_MIN", os.geteuid())
+    monkeypatch.setattr(isolation, "TOOL_UID_MAX", os.geteuid())
+    token = tmp_path / "unreferenced-token"
+    token.write_text("synthetic-unreferenced-token")
+    token.chmod(0o644)
+    with pytest.raises(RuntimeError, match="not be readable"):
+        isolation.validate_credential_files((tmp_path,))
+    token.chmod(0o000)
+    isolation.validate_credential_files((tmp_path,))
+
+
+def test_mi_refuses_an_endpoint_without_a_secret_header(monkeypatch):
+    from daimon_harness.model_adapter import AzureModelAdapter
+
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("IDENTITY_HEADER", raising=False)
+    monkeypatch.setenv("IDENTITY_ENDPOINT", "http://127.0.0.1/token")
+    with pytest.raises(RuntimeError, match="header-protected"):
+        AzureModelAdapter()
+
+
+@pytest.mark.parametrize("directory", [False, True])
+@pytest.mark.parametrize("readonly", [False, True])
+def test_external_mount_files_refused_independent_of_names(
+    tmp_path, monkeypatch, directory, readonly
+):
+    from daimon_harness import isolation
+
+    monkeypatch.setattr(isolation, "TOOL_UID_MIN", os.geteuid())
+    monkeypatch.setattr(isolation, "TOOL_UID_MAX", os.geteuid())
+    mounted = tmp_path / "ordinary mount"
+    if directory:
+        mounted.mkdir()
+        token = mounted / "nested" / "model.env"
+        token.parent.mkdir()
+    else:
+        token = mounted
+    token.write_text("synthetic-api-key")
+    token.chmod(0o644)
+    mountinfo = tmp_path / "mountinfo"
+    escaped = str(mounted).replace(" ", r"\040")
+    option = "ro" if readonly else "rw"
+    mountinfo.write_text(
+        "1 0 0:1 / / rw - overlay overlay rw\n"
+        f"2 1 0:2 / {escaped} {option} - ext4 /dev/disk {option}\n"
+    )
+    roots = isolation.credential_mount_roots(tmp_path / "home", mountinfo)
+    assert roots == (mounted,)
+    with pytest.raises(RuntimeError, match="not be readable"):
+        isolation.validate_credential_files(roots)
+    token.chmod(0o000)
+    isolation.validate_credential_files(roots)
+
+
+def test_mount_allowlist_is_scoped_to_system_filesystems_and_session_dirs(tmp_path):
+    from daimon_harness.isolation import credential_mount_roots
+
+    mountinfo = tmp_path / "mountinfo"
+    mounts = [
+        ("/", "overlay"),
+        ("/proc", "proc"),
+        ("/sys", "sysfs"),
+        ("/sys/fs/cgroup", "cgroup2"),
+        ("/dev", "tmpfs"),
+        ("/dev/pts", "devpts"),
+        ("/dev/shm", "tmpfs"),
+        ("/etc/hosts", "ext4"),
+        ("/etc/hostname", "ext4"),
+        ("/etc/resolv.conf", "ext4"),
+        ("/home/harness/sessions/abc/work", "ext4"),
+        ("/mnt/model.env", "ext4"),
+        ("/dev/model.env", "ext4"),
+        ("/home/harness/sessions-extra/model.env", "ext4"),
+        ("/home/harness", "ext4"),
+        ("/opt/model", "tmpfs"),
+    ]
+    mountinfo.write_text(
+        "".join(
+            f"{index + 1} 0 0:1 / {path} rw - {kind} source rw\n"
+            for index, (path, kind) in enumerate(mounts)
+        )
+    )
+    assert credential_mount_roots(Path("/home/harness"), mountinfo) == tuple(
+        Path(path) for path, _ in mounts[-5:]
+    )
+
+
+def test_home_volume_exempts_session_work_but_checks_other_files(tmp_path, monkeypatch):
+    from daimon_harness import isolation
+
+    monkeypatch.setattr(isolation, "TOOL_UID_MIN", os.geteuid())
+    monkeypatch.setattr(isolation, "TOOL_UID_MAX", os.geteuid())
+    home = tmp_path / "home"
+    work = home / "sessions" / "abc" / "work"
+    work.mkdir(parents=True)
+    (work / "result.txt").write_text("ordinary workspace data")
+    isolation.validate_credential_files((home,), home=home)
+    (home / "model.env").write_text("synthetic-key")
+    with pytest.raises(RuntimeError, match="not be readable"):
+        isolation.validate_credential_files((home,), home=home)

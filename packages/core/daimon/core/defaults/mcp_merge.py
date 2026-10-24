@@ -49,9 +49,9 @@ def get_reserved_mcp_rejection(*, server_name: str, url: str, public_url: str | 
         )
     if public_url is not None and url.rstrip("/") == public_url.rstrip("/"):
         return (
-            f"'{url}' is the deployment's own MCP endpoint (already registered as "
-            f"'{DAIMON_MCP_SERVER_NAME}'). Attaching it under another name would create a "
-            "duplicate entry. Pick a different URL."
+            f"'{url}' is Daimon's own connection (already added as "
+            f"'{DAIMON_MCP_SERVER_NAME}'). Adding it under another name would duplicate "
+            "it. Pick a different URL."
         )
     return None
 

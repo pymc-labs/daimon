@@ -18,10 +18,8 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, legacy_iter
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic.resources.artifacts import Artifacts
-from mux.drivers.anthropic.resources.session_tools import EventQuery, SessionSend, SessionTools
-from mux.drivers.anthropic.resources.skills import NativeSkillVersions
-from mux.drivers.anthropic.resources.vaults import Vaults
+from mux.drivers.anthropic import EventQuery, NativeSkillVersions, SessionSend, SessionTools, Vaults
+from mux.drivers.anthropic import NativeArtifacts as Artifacts
 
 
 def mcp_scope(auth: AuthIdentity) -> Scope:

@@ -32,6 +32,7 @@ from daimon.adapters.discord.embed import (
     EmbedData,
     EmbedEvent,
     TurnPhase,
+    embed_fields,
     format_termination_notice,
     to_embed_data,
     update,
@@ -53,7 +54,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
@@ -61,7 +62,10 @@ from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
     extract_sealed_responses,
+    final_answer_texts,
+    join_messages,
 )
+from daimon.core.turn.status_log import status_log_enabled
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
 from mux.contracts.events import Event
@@ -321,8 +325,8 @@ def build_discord_embed(data: EmbedData) -> discord.Embed:
         embed.set_footer(text=data.footer)
     if data.notice is not None:
         embed.add_field(name="Notice", value=data.notice[:1024], inline=False)
-    if data.details is not None:
-        embed.add_field(name="Details", value=data.details, inline=False)
+    for name, value in embed_fields(data):
+        embed.add_field(name=name, value=value, inline=False)
     return embed
 
 
@@ -332,6 +336,17 @@ def _split_with_name_prefix(text: str, agent_name: str) -> list[str]:
     chunks = split_for_discord_safe(text, limit=1900 - len(prefix))
     chunks[0] = prefix + chunks[0]
     return chunks
+
+
+def _without_adjacent_repeats(messages: list[str], previous: str | None) -> list[str]:
+    """``messages`` with each one dropped that repeats the one before it (or ``previous``)."""
+    kept: list[str] = []
+    for message in messages:
+        text = message.strip()
+        if not text or text != previous:
+            kept.append(message)
+        previous = text
+    return kept
 
 
 class DiscordTurnLifecycle(OutputGate):
@@ -391,6 +406,7 @@ class DiscordTurnLifecycle(OutputGate):
         # no progress edit, no terminal card, no replacement for a missing card.
         self._thread_stopped = thread_stopped or (lambda: False)
         self._fleet_card = fleet_card
+        self._fleet_notice: str | None = None
         self._requester_id = requester_id
         # Only an admin sees the request ref on a stop or failure notice.
         self._requester_is_admin = requester_is_admin
@@ -429,6 +445,7 @@ class DiscordTurnLifecycle(OutputGate):
         self._state = EmbedState(
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
+            platform="discord",
             started_at=self._clock(),
         )
         # Seeded only by dead-session recovery, which hands over the message the
@@ -601,7 +618,13 @@ class DiscordTurnLifecycle(OutputGate):
         text = self._provider_draft.text(event)
         if text is not None:
             self._state = (
-                update(self._state, EmbedEvent(kind="message", label=text))
+                update(
+                    self._state,
+                    EmbedEvent(
+                        kind="message" if self._provider_draft.takes_new_item() else "draft",
+                        label=text,
+                    ),
+                )
                 if text
                 else dataclasses.replace(self._state, text_preview=None)
             )
@@ -917,7 +940,7 @@ class DiscordTurnLifecycle(OutputGate):
         return True
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
-        """Render the one status embed: headline, tool lines and the latest draft."""
+        """Render the one status embed: headline, the last few draft lines, plan and tool lines."""
         embed = build_discord_embed(to_embed_data(self._state, now=now))
         if self._waiting_for_tenant_slot is not None and self._waiting_for_tenant_slot():
             embed.title = "Queued — waiting for a free slot…"
@@ -1182,20 +1205,15 @@ class DiscordTurnLifecycle(OutputGate):
         return discord.File(io.BytesIO(text.encode("utf-8")), filename="answer.txt")
 
     def _final_response(self, state: TurnState) -> str:
-        # Collapse adjacent identical final text blocks before joining them.
-        last_tool = max(
-            (i for i, block in enumerate(state.content) if isinstance(block, ToolUseBlock)),
-            default=-1,
-        )
-        texts: list[str] = []
-        previous = self._last_sealed_text
-        for block in state.content[last_tool + 1 :]:
-            if isinstance(block, TextBlock):
-                text = block.text.strip()
-                if not text or text != previous:
-                    texts.append(block.text)
-                previous = text
-        text = "".join(texts)
+        messages = final_answer_texts(state.content)
+        if status_log_enabled():
+            # Compare like with like: the final messages joined, against the
+            # last sealed run, which was joined the same way.
+            text = join_messages(_without_adjacent_repeats(messages, None))
+            if text.strip() == self._last_sealed_text:
+                text = ""
+        else:
+            text = join_messages(_without_adjacent_repeats(messages, self._last_sealed_text))
         if _pure_tool_markup(text):
             log.warning("turn.final_tool_markup_suppressed", turn_id=str(self._turn_id))
             text = "" if self._unprompted else _TOOL_MARKUP_NOTICE
@@ -1231,7 +1249,9 @@ class DiscordTurnLifecycle(OutputGate):
                 self._skip_terminal()
                 return
             if self._fleet_card is not None:
-                allowed, notice = await self._fleet_card.summary_gate()
+                from daimon.adapters.discord.posted_controls.fleet import fleet_result_seen
+
+                allowed, notice = await self._fleet_card.summary_gate(seen=fleet_result_seen(state))
                 if not allowed:
                     if notice is None:
                         self._terminal = True
@@ -1241,6 +1261,9 @@ class DiscordTurnLifecycle(OutputGate):
                     state = dataclasses.replace(
                         state, content=[TextBlock(kind="text", text=notice)]
                     )
+                else:
+                    # A partial result names its missing workers above the answer.
+                    self._fleet_notice = notice
             await self._deliver_success(state)
         finally:
             self._mark_ended()
@@ -1252,6 +1275,8 @@ class DiscordTurnLifecycle(OutputGate):
         response_text = self._final_response(state)
         if self._deferred_sealed_text:
             response_text = "\n\n".join([*self._deferred_sealed_text, response_text])
+        if self._fleet_notice:
+            response_text = "\n\n".join(filter(None, [self._fleet_notice, response_text]))
         if self._unprompted and not response_text:
             # No final answer on a turn nobody asked for: leave the thread as
             # it was. A tool trail with nothing to say is noise here, not a
@@ -1581,6 +1606,12 @@ class DiscordTurnLifecycle(OutputGate):
                 self._skip_terminal()
                 return
             await self._deliver_failure(state, err)
+            if self._fleet_card is not None:
+                # The error card is up; the fleet card must not stay "running".
+                try:
+                    await self._fleet_card.end_after_error()
+                except Exception:
+                    log.warning("turn.fleet_card_error_end_failed", exc_info=True)
         finally:
             self._mark_ended()
             self._card_writes.queue_repair()
@@ -1615,12 +1646,15 @@ class DiscordTurnLifecycle(OutputGate):
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
+            nouns = RefusalNouns.for_platform("discord", place="dm" if self._in_dm else "channel")
             notice = render_termination_notice(
                 reason,
                 state=state,
                 request_id=request_id if self._requester_is_admin else None,
                 error=err,
                 in_dm=self._in_dm,
+                setup_command=nouns.setup,
+                billing_command=nouns.billing,
                 agent_name=self._agent_name,
             )
             if notice is not None:

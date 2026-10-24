@@ -39,6 +39,7 @@ from daimon.core.channel_environments import (
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import load_live_subject
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
+from daimon.core.platform_words import words_for
 
 import discord
 
@@ -193,7 +194,9 @@ async def save_environment_choice(
             reason=f"authz:{pick.decision.reason}",
         )
         if pick.decision.reason == "not_a_reader":
-            return build_limited_network_refusal(environment_name=name)
+            return build_limited_network_refusal(
+                environment_name=name, admin=words_for("discord").admin
+            )
         return REFUSED_MESSAGE
     if name is not None and pick.missing:
         return build_missing_environment_note(name)

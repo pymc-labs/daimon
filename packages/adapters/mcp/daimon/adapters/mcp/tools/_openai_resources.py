@@ -65,7 +65,7 @@ async def openai_skill_host(
         return None
     if revision.profile != OPENAI_PROFILE:
         raise ToolError(
-            "This channel's backend can't change an agent's skills from chat yet. "
+            "This channel's model provider can't change an agent's skills from chat yet. "
             "Nothing was changed. Do not retry."
         )
     from daimon.core.turn.runtimes import authorized_channel_deployments
@@ -97,7 +97,7 @@ async def openai_skill_host(
 
 def bind_host(host: object, *, auth: AuthIdentity, workspace: str) -> NeutralResourceHost:
     """Select the native OpenAI catalog for the shared scope binder."""
-    from mux.drivers.openai.agents import OpenAIAgents
+    from mux.drivers.openai import OpenAIAgents
 
     return bind_native_host(
         host,

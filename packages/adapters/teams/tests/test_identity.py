@@ -15,6 +15,7 @@ from daimon.adapters.teams.identity import (
     TEXT_ONLY,
     Refusal,
     TeamsInbound,
+    display_bot_name,
     foreign_tenant,
     kind_of,
     live_tenant_id,
@@ -155,6 +156,31 @@ def test_a_mentioned_thread_reply_is_not_unprompted() -> None:
 def _to_named_bot(payload: dict[str, object]) -> dict[str, object]:
     """Teams names the bot on `recipient`; the typed-name match reads it there."""
     return payload | {"recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon"}}
+
+
+@pytest.mark.parametrize(
+    ("name", "shown"),
+    [
+        ("Daimon  Staging ", "Daimon Staging"),
+        ("  Daimon\u00a0 Staging\t", "Daimon Staging"),
+        ("Daimon", "Daimon"),
+        ("   ", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_the_bot_name_is_shown_without_padding_or_doubled_spaces(
+    name: str | None, shown: str | None
+) -> None:
+    assert display_bot_name(name) == shown
+
+
+def test_an_inbound_carries_the_cleaned_bot_name() -> None:
+    padded = make_message_activity(text="hi") | {
+        "recipient": {"id": BOT_ACCOUNT_ID, "name": "Daimon  Staging "}
+    }
+    inbound = _parse(padded)
+    assert isinstance(inbound, TeamsInbound) and inbound.bot_name == "Daimon Staging"
 
 
 def test_a_root_post_typing_the_bot_name_is_marked_by_name() -> None:

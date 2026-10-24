@@ -97,7 +97,7 @@ def test_unsupported_platform_has_explicit_dm_error(platform: str) -> None:
 
 @pytest.mark.fresh_schema
 async def test_dm_migration_upgrade_constraints_and_guarded_downgrade(db_session) -> None:
-    path = Path(__file__).parents[1] / "alembic/versions/0112_routine_dm_destination.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0135_routine_dm_destination.py"
     spec = importlib.util.spec_from_file_location("migration_dm", path)
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)

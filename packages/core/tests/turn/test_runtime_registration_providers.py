@@ -93,7 +93,7 @@ from daimon.core import mux_backend
 from daimon.core.turn import io, prepare, runtimes
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 sys.path.insert(0, os.path.join(os.getcwd(), "packages/core/tests"))
-from turn.test_provider_dispatch import ACCOUNT, TENANT, admission, deps_for
+from turn.test_provider_dispatch import ACCOUNT, TENANT, admission, deps_for_pinned_mux
 profile = {profile!r}
 if profile in prepare._PROVIDER_PREPARATIONS:
     raise RuntimeError("test did not start with a cold native preparation edge")
@@ -127,7 +127,7 @@ async def prove():
         resolve_default(BackendConfig(backend="openai" if profile == "openai.persistent_workspace" else "gemini",
             profile=profile, model="gpt-6-luna" if profile == "openai.persistent_workspace" else "gemini-3.8-flash")))
     selected = replace(selected, backend_revision=config, backend_revision_origin="channel")
-    deps = replace(deps_for(None, async_sessionmaker()), channel_backends=True,
+    deps = replace(deps_for_pinned_mux(None, async_sessionmaker()), channel_backends=True,
         turn_runtime_factory=runtimes.build_channel_runtime)
     try:
         await prepare.bind_session_impl(deps, selected, tenant_id=TENANT, platform="slack",

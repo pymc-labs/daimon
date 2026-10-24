@@ -12,7 +12,7 @@ from daimon.core._models import AgentBackendRevisionRecord
 from daimon.core.channel_backend import AgentBackendRefused
 from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits
 from daimon.core.stores import security_audit
-from daimon.core.stores.domain import AgentBackendRevision
+from daimon.core.stores.domain import FLEET_OFF, AgentBackendRevision
 from mux.contracts.ids import ModelRef
 from mux.profiles import backend_selection
 from pydantic import ValidationError
@@ -20,6 +20,7 @@ from sqlalchemy import update
 
 from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
+from .test_fleet_source_permissions import captured as captured
 
 NOW = datetime(2026, 10, 13, 21, 0, tzinfo=UTC)
 
@@ -118,9 +119,9 @@ async def test_backend_revert_never_restores_a_revoked_grant(owned):
     selected = await service.set_backend(agent, "openai", granted.local, actor)
     assert selected.fleet_grant == granted.fleet_grant
     revoked = await revoke_grant(service, agent, actor)
-    assert revoked.fleet_grant is None
+    assert revoked.fleet_grant == FLEET_OFF and revoked.fleet_off
     reverted = await service.revert(agent, actor, expected_revision=revoked.local)
-    assert reverted.backend is None and reverted.fleet_grant is None
+    assert reverted.backend is None and reverted.fleet_grant == FLEET_OFF
     assert await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=NOW) is None
     assert (await service.revision(agent, granted.local)).fleet_grant == granted.fleet_grant
     regranted = await set_grant(service, agent, actor)
@@ -242,6 +243,36 @@ async def test_expired_grant_cannot_be_persisted(owned):
             ),
         )
     assert await service.current(agent) is None
+
+
+def _capped(*caps: str):
+    return grant().model_copy(
+        update={
+            "limits": grant().limits.model_copy(
+                update={
+                    "provider_limits_usd": dict(
+                        zip(("anthropic", "openai", "gemini"), map(Decimal, caps), strict=True)
+                    )
+                }
+            )
+        }
+    )
+
+
+async def test_provider_caps_above_the_run_budget_are_refused_at_preview(owned):
+    """Fleet r6: caps of 3 x $1.20 under a $2 run passed the grant, then failed every spawn."""
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    over = _capped("0.40", "0.40", "0.40")  # $1.20 of caps under the $0.90 run budget
+    with pytest.raises(AgentBackendRefused, match="fleet provider limits exceed budget"):
+        await service.preview_fleet_grant(agent, over, now=NOW)
+    with pytest.raises(AgentBackendRefused, match="fleet provider limits exceed budget"):
+        await service.set_fleet_grant(
+            agent, over, 0, actor, expected_preview_digest="0" * 64, now=NOW
+        )
+    assert await service.current(agent) is None
+    exact = await set_grant(service, agent, actor, _capped("0.30", "0.30", "0.30"))
+    assert exact.fleet_grant["limits"]["provider_limits_usd"]["gemini"] == "0.30"
 
 
 @pytest.mark.parametrize("fault", ["provider", "model", "duplicate", "wildcard", "options"])
@@ -387,7 +418,7 @@ async def test_grant_revoke_still_works_after_backend_allowlist_is_narrowed(owne
     policy = await service.tenant_policy(agent.tenant_id)
     await service.set_tenant_allowlist(agent.tenant_id, ("anthropic",), policy.revision, actor)
     revoked = await revoke_grant(service, agent, actor)
-    assert revoked.backend == "openai" and revoked.fleet_grant is None
+    assert revoked.backend == "openai" and revoked.fleet_grant == FLEET_OFF
     assert await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=NOW) is None
 
 
@@ -447,7 +478,7 @@ async def test_mixed_backend_and_grant_cas_has_one_shared_winner(owned, operatio
     else:
         assert latest.backend == second.backend and latest.previous_local == current.previous_local
         assert (
-            latest.fleet_grant is None
+            latest.fleet_grant == FLEET_OFF
             if value is None
             else latest.fleet_grant["epoch"] == latest.local
         )
@@ -617,3 +648,90 @@ def test_root_budget_pair_requires_both_operator_fields(field):
     data[field] = Decimal("0.20")
     with pytest.raises(ValidationError, match="supplied together"):
         AgentFleetGrant.model_validate(data)
+
+
+async def test_argon_fleet_grant_is_accepted_only_inside_its_price_window(owned, monkeypatch):
+    from daimon.core import pricing
+
+    clock = {"now": datetime(2026, 12, 1, tzinfo=UTC)}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock["now"]
+
+    monkeypatch.setattr(pricing, "datetime", Clock)
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    argon = (
+        backend_selection("gemini").model_copy(update={"model": "gemini-4-argon"}),
+        ModelRef(provider="gemini", id="gemini-4-argon"),
+    )
+    # After its price window Argon has no tariff, so the grant refuses up front.
+    with pytest.raises(AgentBackendRefused, match="invalid fleet grant"):
+        await set_grant(service, agent, actor, grant().model_copy(update={"choices": (argon,)}))
+    assert await service.current(agent) is None
+    # Inside it, a worker grant may name Argon (it runs on the bounded envelope).
+    clock["now"] = datetime(2026, 11, 30, tzinfo=UTC)
+    await set_grant(service, agent, actor, grant().model_copy(update={"choices": (argon,)}))
+    assert await service.current(agent) is not None
+
+
+async def test_turning_fleet_on_refuses_an_agent_whose_setup_cant_run_one(captured, owned):
+    from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.fleet_configuration import configuration_refusal
+    from mux.contracts.resources import ResourceBinding
+
+    source, _, value, _, _, _ = captured
+    _, _, _, sessions = owned
+    # A login that belongs to no connector still refuses. A stored connector login
+    # (agent-mcp:<id>) no longer does: workers run without connectors (#1357, below).
+    login = "vault:internal-login"
+    with_login = source.model_copy(
+        update={
+            "resource_requirements": (
+                *source.resource_requirements,
+                ResourceBinding(id=login, kind="credential", credential_ref=login),
+            )
+        }
+    )
+    captures = []
+
+    async def capture(agent):
+        captures.append(agent)
+        return with_login
+
+    from .test_fleet_source_permissions import NOW as now
+
+    service = AgentBackendService(sessions, enabled=True, capture_source=capture)
+    with pytest.raises(AgentBackendRefused) as refused:
+        await service.preview_fleet_grant(source, value, now=now, check_root=True)
+    assert refused.value.reason == "fleet_root_credentials"
+    assert configuration_refusal(refused.value.reason) == (
+        "This agent can't run a fleet yet: it uses a connected tool or repository "
+        "with its own login."
+    )
+    # Showing or revoking never captures; an agent that can run a fleet previews.
+    await service.preview_fleet_grant(source, value, now=now)
+    await service.preview_fleet_grant(source, None, now=now, check_root=True)
+    assert captures == [source]
+
+    async def stored_connector_login(agent):
+        stored = "agent-mcp:internal-login"
+        return source.model_copy(
+            update={
+                "resource_requirements": (
+                    *source.resource_requirements,
+                    ResourceBinding(id=stored, kind="credential", credential_ref=stored),
+                )
+            }
+        )
+
+    connector = AgentBackendService(sessions, enabled=True, capture_source=stored_connector_login)
+    await connector.preview_fleet_grant(source, value, now=now, check_root=True)
+
+    async def plain(agent):
+        return source
+
+    fine = AgentBackendService(sessions, enabled=True, capture_source=plain)
+    await fine.preview_fleet_grant(source, value, now=now, check_root=True)

@@ -11,6 +11,7 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
+from daimon.adapters.teams.billing_panel import channel_name_text
 from daimon.adapters.teams.card_actions import button, clip, heading
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.core import channel_backend
@@ -25,8 +26,9 @@ from daimon.core.github_panel import GrantsPanel
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
+from daimon.core.platform_words import words_for
 from daimon.core.roster import Page, Roster, RosterAgent
-from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
+from daimon.core.routing_facts import build_routing_request, precedence_line
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
     EMPTY_ROSTER_COPY,
@@ -162,10 +164,12 @@ def roster_card(
     return _card("Agents", body, actions)
 
 
-def _place(place: AnsweringPlace, *, here: str) -> str:
+def _place(place: AnsweringPlace, *, here: str, names: Mapping[str, str]) -> str:
     if place.tier == "channel" and place.channel_id is not None:
-        return "this chat" if place.channel_id == here else f"channel `{place.channel_id}`"
-    return "the organisation default" if place.tier == "tenant" else "the deployment default"
+        if place.channel_id == here:
+            return "this chat"
+        return channel_name_text(place.channel_id, names)
+    return "the organisation default" if place.tier == "tenant" else "the Daimon-wide default"
 
 
 def _answers_in(places: Sequence[str]) -> str:
@@ -223,15 +227,26 @@ def details_card(
     here: str,
     page: int,
     coding_tools: bool,
+    is_admin: bool,
     github_panel: GrantsPanel | None = None,
     expanded: DetailListName | None = None,
     backend_options: tuple[Provider, ...] = (),
     backend_selection: Provider | None = None,
+    channel_names: Mapping[str, str] | None = None,
+    owned: bool = False,
 ) -> AdaptiveCard:
-    """One agent's readable state. Key values are not in the model, so never here."""
+    """One agent's readable state. Key values are not in the model, so never here.
+
+    `channel_names` names the channels it answers in; one with no name shows a
+    neutral label, never its id.
+
+    Add skill is offered to an admin and to the agent's owner (`owned`); the
+    coding-tool token stays an admin's. A member's press could only end in a
+    refusal.
+    """
     purpose = details.purpose
     body: list[CardElement] = [_text(clip(purpose, _PURPOSE_MAX_CHARS))] if purpose else []
-    places = [_place(place, here=here) for place in details.answers_in]
+    places = [_place(place, here=here, names=channel_names or {}) for place in details.answers_in]
     body.append(
         _text(f"**Answers in:** {_answers_in(places)}")
         if places
@@ -254,8 +269,7 @@ def details_card(
             else "No working repo"
         )
         lines.append(
-            "Open Connect GitHub to add or remove repos and choose a working repo, or ask "
-            f"{details.name} in chat."
+            f"To add or remove repos or choose a working repo, ask {details.name} in chat."
         )
         body.append(_text("\n".join(lines)))
     body += _detail_lists(details, page=page, expanded=expanded)
@@ -264,7 +278,7 @@ def details_card(
             [
                 ChoiceSetInput(
                     id="model_backend",
-                    label="Model backend",
+                    label="Model provider",
                     value=backend_selection or "clear",
                     choices=[
                         Choice(title=channel_backend.DEFAULT_BACKEND_LABEL, value="clear"),
@@ -275,14 +289,14 @@ def details_card(
             ]
         )
     actions: list[Action] = []
-    if not details.daimon_managed:
+    if (is_admin or owned) and not details.daimon_managed:
         add = OpenDialogData(SKILL_DIALOG, {"agent": details.name})
         actions.append(SubmitAction(title="➕ Add skill", data=add))
-    if coding_tools:
+    if is_admin and coding_tools:
         data = OpenDialogData(TOKEN_DIALOG, {"agent": details.name})
         actions.append(SubmitAction(title="🧰 Use from your coding tools", data=data))
-    else:
-        body.append(_text("Coding-tool access is not configured for this deployment.", subtle=True))
+    elif is_admin:
+        body.append(_text("Coding-tool access isn't set up yet.", subtle=True))
     actions.append(_button("Back", "agents", page=page))
     return _card(details.name, body, actions)
 
@@ -291,10 +305,10 @@ def backend_preview_card(
     preview: channel_backend.CompatibilityPreview, *, agent_name: str, clear: bool
 ) -> AdaptiveCard:
     selection = "Use default" if clear else preview.target_backend
-    lines = [f"Model backend: {selection}"]
+    lines = [f"Model provider: {selection}"]
     for label, items in (
         ("Unsupported skills", preview.unsupported_skills),
-        ("Unsupported MCPs", preview.unsupported_mcps),
+        ("Unsupported connections", preview.unsupported_mcps),
         ("Unsupported capabilities", preview.unsupported_capabilities),
         ("Shared-thread limits", preview.shared_thread_limits),
     ):
@@ -302,10 +316,10 @@ def backend_preview_card(
         shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
         lines.append(f"{label}: {shown}")
     lines.extend(
-        [preview.cost_line, "Existing threads keep their backend; channel overrides still apply."]
+        [preview.cost_line, "Existing threads keep their provider; channel settings still apply."]
     )
     if not preview.allowed:
-        lines.append("This backend is not enabled for this organisation.")
+        lines.append("This provider is off for this organisation. Pick another.")
     actions: list[Action] = [_button("Cancel", "backend_cancel", agent=agent_name)]
     if preview.allowed:
         actions.insert(
@@ -320,7 +334,7 @@ def backend_preview_card(
                 digest=preview.digest,
             ),
         )
-    return _card("Model backend", [_text("\n".join(lines)[:3000])], actions)
+    return _card("Model provider", [_text("\n".join(lines)[:3000])], actions)
 
 
 def routing_card(
@@ -330,25 +344,30 @@ def routing_card(
     is_admin: bool,
     request_agent: str | None,
     changes_channels: bool = False,
+    channel_names: Mapping[str, str] | None = None,
 ) -> AdaptiveCard:
     """The whole cascade, so the precedence is visible rather than inferred.
 
     `changes_channels` adds Channel settings, for a server admin or a channel's admin.
+    `channel_names` names the channels listed (`routing_channel_ids`); one with no
+    name shows a neutral label, never its id.
     """
+    channels = channel_names or {}
     body: list[CardElement] = [
-        _text(f"Channel `{answer.channel_id}`: **{answer.agent_name}**") for answer in page.items
+        _text(_channel_line(answer.channel_id, answer.agent_name, channels))
+        for answer in page.items
     ] or [_text("No channel has its own setting.", subtle=True)]
     tenant = answering_map.tenant_default
     default = tenant.agent_name if tenant else "Not assigned"
     body.append(_text(f"**Organisation default:** {default}"))
     if answering_map.deployment_default is None:
-        body.append(_text("No deployment default.", subtle=True))
+        body.append(_text("No Daimon-wide default.", subtle=True))
     else:
-        line = f"**Deployment default:** {answering_map.deployment_default}"
+        line = f"**Daimon-wide default:** {answering_map.deployment_default}"
         if answering_map.tenant_consumes_fallthrough:
             line += " (not in effect while an organisation default is set)"
         body.append(_text(line))
-    body.append(_text(_environments_text(answering_map)))
+    body.append(_text(_environments_text(answering_map, channels)))
     names = [setup_thread_name(ref.target_name) for ref in answering_map.setup_threads]
     if answering_map.setup_threads_truncated:
         names.append("…and more")
@@ -357,7 +376,7 @@ def routing_card(
     request = build_routing_request(
         agent_name=request_agent or "an agent", channel_label="a channel"
     )
-    body.append(_text(f"{PRECEDENCE_LINE} {lead}{request}", subtle=True))
+    body.append(_text(f"{precedence_line(words_for('teams').space)} {lead}{request}", subtle=True))
     actions: list[Action] = [*_pager(page, "routing"), _button("Back", "agents")]
     if changes_channels:
         settings = OpenDialogData(CHANNEL_DIALOG)
@@ -368,11 +387,29 @@ def routing_card(
     return _card("Who answers where", body, actions)
 
 
-def _environments_text(answering_map: AnsweringMap) -> str:
+def _channel_line(channel_id: str, value: str, names: Mapping[str, str]) -> str:
+    """`General → **qa-haiku**`, as Discord and Slack list a channel's setting."""
+    return f"{channel_name_text(channel_id, names)} → **{value}**"
+
+
+def routing_channel_ids(answering_map: AnsweringMap, page: Page[Any]) -> list[str]:
+    """The channels `routing_card` lists on `page`, whose names it needs."""
+    environments = answering_map.channel_environments[:MAX_ENVIRONMENT_LINES]
+    ids = [answer.channel_id for answer in page.items] + [row.channel_id for row in environments]
+    return list(dict.fromkeys(ids))
+
+
+def place_channel_ids(details: AgentDetails, *, here: str) -> list[str]:
+    """The channels `details_card` lists as answering places, whose names it needs."""
+    ids = (place.channel_id for place in details.answers_in if place.tier == "channel")
+    return list(dict.fromkeys(i for i in ids if i is not None and i != here))
+
+
+def _environments_text(answering_map: AnsweringMap, names: Mapping[str, str]) -> str:
     """Each channel's own environment, then the defaults, as Discord and Slack list them."""
     rows = answering_map.channel_environments
     lines = [
-        f"Channel `{row.channel_id}`: **{row.environment_name}**"
+        _channel_line(row.channel_id, row.environment_name, names)
         for row in rows[:MAX_ENVIRONMENT_LINES]
     ]
     if len(rows) > len(lines):
@@ -382,7 +419,7 @@ def _environments_text(answering_map: AnsweringMap) -> str:
     lines.append(f"**Organisation default:** {tenant or 'Not assigned'}")
     if deployment is not None:
         note = " (not in effect while an organisation default is set)" if tenant else ""
-        lines.append(f"**Deployment default:** {deployment}{note}")
+        lines.append(f"**Daimon-wide default:** {deployment}{note}")
     return "**Environments**\n\n" + "\n\n".join(lines)
 
 
@@ -485,7 +522,7 @@ def token_channel_form(
     Panels live in the 1:1 chat, so the channel the token binds to is chosen
     here rather than read from where the button was pressed.
     """
-    choices = [Choice(title="Not bound to a channel", value=UNBOUND)] if allow_unbound else []
+    choices = [Choice(title="Not tied to a channel", value=UNBOUND)] if allow_unbound else []
     choices += [
         Choice(title=f"Channel {channel_id}", value=channel_id) for channel_id in channel_ids
     ]
@@ -500,7 +537,7 @@ def token_channel_form(
                 value=choices[0].value,
                 choices=choices,
             ),
-            _text("A bound token runs under that channel's rules and budget.", subtle=True),
+            _text("A token tied to a channel runs under its rules and budget.", subtle=True),
         ],
         actions=[SubmitAction(title="Mint token", data=submit)],
         fallback_text=f"Use {agent_name} from your coding tools",
@@ -546,7 +583,7 @@ def operator_tokens_card(rows: Sequence[McpTokenRow], *, notice: str | None = No
         ),
         TextInput(id="label", label="Label", placeholder="what it is for", max_length=100),
         _text(
-            f"An operator token lets an integration call daimon's tenant tools as you, for "
+            f"An operator token lets an integration use Daimon as you for "
             f"{PANEL_TTL_DAYS} days. It is shown once.",
             subtle=True,
         ),

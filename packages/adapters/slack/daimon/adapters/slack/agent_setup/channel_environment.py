@@ -35,6 +35,7 @@ from daimon.core.channel_environments import (
 )
 from daimon.core.native_admins import load_live_subject
 from daimon.core.panel_audit import record_panel_write
+from daimon.core.platform_words import words_for
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -168,7 +169,9 @@ async def save_environment_choice(
     if not pick.decision:
         await audit(outcome="denied", reason=f"authz:{pick.decision.reason}")
         if pick.decision.reason == "not_a_reader":
-            return build_limited_network_refusal(environment_name=name)
+            return build_limited_network_refusal(
+                environment_name=name, admin=words_for("slack").admin
+            )
         return ENVIRONMENT_NEED_ADMIN_MESSAGE
     if name is not None and pick.missing:
         return build_missing_environment_note(name)

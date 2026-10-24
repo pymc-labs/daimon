@@ -11,8 +11,8 @@ from daimon.core._models import TeamsMessageAdmission
 from daimon.core.stores.teams_message_admissions import (
     claim_teams_message,
     count_teams_messages_for_user,
-    delete_teams_messages_for_user,
     finish_teams_messages,
+    forget_teams_messages_for_user,
     list_unhandled_teams_messages,
     mark_restart_notice,
     prune_teams_messages,
@@ -271,17 +271,32 @@ async def test_prune_keeps_recent_rows_and_a_live_owners(
         assert not await _claim(db_session, tenant.id, me, "live"), "a live owner's row stays"
 
 
-async def test_a_persons_rows_are_counted_and_purged(db_session: AsyncSession) -> None:
+async def test_a_persons_rows_are_forgotten_but_keep_their_key(db_session: AsyncSession) -> None:
+    """A purge leaves a content-free receipt, or a catch-up would run the message again."""
     tenant = await make_tenant(db_session)
     owner = randbits(30)
     assert await _claim(db_session, tenant.id, owner, "1", user_id="u-1")
     assert await _claim(db_session, tenant.id, owner, "2", user_id="u-2")
 
     counted = await count_teams_messages_for_user(db_session, tenant_id=tenant.id, user_id="u-1")
-    deleted = await delete_teams_messages_for_user(db_session, tenant_id=tenant.id, user_id="u-1")
+    forgotten = await forget_teams_messages_for_user(db_session, tenant_id=tenant.id, user_id="u-1")
 
-    assert (counted, deleted) == (1, 1), "only that person's row, counted as deleted"
+    assert (counted, forgotten) == (1, 1), "only that person's row, counted as cleared"
     assert await count_teams_messages_for_user(db_session, tenant_id=tenant.id, user_id="u-1") == 0
+    assert await forget_teams_messages_for_user(db_session, tenant_id=tenant.id, user_id="u-1") == 0
+    forgotten_row = await db_session.get(TeamsMessageAdmission, (tenant.id, CHANNEL, "1"))
+    assert forgotten_row is not None, "the row stays"
+    assert (forgotten_row.user_id, forgotten_row.message, forgotten_row.handled) == (
+        None,
+        None,
+        True,
+    ), "with no person, no words, and nothing left to replay"
+    other = await db_session.get(TeamsMessageAdmission, (tenant.id, CHANNEL, "2"))
+    assert other is not None and other.user_id == "u-2" and other.message is not None
+    assert not await _claim(db_session, tenant.id, owner + 1, "1"), (
+        "the message is not admitted again"
+    )
+    assert not await _claim(db_session, tenant.id, owner + 1, "1", user_id="u-1")
 
 
 async def test_a_message_for_a_tenant_not_yet_provisioned_is_let_through(

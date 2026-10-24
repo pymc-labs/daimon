@@ -6,7 +6,8 @@ messages), an unmentioned human reply in a channel thread (a participation
 candidate, `unprompted`), or a personal-chat message from the configured Entra
 tenant, and reduces it to `TeamsInbound`. `parse_graph_message` does the
 same for a message Graph reported from a subscribed private or shared channel,
-where Teams sends the bot only @mentions. `live_tenant_id`
+where Teams sends the bot only @mentions, or read back after a restart from any
+channel or group chat. `live_tenant_id`
 then maps it to the organisation's live daimon tenant; a 1:1 chat names its
 organisation, so it needs no DM workspace choice. A group chat (`kind="group"`)
 is one conversation keyed by its chat id: only a mention, a quote of the bot
@@ -39,6 +40,7 @@ from daimon.core.name_mentions import mentions_by_name, strip_name_mentions
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.teams_graph import (
+    GraphBody,
     GraphMessage,
     GraphSender,
     html_to_text,
@@ -63,6 +65,8 @@ _QUOTED = re.compile(r'<quoted\s+messageId="([^"]*)"\s*/>')
 # `[^<>]`, not `[^>]`: many unclosed "<blockquote" tags would otherwise scan quadratically.
 _BLOCKQUOTE_TAG = re.compile(r"<(/?)blockquote\b([^<>]*)>", re.IGNORECASE)
 _ENTITY = re.compile(r"&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]*);", re.IGNORECASE)
+# A body's `<at id="N">name</at>` tag, N naming its entry in the message's mentions.
+_AT_TAG = re.compile(r"""<at\b[^<>]*?\bid=["'](?P<id>\d+)["'][^<>]*>[^<]*</at>""")
 _REPLY_ITEMTYPE = re.compile(r'itemtype\s*=\s*"[^"]*schema\.skype\.com/reply"', re.IGNORECASE)
 
 
@@ -103,7 +107,7 @@ class TeamsInbound:
     marks a channel message only the bot sees (a slash command, say): it is
     answered privately and never enters the thread's session. `is_foreign`
     marks a sender from another organisation (`foreign_tenant`): Teams opens no
-    1:1 chat with them.
+    1:1 chat with them, and `home_tenant_id` is the tenant the activity names for them.
     """
 
     kind: Literal["dm", "channel", "group"]
@@ -131,6 +135,7 @@ class TeamsInbound:
     sender_id: str | None = None
     is_targeted: bool = False
     is_foreign: bool = False
+    home_tenant_id: str | None = None
 
     @property
     def thread_id(self) -> str:
@@ -272,6 +277,15 @@ def _without_reply_quotes(text: str) -> str:
     return "".join(kept)
 
 
+def display_bot_name(name: str | None) -> str | None:
+    """The bot's name as a person reads it: runs of whitespace collapsed, ends trimmed.
+
+    Teams can hand a name such as "Daimon  Staging " back with padding; None when
+    nothing is left."""
+    cleaned = " ".join((name or "").split())
+    return cleaned or None
+
+
 def strip_typed_name(text: str, name: str | None) -> str:
     """`text` without the typed "@<name>", its entities read as `_typed_text` reads them.
 
@@ -390,7 +404,7 @@ def parse_inbound(
         activity_id=activity.id,
         text=text,
         service_url=service_url,
-        bot_name=activity.recipient.name,
+        bot_name=display_bot_name(activity.recipient.name),
         files=files,
         team_id=team_id,
         team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,
@@ -406,6 +420,7 @@ def parse_inbound(
         sender_id=activity.from_.id or None,
         is_targeted=targeted,
         is_foreign=home is not None,
+        home_tenant_id=home,
     )
     return _admitted(inbound, addressed=addressed)
 
@@ -453,41 +468,100 @@ def _display_name(identity: GraphSender | None) -> str | None:
     return who.display_name if who else None
 
 
+@dataclass(frozen=True)
+class GraphSource:
+    """Where Graph read a message: a channel or group chat, and what the adapter knows of it.
+
+    Graph carries none of this, which an activity does: a subscription records
+    it for a private channel; a restart's catch-up takes it from the team's record.
+    """
+
+    kind: Literal["channel", "group"]
+    channel_id: str
+    team_id: str | None = None
+    group_id: str | None = None
+    channel_type: str | None = None
+    channel_name: str | None = None
+    team_name: str | None = None
+    bot_name: str | None = None
+    service_url: str | None = None
+
+    @classmethod
+    def of_subscription(cls, row: TeamsChannelSubscriptionRow) -> GraphSource:
+        return cls(
+            kind="channel",
+            channel_id=row.channel_id,
+            team_id=row.team_id,
+            group_id=row.group_id,
+            channel_type=row.channel_type,
+            channel_name=row.channel_name,
+            team_name=row.team_name,
+            bot_name=row.bot_name,
+            service_url=row.service_url,
+        )
+
+
+def _mentions_bot(message: GraphMessage, bot: str) -> bool:
+    return any(_is_app(mention.mentioned, bot) for mention in message.mentions)
+
+
+def _without_bot_mention(message: GraphMessage, bot: str) -> GraphMessage:
+    """`message` with the bot's own `<at>` tag removed, as Bot Framework strips it."""
+    ids = {str(m.id) for m in message.mentions if m.id is not None and _is_app(m.mentioned, bot)}
+    if message.body.content_type != "html" or not ids:
+        return message
+
+    def keep_other(tag: re.Match[str]) -> str:
+        return "" if tag["id"] in ids else tag[0]
+
+    content = _AT_TAG.sub(keep_other, message.body.content or "")
+    return message.model_copy(update={"body": GraphBody(content_type="html", content=content)})
+
+
 def parse_graph_message(
     message: GraphMessage,
-    channel: TeamsChannelSubscriptionRow,
+    source: GraphSource,
     *,
     configured_tenant: str,
     bot_app_id: str,
+    mentions: bool = False,
 ) -> TeamsInbound | Refusal:
-    """`parse_inbound` for a message Graph reported from a subscribed channel.
+    """`parse_inbound` for a message Graph reported, from a subscribed channel or read back.
 
     Only a person's new message counts. One that @mentions the bot is refused
-    silently too: Bot Framework delivers it. A Reply on one of the bot's
-    messages (a `messageReference` naming the bot's app id) is addressed, as a
-    quote is there; the rest is screened as an unmentioned channel message.
+    silently too, unless `mentions`: Bot Framework delivers it, except while the
+    adapter was restarting, which a read back after a boot is making up for. A
+    Reply on one of the bot's messages (a `messageReference` naming the bot's app
+    id) is addressed, as a quote is there; the rest is screened as an unmentioned
+    channel message. A group chat has no threads, so only an address counts there.
     """
     sender = message.sender
     user = sender.user if sender is not None else None
     bot = bot_app_id.lower()
+    mentioned = _mentions_bot(message, bot)
     if (
         message.message_type != "message"
         or message.deleted_date_time is not None
         or user is None
         or (sender is not None and sender.application is not None)
-        or any(_is_app(mention.mentioned, bot) for mention in message.mentions)
+        or (mentioned and not mentions)
     ):
         return Refusal(None)
+    if mentioned:
+        message = _without_bot_mention(message, bot)
     is_html = message.body.content_type == "html"
     body = message.body.content or ""
     references = message_references(message)
-    addressed = any(_is_app(ref.message_sender, bot) for ref in references) or (
-        is_html and any(_bare_bot_id(s) == bot for s in _quote_senders(body))
+    addressed = (
+        mentioned
+        or any(_is_app(ref.message_sender, bot) for ref in references)
+        or (is_html and any(_bare_bot_id(s) == bot for s in _quote_senders(body)))
     )
     root = message.reply_to_id or message.id
-    thread_reply = not addressed and root != message.id
+    in_thread = source.kind == "channel"
+    thread_reply = in_thread and not addressed and root != message.id
     typed = html_to_text(_without_reply_quotes(body)) if is_html else body
-    by_name = not addressed and mentions_by_name(typed, (channel.bot_name,))
+    by_name = not addressed and mentions_by_name(typed, (source.bot_name,))
     if not addressed and not thread_reply and not by_name:
         return Refusal(None)
 
@@ -500,26 +574,27 @@ def parse_graph_message(
     )
     home = (user.tenant_id or "").strip()
     inbound = TeamsInbound(
-        kind="channel",
+        kind=source.kind,
         entra_tenant_id=tenant,
         user_id=user_id,
-        conversation_id=f"{channel.channel_id};messageid={root}",
-        channel_id=channel.channel_id,
+        conversation_id=f"{source.channel_id};messageid={root}" if in_thread else source.channel_id,
+        channel_id=source.channel_id,
         activity_id=message.id,
         text=(quoted + message_text(message)).strip(),
-        service_url=channel.service_url,
-        bot_name=channel.bot_name,
+        service_url=source.service_url,
+        bot_name=source.bot_name,
         files=parse_graph_attachments(message),
-        team_id=channel.team_id,
-        team_group_id=channel.group_id,
+        team_id=source.team_id,
+        team_group_id=source.group_id,
         unprompted=thread_reply,
         by_name=by_name,
         user_name=user.display_name,
         timestamp=message.created_date_time,
-        channel_name=_channel_name(channel.channel_id, channel.team_id, channel.channel_name),
-        channel_type=channel.channel_type,
-        team_name=channel.team_name,
+        channel_name=_channel_name(source.channel_id, source.team_id, source.channel_name),
+        channel_type=source.channel_type,
+        team_name=source.team_name,
         is_foreign=bool(home) and canonical_uuid(home) != tenant,
+        home_tenant_id=home or None,
     )
     return _admitted(inbound, addressed=addressed)
 

@@ -55,6 +55,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.slack_customize_scope import (
@@ -95,8 +96,7 @@ _ATTACHMENT_LINK_REJECTED_MSG = (
     "again to get a fresh one"
 )
 _ATTACHMENT_LINKS_UNCONFIGURED_MSG = (
-    "this deployment cannot resolve file links — use create_file_upload_url and "
-    "file_handles instead"
+    "Daimon cannot resolve file links here — use create_file_upload_url and file_handles instead"
 )
 _FILES_NEED_CONTENT_MSG = "Slack files need a short caption — content cannot be empty"
 _MISSING_FILES_SCOPE_MSG = (
@@ -140,12 +140,18 @@ def _slack_error_code(err: SlackApiError) -> str:
 
 
 async def _validate_channel_access(
-    client: AsyncWebClient, *, channel_id: str, requester_id: str
+    client: AsyncWebClient, *, channel_id: str, requester_id: str, is_client: bool = False
 ) -> None:
     try:
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel = cast(dict[str, Any], info["channel"])
-        await check_channel_access(client, channel=channel, user_id=requester_id, allow_own_im=True)
+        await check_channel_access(
+            client,
+            channel=channel,
+            user_id=requester_id,
+            allow_own_im=True,
+            is_client=is_client,
+        )
     except SlackApiError as err:
         mapped = map_slack_api_error(err)
         if mapped is None:
@@ -225,6 +231,8 @@ async def _post_with_identity(
 
 
 async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dict[str, str] | None:
+    if auth.anthropic_disabled or anthropic_disabled():
+        return None
     if not identity_enabled_for(runtime.settings, "slack", auth.external_id):
         return None
     agent_id = auth.chat_agent_id or auth.agent_id
@@ -393,7 +401,9 @@ async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
             raise ToolError(f"attachment exceeds {MAX_BYTES_PER_FILE // (1024 * 1024)} MiB")
     client = await slack_web_client(runtime, team_id=team_id)
 
-    await _validate_channel_access(client, channel_id=target_channel_id, requester_id=requester_id)
+    await _validate_channel_access(
+        client, channel_id=target_channel_id, requester_id=requester_id, is_client=auth.client
+    )
     await require_channel_writable(runtime, auth, channel_id=target_channel_id)
     if thread_ts is not None:
         await _validate_thread_target(client, channel_id=target_channel_id, thread_ts=thread_ts)
@@ -493,7 +503,9 @@ async def _slack_create_thread_impl(  # pyright: ignore[reportUnusedFunction]  #
     team_id = _require_team_id(auth)
     client = await slack_web_client(runtime, team_id=team_id)
 
-    await _validate_channel_access(client, channel_id=target_channel_id, requester_id=requester_id)
+    await _validate_channel_access(
+        client, channel_id=target_channel_id, requester_id=requester_id, is_client=auth.client
+    )
     await require_channel_writable(runtime, auth, channel_id=target_channel_id)
 
     resp = await _post_message(

@@ -20,6 +20,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.identity import get_or_create_platform_principal
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -45,7 +46,7 @@ class BillingCog(commands.Cog):
 
     @app_commands.command(
         name="billing",
-        description="Your usage and credit",
+        description=DESCRIPTIONS["billing"],
     )
     @require_registered_guild
     async def billing(self, interaction: BotInteraction) -> None:

@@ -27,7 +27,7 @@ from daimon.core.session_snapshot import (
     fingerprint_identity,
     fingerprint_mutable,
 )
-from daimon.testing.ma_transport import Json, RecordedRequest
+from mux.testing.drivers.anthropic.ma_transport import Json, RecordedRequest
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import MetaData, select
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -52,8 +52,8 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.crypto import make_fernet
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import list_response, session_response
 from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import list_response, session_response
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
