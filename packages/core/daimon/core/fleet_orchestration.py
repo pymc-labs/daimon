@@ -2250,14 +2250,22 @@ class HostFleetPorts:
             async with self.sessions.begin() as db:
                 policy = await access_policy.load_access_policy(db, tenant_id=tenant_id)
                 _authorize(parent, policy)
-                # Lock before the ordinal read; admission reuses this same transaction lock.
-                await fleet.lock_budget(
+                # Lock before the ordinal read; admission reuses this same transaction's
+                # lock AND its graph (the run and its workers are in it), so the
+                # tenant-wide graph is read once per admission.
+                locked = await fleet.lock_budget(
                     db,
                     tenant_id=tenant_id,
                     actor_id=parent.fleet.account_id,
                     run_id=run_id,
+                    persisted=True,
                 )
-                run, workers = await fleet.run_status(db, tenant_id=tenant_id, run_id=run_id)
+                pair = next((pair for pair in locked[0] if pair[0].id == run_id), None)
+                if pair is None:
+                    from daimon.core.fleet import FleetConflict
+
+                    raise FleetConflict(f"no fleet run {run_id} in this tenant")
+                run, workers = pair
                 _scope(parent, run)
                 begun = await mux_state.begin_operation(
                     db,
@@ -2290,6 +2298,7 @@ class HostFleetPorts:
                         markup=self.markup,
                         reviewer_of=reviewer_of,
                         result_contract=result_contract,
+                        locked=locked,
                     )
                     await mux_state.claim_send(
                         db,
@@ -2416,8 +2425,14 @@ class HostFleetPorts:
             policy = await access_policy.load_access_policy(db, tenant_id=run.tenant_id)
             _authorize(parent, policy)
             _session_authorize(parent, policy, continuing=True)
+            # A wait writes only its wake (task_continuations), never money: the tenant
+            # row is a key share here, not the funds lock admissions queue on.
             await fleet.lock_budget(
-                db, tenant_id=run.tenant_id, actor_id=parent.fleet.account_id, run_id=run.id
+                db,
+                tenant_id=run.tenant_id,
+                actor_id=parent.fleet.account_id,
+                run_id=run.id,
+                financial=False,
             )
             actual, _ = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
             _scope(parent, actual)
@@ -2494,8 +2509,14 @@ class HostFleetPorts:
                 policy = await access_policy.load_access_policy(db, tenant_id=run.tenant_id)
                 _authorize(parent, policy)
                 _session_authorize(parent, policy, continuing=True)
+                # A read of retained evidence (write=False) writes nothing; only a
+                # control that changes a run or worker takes the funds lock.
                 await fleet.lock_budget(
-                    db, tenant_id=run.tenant_id, actor_id=parent.fleet.account_id, run_id=run.id
+                    db,
+                    tenant_id=run.tenant_id,
+                    actor_id=parent.fleet.account_id,
+                    run_id=run.id,
+                    financial=write,
                 )
                 actual, _ = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
                 _scope(parent, actual)

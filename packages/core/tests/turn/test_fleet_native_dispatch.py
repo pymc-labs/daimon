@@ -250,8 +250,12 @@ async def test_derivation_refuses_unbound_stale_expired_and_disabled_before_revi
         )
 
 
-async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_again(worker_root):
+async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_again(
+    worker_root, monkeypatch
+):
     from mux.contracts.config import BackendConfig
+
+    from packages.core.tests.test_fleet_budget import count_budget_locks
 
     request, root, _, resolved, prices, calls, _, _, _ = worker_root
 
@@ -283,6 +287,7 @@ async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_agai
         else None,
         limits=resolved.limits,
     )
+    budget_locks = count_budget_locks(monkeypatch)
     try:
         policy = await _policy(request)
         first = await owner.spawn(root, policy, **terms)
@@ -307,6 +312,9 @@ async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_agai
         again = await owner.spawn(root, policy, **terms)
         assert again["worker_id"] == first["worker_id"] and again["status"] == "succeeded"
         assert [call.url.path for call in calls if call.method == "POST"] == posts
+        # Spawn admission, the worker's own admission and every step after it read the
+        # tenant graph once per transaction.
+        assert budget_locks and max(budget_locks.values()) == 1, dict(budget_locks)
     finally:
         await ports.close()
     assert request.deps.running_turns.count() == 0
