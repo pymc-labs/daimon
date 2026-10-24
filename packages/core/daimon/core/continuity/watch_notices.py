@@ -1,4 +1,4 @@
-"""Drain migration DMs from the chat adapter's existing notice poller."""
+"""Drain owner watch notices from the chat adapter's existing notice poller."""
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -21,7 +21,17 @@ async def poll_watch_notices(
             return
         watch, workspace_id = notice
         try:
-            delivered = await deliver(watch, workspace_id, UNMAPPED_NOTICE)
+            if watch.status == "expired":
+                message = f"Watch {watch.id} expired."
+            elif watch.source_state.get("reason") == "source_unmapped":
+                message = UNMAPPED_NOTICE
+            elif watch.source_state.get("reason") == "cap_reached":
+                message = f"Watch {watch.id} paused: fired {watch.fire_count} times."
+            elif watch.source_state.get("reason") == "access_revoked":
+                message = f"Watch {watch.id} paused: owner access was revoked."
+            else:
+                message = f"Watch {watch.id} paused."
+            delivered = await deliver(watch, workspace_id, message)
         except Exception:
             delivered = False  # Never log owner details or source content.
         async with sessions.begin() as db:

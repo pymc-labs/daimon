@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep completed routine replies deliverable when generated-file collection fails, with a note that files could not be attached.
 - Record routine failures and queue channel/thread failure notices after the scheduler heals a stale agent ID.
 - Correct the routines documentation: owner-DM execution failures and busy-owner skips record an error without sending a notice.
+- Daimon watches retry capped polls at their normal interval and send owners a private notice when paused or expired.
 
 ### Removed
 

@@ -538,6 +538,8 @@ async def pause_watch(
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None:
         raise ValueError("Watch not found")
+    if row.status == "paused":
+        return
     await _cancel_queued(session, [watch_id])
     row.status = "paused"
     row.revision += 1
@@ -721,6 +723,7 @@ async def poll_failed(
     *,
     revoked: bool,
     now: datetime,
+    capped: bool = False,
 ) -> None:
     # Invalid capabilities never contend on the global firing lock.
     current = await get_watch(session, watch_id)
@@ -733,12 +736,15 @@ async def poll_failed(
     if revoked:
         await pause_watch(session, watch_id, reason="access_revoked")
         return
-    row.consecutive_errors += 1
-    delay = min(
-        86400, int(row.source_state.get("interval", 60)) * 2 ** min(row.consecutive_errors, 10)
-    )
-    row.backoff_until = now + timedelta(seconds=delay)
-    row.next_check_at = row.backoff_until
+    interval = int(row.source_state.get("interval", 60))
+    if capped:
+        row.backoff_until = None
+        row.next_check_at = now + timedelta(seconds=interval)
+    else:
+        row.consecutive_errors += 1
+        delay = min(86400, interval * 2 ** min(row.consecutive_errors, 10))
+        row.backoff_until = now + timedelta(seconds=delay)
+        row.next_check_at = row.backoff_until
     row.lease_owner = None
     row.lease_expires_at = None
     await session.flush()
@@ -874,12 +880,30 @@ async def confirm_import(
 async def claim_import_notice(
     session: AsyncSession, *, now: datetime
 ) -> tuple[WatchRow, str] | None:
-    """Claim a private migration notice on the existing adapter notice cadence."""
+    """Claim import and lifecycle notices on the existing adapter notice cadence."""
+    await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(
         select(Watch)
         .where(
             Watch.platform == "discord",
-            Watch.source_state["notice_pending"].as_boolean().is_(True),
+            or_(
+                Watch.source_state["notice_pending"].as_boolean().is_(True),
+                Watch.status.in_(("active", "paused")) & (Watch.expires_at <= now),
+                (Watch.status == "active")
+                & (Watch.max_fires.is_not(None))
+                & (Watch.fire_count >= Watch.max_fires)
+                & ~select(WatchFiring.wake_key)
+                .join(TaskContinuation, TaskContinuation.idempotency_key == WatchFiring.wake_key)
+                .where(
+                    WatchFiring.watch_id == Watch.id,
+                    TaskContinuation.status.in_(("pending", "claimed")),
+                )
+                .exists(),
+                Watch.status.in_(("paused", "expired"))
+                & Watch.source_state["notice_state"].astext.is_distinct_from(
+                    func.concat(Watch.status, ":", Watch.revision)
+                ),
+            ),
             or_(
                 Watch.source_state["notice_lease_until"].astext.is_(None),
                 Watch.source_state["notice_lease_until"].astext <= now.isoformat(),
@@ -891,6 +915,14 @@ async def claim_import_notice(
     )
     if row is None:
         return None
+    if row.status in {"active", "paused"} and row.expires_at <= now:
+        await _cancel_queued(session, [row.id])
+        row.status = "expired"
+        row.revision += 1
+        row.lease_owner = None
+        row.lease_expires_at = None
+    elif row.status == "active" and row.max_fires is not None and row.fire_count >= row.max_fires:
+        await pause_watch(session, row.id, reason="cap_reached")
     state = dict(row.source_state)
     until = state.get("notice_lease_until")
     if until is not None and datetime.fromisoformat(str(until)) > now:
@@ -898,6 +930,8 @@ async def claim_import_notice(
     token = str(uuid.uuid4())
     row.source_state = {
         **state,
+        "notice_pending": True,
+        "notice_state": f"{row.status}:{row.revision}",
         "notice_lease": token,
         "notice_lease_until": (now + timedelta(minutes=2)).isoformat(),
     }
@@ -915,8 +949,11 @@ async def settle_import_notice(
     delivered: bool,
 ) -> None:
     row = await session.scalar(select(Watch).where(Watch.id == notice.id).with_for_update())
-    if row is None or row.source_state.get("notice_lease") != notice.source_state.get(
-        "notice_lease"
+    if (
+        row is None
+        or row.status != notice.status
+        or row.revision != notice.revision
+        or row.source_state.get("notice_lease") != notice.source_state.get("notice_lease")
     ):
         return
     row.source_state = {
