@@ -804,3 +804,28 @@ async def test_a_member_forks_the_default_agent_across_opus_astra_and_gemini(
     }
     for row in seen.settled:
         assert f"model {row.model}." in told[row.model], row.model
+
+
+async def test_j10_a_family_name_alone_means_its_newest_model_with_no_question():
+    """J10b (ac0446b6): "fork yourself across haiku, luna and flash" drew "'Haiku' matches
+    two models here (Claude Haiku 5.5 / 4.5)" instead of a fleet. A family name alone
+    means the newest of that family; only different families are worth a question."""
+    from daimon.adapters.mcp.tools.fleet import family_names, fleet_model, register_fleet_tools
+    from daimon.core.agent_model_names import agent_catalog
+    from fastmcp import FastMCP
+
+    allowed = [entry.model for entry in agent_catalog()]
+    assert {"claude-haiku-5-5", "claude-haiku-4-5"} <= {model.id for model in allowed}
+    assert fleet_model("haiku", allowed) == "claude-haiku-5-5"
+    assert fleet_model("Haiku", allowed) == "claude-haiku-5-5"
+    assert fleet_model("haiku 4.5", allowed) == "claude-haiku-4-5", "an explicit version stays"
+    named = family_names(allowed)
+    assert named["haiku"] == "claude-haiku-5-5"
+    assert named["sonnet"] == "claude-sonnet-5-5"
+    assert named["flash"] == "gemini-3.8-flash"
+    assert named["luna"] == "gpt-6-luna"
+    mcp = FastMCP("guard")
+    register_fleet_tools(mcp, runtime(), enabled=True)
+    for tool in ("fleet_agents", "fleet_spawn"):
+        description = " ".join(((await mcp.get_tool(tool)).description or "").split())
+        assert "never ask which version" in description, tool
