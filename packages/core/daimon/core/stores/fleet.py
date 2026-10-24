@@ -803,7 +803,8 @@ async def record_cancel_cause(
     records can be deferred by the very contention that blinded it, and the
     deadline sweep then ended them as `deadline_expired`, losing the real cause.
     One short transaction of its own, outside the fleet lock, bounded by a lock
-    timeout; only rows not yet ended and with no cause yet. Returns rows marked.
+    timeout (which bounds lock waits, not the pool's); only rows not yet ended and
+    with no cause yet, locked in id order. Returns rows marked.
     """
     if error_code not in RECORDED_CAUSES:
         raise FleetConflict(f"{error_code} is not a recorded cancel cause")
@@ -811,14 +812,25 @@ async def record_cancel_cause(
         return 0
     async with sessionmaker.begin() as session:
         await session.execute(text("SET LOCAL lock_timeout = '2s'"))
+        # Lock in id order, as the budget lock does, so the two never deadlock.
+        locked = (
+            await session.scalars(
+                select(FleetWorkerRow.id)
+                .where(
+                    FleetWorkerRow.tenant_id == tenant_id,
+                    FleetWorkerRow.id.in_(list(worker_ids)),
+                    FleetWorkerRow.status.in_(("pending", "starting", "running")),
+                    FleetWorkerRow.error_code.is_(None),
+                )
+                .order_by(FleetWorkerRow.id)
+                .with_for_update()
+            )
+        ).all()
+        if not locked:
+            return 0
         result = await session.execute(
             update(FleetWorkerRow)
-            .where(
-                FleetWorkerRow.tenant_id == tenant_id,
-                FleetWorkerRow.id.in_(list(worker_ids)),
-                FleetWorkerRow.status.in_(("pending", "starting", "running")),
-                FleetWorkerRow.error_code.is_(None),
-            )
+            .where(FleetWorkerRow.tenant_id == tenant_id, FleetWorkerRow.id.in_(locked))
             .values(
                 error_code=error_code,
                 version=FleetWorkerRow.version + 1,

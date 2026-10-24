@@ -326,13 +326,24 @@ async def test_the_watch_s_first_cause_survives_a_deferred_failure_and_the_sweep
     async def busy_finish(*args, **kwargs):
         raise DBAPIError("UPDATE fleet_worker", None, RuntimeError("lock busy"))
 
+    capped = uuid.uuid4()  # a worker the watch cancelled earlier, for its budget cap
+    recorded: list[tuple[uuid.UUID, ...]] = []
+    real_record = fleet.record_cancel_cause
+
     async def blind_watch(*, cancelled, finished, **_kwargs):
         while not cancelled:  # the waiting worker registers its cancel event
             await asyncio.sleep(0.02)
+        cancelled[capped] = channel_budget.WorkerCancel()
+        channel_budget.cancel_workers({capped: cancelled[capped]}, "budget", run_id=None)
         channel_budget.cancel_workers(cancelled, "usage_unavailable", run_id=root.fleet.run_id)
         return "usage_unavailable"
 
+    async def record(sessionmaker, **kwargs):
+        recorded.append(tuple(kwargs["worker_ids"]))
+        return await real_record(sessionmaker, **kwargs)
+
     monkeypatch.setattr(channel_budget, "watch_fleet_budget", blind_watch)
+    monkeypatch.setattr(fleet, "record_cancel_cause", record)
     monkeypatch.setattr(fleet, "finish", busy_finish)
     ports = _ports(request, prices, max_per_tenant=1)
     owner = FleetOrchestrator(ports)
@@ -357,3 +368,5 @@ async def test_the_watch_s_first_cause_survives_a_deferred_failure_and_the_sweep
     await fleet.sweep_expired(request.deps.sessionmaker, tenant_id=request.tenant_id)
     row = await _row(request, root, waiting["worker_id"])
     assert (row.status, row.error_code) == ("failed", "usage_unavailable"), row.error_code
+    # Only the watch's own cancels are recorded: the budget-capped worker keeps its cause.
+    assert recorded and all(capped not in ids for ids in recorded), recorded

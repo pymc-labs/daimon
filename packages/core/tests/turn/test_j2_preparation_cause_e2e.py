@@ -49,6 +49,21 @@ def _unknown() -> BaseException:
     return KeyError(PRIVATE)
 
 
+def _session_busy() -> BaseException:
+    from daimon.core.session_fence_retry import FenceUnavailable
+    from daimon.core.turn.errors import SessionBusyError
+
+    busy = SessionBusyError(pending_reasons=(PRIVATE,), retry_after=datetime.now(UTC))
+    busy.__cause__ = FenceUnavailable(PRIVATE)
+    return busy
+
+
+def _connection_lost() -> BaseException:
+    from daimon.core.errors import TurnError
+
+    return TurnError(kind="connection_lost", message=PRIVATE)
+
+
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 @pytest.mark.parametrize(
     ("failure", "cause", "labels"),
@@ -56,6 +71,9 @@ def _unknown() -> BaseException:
         (_lock_timeout, "preparation_busy", {"class": "sqlalchemy.exc.OperationalError"}),
         (lambda: TimeoutError(PRIVATE), "preparation_busy", {"type": "unlisted"}),
         (_unknown, "preparation_failed", {"class": "builtins.KeyError"}),
+        # The live J2 failure (fresh-eyes FINDINGS): the session was still busy.
+        (_session_busy, "preparation_busy", {"class": "daimon.core.turn.errors.SessionBusyError"}),
+        (_connection_lost, "preparation_busy", {"class": "daimon.core.errors.TurnError"}),
     ],
 )
 async def test_j2_a_preparation_that_fails_says_busy_or_failed_never_not_set_up(

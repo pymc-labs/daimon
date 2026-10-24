@@ -166,6 +166,18 @@ _CANCEL_CODES: dict[str, WorkerFailureCode] = {
 }
 
 
+def cancelled_for(
+    cancellations: Mapping[uuid.UUID, asyncio.Event], reason: str
+) -> tuple[uuid.UUID, ...]:
+    """The workers the watch cancelled for `reason`: not one cancelled earlier for
+    another (a budget cap), whose own cause must stand."""
+    return tuple(
+        worker_id
+        for worker_id, event in cancellations.items()
+        if event.is_set() and getattr(event, "reason", None) == reason
+    )
+
+
 def cancel_failure_code(cancel: asyncio.Event) -> WorkerFailureCode | None:
     """Why the budget watch cancelled this worker, as its failure code; None when it
     didn't (not set, or no reason the watch names)."""
@@ -190,6 +202,8 @@ _BACKEND_CAUSE_CODES: dict[str, WorkerFailureCode] = {
     "provider_not_allowed": "provider_not_allowed",
     "channel_pin": "channel_backend_pinned",
     "agent_backend": "worker_runtime_missing",
+    # Daimon was busy getting it ready: "try again", never a setup error.
+    "preparation_busy": "preparation_deadline_exceeded",
 }
 
 
@@ -1713,7 +1727,7 @@ class HostFleetPorts:
                                 self.sessions,
                                 tenant_id=worker.tenant_id,
                                 run_id=worker.run_id,
-                                worker_ids=tuple(cancellations),
+                                worker_ids=cancelled_for(cancellations, "usage_unavailable"),
                             )
                     except TimeoutError:
                         reason = "run_deadline"

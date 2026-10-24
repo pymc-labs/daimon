@@ -1671,3 +1671,56 @@ async def test_a_recorded_cancel_cause_wins_over_a_later_end_and_blocks_a_claim(
         await fleet.record_cancel_cause(
             sm, tenant_id=run.tenant_id, worker_ids=(pending.id,), error_code="deadline_expired"
         )
+
+
+async def test_only_the_watch_s_own_cancels_are_recorded_and_a_stop_is_still_a_stop(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#1558 review: a worker the watch cancelled earlier for a budget cap keeps
+    cap_exceeded (it is never recorded usage_unavailable); one recorded
+    usage_unavailable and then stopped by a person ends stopped."""
+    from daimon.core.channel_budget import WorkerCancel, cancel_workers
+    from daimon.core.fleet_orchestration import cancelled_for
+
+    sm = db_session_factory
+    run = await _run(sm)
+    capped = await _worker(sm, run, 0)
+    blinded = await _worker(sm, run, 1)
+    stopped = await _worker(sm, run, 2)
+    events = {capped.id: WorkerCancel(), blinded.id: WorkerCancel(), stopped.id: WorkerCancel()}
+    cancel_workers({capped.id: events[capped.id]}, "budget", run_id=run.id)
+    cancel_workers(events, "usage_unavailable", run_id=run.id)
+    chosen = cancelled_for(events, "usage_unavailable")
+    assert set(chosen) == {blinded.id, stopped.id}
+    assert (
+        await fleet.record_cancel_cause(
+            sm, tenant_id=run.tenant_id, worker_ids=chosen, error_code="usage_unavailable"
+        )
+        == 2
+    )
+    _, rows = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
+    latest = {w.id: w for w in rows}
+    ended = await fleet.finish(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=capped.id,
+        expected_version=latest[capped.id].version,
+        status="failed",
+        error_code="cap_exceeded",
+    )
+    assert ended.error_code == "cap_exceeded", "a budget cause is never overwritten"
+    asked = await fleet.request_worker_stop(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=stopped.id,
+        expected_version=latest[stopped.id].version,
+    )
+    halted = await fleet.finish(
+        sm,
+        tenant_id=run.tenant_id,
+        worker_id=stopped.id,
+        expected_version=asked.version,
+        status="cancelled",
+        error_code="stop_requested",
+    )
+    assert (halted.status, halted.error_code) == ("cancelled", "stop_requested")

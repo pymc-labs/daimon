@@ -33,7 +33,7 @@ from daimon.core.caller_resources import (
     CALLER_RESOURCES_ID,
     CALLER_VAULT_PREFIX,
 )
-from daimon.core.errors import DaimonError, TurnError
+from daimon.core.errors import DaimonError
 from daimon.core.neutral_resources import (
     AgentFleetGrant,
     WorkerPermissions,
@@ -3214,7 +3214,7 @@ async def read_preparation_counterpart(
         if error.reason == "re_confirm":
             raise AdmissionDenied(reason="backend_unsupported", cause="re_confirm") from error
         raise AdmissionDenied(reason="backend_unsupported") from error
-    except (UnsupportedCapability, TurnError) as error:
+    except UnsupportedCapability as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     except Exception as error:
         from daimon.core.channel_backend import backend_refusal_causes, transient_failure

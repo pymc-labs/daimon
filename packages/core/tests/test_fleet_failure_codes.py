@@ -407,3 +407,20 @@ def test_every_capability_our_code_raises_is_on_the_log_allowlist():
         UnsupportedCapability(tuple(plain), "anthropic.managed_agents")
     )
     assert "redacted" not in cause["missing"], sorted(set(plain) - set(cause["missing"]))
+
+
+def test_a_busy_preparation_reads_as_try_again_through_the_kept_chain() -> None:
+    """#1558: the catch-all now keeps its chain (`from error`). A busy preparation is
+    "try again" for a worker too, and an inner provider quota still names itself."""
+    from daimon.core.fleet_orchestration import worker_failure_code
+    from daimon.core.turn.errors import AdmissionDenied
+    from mux.errors import ProviderError
+
+    busy = AdmissionDenied(reason="backend_unsupported", cause="preparation_busy")
+    busy.__cause__ = TimeoutError()
+    assert worker_failure_code(busy, "preparation_refused") == "preparation_deadline_exceeded"
+    quota = ProviderError.__new__(ProviderError)
+    quota.category, quota.native_code = "rate_limited", "quota_zero"
+    failed = AdmissionDenied(reason="backend_unsupported", cause="preparation_failed")
+    failed.__cause__ = quota
+    assert worker_failure_code(failed, "preparation_refused") == "provider_quota_zero"

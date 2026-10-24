@@ -599,8 +599,12 @@ def _raised_capability(item: str) -> bool:
 _SQLSTATE = re.compile(r"^[0-9A-Z]{5}$")
 #: SQLSTATE classes and codes a retry can clear: connection loss (08), a
 #: serialization failure or deadlock (40001, 40P01), a lock not granted (55P03),
-#: a statement cancelled by its timeout (57014), too many connections (53300).
-_TRANSIENT_SQLSTATES = frozenset({"40001", "40P01", "55P03", "57014", "53300"})
+#: a statement cancelled by its timeout (57014), too many connections (53300), the
+#: server shutting down or not yet up (57P01-57P03), an idle transaction timed out
+#: (25P03).
+_TRANSIENT_SQLSTATES = frozenset(
+    {"40001", "40P01", "55P03", "57014", "53300", "57P01", "57P02", "57P03", "25P03"}
+)
 
 
 def exception_labels(error: BaseException) -> dict[str, object]:
@@ -663,15 +667,36 @@ def _sqlstate(error: BaseException) -> str | None:
 
 def transient_failure(error: BaseException | None) -> bool:
     """Whether a failure, or any exception in its chain, is one a retry can clear:
-    a timeout, a database pool timeout, a lost connection, or a lock/serialization
-    conflict. Its turn says "busy, try again", never "not set up"."""
+    a timeout, a database pool timeout, a lost connection or server restart, a
+    lock/serialization conflict, a busy session or policy write, or a provider
+    connection lost mid-way. Its turn says "busy, try again", never "not set up".
+
+    The chain is the one a traceback shows: an explicit `__cause__`, else the
+    implicit `__context__` unless `raise ... from None` suppressed it.
+    """
+    from daimon.core.errors import TurnError
+    from daimon.core.session_fence_retry import FenceUnavailable
+    from daimon.core.stores.access_policy import PolicyBusyError
+    from daimon.core.turn.errors import SessionBusyError
     from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
     from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
     seen: set[int] = set()
     while error is not None and id(error) not in seen:
         seen.add(id(error))
-        if isinstance(error, (TimeoutError, PoolTimeoutError, InterfaceError)):
+        if isinstance(
+            error,
+            (
+                TimeoutError,
+                PoolTimeoutError,
+                InterfaceError,
+                SessionBusyError,
+                PolicyBusyError,
+                FenceUnavailable,
+            ),
+        ):
+            return True
+        if isinstance(error, TurnError) and error.kind in ("connection_lost", "upstream"):
             return True
         if isinstance(error, DBAPIError):
             sqlstate = _sqlstate(error)
@@ -681,7 +706,13 @@ def transient_failure(error: BaseException | None) -> bool:
                 return True
             if sqlstate is None and isinstance(error, OperationalError):
                 return True
-        error = error.__cause__ or error.__context__
+        error = (
+            error.__cause__
+            if error.__cause__ is not None
+            else None
+            if error.__suppress_context__
+            else error.__context__
+        )
     return False
 
 
