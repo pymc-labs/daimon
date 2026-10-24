@@ -69,3 +69,36 @@ async def test_j6g_a_person_who_spoke_meanwhile_gets_one_answer_not_two(
     seeds, _ = await _dispatch(db_session_factory, caller, latest=spoke)
     assert seeds == [], "the person's own message is the one the copy answers"
     assert (await _status(db_session_factory, key))[0] != "pending"
+
+
+async def test_j6g_a_handoff_whose_session_is_still_held_waits_then_answers_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    caller: tuple[uuid.UUID, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smokes cbfc6032/4acca048 (J2, J6g): the turn marker cleared but the outgoing
+    session was still held, so the retried hand-off bound busy, wrapped in the turn's
+    own error. That rendered "Daimon is busy right now" and never answered. Now the
+    row waits, silently, and the copy answers once when the session frees."""
+    from daimon.core.errors import TurnError
+    from daimon.core.turn.errors import SessionBusyError
+
+    live, caller = await _active_turn(db_session_factory, caller)
+    monkeypatch.setattr("daimon.core.continuity.dispatch.WAKE_RETRY_DELAY", timedelta(0))
+    # The busy release offers the row again after the poller's delay; none here.
+    monkeypatch.setattr("daimon.core.continuity.wakes.WAKE_RETRY_DELAY", timedelta(0))
+    key = await _queue(db_session_factory, caller, "compare X and Y")
+    assert await _dispatch(db_session_factory, caller) == ([], [])
+    async with db_session_factory.begin() as session:
+        await clear_active_turn(session, id=live.id)
+    held = SessionBusyError(
+        pending_reasons=("session_active",), retry_after=datetime.now(UTC) - timedelta(seconds=1)
+    )
+    _, notices = await _dispatch(
+        db_session_factory, caller, run=TurnError(kind="upstream", cause=held)
+    )
+    assert notices == [], "a held session is not an error and asks nothing of the person"
+    assert (await _status(db_session_factory, key))[0] == "pending"
+    assert await _dispatch(db_session_factory, caller) == (["compare X and Y"], [])
+    assert await _status(db_session_factory, key) == ("delivered", None)
+    assert await _dispatch(db_session_factory, caller) == ([], []), "never a second answer"
