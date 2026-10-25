@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from daimon.core._models import TurnOrigin
 from daimon.core.stores.domain import Role, TurnOriginRow
-from sqlalchemy import CursorResult, delete, func, select, update
+from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -147,15 +147,7 @@ async def delete_origin(
     session: AsyncSession,
     *,
     origin_id: uuid.UUID,
-    retain_until: datetime | None = None,
 ) -> None:
-    if retain_until is not None:
-        await session.execute(
-            update(TurnOrigin)
-            .where(TurnOrigin.id == origin_id)
-            .values(expires_at=func.least(TurnOrigin.expires_at, retain_until))
-        )
-        return
     await session.execute(delete(TurnOrigin).where(TurnOrigin.id == origin_id))
 
 

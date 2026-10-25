@@ -202,11 +202,7 @@ async def turn_origin(
     finally:
         current_origin_id.reset(origin_context)
         async with sessionmaker.begin() as session:
-            retain_until = None
-            if retain_until is None:
-                await delete_origin(session, origin_id=origin.id)
-            else:
-                await delete_origin(session, origin_id=origin.id, retain_until=retain_until)
+            await delete_origin(session, origin_id=origin.id)
 
 
 def origin_place(origin: TurnOriginRow) -> Place:

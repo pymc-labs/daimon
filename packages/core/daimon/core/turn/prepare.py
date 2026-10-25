@@ -565,22 +565,16 @@ async def create_ma_session(
         from mux.drivers.anthropic import single_attempt_mutation
 
         try:
-            named = False
-            if named:
-                log.info("turn.create_cleanup_skipped_named_session", session_id=ma_session.id)
-            else:
-                with single_attempt_mutation():
-                    await _archive_orphaned_session(
-                        deps.anthropic,
-                        session_id=ma_session.id,
-                        scope=admitted_session_scope(
-                            admission, tenant_id=tenant_id, session_id=ma_session.id
-                        ),
-                    )
+            with single_attempt_mutation():
+                await _archive_orphaned_session(
+                    deps.anthropic,
+                    session_id=ma_session.id,
+                    scope=admitted_session_scope(
+                        admission, tenant_id=tenant_id, session_id=ma_session.id
+                    ),
+                )
         except Exception as cleanup_error:
-            # The row read or binding validation failed before any archive was
-            # sent: leave the session alone. The error being unwound is the one
-            # the caller must see.
+            # Preserve the original preparation error if cleanup fails.
             log.warning(
                 "turn.recovery_orphan_archive_failed",
                 session_id=ma_session.id,

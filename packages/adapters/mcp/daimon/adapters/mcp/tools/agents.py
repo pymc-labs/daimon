@@ -1577,7 +1577,7 @@ async def _fork_agent_impl(
 
             raise ToolError(
                 f"A saved copy keeps {source_name}'s model; it can't become "
-                f"{model_name(requested)}. Make the copy, then request a backend switch "
+                f"{model_name(requested)}. Make the copy, then request a model provider switch "
                 "for the copy. Nothing was created."
             )
     # Forking another agent is an admin's call: a fork routes nowhere and has no
