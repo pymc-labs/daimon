@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-import time
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -1299,19 +1298,6 @@ BUDGET_READ_TIMEOUT_MIN_S = 5.0
 #: keep succeeding inside this window, a busy lock or a slow read never stops anyone.
 BUDGET_READ_FAILURE_WINDOW_S = 30.0
 
-#: When this process last ran each tenant's locked budget refresh (`time.monotonic()`).
-#: One locked pass row-locks, recomputes and persists every live run's exposure in the
-#: tenant, not only the caller's, so while one is fresh the other runs' watches decide
-#: from the lock-free snapshot (their own priced floors: BUDGET_OWN_REFRESH_S).
-#: Each live run's watch used to retake `fleet:<tenant>` for the same whole-tenant pass
-#: every BUDGET_LOCKED_REFRESH_S: N runs held it N times as often (smoke dce44708: 524
-#: waits on it, up to 16 s, behind admissions, claims and guards).
-_TENANT_REFRESHED_AT: dict[uuid.UUID, float] = {}
-#: The longest a run's watch defers to other runs' passes. A pass prices usage only for
-#: its caller's run (it holds only that run's tariffs), so each run still persists its
-#: own priced floor under the lock at least this often.
-BUDGET_OWN_REFRESH_S = 10.0
-
 # The granted holder of one advisory key, from the same transaction the watch opened.
 _LOCK_HOLDER = text(
     """
@@ -1418,7 +1404,6 @@ async def watch_fleet_budget(
     poll_interval: float = 1.0,
     read_timeout: float | None = None,
     locked_refresh_s: float = BUDGET_LOCKED_REFRESH_S,
-    own_refresh_s: float = BUDGET_OWN_REFRESH_S,
 ) -> str:
     """One loop per run, fanning out decisions from the same producer graph.
 
@@ -1455,25 +1440,11 @@ async def watch_fleet_budget(
     busy_since: float | None = None
     holder_key: tuple[object, object] | None = None
     holder_since: float | None = None
-    tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
-    lock_key = f"fleet:{tenant_id}"
+    lock_key = f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"
     last_locked: float | None = None
     # When a budget read last succeeded (the watch's start counts): failing closed needs
     # BUDGET_READ_FAILURE_WINDOW_S without one, not only a few slow polls in a row.
     last_read = asyncio.get_running_loop().time()
-
-    def defer_to_tenant() -> bool:
-        """Another run's locked pass is fresh, and this run's own priced floor is too.
-
-        That pass persisted every run's exposure; this run's own priced floor waits
-        for its own pass at most `own_refresh_s`.
-        """
-        loop_now = asyncio.get_running_loop().time()
-        own_fresh = last_locked is not None and loop_now - last_locked < own_refresh_s
-        tenant_fresh = (
-            time.monotonic() - _TENANT_REFRESHED_AT.get(tenant_id, -math.inf) < locked_refresh_s
-        )
-        return own_fresh and tenant_fresh
 
     def read_starved() -> bool:
         return asyncio.get_running_loop().time() - last_read >= BUDGET_READ_FAILURE_WINDOW_S
@@ -1485,8 +1456,6 @@ async def watch_fleet_budget(
             snapshot_read = False
             try:
                 if last_locked is not None and started - last_locked < locked_refresh_s:
-                    raise _BudgetSnapshotDue
-                if defer_to_tenant():
                     raise _BudgetSnapshotDue
                 async with asyncio.timeout(timeout):
                     async with sessionmaker.begin() as session:
@@ -1509,10 +1478,6 @@ async def watch_fleet_budget(
                             if not fleet_store.lock_timed_out(error):
                                 raise
                             raise _BudgetLockBusy(await _lock_holder(session, lock_key)) from None
-                        if defer_to_tenant():
-                            # Another run's watch refreshed the tenant while this one
-                            # queued for the lock: leaving releases it at once.
-                            raise _BudgetSnapshotDue
                         # Holding the tenant lock, a row lock (a run or worker another
                         # writer holds) is waited on only briefly too: an unbounded wait
                         # here held the tenant lock for every other fleet step meanwhile.
@@ -1628,13 +1593,6 @@ async def watch_fleet_budget(
             if not snapshot_read:
                 busy_since, holder_key, holder_since = None, None, None
                 last_locked = started
-                _TENANT_REFRESHED_AT[tenant_id] = time.monotonic()
-                # One line per locked pass: their rate per tenant is the lock's load.
-                log.info(
-                    "fleet.budget_locked_refresh",
-                    run_id=str(parent.fleet.run_id),
-                    pass_ms=round((asyncio.get_running_loop().time() - started) * 1000),
-                )
             for worker_id, event in watched:
                 usage = usages.get(worker_id)
                 if event.is_set() or usage is None:
