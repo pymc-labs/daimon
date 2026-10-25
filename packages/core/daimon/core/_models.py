@@ -1012,6 +1012,10 @@ class TenantLedger(Base):
             "occurred_at",
             postgresql_where=text("channel_id IS NOT NULL"),
         ),
+        CheckConstraint(
+            "estimate IS NULL OR estimate IN ('cache_writes_unreported')",
+            name="ck_tenant_ledger_estimate",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1037,6 +1041,9 @@ class TenantLedger(Base):
     # On a debit: the parent channel whose budget the spend counts against. On a
     # channel promo credit: the channel it was redeemed for (budgets read debits only).
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A debit priced from incomplete provider counts (a `LedgerEstimate`); NULL when
+    # fully metered. Never changes the amount: it says how the amount was reached.
+    estimate: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ChannelSkill(Base):

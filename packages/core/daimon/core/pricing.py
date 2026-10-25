@@ -320,6 +320,27 @@ class ProviderPrice:
                 raise ValueError("provider rates must be finite nonnegative Decimals")
 
 
+#: Providers whose usage meter has no cache-write count although their tariff bills
+#: cache writes. OpenAI's Agents API turn usage "do[es] not expose a separate
+#: cache-write count" (developers.openai.com agents-api/observability) while GPT-5.6
+#: and later bill writes at 1.25x uncached input (guides/prompt-caching).
+_CACHE_WRITES_UNREPORTED = frozenset({"openai"})
+
+
+def unreported_cache_writes(usage: UsageObservation, price: ProviderPrice) -> bool:
+    """True when the tariff bills cache writes the meter never counts.
+
+    Such a turn is priced as if it wrote nothing to the cache (ROOT D2=B): its
+    non-cached input at the uncached rate, never above what its counts prove. The
+    debit is an estimate, marked `cache_writes_unreported` on its ledger row.
+    """
+    return (
+        price.cache_write is not None
+        and usage.input_cache_write_tokens is None
+        and usage.session.provider in _CACHE_WRITES_UNREPORTED
+    )
+
+
 def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice) -> int | None:
     """Validate attribution and project the input stage independently."""
     if usage.model is None or (usage.session.provider, usage.model.provider, usage.model.id) != (
@@ -332,6 +353,8 @@ def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice
     if price.cache_write is None:
         if written not in (None, 0):
             raise ValueError("provider reported an inapplicable cache-write stage")
+        written = 0
+    elif unreported_cache_writes(usage, price):
         written = 0
     if usage.input_tokens is None or usage.input_cached_tokens is None or written is None:
         return None

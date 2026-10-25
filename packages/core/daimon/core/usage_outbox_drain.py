@@ -17,7 +17,7 @@ from decimal import Decimal
 import structlog
 from daimon.core.accounting_outbox import apply_usage_outbox
 from daimon.core.infrastructure_cost import NO_INFRASTRUCTURE_PROFILES, known_infrastructure_usd
-from daimon.core.pricing import provider_cost_of, provider_prices
+from daimon.core.pricing import provider_cost_of, provider_prices, unreported_cache_writes
 from daimon.core.stores import mux_state
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -45,7 +45,7 @@ async def drain_pending_usage(
         if last is not None and len(rows) == limit
         else None
     )
-    applied, debited, skipped = 0, Decimal(0), 0
+    applied, debited, skipped, estimated = 0, Decimal(0), 0, 0
     # An observation's newest revision carries its whole cost; older ones only close.
     counted: set[tuple[str, str]] = set()
     for row, tenant_id, binding in rows:
@@ -85,6 +85,8 @@ async def drain_pending_usage(
             continue
         if claimed:
             applied += 1
+            # Priced as writing nothing to the cache: an estimate, marked on its debit.
+            estimated += unreported_cache_writes(observation, price)
             key = (row.binding_id, row.observation_id)
             cost = provider_cost_of(observation, price, infrastructure_usd=infrastructure)
             if cost is not None and key not in counted:
@@ -96,6 +98,7 @@ async def drain_pending_usage(
             seen=len(rows),
             applied=applied,
             skipped=skipped,
+            estimated=estimated,
             usd=str(debited),
         )
     return applied, debited

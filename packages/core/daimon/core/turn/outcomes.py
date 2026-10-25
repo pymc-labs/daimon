@@ -24,6 +24,7 @@ from daimon.core.pricing import (
     provider_cost_of,
     provider_uncached_input_tokens,
     uncached_input_tokens,
+    unreported_cache_writes,
 )
 from daimon.core.runtime_health import track_turn
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
@@ -297,7 +298,10 @@ class TurnObservation:
                 lambda sample: (
                     0
                     if sample.provider_price is not None
-                    and sample.provider_price.cache_write is None
+                    and (
+                        sample.provider_price.cache_write is None
+                        or unreported_cache_writes(sample.usage, sample.provider_price)
+                    )
                     else sample.usage.input_cache_write_tokens
                 )
             ),
