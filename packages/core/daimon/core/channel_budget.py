@@ -14,16 +14,18 @@ The period and validation helpers are pure; `get_channel_budget_status` and
 from __future__ import annotations
 
 import asyncio
+import asyncio as _real_asyncio
 import math
 import re
+import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
 from functools import partial
-from typing import Literal, get_args
+from typing import Literal, cast, get_args
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
@@ -575,6 +577,38 @@ async def _released_roots(
     return released
 
 
+#: session.info key of one shared snapshot transaction's memo (`read_tenant_budget_snapshots`).
+_SNAPSHOT_MEMO = "fleet_budget_snapshot_memo"
+
+
+async def _memoised[T](
+    session: AsyncSession, key: tuple[object, ...], read: Callable[[], Awaitable[T]]
+) -> T:
+    """`read()` once per key inside a shared snapshot transaction; otherwise just `read()`.
+
+    One REPEATABLE READ snapshot returns the same rows for the same query, so every run
+    priced from this transaction gets exactly what its own read would have returned.
+    """
+    memo = cast("dict[tuple[object, ...], object] | None", session.info.get(_SNAPSHOT_MEMO))
+    if memo is None:
+        return await read()
+    if key not in memo:
+        memo[key] = await read()
+    return cast(T, memo[key])
+
+
+def _graph_key(graph: fleet_store.BudgetGraph) -> tuple[object, ...]:
+    return tuple(
+        (run.id, run.version, tuple((w.id, w.version) for w in workers)) for run, workers in graph
+    )
+
+
+async def _released_roots_now(
+    session: AsyncSession, roots: tuple[OperationRecord, ...]
+) -> set[int]:
+    return await _released_roots(session, roots, await mux_state.database_clock(session))
+
+
 async def _financial_room(
     session: AsyncSession,
     *,
@@ -589,7 +623,14 @@ async def _financial_room(
         arithmetic.prec = 80
         held = [(r.platform, r.channel_id, r.reserved_usd - r.observed_usd) for r, _ in graph]
         released: set[int] = (
-            await _released_roots(session, roots, await mux_state.database_clock(session))
+            await _memoised(
+                session,
+                (
+                    "released",
+                    tuple((root.operation.key, root.operation.updated_at) for root in roots),
+                ),
+                lambda: _released_roots_now(session, roots),
+            )
             if roots
             else set()
         )
@@ -601,21 +642,27 @@ async def _financial_room(
             assert root.slot is not None
             channel = root.slot.thread.channel
             held.append((channel.platform, channel.channel_id, exposure - debit))
-        balance = await tenant_ledger.get_prepaid_balance(
-            session, tenant_id=tenant_id, persisted=True
+        balance = await _memoised(
+            session,
+            ("balance", tenant_id),
+            lambda: tenant_ledger.get_prepaid_balance(session, tenant_id=tenant_id, persisted=True),
         )
         available = (
             None
             if balance is None
             else balance - sum((amount for _, _, amount in held), Decimal(0))
         )
-        budget = await get_channel_budget_status(
+        budget = await _memoised(
             session,
-            tenant_id=tenant_id,
-            platform=platform,
-            channel_id=channel_id,
-            now=datetime.now(UTC),
-            persisted=True,
+            ("channel", tenant_id, platform, channel_id),
+            lambda: get_channel_budget_status(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                now=datetime.now(UTC),
+                persisted=True,
+            ),
         )
         channel_available = (
             None
@@ -804,8 +851,12 @@ async def _produce_fleet_budget(
                 persisted=True,
                 locking=not snapshot,
             )
-            roots = await mux_state.list_fleet_root_finances(
-                session, tenant_id=tenant_id, locking=not snapshot
+            roots = await _memoised(
+                session,
+                ("roots", tenant_id, snapshot),
+                lambda: mux_state.list_fleet_root_finances(
+                    session, tenant_id=tenant_id, locking=not snapshot
+                ),
             )
         else:
             graph, started_at, roots = locked
@@ -891,7 +942,11 @@ async def _produce_fleet_budget(
         zero_spend: set[uuid.UUID] = set()
         settled_spend: dict[uuid.UUID, Decimal] = {}
         unpriced_usage = False
-        prefetch = await _prefetch_fleet_money(session, graph, tenant_id=tenant_id)
+        prefetch = await _memoised(
+            session,
+            ("prefetch", tenant_id, _graph_key(graph)),
+            lambda: _prefetch_fleet_money(session, graph, tenant_id=tenant_id),
+        )
         with localcontext() as arithmetic:
             arithmetic.prec = 80
             money: dict[uuid.UUID, tuple[Decimal, UsageState, bool]] = {}
@@ -924,7 +979,11 @@ async def _produce_fleet_budget(
                 and money[member.id][1] != "pending"
                 and member.reserved_usd > money[member.id][0]
             ]
-            sent, in_flight = await _worker_activity(session, tenant_id, candidates)
+            sent, in_flight = await _memoised(
+                session,
+                ("activity", tenant_id, tuple((r.id, m.id, m.version) for r, m in candidates)),
+                lambda: _worker_activity(session, tenant_id, candidates),
+            )
             settling = {member.id for _, member in candidates} - in_flight
             for _, members in graph:
                 for member in members:
@@ -1143,6 +1202,47 @@ async def read_fleet_budget_snapshot(
         )
 
 
+async def read_tenant_budget_snapshots(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    requests: Sequence[
+        tuple[WorkerPermissions, Mapping[tuple[str, str], ModelRates | ProviderPrice], Decimal]
+    ],
+) -> dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception]:
+    """Every requested run's snapshot decisions from ONE read-only snapshot of the tenant.
+
+    Each run is decided exactly as `read_fleet_budget_snapshot` decides it (its own
+    prices, its own run's priced floor), but the tenant-wide reads (root finances, the
+    money prefetch, worker activity, balance, channel spend) happen once and serve every
+    run: the same REPEATABLE READ snapshot answers them identically. One run's refusal is
+    returned as its own exception and never stops the others.
+    """
+    async with sessionmaker.begin() as session:
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        session.info[_SNAPSHOT_MEMO] = {}
+        try:
+            decided: dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception] = {}
+            for parent, prices, markup in requests:
+                try:
+                    # A savepoint per run: one run's database error rolls back only its
+                    # own pass, never the shared snapshot the other runs still read.
+                    async with session.begin_nested():
+                        decided[parent.fleet.run_id] = await _produce_fleet_budget(
+                            session,
+                            parent=parent,
+                            worker_id=None,
+                            prices=prices,
+                            markup=markup,
+                            reserve=False,
+                            financial=False,
+                            snapshot=True,
+                        )
+                except Exception as error:  # one run's refusal is its own
+                    decided[parent.fleet.run_id] = error
+            return decided
+        finally:
+            session.info.pop(_SNAPSHOT_MEMO, None)
+
+
 async def read_fleet_run_cost(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -1298,6 +1398,19 @@ BUDGET_READ_TIMEOUT_MIN_S = 5.0
 #: keep succeeding inside this window, a busy lock or a slow read never stops anyone.
 BUDGET_READ_FAILURE_WINDOW_S = 30.0
 
+#: When this process last ran each tenant's locked budget refresh (`time.monotonic()`).
+#: One locked pass row-locks, recomputes and persists every live run's exposure in the
+#: tenant, not only the caller's, so while one is fresh the other runs' watches decide
+#: from the lock-free snapshot (their own priced floors: BUDGET_OWN_REFRESH_S).
+#: Each live run's watch used to retake `fleet:<tenant>` for the same whole-tenant pass
+#: every BUDGET_LOCKED_REFRESH_S: N runs held it N times as often (smoke dce44708: 524
+#: waits on it, up to 16 s, behind admissions, claims and guards).
+_TENANT_REFRESHED_AT: dict[uuid.UUID, float] = {}
+#: The longest a run's watch defers to other runs' passes. A pass prices usage only for
+#: its caller's run (it holds only that run's tariffs), so each run still persists its
+#: own priced floor under the lock at least this often.
+BUDGET_OWN_REFRESH_S = 10.0
+
 # The granted holder of one advisory key, from the same transaction the watch opened.
 _LOCK_HOLDER = text(
     """
@@ -1393,6 +1506,99 @@ def cancel_workers(
         event.set()
 
 
+@dataclass
+class _TenantSnapshots:
+    """The runs one process watches in a tenant, and their one shared snapshot read."""
+
+    runs: dict[
+        uuid.UUID,
+        tuple[WorkerPermissions, Mapping[tuple[str, str], ModelRates | ProviderPrice], Decimal],
+    ]
+    reading: (
+        asyncio.Future[dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception]] | None
+    ) = None
+    result: dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception] | None = None
+    taken_at: float = -math.inf
+    reading_started: float = -math.inf
+
+
+#: Per event loop and tenant. Each live run's watch decided from its own whole-tenant
+#: snapshot read every poll, so R runs read the tenant R times per poll and, under load,
+#: a read outlasted its timeout (smoke 4681c13f: 4 "spending couldn't be measured"
+#: stops). One read per tenant per poll now serves every watched run.
+_SHARED_SNAPSHOTS: dict[tuple[int, uuid.UUID], _TenantSnapshots] = {}
+
+
+async def _shared_snapshot(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    state: _TenantSnapshots,
+    *,
+    parent: WorkerPermissions,
+    watched: frozenset[uuid.UUID],
+    max_age: float,
+    timeout: float,
+) -> tuple[dict[uuid.UUID, FleetBudgetUsage], float]:
+    """This run's snapshot decisions from the tenant's shared read, and their age (s).
+
+    Never older than `max_age` (one poll) when the call starts: a fresh result is reused,
+    an in-flight read is joined only if it began within `max_age`, otherwise a new read
+    starts for every registered run. A result missing one of the `watched` workers (one
+    spawned after the read began) is stale, never "unavailable": this run is read again.
+    The shared read has its own `timeout`, and is shielded so one watch giving up never
+    cancels the read the others wait on. Each run is decided with its own prices.
+    """
+    loop = _real_asyncio.get_running_loop()  # freshness is real elapsed time
+    run_id = parent.fleet.run_id
+
+    def covers(result: Mapping[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception]) -> bool:
+        decided = result.get(run_id)
+        return decided is not None and (isinstance(decided, Exception) or watched <= decided.keys())
+
+    def answer(
+        result: Mapping[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception], started: float
+    ) -> tuple[dict[uuid.UUID, FleetBudgetUsage], float]:
+        decided = result[run_id]
+        if isinstance(decided, Exception):
+            raise decided
+        return decided, max(0.0, loop.time() - started)
+
+    called = loop.time()
+    if state.result is not None and called - state.taken_at <= max_age and covers(state.result):
+        return answer(state.result, state.taken_at)
+    if (
+        state.reading is not None
+        and not state.reading.done()
+        and called - state.reading_started <= max_age
+    ):
+        started = state.reading_started
+        result = await _real_asyncio.shield(state.reading)
+        if covers(result):
+            return answer(result, started)
+    started = loop.time()
+    # One line per shared read: their rate per tenant is the snapshot load.
+    log.info("fleet.budget_snapshot_read", runs=len(state.runs))
+    reading = _real_asyncio.ensure_future(
+        _real_asyncio.wait_for(
+            read_tenant_budget_snapshots(sessionmaker, list(state.runs.values())), timeout
+        )
+    )
+
+    def keep(
+        done: asyncio.Future[dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception]],
+    ) -> None:
+        if not done.cancelled() and done.exception() is None:
+            state.result, state.taken_at = done.result(), started
+
+    reading.add_done_callback(keep)
+    state.reading, state.reading_started = reading, started
+    result = await _real_asyncio.shield(reading)
+    if run_id not in result:  # registered after that read began: read it alone
+        result = await _real_asyncio.wait_for(
+            read_tenant_budget_snapshots(sessionmaker, [state.runs[run_id]]), timeout
+        )
+    return answer(result, started)
+
+
 async def watch_fleet_budget(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -1404,6 +1610,7 @@ async def watch_fleet_budget(
     poll_interval: float = 1.0,
     read_timeout: float | None = None,
     locked_refresh_s: float = BUDGET_LOCKED_REFRESH_S,
+    own_refresh_s: float = BUDGET_OWN_REFRESH_S,
 ) -> str:
     """One loop per run, fanning out decisions from the same producer graph.
 
@@ -1440,22 +1647,44 @@ async def watch_fleet_budget(
     busy_since: float | None = None
     holder_key: tuple[object, object] | None = None
     holder_since: float | None = None
-    lock_key = f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"
+    tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
+    lock_key = f"fleet:{tenant_id}"
     last_locked: float | None = None
     # When a budget read last succeeded (the watch's start counts): failing closed needs
     # BUDGET_READ_FAILURE_WINDOW_S without one, not only a few slow polls in a row.
     last_read = asyncio.get_running_loop().time()
 
+    def defer_to_tenant() -> bool:
+        """Another run's locked pass is fresh, and this run's own priced floor is too.
+
+        That pass persisted every run's exposure; this run's own priced floor waits
+        for its own pass at most `own_refresh_s`.
+        """
+        loop_now = asyncio.get_running_loop().time()
+        own_fresh = last_locked is not None and loop_now - last_locked < own_refresh_s
+        tenant_fresh = (
+            time.monotonic() - _TENANT_REFRESHED_AT.get(tenant_id, -math.inf) < locked_refresh_s
+        )
+        return own_fresh and tenant_fresh
+
     def read_starved() -> bool:
         return asyncio.get_running_loop().time() - last_read >= BUDGET_READ_FAILURE_WINDOW_S
 
+    # Keyed by the real event loop (`_real_asyncio`: tests may wrap the module's
+    # `asyncio` to virtualise time, and a wrapped loop is a new object every call).
+    shared_key = (id(_real_asyncio.get_running_loop()), tenant_id)
+    shared = _SHARED_SNAPSHOTS.setdefault(shared_key, _TenantSnapshots(runs={}))
+    shared.runs[parent.fleet.run_id] = (parent, prices, markup)
     try:
         while not finished.is_set():
             started = asyncio.get_running_loop().time()
             watched = tuple(cancelled.items())
             snapshot_read = False
+            read_age = 0.0
             try:
                 if last_locked is not None and started - last_locked < locked_refresh_s:
+                    raise _BudgetSnapshotDue
+                if defer_to_tenant():
                     raise _BudgetSnapshotDue
                 async with asyncio.timeout(timeout):
                     async with sessionmaker.begin() as session:
@@ -1478,6 +1707,10 @@ async def watch_fleet_budget(
                             if not fleet_store.lock_timed_out(error):
                                 raise
                             raise _BudgetLockBusy(await _lock_holder(session, lock_key)) from None
+                        if defer_to_tenant():
+                            # Another run's watch refreshed the tenant while this one
+                            # queued for the lock: leaving releases it at once.
+                            raise _BudgetSnapshotDue
                         # Holding the tenant lock, a row lock (a run or worker another
                         # writer holds) is waited on only briefly too: an unbounded wait
                         # here held the tenant lock for every other fleet step meanwhile.
@@ -1536,8 +1769,13 @@ async def watch_fleet_budget(
                 # persists floors resumes when the lock is free.
                 try:
                     async with asyncio.timeout(timeout):
-                        usages = await read_fleet_budget_snapshot(
-                            sessionmaker, parent=parent, prices=prices, markup=markup
+                        usages, read_age = await _shared_snapshot(
+                            sessionmaker,
+                            shared,
+                            parent=parent,
+                            watched=frozenset(worker_id for worker_id, _ in watched),
+                            max_age=poll_interval,
+                            timeout=timeout,
                         )
                     if any(worker_id not in usages for worker_id, _ in watched):
                         raise FleetConflict("watched worker is unavailable")
@@ -1589,10 +1827,19 @@ async def watch_fleet_budget(
                 cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
                 return "usage_unavailable"
             timeouts = 0
-            last_read = asyncio.get_running_loop().time()
+            # A shared snapshot is as old as its read: the read-failure window counts
+            # from when that data was read, not from when this watch received it.
+            last_read = max(last_read, asyncio.get_running_loop().time() - read_age)
             if not snapshot_read:
                 busy_since, holder_key, holder_since = None, None, None
                 last_locked = started
+                _TENANT_REFRESHED_AT[tenant_id] = time.monotonic()
+                # One line per locked pass: their rate per tenant is the lock's load.
+                log.info(
+                    "fleet.budget_locked_refresh",
+                    run_id=str(parent.fleet.run_id),
+                    pass_ms=round((asyncio.get_running_loop().time() - started) * 1000),
+                )
             for worker_id, event in watched:
                 usage = usages.get(worker_id)
                 if event.is_set() or usage is None:
@@ -1614,6 +1861,10 @@ async def watch_fleet_budget(
     except asyncio.CancelledError:
         cancel_workers(cancelled, "watch_cancelled", run_id=parent.fleet.run_id)
         raise
+    finally:
+        shared.runs.pop(parent.fleet.run_id, None)
+        if not shared.runs and _SHARED_SNAPSHOTS.get(shared_key) is shared:
+            del _SHARED_SNAPSHOTS[shared_key]
 
 
 async def require_fleet_worker_admission(
