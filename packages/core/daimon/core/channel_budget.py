@@ -1223,17 +1223,20 @@ async def read_tenant_budget_snapshots(
             decided: dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception] = {}
             for parent, prices, markup in requests:
                 try:
-                    decided[parent.fleet.run_id] = await _produce_fleet_budget(
-                        session,
-                        parent=parent,
-                        worker_id=None,
-                        prices=prices,
-                        markup=markup,
-                        reserve=False,
-                        financial=False,
-                        snapshot=True,
-                    )
-                except Exception as error:
+                    # A savepoint per run: one run's database error rolls back only its
+                    # own pass, never the shared snapshot the other runs still read.
+                    async with session.begin_nested():
+                        decided[parent.fleet.run_id] = await _produce_fleet_budget(
+                            session,
+                            parent=parent,
+                            worker_id=None,
+                            prices=prices,
+                            markup=markup,
+                            reserve=False,
+                            financial=False,
+                            snapshot=True,
+                        )
+                except Exception as error:  # one run's refusal is its own
                     decided[parent.fleet.run_id] = error
             return decided
         finally:
@@ -1511,11 +1514,12 @@ class _TenantSnapshots:
         uuid.UUID,
         tuple[WorkerPermissions, Mapping[tuple[str, str], ModelRates | ProviderPrice], Decimal],
     ]
-    reading: asyncio.Task[dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception]] | None = (
-        None
-    )
+    reading: (
+        asyncio.Future[dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception]] | None
+    ) = None
     result: dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception] | None = None
     taken_at: float = -math.inf
+    reading_started: float = -math.inf
 
 
 #: Per event loop and tenant. Each live run's watch decided from its own whole-tenant
@@ -1530,46 +1534,69 @@ async def _shared_snapshot(
     state: _TenantSnapshots,
     *,
     parent: WorkerPermissions,
+    watched: frozenset[uuid.UUID],
     max_age: float,
-) -> dict[uuid.UUID, FleetBudgetUsage]:
-    """This run's snapshot decisions from the tenant's shared read, at most `max_age` old.
+    timeout: float,
+) -> tuple[dict[uuid.UUID, FleetBudgetUsage], float]:
+    """This run's snapshot decisions from the tenant's shared read, and their age (s).
 
-    A fresh result is reused; an in-flight read is awaited (shielded: one watch's timeout
-    never cancels the read the others wait on); otherwise this watch starts the read for
-    every run registered in the tenant. Each run is decided with its own prices.
+    Never older than `max_age` (one poll) when the call starts: a fresh result is reused,
+    an in-flight read is joined only if it began within `max_age`, otherwise a new read
+    starts for every registered run. A result missing one of the `watched` workers (one
+    spawned after the read began) is stale, never "unavailable": this run is read again.
+    The shared read has its own `timeout`, and is shielded so one watch giving up never
+    cancels the read the others wait on. Each run is decided with its own prices.
     """
     loop = _real_asyncio.get_running_loop()  # freshness is real elapsed time
     run_id = parent.fleet.run_id
-    if not (
-        state.result is not None
-        and run_id in state.result
-        and loop.time() - state.taken_at <= max_age
+
+    def covers(result: Mapping[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception]) -> bool:
+        decided = result.get(run_id)
+        return decided is not None and (isinstance(decided, Exception) or watched <= decided.keys())
+
+    def answer(
+        result: Mapping[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception], started: float
+    ) -> tuple[dict[uuid.UUID, FleetBudgetUsage], float]:
+        decided = result[run_id]
+        if isinstance(decided, Exception):
+            raise decided
+        return decided, max(0.0, loop.time() - started)
+
+    called = loop.time()
+    if state.result is not None and called - state.taken_at <= max_age and covers(state.result):
+        return answer(state.result, state.taken_at)
+    if (
+        state.reading is not None
+        and not state.reading.done()
+        and called - state.reading_started <= max_age
     ):
-        if state.reading is None or state.reading.done():
-            started = loop.time()
-            # One line per shared read: their rate per tenant is the snapshot load.
-            log.info("fleet.budget_snapshot_read", runs=len(state.runs))
-            reading = _real_asyncio.ensure_future(
-                read_tenant_budget_snapshots(sessionmaker, list(state.runs.values()))
-            )
-
-            def keep(
-                done: asyncio.Task[dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception]],
-            ) -> None:
-                if not done.cancelled() and done.exception() is None:
-                    state.result, state.taken_at = done.result(), started
-
-            reading.add_done_callback(keep)
-            state.reading = reading
+        started = state.reading_started
         result = await _real_asyncio.shield(state.reading)
-        if run_id not in result:  # registered after that read began: read it alone
-            result = await read_tenant_budget_snapshots(sessionmaker, [state.runs[run_id]])
-    else:
-        result = state.result
-    decided = result[run_id]
-    if isinstance(decided, Exception):
-        raise decided
-    return decided
+        if covers(result):
+            return answer(result, started)
+    started = loop.time()
+    # One line per shared read: their rate per tenant is the snapshot load.
+    log.info("fleet.budget_snapshot_read", runs=len(state.runs))
+    reading = _real_asyncio.ensure_future(
+        _real_asyncio.wait_for(
+            read_tenant_budget_snapshots(sessionmaker, list(state.runs.values())), timeout
+        )
+    )
+
+    def keep(
+        done: asyncio.Future[dict[uuid.UUID, dict[uuid.UUID, FleetBudgetUsage] | Exception]],
+    ) -> None:
+        if not done.cancelled() and done.exception() is None:
+            state.result, state.taken_at = done.result(), started
+
+    reading.add_done_callback(keep)
+    state.reading, state.reading_started = reading, started
+    result = await _real_asyncio.shield(reading)
+    if run_id not in result:  # registered after that read began: read it alone
+        result = await _real_asyncio.wait_for(
+            read_tenant_budget_snapshots(sessionmaker, [state.runs[run_id]]), timeout
+        )
+    return answer(result, started)
 
 
 async def watch_fleet_budget(
@@ -1653,6 +1680,7 @@ async def watch_fleet_budget(
             started = asyncio.get_running_loop().time()
             watched = tuple(cancelled.items())
             snapshot_read = False
+            read_age = 0.0
             try:
                 if last_locked is not None and started - last_locked < locked_refresh_s:
                     raise _BudgetSnapshotDue
@@ -1741,8 +1769,13 @@ async def watch_fleet_budget(
                 # persists floors resumes when the lock is free.
                 try:
                     async with asyncio.timeout(timeout):
-                        usages = await _shared_snapshot(
-                            sessionmaker, shared, parent=parent, max_age=poll_interval
+                        usages, read_age = await _shared_snapshot(
+                            sessionmaker,
+                            shared,
+                            parent=parent,
+                            watched=frozenset(worker_id for worker_id, _ in watched),
+                            max_age=poll_interval,
+                            timeout=timeout,
                         )
                     if any(worker_id not in usages for worker_id, _ in watched):
                         raise FleetConflict("watched worker is unavailable")
@@ -1794,7 +1827,9 @@ async def watch_fleet_budget(
                 cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
                 return "usage_unavailable"
             timeouts = 0
-            last_read = asyncio.get_running_loop().time()
+            # A shared snapshot is as old as its read: the read-failure window counts
+            # from when that data was read, not from when this watch received it.
+            last_read = max(last_read, asyncio.get_running_loop().time() - read_age)
             if not snapshot_read:
                 busy_since, holder_key, holder_since = None, None, None
                 last_locked = started
