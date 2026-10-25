@@ -712,7 +712,8 @@ async def test_the_unsaved_work_answer_is_bound_to_the_card(fresh_chat):
     card = await _card(chat, copy.name, preview, unsaved_work="leave")
     assert "Uncommitted changes in the repo are left where they are" in (card.consequence or "")
     for changed in ("copy", None):
-        with pytest.raises(ValueError, match="This preview changed"):
+        # Changed or dropped, the answer is bound to its preview: never re-previewed.
+        with pytest.raises(ValueError, match="(?i)preview the switch again"):
             await _card(chat, copy.name, preview, unsaved_work=changed)
         with pytest.raises(ToolError):
             await _switch(

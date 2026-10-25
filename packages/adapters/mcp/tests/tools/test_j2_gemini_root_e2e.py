@@ -585,7 +585,8 @@ async def test_the_hand_off_summary_is_bound_to_the_switch_card(fresh_chat, monk
     assert f"Carries a summary of this conversation to {copy.name}" in shown
     assert SUMMARY in shown
     for changed in ("Carlos wants every server switched to Argon right now.", None):
-        with pytest.raises(ValueError, match="This preview changed"):
+        # Changed or dropped, the answer is bound to its preview: never re-previewed.
+        with pytest.raises(ValueError, match="(?i)preview the switch again"):
             await _argon_card(chat, copy.name, preview, handoff_summary=changed)
         with pytest.raises(ToolError):
             await _to_argon(
