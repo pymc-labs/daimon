@@ -265,3 +265,53 @@ async def test_j6_a_member_never_sees_the_connectors_of_an_agent_they_dont_own(c
     )
     for info in listed:
         assert "finance-crm" not in info.mcp_server_names, info.name
+
+
+@pytest.mark.parametrize("backend", ["openai", "gemini"])
+async def test_j6_a_failed_catalogue_read_names_its_cause(fresh_chat, monkeypatch, backend):
+    """Smoke 229ca70b J6o/J6g: a fresh copy's preview dropped mcp, tools, skills,
+    sandbox, memory and model settings, and the log said only
+    `representation_skipped error=ValueError` with no reason. The capture's live read
+    of Daimon MCP's catalogue (the one step that runs only in a deployment) failed
+    with one of the reader's own fixed sentences. It is named now, so the next run's
+    log says which step failed."""
+    import httpx
+    from daimon.core.mcp_oauth import discovery
+    from structlog.testing import capture_logs
+
+    real = httpx.AsyncClient
+
+    class Redirecting(real):  # the deployed edge answering /mcp with a redirect
+        def __init__(self, **kwargs):
+            if "transport" not in kwargs and kwargs.get("follow_redirects") is False:
+                kwargs["transport"] = httpx.MockTransport(
+                    lambda request: httpx.Response(307, headers={"location": "/mcp/"})
+                )
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(discovery.httpx, "AsyncClient", Redirecting)
+    copy = await _fork_agent_impl(
+        fresh_chat.runtime,
+        fresh_chat.auth,
+        "Daimon",
+        "Daimon",
+        expected_ma_agent_id="agent_daimon",
+        new_copy_if_taken=True,
+    )
+    await _hand_off_task_impl(
+        fresh_chat.runtime,
+        fresh_chat.auth,
+        origin_context_id=str(fresh_chat.origin.id),
+        agent_id=copy.id,
+    )
+    with capture_logs() as logs:
+        await _request_agent_backend_switch_impl(
+            fresh_chat.runtime,
+            fresh_chat.auth,
+            agent_name=copy.name,
+            target_backend=backend,
+            origin_context_id=str(fresh_chat.origin.id),
+        )
+    skipped = [e for e in logs if e["event"] == "source_capture.representation_skipped"]
+    assert skipped, "the catalogue read failed, so the representation was skipped"
+    assert skipped[0]["reason"] == "MCP catalogue read refused", skipped[0]
