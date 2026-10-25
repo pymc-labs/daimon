@@ -1462,14 +1462,15 @@ async def test_a_watch_holding_the_tenant_lock_waits_on_a_row_lock_briefly_then_
     worker = await add(sm, parent)
     assert (await reserve(sm, parent, worker)).admitted
     finished, cancelled, snapshot = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    original = channel_budget.read_fleet_budget_snapshot
+    original = channel_budget.read_tenant_budget_snapshots
 
     async def observed_snapshot(*args, **kwargs):
         value = await original(*args, **kwargs)
         snapshot.set()
         return value
 
-    monkeypatch.setattr(channel_budget, "read_fleet_budget_snapshot", observed_snapshot)
+    # The watch's lock-free snapshot is the tenant's shared read.
+    monkeypatch.setattr(channel_budget, "read_tenant_budget_snapshots", observed_snapshot)
     # A run/worker writer that never takes the tenant lock (e.g. a card or settle write).
     async with sm() as writer, writer.begin():
         await writer.execute(select(WorkerRow).where(WorkerRow.id == worker.id).with_for_update())
@@ -3437,3 +3438,117 @@ async def test_concurrent_run_watches_share_one_locked_refresh_per_tenant(sm, mo
     # The overrunning worker's priced floor is persisted (by its own run's pass).
     _, persisted = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=overrun_run.id)
     assert {w.id: w.reserved_usd for w in persisted}[workers[3].id] == Decimal(".02")
+
+
+async def _watched_runs(sm, count: int):
+    """`count` runs in one tenant, each with one admitted worker that has usage."""
+    parent, run = await setup(sm, cap="2", funds="10")
+    runs = [(parent, run), *[await next_run(sm, parent, run) for _ in range(count - 1)]]
+    workers = []
+    for index, (run_parent, run_row) in enumerate(runs):
+        worker = await add(sm, run_parent, budget=".5")
+        assert (await reserve(sm, run_parent, worker)).admitted
+        await usage(sm, run_parent, run_row, worker, inputs=1_000 * (index + 1), outputs=None)
+        workers.append(worker)
+    return runs, workers
+
+
+async def test_one_tenant_snapshot_answers_every_run_exactly_as_its_own_snapshot(sm):
+    """The shared snapshot reads the tenant once and decides each run with its own
+    prices: each run's decisions equal today's per-run snapshot, field for field."""
+    from daimon.core.channel_budget import (
+        read_fleet_budget_snapshot,
+        read_tenant_budget_snapshots,
+    )
+
+    runs, _ = await _watched_runs(sm, 3)
+    shared = await read_tenant_budget_snapshots(
+        sm, [(run_parent, tariffs(run_parent), Decimal(1)) for run_parent, _ in runs]
+    )
+    for run_parent, _ in runs:
+        alone = await read_fleet_budget_snapshot(
+            sm, parent=run_parent, prices=tariffs(run_parent), markup=Decimal(1)
+        )
+        assert shared[run_parent.fleet.run_id] == alone
+
+
+async def test_concurrent_run_watches_share_one_snapshot_read_per_poll(sm, monkeypatch):
+    """Smoke 4681c13f: 4 of the 10 "spending couldn't be measured" stops were the
+    lock-free snapshot itself timing out. #1555 already defers locked passes to one per
+    tenant; each run's watch still read the whole tenant every poll. One shared read
+    per tenant per poll now serves every run's watch."""
+    from daimon.core import channel_budget
+
+    runs, workers = await _watched_runs(sm, 4)
+    reads = 0
+    real = channel_budget._prefetch_fleet_money  # pyright: ignore[reportPrivateUsage]
+
+    async def counted(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(channel_budget, "_prefetch_fleet_money", counted)
+    finished = asyncio.Event()
+    tasks = [
+        asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=sm,
+                parent=run_parent,
+                prices=tariffs(run_parent),
+                markup=Decimal(1),
+                cancelled={worker.id: asyncio.Event()},
+                finished=finished,
+                poll_interval=0.05,
+                read_timeout=3,
+                locked_refresh_s=0.4,
+            )
+        )
+        for (run_parent, _), worker in zip(runs, workers, strict=True)
+    ]
+    try:
+        await asyncio.sleep(0.5)
+        before = reads
+        await asyncio.sleep(2.0)
+        steady = reads - before
+        finished.set()
+        assert await asyncio.wait_for(asyncio.gather(*tasks), 5) == ["finished"] * 4
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    # 4 watches polling every 0.05 s: one read per watch per poll is ~160 in 2 s;
+    # one shared read per poll (plus the tenant's few locked passes) is ~45.
+    assert steady <= 80, steady
+
+
+async def test_one_watchs_timeout_never_cancels_the_shared_snapshot_read(sm, monkeypatch):
+    """Two runs wait on the tenant's one snapshot read; the first gives up (its read
+    timeout). The read carries on, once, and still answers the second."""
+    from daimon.core import channel_budget
+
+    runs, workers = await _watched_runs(sm, 2)
+    gate = asyncio.Event()
+    calls = 0
+    real = channel_budget.read_tenant_budget_snapshots
+
+    async def slow(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await gate.wait()
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(channel_budget, "read_tenant_budget_snapshots", slow)
+    state = channel_budget._TenantSnapshots(  # pyright: ignore[reportPrivateUsage]
+        runs={p.fleet.run_id: (p, tariffs(p), Decimal(1)) for p, _ in runs}
+    )
+    shared = channel_budget._shared_snapshot  # pyright: ignore[reportPrivateUsage]
+    first = asyncio.create_task(shared(sm, state, parent=runs[0][0], max_age=60))
+    second = asyncio.create_task(shared(sm, state, parent=runs[1][0], max_age=60))
+    await asyncio.sleep(0.05)
+    first.cancel()  # its read timeout
+    await asyncio.gather(first, return_exceptions=True)
+    gate.set()
+    decided = await asyncio.wait_for(second, 5)
+    assert set(decided) == {workers[1].id}
+    assert calls == 1, "one shared read, not cancelled by the first watch"
