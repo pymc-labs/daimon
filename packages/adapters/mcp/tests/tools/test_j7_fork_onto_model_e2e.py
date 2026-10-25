@@ -60,6 +60,6 @@ async def test_a_member_without_a_chat_turn_forking_onto_another_model_hears_the
             model="gpt-6-luna",
         )
     text = str(refused.value)
-    assert "keeps Daimon's model" in text and "request a backend switch" in text, text
+    assert "keeps Daimon's model" in text and "request a model provider switch" in text, text
     assert "admin" not in text.lower() and "owner" not in text.lower(), text
     assert chat.ma.created == []
