@@ -133,8 +133,7 @@ def _toolset_intent(
     effective enablement and permission controls).
     `None` is never a schema failure: the caller only sees it for toolsets
     that already passed `AgentToolsConfig` validation. Treat it as a known,
-    droppable loss — exclude it from a worker ceiling (stricter, never
-    looser) or flag it as a declarable "tools" obligation, but never raise.
+    droppable loss: flag it as a declarable "tools" obligation, but never raise.
     """
     if isinstance(tool, CustomTool):
         return (
@@ -226,14 +225,6 @@ class AgentToolsConfig(NativeConfig):
             if projected is not None:
                 result.extend(projected)
         return tuple(result)
-
-    def excluded_mcp_servers(self) -> frozenset[str]:
-        """Servers paired with native-only toolsets cannot enter a worker ceiling."""
-        return frozenset(
-            tool.mcp_server_name
-            for tool in self.tools
-            if isinstance(tool, MCPToolset) and _toolset_intent(tool) is None
-        )
 
     def has_unrepresented_toolset(
         self, *, mcp_catalogues: Mapping[str, frozenset[str]] | None = None

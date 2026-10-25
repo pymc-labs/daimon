@@ -248,7 +248,7 @@ async def mcp_janitor(*, rt: CliRuntime, console: Console, apply: bool) -> None:
         "user-added external creds. "
         "Default is dry-run (read-only); pass --apply to mutate. "
         "NOTE: this sweep is NOT the fix for the admin escalation — that is closed at "
-        "the MCP admin gate. This sweep aligns the existing credential fleet with the "
+        "the MCP admin gate. This sweep aligns the existing credential set with the "
         "no-is_admin invariant."
     ),
 )

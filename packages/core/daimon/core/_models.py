@@ -2696,8 +2696,7 @@ class TaskContinuation(Base):
     __tablename__ = "task_continuations"
     __table_args__ = (
         CheckConstraint(
-            "reason IN ('task_handoff', 'private_input_applied', 'timer', "
-            "'github_access_ready', 'worker_finished')",
+            "reason IN ('task_handoff', 'private_input_applied', 'timer', 'github_access_ready')",
             name="ck_task_continuations_reason",
         ),
         CheckConstraint(
@@ -2770,7 +2769,7 @@ class TurnOutcome(Base):
     __tablename__ = "turn_outcomes"
     __table_args__ = (
         CheckConstraint(
-            "origin IN ('chat', 'routine', 'relay', 'handoff', 'worker')",
+            "origin IN ('chat', 'routine', 'relay', 'handoff')",
             name="ck_turn_outcomes_origin",
         ),
         CheckConstraint(
@@ -3952,7 +3951,6 @@ class AgentBackendRevisionRecord(Base):
     preview_digest: Mapped[str] = mapped_column(Text, nullable=False)
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     previous_local: Mapped[int | None] = mapped_column(Integer)
-    fleet_grant: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     drop_consent: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -3992,166 +3990,6 @@ class AgentOwner(Base):
     )
     source: Mapped[str] = mapped_column(Text, nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
-class FleetRun(Base):
-    """One orchestrator's fan-out: its budget, deadline and status.
-
-    Workers are `FleetWorker` rows. Each worker's session, lease and journal
-    live in the neutral state store under its own private binding slot; these
-    two tables hold only what the store cannot: the run graph, budgets,
-    deadlines, status and a pointer to each worker's result.
-    """
-
-    __tablename__ = "fleet_run"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "id", name="uq_fleet_run_tenant_id"),
-        UniqueConstraint("tenant_id", "operation_key", name="uq_fleet_run_operation"),
-        CheckConstraint(
-            "status IN ('running', 'collecting', 'completed', 'cancelled', 'failed')",
-            name="ck_fleet_run_status",
-        ),
-        CheckConstraint("max_workers > 0", name="ck_fleet_run_max_workers"),
-        CheckConstraint(
-            "quorum IS NULL OR (quorum > 0 AND quorum <= max_workers)", name="ck_fleet_run_quorum"
-        ),
-        CheckConstraint(
-            "total_budget_usd >= 0 AND reserved_usd >= 0 AND observed_usd >= 0",
-            name="ck_fleet_run_amounts",
-        ),
-        CheckConstraint(
-            "end_notice IS NULL OR end_notice IN ('owed', 'cost_owed', 'shown', 'given_up')",
-            name="ck_fleet_run_end_notice",
-        ),
-        Index(
-            "ix_fleet_run_end_notice_owed",
-            "platform",
-            "end_notice_due_at",
-            postgresql_where=text("end_notice IN ('owed', 'cost_owed')"),
-        ),
-    )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    orchestrator_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    orchestrator_session_id: Mapped[str] = mapped_column(Text, nullable=False)
-    orchestrator_binding_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    operation_key: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
-    total_budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    reserved_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default=text("0")
-    )
-    observed_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default=text("0")
-    )
-    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    max_workers: Mapped[int] = mapped_column(Integer, nullable=False)
-    quorum: Mapped[int | None] = mapped_column(Integer)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    created_by: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Whether the thread was told the run ended: "owed" from the end until a
-    # terminal card is rendered ("shown"), or the poller gives up ("given_up").
-    end_notice: Mapped[str | None] = mapped_column(Text)
-    end_notice_attempts: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
-    end_notice_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The run's live card, so a later render edits it instead of posting another.
-    card_message_id: Mapped[str | None] = mapped_column(Text)
-
-
-class FleetWorker(Base):
-    """One worker turn of a fleet run; its result stays in the journal."""
-
-    __tablename__ = "fleet_worker"
-    __table_args__ = (
-        UniqueConstraint("run_id", "ordinal", name="uq_fleet_worker_ordinal"),
-        UniqueConstraint("run_id", "id", name="uq_fleet_worker_run_id"),
-        ForeignKeyConstraint(
-            ["tenant_id", "run_id"],
-            ["fleet_run.tenant_id", "fleet_run.id"],
-            name="fk_fleet_worker_run",
-            ondelete="CASCADE",
-        ),
-        ForeignKeyConstraint(
-            ["run_id", "reviewer_of"],
-            ["fleet_worker.run_id", "fleet_worker.id"],
-            name="fk_fleet_worker_reviewer",
-        ),
-        CheckConstraint(
-            "status IN ('pending', 'starting', 'running', 'succeeded', 'failed', "
-            "'cancelled', 'timed_out', 'budget_exceeded')",
-            name="ck_fleet_worker_status",
-        ),
-        CheckConstraint(
-            "backend IN ('anthropic', 'openai', 'gemini')", name="ck_fleet_worker_backend"
-        ),
-        CheckConstraint("ordinal >= 0", name="ck_fleet_worker_ordinal"),
-        CheckConstraint("reviewer_of IS NULL OR reviewer_of <> id", name="ck_fleet_worker_review"),
-        CheckConstraint(
-            "max_turns > 0 AND turns_used >= 0 AND turns_used <= max_turns AND attempts >= 0",
-            name="ck_fleet_worker_counts",
-        ),
-        CheckConstraint("budget_usd >= 0 AND reserved_usd >= 0", name="ck_fleet_worker_amounts"),
-        CheckConstraint(
-            "(result_session_id IS NULL) = (result_sequence IS NULL) "
-            "AND (result_session_id IS NULL) = (result_digest IS NULL) "
-            "AND (result_excerpt IS NULL OR char_length(result_excerpt) <= 4096)",
-            name="ck_fleet_worker_result",
-        ),
-        Index(
-            "ix_fleet_worker_active",
-            "tenant_id",
-            postgresql_where=text("status IN ('starting', 'running')"),
-        ),
-        Index("ix_fleet_worker_run_status", "run_id", "status"),
-    )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
-    role: Mapped[str] = mapped_column(Text, nullable=False)
-    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    spec_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    backend: Mapped[str] = mapped_column(Text, nullable=False)
-    profile: Mapped[str] = mapped_column(Text, nullable=False)
-    model: Mapped[str] = mapped_column(Text, nullable=False)
-    binding_id: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
-    budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    reserved_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default=text("0")
-    )
-    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    max_turns: Mapped[int] = mapped_column(Integer, nullable=False)
-    turns_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    reviewer_of: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    result_contract: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    result_session_id: Mapped[str | None] = mapped_column(Text)
-    result_sequence: Mapped[int | None] = mapped_column(Integer)
-    result_digest: Mapped[str | None] = mapped_column(Text)
-    result_excerpt: Mapped[str | None] = mapped_column(Text)
-    error_code: Mapped[str | None] = mapped_column(Text)
-    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 

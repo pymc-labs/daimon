@@ -12,18 +12,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from daimon.core._models import TenantLedger
-from daimon.core.accounting_outbox import record_observation_usage
 from daimon.core.pricing import provider_cost_of, provider_prices, unreported_cache_writes
-from daimon.core.stores import mux_state
 from mux.contracts.ids import ModelRef, ResourceRef
-from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
 from mux.profiles.openai import CONVERSATION_ONLY
-from sqlalchemy import select
-
-from .test_fleet_budget import setup
-from .test_fleet_budget import sm as sm
 
 PRICES = provider_prices(CONVERSATION_ONLY.profile_id)
 
@@ -116,80 +108,3 @@ def test_a_provider_without_a_cache_write_rate_is_never_an_estimate():
         }
     )
     assert not unreported_cache_writes(usage, price)
-
-
-async def _bind(sm, run, parent, profile, provider):
-    binding = ProviderBinding(
-        id=f"binding-{provider}",
-        thread=parent.fleet.root.model_copy(update={"thread_id": f"thread-{provider}"}),
-        legacy_account_id=str(parent.fleet.account_id),
-        provider=provider,
-        profile=profile,
-        native_refs={"session": f"native-{provider}"},
-        generation=1,
-        config_revision=0,
-    )
-    async with sm() as db, db.begin():
-        await mux_state.put_binding(db, binding, expected_generation=0)
-    return binding
-
-
-async def test_the_estimate_is_marked_on_its_debit_and_absent_on_a_metered_one(sm):
-    parent, run = await setup(sm, funds="10", cap="2")
-    native = ResourceRef(
-        provider="openai",
-        kind="session",
-        id="native-openai",
-        tenant_id=str(run.tenant_id),
-        account_scope_id="daimon-deployment",
-    )
-    openai = await _bind(sm, run, parent, CONVERSATION_ONLY.profile_id, "openai")
-    estimated = turn("gpt-6-luna", 13_351, 0, 61).model_copy(update={"session": native})
-    gemini_price = provider_prices("gemini.inline_reuse")[("gemini", "gemini-3.8-flash")]
-    gemini = await _bind(sm, run, parent, "gemini.inline_reuse", "gemini")
-    metered = UsageObservation(
-        id="gemini:interaction:usage",
-        revision=1,
-        session=native.model_copy(update={"provider": "gemini", "id": "native-gemini"}),
-        turn_id="interaction",
-        model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
-        grain="turn",
-        basis="cumulative",
-        input_tokens=4_000,
-        input_cached_tokens=1_000,
-        output_tokens=300,
-        native_meter={},
-        completeness="measured",
-        observed_at=datetime.now(UTC),
-    )
-    for binding, usage, price in (
-        (openai, estimated, PRICES[("openai", "gpt-6-luna")]),
-        (gemini, metered, gemini_price),
-    ):
-        async with sm() as db, db.begin():
-            assert await record_observation_usage(
-                db,
-                binding_id=binding.id,
-                observation=usage,
-                tenant_id=run.tenant_id,
-                platform_user_id="tester",
-                pricing=None,
-                provider_price=price,
-                infrastructure_usd=Decimal(0),
-                billing_grain="turn",
-                channel_id=run.channel_id,
-            )
-    async with sm() as db:
-        marks = dict(
-            (
-                await db.execute(
-                    select(TenantLedger.idempotency_key, TenantLedger.estimate).where(
-                        TenantLedger.tenant_id == run.tenant_id, TenantLedger.delta_usd < 0
-                    )
-                )
-            ).all()
-        )
-    assert marks == {
-        "turn:native-openai:openai:turn:turn_1": "cache_writes_unreported",
-        "turn:native-gemini:gemini:interaction:usage": None,
-    }

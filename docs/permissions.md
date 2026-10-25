@@ -52,15 +52,6 @@ refused when such a rule is saved (a third-party key keeps the plain `server/too
 (`tool_safety.rule_name_skipped`), because the name becomes a tool setting in
 the session.
 
-The rule set is read when a turn starts and again whenever the turn's admission
-is re-decided (a session built or reused, a fleet worker prepared), so a rule
-added or cleared reaches the driver at once. The session's own tool settings
-follow it at the next bind. A rule never loosens a gate Daimon already has:
-`add_skill` with a reviewed preview and the publish tools of an agent that asks
-before publishing still wait for their card, and the operator's deny list still
-comes first. An agent `deny` wins over those cards. These cards do not offer
-**Always allow**.
-
 A rule on a publish tool turns the publish card on for the agent everywhere. The
 session asks on a tool named by a rule in every channel, so a rule on
 `publish_report`, `create_notebook_upload_url` or `create_attachment_upload_url`,
@@ -209,26 +200,6 @@ or the setup panel's New agent button, or who copied it with `fork_agent`; a
 channel's own copy of an agent keeps that agent's owner. An admin can also
 name one with `daimon agents owner set`. An agent has at most one owner.
 Agents created before owners existed have none and stay admin-only.
-
-The owner may change the agent's instructions, model, description, tools,
-skills, MCP server attachments (including token forms and OAuth connections),
-keys, model provider, its required capabilities, and its fleet, from chat and
-from the Discord, Slack and Teams setup panels. They see their agent's setup
-(its prompt and connections) and find it with `list_agents` (`mine=true`), even
-while it answers nowhere. An owner reaches their own agents past channel
-isolation too, including a channel's copy they own, since the copy keeps its
-source's owner. Because the owner can rewrite the prompt, keys an admin added
-to that agent are not secret from its owner: the agent can be told to use or
-reveal them. Give an agent's keys only to an agent whose owner may hold them.
-A person from another organisation is never an agent's owner. Making the agent share threads stays with admins,
-because it applies in every channel the agent answers in that doesn't pin a
-backend; the owner may keep an admin's choice or return to one thread per
-person. If two people create agents of the same name at once, one is refused;
-nobody becomes the owner of an agent someone else created. Ownership is read
-again when a change is written, when a form is submitted and when a
-confirmation card is clicked, always for the person acting, so a change of
-owner applies at once. An agent key or a requester from another organisation
-is never the owner.
 
 The owner may not change what the whole workspace shares: the provider
 allowlist, channel budgets, GitHub access (repo and skill-repo binds, grants),

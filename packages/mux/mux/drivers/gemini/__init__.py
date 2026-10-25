@@ -92,16 +92,11 @@ class GeminiManagedAgents:
         resource_catalog_enabled: bool = False,
         resource_catalog_transport: AgentCatalogTransport | None = None,
         native_agent: Agent | None = None,
-        max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
-        max_input_tokens: int | None = None,
     ) -> None:
         if type(resource_catalog_enabled) is not bool:
             raise ValueError("resource catalog capability must be an explicit bool")
-        if max_output_tokens is not None and (
-            ((native_agent is not None or resource_catalog_enabled) and max_input_tokens is None)
-            or max_total_tokens is not None
-        ):
+        if max_output_tokens is not None and (native_agent is not None or resource_catalog_enabled):
             raise UnsupportedCapability(("model_interaction_resources",), PROFILE.profile_id)
         self.catalog_adapter: GeminiCatalogAdapter | None = None
         if resource_catalog_enabled:
@@ -128,9 +123,7 @@ class GeminiManagedAgents:
             mcp_secrets=mcp_secrets,
             native_agent=native_agent,
             gcs_secrets=gcs_secrets,
-            max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
-            max_input_tokens=max_input_tokens,
         )
         self.events = GeminiEvents(
             transport,
@@ -141,9 +134,7 @@ class GeminiManagedAgents:
             native_agent=native_agent,
             gcs_secrets=gcs_secrets,
             mcp_secrets=mcp_secrets,
-            max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
-            max_input_tokens=max_input_tokens,
         )
         self.usage = GeminiUsage(transport, storage, account_scope_id)
         self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)

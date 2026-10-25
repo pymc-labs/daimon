@@ -277,7 +277,7 @@ jobs:
           PROD_PIN=""
           if [ "${DEPLOY_ENVIRONMENT:-}" = production ]; then
             PROD_PIN=",DAIMON_TURN__PATH=legacy,DAIMON_TURN__CHANNEL_BACKENDS=false"
-            PROD_PIN="$PROD_PIN,DAIMON_TURN__AGENT_BACKENDS=false,DAIMON_FLEET__ENABLED=false"
+            PROD_PIN="$PROD_PIN,DAIMON_TURN__AGENT_BACKENDS=false"
           fi
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --image "${{ steps.images.outputs.daimon }}" \
@@ -459,7 +459,7 @@ jobs:
               # this block (and the MCP PROD_PIN and the daimon-infra pins).
               if [ "${{ inputs.environment }}" = production ]; then
                 printf "%s\n" DAIMON_TURN__PATH=legacy DAIMON_TURN__CHANNEL_BACKENDS=false \
-                  DAIMON_TURN__AGENT_BACKENDS=false DAIMON_FLEET__ENABLED=false \
+                  DAIMON_TURN__AGENT_BACKENDS=false \
                   | sudo tee -a /etc/daimon/daimon.env >/dev/null
               fi
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.worker.yml /etc/daimon/compose.worker.yml

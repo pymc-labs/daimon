@@ -669,76 +669,7 @@ def test_configured_agent_compiles_only_declared_builtin_custom_and_mcp_tools() 
     ]
 
 
-@pytest.mark.parametrize("ceiling", (False, 0, -1, "4096"))
-def test_agent_worker_budget_requires_a_positive_integer(ceiling) -> None:
-    with pytest.raises(UnsupportedCapability):
-        compile_agent(
-            AgentSpec(name="worker", model=ModelRef(provider="gemini", id="gemini-3.5-flash-lite")),
-            max_total_tokens=ceiling,
-        )
-
-
-async def test_agent_worker_budget_is_in_the_owned_template_and_blocks_another_interaction() -> (
-    None
-):
-    from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
-
-    transport, storage, state = FakeTransport(), MemoryStorage(), MemoryStateStore()
-    worker = GeminiManagedAgents(
-        transport,
-        storage=storage,
-        state_store=state,
-        account_scope_id="project",
-        max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
-    )
-    agent = await worker.agents.create(
-        SCOPE,
-        AgentSpec(name="worker", model=ModelRef(provider="gemini", id=WORKER_MODEL), system="Kept"),
-        key="agent",
-    )
-    spec = SessionSpec(
-        agent=agent.ref,
-        agent_revision=agent.revision,
-        config_revision=1,
-        extensions={
-            "gemini.session": ExtensionConfig(
-                namespace="gemini.session",
-                version=1,
-                value={
-                    "thread": THREAD.model_dump(mode="json"),
-                    "binding_id": "budget-worker",
-                },
-            )
-        },
-    )
-    session = await worker.sessions.create(SCOPE, spec, key="session")
-    transport.responses.append(native())
-    first = await worker.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input")
-    assert transport.requests[0]["agent_config"] == {
-        "type": "antigravity",
-        "model": "gemini-3.5-flash-lite",
-        "max_total_tokens": 65_536,
-    }
-    assert transport.requests[0]["system_instruction"] == "Kept"
-    assert transport.requests[0]["tools"] == [NO_TOOLS_TOOL]
-    assert await worker.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input") == first
-    restarted = GeminiManagedAgents(
-        transport,
-        storage=storage,
-        state_store=state,
-        account_scope_id="project",
-        max_total_tokens=WORKER_MAX_TOTAL_TOKENS,
-    )
-    assert await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="claimed-input") == first
-    with pytest.raises(UnsupportedCapability) as refused:
-        await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="second-input")
-    assert "worker_single_interaction" in refused.value.missing
-    assert len(transport.requests) == 1
-    operation = await state.get_operation(SCOPE, "claimed-input")
-    assert operation is not None and operation.operation.status == "accepted"
-
-
-def test_worker_model_permission_preserves_default_selections_and_thread_mode() -> None:
+def test_removed_model_preserves_default_selections_and_thread_mode() -> None:
     from mux.profiles import BackendSelection, backend_selection, runnable_selection
 
     assert BackendSelection(BackendConfig(), ("per_caller",)).allowed_models is None
@@ -748,7 +679,7 @@ def test_worker_model_permission_preserves_default_selections_and_thread_mode() 
     cheap = BackendConfig(
         backend="gemini", profile="gemini.inline_reuse", model="gemini-3.5-flash-lite"
     )
-    assert runnable_selection(resolve_default(cheap))
+    assert not runnable_selection(resolve_default(cheap))
     assert not runnable_selection(
         resolve_default(cheap.model_copy(update={"thread_mode": "shared"}))
     )
@@ -775,27 +706,6 @@ def test_model_output_cap_is_strict_and_bounded(ceiling) -> None:
     spec = AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
     with pytest.raises(UnsupportedCapability, match="capped_model_request"):
         compile_agent(spec, max_output_tokens=ceiling)
-
-
-@pytest.mark.parametrize("resource", ("tool", "skill", "mcp", "agent_budget"))
-def test_model_output_cap_cannot_discard_managed_intent(resource: str) -> None:
-    from mux.contracts.ids import SkillRef
-
-    spec = AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
-    if resource == "tool":
-        spec = spec.model_copy(update={"tools": (ToolSpec(name="code_execution", kind="builtin"),)})
-    elif resource == "skill":
-        spec = spec.model_copy(update={"skills": (SkillRef(id="skill"),)})
-    elif resource == "mcp":
-        spec = spec.model_copy(
-            update={"mcp_servers": (MCPConnection(name="server", url="https://example.test/mcp"),)}
-        )
-    with pytest.raises(UnsupportedCapability, match="model_interaction_resources"):
-        compile_agent(
-            spec,
-            max_output_tokens=4096,
-            max_total_tokens=4096 if resource == "agent_budget" else None,
-        )
 
 
 async def test_capped_model_turns_keep_conversation_and_budget_after_restart() -> None:
@@ -857,137 +767,6 @@ async def test_capped_model_turns_keep_conversation_and_budget_after_restart() -
         await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="tampered")
     assert len(transport.requests) == 2
     assert await state.get_operation(SCOPE, "tampered") is None
-
-
-class CountingTransport(FakeTransport):
-    def __init__(self, count):
-        super().__init__()
-        self.count = count
-        self.counted = []
-
-    async def count_input_tokens(self, request):
-        self.counted.append(dict(request))
-        return self.count
-
-
-async def bounded_worker(transport, *, storage=None, state=None, cap=20):
-    storage = storage or MemoryStorage()
-    state = state or MemoryStateStore()
-    driver = GeminiManagedAgents(
-        transport,
-        storage=storage,
-        state_store=state,
-        account_scope_id="project",
-        max_input_tokens=cap,
-        max_output_tokens=24,
-    )
-    agent = await driver.agents.create(
-        SCOPE,
-        AgentSpec(
-            name="bounded",
-            model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
-            system="Protected source instructions",
-        ),
-        key="bounded-agent",
-    )
-    session = await driver.sessions.create(
-        SCOPE,
-        SessionSpec(
-            agent=agent.ref,
-            agent_revision=agent.revision,
-            config_revision=1,
-            extensions={
-                "gemini.session": ExtensionConfig(
-                    namespace="gemini.session",
-                    version=1,
-                    value={"thread": THREAD.model_dump(mode="json"), "binding_id": "bounded"},
-                )
-            },
-        ),
-        key="bounded-session",
-    )
-    return driver, storage, state, session
-
-
-@pytest.mark.parametrize("count", (21, None, False, 0, -1))
-async def test_worker_refuses_over_cap_or_unknown_input_before_claim_or_dispatch(count):
-    transport = CountingTransport(count)
-    driver, _, state, session = await bounded_worker(transport)
-    with pytest.raises(UnsupportedCapability, match="worker_input_token_limit"):
-        await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="over-cap")
-    assert not transport.requests
-    assert await state.get_operation(SCOPE, "over-cap") is None
-    assert transport.counted[0]["system_instruction"] == "Protected source instructions"
-
-
-async def test_worker_accepts_exact_cap_including_cached_input_and_thinking_then_stops():
-    transport = CountingTransport(20)
-    driver, storage, state, session = await bounded_worker(transport)
-    transport.responses.append(
-        native(
-            usage={
-                "total_input_tokens": 20,
-                "total_cached_tokens": 18,
-                "total_output_tokens": 21,
-                "total_thought_tokens": 3,
-            },
-            environment_id=None,
-        )
-    )
-    receipt = await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="at-cap")
-    observations = await driver.usage.reconcile(SCOPE, session.ref)
-    assert observations[-1].input_tokens == 20
-    assert observations[-1].input_cached_tokens == 18
-    assert observations[-1].output_tokens == 24
-    assert observations[-1].output_reasoning_tokens == 3
-    sent = transport.requests[0]
-    assert sent == transport.counted[0]
-    assert sent["generation_config"] == {"max_output_tokens": 24}
-    assert not {"agent", "agent_config", "previous_interaction_id", "environment"} & sent.keys()
-    restarted, _, _, _ = await bounded_worker(transport, storage=storage, state=state)
-    assert await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="at-cap") == receipt
-    with pytest.raises(UnsupportedCapability, match="worker_single_interaction"):
-        await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="next-turn")
-    assert len(transport.requests) == len(transport.counted) == 1
-    assert await state.get_operation(SCOPE, "next-turn") is None
-
-
-async def test_worker_unknown_acceptance_keeps_aggregate_envelope_spent():
-    transport = CountingTransport(20)
-    driver, storage, state, session = await bounded_worker(transport)
-    transport.responses.append(ProviderError("transient_network", retryable=True))
-    receipt = await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="unknown")
-    assert receipt.status == "outcome_unknown"
-    restarted, _, _, _ = await bounded_worker(transport, storage=storage, state=state)
-    with pytest.raises(UnsupportedCapability, match="unreconciled_delivery"):
-        await restarted.events.send(SCOPE, session.ref, (MESSAGE,), key="replacement")
-    assert len(transport.requests) == 1
-
-
-async def test_worker_envelope_cannot_expand_or_disappear_after_restart():
-    transport = CountingTransport(20)
-    _, storage, state, session = await bounded_worker(transport)
-    for cap in (None, 21):
-        changed = GeminiManagedAgents(
-            transport,
-            storage=storage,
-            state_store=state,
-            account_scope_id="project",
-            max_output_tokens=24,
-            max_input_tokens=cap,
-        )
-        with pytest.raises(UnsupportedCapability, match="changed_worker_token_envelope"):
-            await changed.events.send(SCOPE, session.ref, (MESSAGE,), key="changed")
-    assert not transport.requests
-
-
-async def test_worker_without_complete_prompt_counting_refuses_before_dispatch():
-    transport = FakeTransport()
-    driver, _, state, session = await bounded_worker(transport)
-    with pytest.raises(UnsupportedCapability, match="worker_input_token_count"):
-        await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="uncounted")
-    assert not transport.requests
-    assert await state.get_operation(SCOPE, "uncounted") is None
 
 
 def high_demand() -> ProviderError:

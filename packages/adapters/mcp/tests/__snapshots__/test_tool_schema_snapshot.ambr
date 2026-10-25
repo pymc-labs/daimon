@@ -2585,10 +2585,7 @@
         Anyone may copy you (the agent answering them), and owns that copy; copying
         any other agent is admin-only. Only for a saved, named copy someone asked
         to keep. The copy keeps its source's tool rules (copied once, at the fork:
-        later changes to the source's rules don't follow), and starts on the server's
-        default fleet (the source's own fleet settings don't carry over). Running
-        copies of yourself on several models at once is not this: that is a fleet
-        of task workers (fleet_spawn), which needs no admin.
+        later changes to the source's rules don't follow).
         Copies its prompt, model, skills and the MCP servers that need
         no stored token. The copy starts with no credentials: no repo binding or
         GitHub access, no API/service keys and no connector tokens; attach its own
@@ -2610,9 +2607,8 @@
         If the person names a model for the copy ("fork yourself onto
         gpt-3.5-turbo"), pass it as ``model``. A saved copy keeps its source's
         model: an unavailable model is refused as unavailable, and a different
-        available one points at ``fleet_spawn``. Never answer such an ask with an
-        admin/owner rule; "fork yourself onto <model>" is a fleet task worker, not
-        a saved copy. Pass this active turn's ``origin_context_id``.
+        available one is refused; make the copy and then request a backend switch
+        for it. Pass this active turn's ``origin_context_id``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3554,8 +3550,7 @@
         to pick a name for an agent's model. Only providers this server has turned
         on are listed, and every listed name (e.g. "Opus 5.5", "Astra", "Argon")
         is accepted wherever a model is named. Prices are list prices per million
-        tokens, before this server's markup. A fleet's own allowed models are in
-        fleet_agents.
+        tokens, before this server's markup.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4809,6 +4804,226 @@
         'type': 'object',
       }),
     }),
+    'request_agent_backend_switch': dict({
+      'description': '''
+        Preview a requested agent backend switch, then Confirm in this chat.
+        <blank line>
+        Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
+        or Gemini. A member can make a copy they own and switch that copy.
+        If the named model isn't available, say that with the allowed list.
+        optionally naming a model naturally: "switch Researcher to argon" or
+        "switch Researcher to luna". For an Anthropic model change such as
+        "set Writer to opus 5.5", use update_agent with that natural model name.
+        ``model`` accepts natural names or one of
+        the returned ``models``; omit it for the provider's default. A provider
+        alone ("switch to GPT", "to Gemini") means its default: omit ``model`` and
+        preview; never ask which model. Never ask the person for a model id.
+        Ambiguous model names return the choices.
+        The switch applies to
+        new conversations wherever the agent answers, and to this conversation
+        from the next message when the switched agent answers here (the result's
+        summary says which). The server's default or built-in agent switches only
+        when the person says it's for everyone (for_everyone=true, on both calls);
+        otherwise offer the copy below. For "make a copy of yourself on Gemini":
+        copy the agent with fork_agent and new_copy_if_taken=true (always a NEW
+        copy, never an earlier one; use the name it returns from here on), then
+        switch the copy here. Don't hand_off_task first: the confirmed switch hands
+        this conversation to the copy and moves it to Gemini from the next message.
+        Pass ``handoff_summary`` on both calls: a short summary of this conversation
+        (what was asked, decided and still open; no secrets, keys or tool output),
+        which the copy starts from there, since the history itself can't move.
+        If that preview asks the uncommitted-work question, pass the person's
+        answer as ``unsaved_work`` on both calls.
+        First call without preview_digest: tell the person in plain words the
+        compatibility, shared-thread limits, what won't be available and the cost
+        line, then call again in this same turn with the same model and that preview's
+        expected_revision, preview_digest and exact declared_drops as accepted_drops.
+        Never ask the person to reply "yes", to confirm in chat, or for a second
+        go-ahead: the request that began this turn is the go-ahead, and the second
+        call posts the card, where they Confirm. On an OpenAI or Gemini turn
+        that call posts the card itself and returns awaiting_confirmation: tell the
+        person to press Confirm, and don't call again. Never confirm, approve or accept it
+        on their behalf, and never say you did. A stale preview or expired card
+        changes nothing; preview again. Make any other change to the agent (its tools,
+        skills or settings) before previewing a switch: a change after the preview
+        makes it stale. Pass this active turn's origin_context_id.
+        The same tool states the agent's own settings: ``thread_mode`` ("shared"
+        to share threads where the channel allows it, admins only; or "per_caller") and
+        ``required_capabilities`` (a channel that can't give one refuses the turn).
+        Pass both together; an omitted one returns to the default. To change only
+        settings, pass the agent's current target_backend and model.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'accepted_drops': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'agent_name': dict({
+            'type': 'string',
+          }),
+          'expected_revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'for_everyone': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'handoff_summary': dict({
+            'anyOf': list([
+              dict({
+                'maxLength': 2000,
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'model': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'preview_digest': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'required_capabilities': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'enum': list([
+                    'thread_workspace_persistence',
+                    'turn_lifecycle',
+                    'cancel',
+                    'tool_loop',
+                    'required_actions',
+                    'skills_bundle',
+                    'artifacts',
+                    'usage_observations',
+                    'reconcile',
+                    'steer',
+                    'tool_confirmation',
+                    'native_event_replay',
+                    'event_previews',
+                    'vaults',
+                    'memory_stores',
+                    'session_resources',
+                    'skills_versions',
+                    'multiagent',
+                    'environments_fork',
+                    'native_schedules',
+                    'model_request_usage',
+                    'model_request_limit',
+                    'input_token_limit',
+                    'output_token_limit',
+                    'session_spend_control',
+                    'workspace_export_import',
+                    'neutral_catalog',
+                    'agent_delete',
+                  ]),
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'target_backend': dict({
+            'enum': list([
+              'anthropic',
+              'openai',
+              'gemini',
+              'selfhosted',
+            ]),
+            'type': 'string',
+          }),
+          'thread_mode': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'per_caller',
+                  'shared',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'unsaved_work': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'copy',
+                  'leave',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'agent_name',
+          'target_backend',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'request_agent_key': dict({
       'description': '''
         Give an agent an API key or token for any service: Toggl, OpenAI,
@@ -4878,6 +5093,58 @@
           'origin_context_id',
           'expected_ma_agent_id',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'request_channel_pin_clear': dict({
+      'description': '''
+        Show or clear THIS channel's model-provider pin, with admin confirmation. Admin-only.
+        <blank line>
+        Use when an admin says "clear this channel's pin", or when a switch or refusal says
+        this channel pins a provider. A pin makes every agent answer here on that provider;
+        clearing it lets each agent use its own. First call without preview_digest and show
+        what the channel pins. Then call again with that preview's expected_revision and
+        preview_digest: the requesting admin must Confirm on the card. Only this chat's
+        channel can be cleared. Existing threads keep their model. Pass this turn's
+        origin_context_id. A stale preview changes nothing.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'expected_revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'preview_digest': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
         'type': 'object',
       }),
     }),
@@ -5044,6 +5311,72 @@
           'channel_id',
           'origin_context_id',
           'expected_ma_agent_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'request_provider_allowlist': dict({
+      'description': '''
+        Preview and confirm the server's allowed model providers. Admin-only.
+        <blank line>
+        providers is the complete replacement list, not an addition. A server no
+        admin configured uses every provider this Daimon install holds a key for;
+        saving a list makes it the server's own choice, which always wins.
+        Preview first, explain the server-wide scope and full list, then call with
+        the same providers and returned expected_revision and preview_digest for
+        the admin's Confirm card. Pass this active turn's origin_context_id.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'expected_revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'preview_digest': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'providers': dict({
+            'items': dict({
+              'enum': list([
+                'anthropic',
+                'openai',
+                'gemini',
+                'selfhosted',
+              ]),
+              'type': 'string',
+            }),
+            'type': 'array',
+          }),
+        }),
+        'required': list([
+          'providers',
         ]),
         'type': 'object',
       }),
@@ -5383,6 +5716,77 @@
         'required': list([
           'channel_id',
           'content',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_agent_backend': dict({
+      'description': '''
+        Set an enabled model provider, or clear the agent setting with backend=null.
+        <blank line>
+        The agent's owner or an admin, for direct coding-tool or API requests. Chat
+        turns use request_agent_backend_switch so the requester confirms the preview.
+        The returned preview names compatibility limits and list prices.
+        Each person's own conversation with the agent moves to the new provider on
+        their next message; shared threads stay on the old one; channel settings
+        still apply.
+        expected_revision refuses a setting changed since it was read.
+        preview_only returns the compatibility and cost preview without applying it.
+        model picks one of the provider's selectable models (Gemini: gemini-3.8-flash or
+        gemini-4-argon); omit it for the provider's default.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'backend': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'anthropic',
+                  'openai',
+                  'gemini',
+                  'selfhosted',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+          }),
+          'expected_revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'model': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'name': dict({
+            'type': 'string',
+          }),
+          'preview_only': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'name',
+          'backend',
         ]),
         'type': 'object',
       }),

@@ -1590,3 +1590,23 @@ Harness process cleanup enumerates present `/proc` PIDs, including after PID wra
 If procfs uses hidepid, configure `gid=60002` for the trusted cleanup verifier;
 only that helper receives the exemption group. Multi-session harness mode requires
 `hidepid=2,gid=60002`. Ordinary tool processes do not receive the exemption.
+
+### Removing Fleet storage
+
+Fleet orchestration, worker tools, settings and controls have been removed.
+Ordinary agents, provider switching, handoffs, timers, session recovery and usage
+accounting continue to use their shared infrastructure.
+
+Migration `0141_remove_fleet` permanently drops `fleet_worker`, `fleet_run`
+(including their indexes and constraints), and `agent_backend_revision.fleet_grant`.
+Applying it destroys Fleet run/worker history and stored grants. Back up or export
+that history before a separately approved rollout. The migration is irreversible;
+restoring those records requires a database backup. Stop the old application and
+its background processes before applying it; old builds still require those tables.
+
+Shared provider bindings, journals, turn outcomes, accounting records and queued
+continuations are retained for ordinary operation and historical evidence. The
+forward migration adds checks with `NOT VALID`: existing historical worker origins
+and completion reasons remain stored, while new such rows are rejected. Updates to
+those old rows are also subject to the checks. Runtime queues exclude unsupported
+reasons before batching or decoding, and no Fleet continuation producer remains.

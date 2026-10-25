@@ -32,13 +32,9 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
 from urllib.parse import unquote
 
-from daimon.core.fleet_configuration import (
+from daimon.core.agent_configuration import (
     ConfigurationReference,
-    complete_fleet_config,
     configuration_refusal,
-    configured_fleet_grant,
-    fleet_default_line,
-    fleet_detail_lines,
     provider_preview_digest,
 )
 from daimon.core.microsoft_write_paths import write_kind
@@ -154,10 +150,7 @@ class BackendSwitchReference(BaseModel):
 def _forked_copy(agent: BackendAgent) -> bool:
     """A copy fork_agent made in a conversation: its switch may hand it that
     conversation (J1), so its answers are bound to the preview they answered."""
-    from daimon.core.defaults.metadata import (
-        MA_METADATA_KEY_FORKED_FROM,
-        MA_METADATA_KEY_FORKED_IN,
-    )
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_FORKED_FROM, MA_METADATA_KEY_FORKED_IN
 
     stamp = (agent.source.spec.metadata if agent.source is not None else None) or {}
     return MA_METADATA_KEY_FORKED_FROM in stamp and MA_METADATA_KEY_FORKED_IN in stamp
@@ -437,33 +430,17 @@ def prompt_for_tool_call(
     denied_action: str
     consequence: str | None = None
     detail_lines: tuple[str, ...]
-    if (
-        call.tool_name in {"request_fleet_config", "request_provider_allowlist"}
-        and server == DAIMON_SERVER_NAME
-    ):
-        if call.tool_name == "request_fleet_config":
-            reference = ConfigurationReference.model_validate(
-                {
-                    "operation": "fleet_revoke" if data.get("revoke") else "fleet_set",
-                    "agent_name": data.get("agent_name"),
-                    "config": data.get("config"),
-                    "expected_revision": data.get("expected_revision"),
-                    "preview_digest": data.get("preview_digest"),
-                }
-            )
-        else:
-            reference = ConfigurationReference.model_validate(
-                {
-                    "operation": "provider_allowlist",
-                    "providers": data.get("providers"),
-                    "expected_revision": data.get("expected_revision"),
-                    "preview_digest": data.get("preview_digest"),
-                }
-            )
+    if call.tool_name in {"request_provider_allowlist"} and server == DAIMON_SERVER_NAME:
+        reference = ConfigurationReference.model_validate(
+            {
+                "operation": "provider_allowlist",
+                "providers": data.get("providers"),
+                "expected_revision": data.get("expected_revision"),
+                "preview_digest": data.get("preview_digest"),
+            }
+        )
         return ConfirmationPrompt(
-            title="Change fleet settings?"
-            if call.tool_name == "request_fleet_config"
-            else "Change allowed providers?",
+            title="Change allowed providers?",
             requester_platform_user_id=requester_platform_user_id,
             expires_at=now + timeout,
             admin=True,
@@ -768,11 +745,7 @@ def backend_switch_callbacks(
     shared service's compare-and-set after the approved tool call.
     """
     from daimon.core.authz import build_subject
-    from daimon.core.channel_backend import (
-        BackendActor,
-        answers_for_everyone,
-        load_backend_agent,
-    )
+    from daimon.core.channel_backend import BackendActor, answers_for_everyone, load_backend_agent
     from daimon.core.stores.accounts import get_account_with_tenant
 
     async def verified(
@@ -906,8 +879,8 @@ def backend_switch_callbacks(
                 # Only the chat this card is posted in: the reference names no channel.
                 if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
                     raise ValueError("This confirmation is unavailable. Preview again.")
+                from daimon.core.agent_configuration import channel_pin_digest
                 from daimon.core.channel_backend import current_backend
-                from daimon.core.fleet_configuration import channel_pin_digest
                 from daimon.core.stores import mux_state
                 from daimon.core.turn.notices import provider_name
 
@@ -932,7 +905,7 @@ def backend_switch_callbacks(
                     "After clearing, each agent answers here on its own provider. "
                     "Existing threads keep their model.",
                 )
-            elif reference.operation == "provider_allowlist":
+            else:
                 assert reference.providers is not None
                 policy = await service.tenant_policy(tenant_id)
                 if (
@@ -949,71 +922,6 @@ def backend_switch_callbacks(
                     "Allowed providers: " + (", ".join(reference.providers) or "none"),
                     "Applies to this server. Saving makes this list the server's own choice: "
                     "it stops following the providers this Daimon install has keys for.",
-                )
-            else:
-                assert reference.agent_name is not None
-                agent = await load_backend_agent(
-                    anthropic,
-                    sessionmaker,
-                    tenant_id=tenant_id,
-                    agent_name=reference.agent_name,
-                    resource_host=resource_host,
-                )
-                if not await service.may_edit(agent, actor):
-                    raise ValueError("This change needs the agent's owner or a current admin.")
-                setting = await service.fleet_setting(
-                    tenant_id, agent.agent_id, now=datetime.now(prompt.expires_at.tzinfo)
-                )
-                previous = setting.base
-                complete = (
-                    await complete_fleet_config(
-                        reference.config,
-                        previous,
-                        anthropic,
-                        tenant_id=tenant_id,
-                        default=setting.kind != "custom",
-                    )
-                    if reference.config
-                    else None
-                )
-                value = (
-                    await configured_fleet_grant(
-                        complete,
-                        service,
-                        anthropic,
-                        sessionmaker,
-                        agent,
-                        now=datetime.now(prompt.expires_at.tzinfo),
-                    )
-                    if complete
-                    else None
-                )
-                if value is not None:
-                    # A non-admin owner may only tighten; the write re-checks at the click.
-                    await service.check_owner_fleet_ceiling(
-                        agent, value, actor, now=datetime.now(prompt.expires_at.tzinfo)
-                    )
-                preview = await service.preview_fleet_grant(
-                    agent, value, now=datetime.now(prompt.expires_at.tzinfo)
-                )
-                if (
-                    preview.setting_revision != reference.expected_revision
-                    or preview.digest != reference.preview_digest
-                ):
-                    raise StalePreview(STALE_SETTING_TEXT)
-                action = (
-                    "Turn off fleet for "
-                    if reference.operation == "fleet_revoke"
-                    else "Configure fleet for "
-                ) + agent.name
-                details = (
-                    *fleet_default_line(setting.kind, revoke=reference.operation == "fleet_revoke"),
-                    *fleet_detail_lines(
-                        preview,
-                        worker_names=complete.worker_agents if complete else None,
-                        # The default's fixed expiry isn't a limit an owner set.
-                        previous=previous if setting.kind == "custom" else None,
-                    ),
                 )
         except AgentBackendRefused as exc:
             if exc.reason in ("stale_preview", "stale_revision"):

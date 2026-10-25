@@ -212,7 +212,6 @@ async def test_real_preparation_uses_original_consent_after_latest_setting_chang
     )
     await service.clear_backend(source, accepted.local, actor)
     selected = await read_preparation_counterpart(request)
-    assert selected.worker is None
     assert selected.target_spec.declared_drops == accepted.declared_drops
     assert selected.target_spec.system.startswith("Authoritative source instructions\n\n")
     assert selected.verified_counterpart == selected.counterpart
@@ -1410,14 +1409,6 @@ async def test_portable_native_no_drop_consent_survives_store_and_retained_prepa
     assert prepared.target_spec == source.effective_spec
     assert prepared.source.resource_requirements == source.resource_requirements
     assert len(prepared.source.resource_requirements) == 1
-    assert classify_source_obligations(
-        source,
-        source.effective_spec,
-        environment=source.environment.spec,
-        resources=source.resource_requirements,
-        retained_agent=source.source.ref,
-        worker_ceiling=True,
-    )
     assert agent_payload(prepared.target_spec)["model"] == {
         "id": "claude-haiku-5-5",
         "speed": "standard",

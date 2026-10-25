@@ -1588,9 +1588,9 @@ class BillingSettings(BaseModel):
         ge=0,
         description=(
             "Most a tenant may spend each UTC day on any one Gemini model, in provider "
-            "USD at list price, counted across every agent turn and fleet worker. A "
+            "USD at list price, counted across every agent turn. A "
             "Gemini agent turn has no token envelope and its usage reaches no ledger "
-            "debit, so this is the guard. Checked as each turn or worker starts, for "
+            "debit, so this is the guard. Checked as each turn starts, for "
             "its first request's model and any Flash fallback of it, never mid-turn; "
             "a model with no current tariff is refused, and an unpriced fallback never "
             "runs. It resets at midnight UTC. 0 allows no Gemini turns."
@@ -1601,9 +1601,9 @@ class BillingSettings(BaseModel):
         ge=0,
         description=(
             "Most a tenant may spend each UTC day on any one OpenAI model, in provider "
-            "USD at list price, counted across every agent turn and fleet worker. "
+            "USD at list price, counted across every agent turn. "
             "OpenAI sessions carry no native spend limit on this project, so this is "
-            "the guard. Checked as each turn or worker starts, never mid-turn; a model "
+            "the guard. Checked as each turn starts, never mid-turn; a model "
             "with no current tariff is refused. It resets at midnight UTC. 0 allows no "
             "OpenAI turns."
         ),
@@ -2060,53 +2060,6 @@ class TurnQueueSettings(BaseModel):
     )
 
 
-class FleetSettings(BaseModel):
-    """Orchestrated worker fleets (``DAIMON_FLEET__*``). On by default.
-
-    An orchestrator turn fans out to worker turns on any enabled backend. Their
-    concurrency is a pool of its own, counted from the durable worker rows, so a
-    fan-out never takes the chat turns' slots. Each agent still needs its own fleet
-    grant and stays inside the tenant's budgets.
-    """
-
-    enabled: bool = Field(
-        default=True,
-        description=(
-            "Allow orchestrator turns to start worker fleets. On by default. Emergency "
-            "stop only: false refuses new fleets and new workers before they are funded, "
-            "and holds finished-worker wakes until it is on again; the run's deadline "
-            "sweep ends what is left. Fleets also stop when the turn path or either "
-            "backend flag is off."
-        ),
-    )
-    max_workers_per_run: int = Field(
-        default=8,
-        ge=1,
-        description="Most workers one fleet run may start.",
-    )
-    max_concurrent_workers_per_tenant: int = Field(
-        default=3,
-        ge=1,
-        description=(
-            "Most worker turns one tenant may have starting or running at once, across "
-            "all its fleet runs and processes. Separate from the chat turn cap."
-        ),
-    )
-    max_concurrent_workers: int = Field(
-        default=6,
-        ge=1,
-        description="Most worker turns one process runs at once, across all tenants.",
-    )
-    max_attempts: int = Field(
-        default=2,
-        ge=1,
-        description=(
-            "Most times in total a worker is started when it keeps being lost before "
-            "its turn is sent. A worker whose turn was sent is reconciled, never resent."
-        ),
-    )
-
-
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -2204,7 +2157,6 @@ class Settings(BaseSettings):
     turn: TurnSettings = Field(default_factory=TurnSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
-    fleet: FleetSettings = Field(default_factory=FleetSettings)
     private_channel_messages: PrivateChannelMessagesSettings = Field(
         default_factory=PrivateChannelMessagesSettings
     )

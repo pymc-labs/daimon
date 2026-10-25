@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantLedger
-from daimon.core.stores import check_persisted_read, read_persisted_columns
+from daimon.core.stores import read_persisted_columns
 from daimon.core.stores.domain import LedgerEstimate, TenantLedgerRow
 from sqlalchemy import DateTime, Select, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import array as pg_array
@@ -174,11 +174,6 @@ def _prepaid_balance_query(tenant_id: uuid.UUID) -> Select[tuple[Decimal]]:
         .where(Tenant.id == tenant_id, Tenant.funding_mode == "prepaid")
         .group_by(Tenant.id)
     )
-
-
-def check_prepaid_balance_read(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
-    """What `get_prepaid_balance(persisted=True)` refuses, without reading the balance."""
-    check_persisted_read(session, _prepaid_balance_query(tenant_id), reject_new=True)
 
 
 async def get_prepaid_balance(

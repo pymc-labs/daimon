@@ -910,25 +910,6 @@ The Discord process reads a conversation-only turn recorded that way again
 records the measured revision through the same applier. A turn still unmetered
 after 24 hours is logged (`accounting.usage_reread_expired`) and keeps its hold.
 
-A finished fleet worker settles its hold to what it was debited. Gemini sends stay
-`accepted`: one counts as answered once the turn its own receipt names has a
-measured, applied revision on the worker's binding. A Managed Agents worker's
-debits are the ledger rows keyed `turn:<its session>:<event>` for that session's
-`usage_events`. It is settled once every call has its debit.
-
-A fleet's cost on its card and in the root's reply is never shown as final while
-a worker's usage is still pending:
-- Card: "Cost so far $0.01 · GPT-6 Astra's cost is still being counted".
-- Reply: "This cost $0.01 so far; ...".
-
-A worker is pending when the newest revision of one of its observations isn't on
-the ledger yet. A superseded revision doesn't count. A terminal card shown with a
-pending cost leaves the run's `end_notice` at `cost_owed`. The run-end poller then
-reads the cost by tenant and run, with no frozen root. It edits only that card, with
-no new message, once the cost settles. It backs off from 30 s to 15 min over six
-attempts. If the cost is still pending after that, the card keeps "so far" and one
-`fleet.cost_update_given_up` line is logged.
-
 Prepared turns for an explicitly configured alternate provider use its authorized
 native session and bound observation recorder. Usage frames can arrive without
 a display event; nullable measurements and pending accounting stay intact.
@@ -1110,31 +1091,7 @@ bound a turn's request count or other charges. A preview neither reserves spend
 nor establishes a financial cap.
 
 
-Host-worker accounting reads use `usage_delegation.read_delegated_usage` with
-host-authorized worker bindings and resolved tariffs. The read preserves each
-worker's native session, model, observation, revision and ledger identity. It
-returns disjoint token floors at provider list price without markup, existing
-signed customer ledger debits including markup, and pending revisions. The
-floor and debit amounts overlap and must not be added. The orchestrator rollup
-creates no second debit. Token floors omit unknown infrastructure and rates. A zero floor or settled latest observation
-alone is not proof of complete final usage or permission to release an admitted bound.
-
-`stores.turn_usage.read_fleet_accounting_revisions(session, tenant_id=..., run_id=...)`
-reads one exact durable run and its private worker bindings in the caller's coherent
-read-only transaction. It returns original usage revisions, outbox settlement facts,
-customer ledger identities and persisted worker exposure without repricing or writes.
-Fleet and per-binding accounting reads use `stores.read_persisted_columns` to
-project authoritative database columns, including after a Core update. It refuses
-effective persistent dirty/deleted state in tables the query reads, including
-subqueries, with `UnflushedReadState`. Pending new objects, reverted assignments
-and unrelated dirty tables remain unflushed. No caller state is overwritten.
-Reserved exposure already contains observed debits; the two must not be added.
-Unavailable or unaccepted bindings remain explicit gaps; a missing row never implies
-zero spend. Reused root-session history is excluded. These product facts do not prove
-provider final actuals or connect a fleet run to a separate QA cash receipt. That
-connection needs an actual allocation-owner record, not a role, model or time match.
-
-The same accounting reader accepts `outcome_ids` and the admitted `account_id`
+The turn accounting reader accepts `outcome_ids` and the admitted `account_id`
 for exact root attribution. The caller obtains the original outcome UUIDs from
 its counted input operation associations. The query joins the scoped immutable
 outcomes' `usage_refs` to original usage revisions, usage-event rows and ledger
@@ -1145,134 +1102,6 @@ stay pending; replay never substitutes a fresh observer. `attribution_complete`
 certifies only this reference join, not final usage, price, runtime, settlement
 or permission to release a reservation. Existing no-selector reads are unchanged.
 
-
-Fleet monetary interfaces are opt-in host seams; ordinary turns do not call
-them. `channel_budget.admit_fleet_worker` is the single transactional spawn and
-reservation entry point. Its producer retains ambiguous charges at their whole
-bound, releasing only a cancelled worker with proof it was never claimed or
-allocated and has no native accounting evidence. The graph covers live or
-unsettled runs plus the requested run for terminal readback; overrun latches
-belong to the current run, while other holds reduce available tenant funds.
-
-Native preparation requires fresh `require_fleet_worker_admission` readback,
-including the shared tariff check. Hosts composing fleet row writers acquire
-`stores.fleet.lock_budget` before any run or worker lock, then commit before
-native I/O. Financial locking uses the tenant's existing ledger foreign key;
-unrelated ordinary writes continue. Passive `produce_fleet_budget` refresh
-returns a mapping of worker IDs to decisions from one graph pass, retaining
-KEY SHARE on the tenant and account while allowing ordinary chat ledger and
-turn inserts for that same tenant. Its funds snapshot is informational; only
-fresh financial admission uses the tenant FOR UPDATE fence and authorizes
-native allocation.
-
-Hosts start one `watch_fleet_budget` loop per run, passing the run's mapping
-of worker IDs to cancellation events and a run-finished event. Register each
-worker event after its admission transaction commits. It fans out
-these decisions at four Hz by default, including producer time in the interval,
-and remains active across completed or cancelled cohorts until the run owner
-sets the run-finished event. Unavailable usage fails closed and cancels all
-registered workers. A busy tenant fleet lock is not by itself unavailable usage:
-on each busy poll the watcher logs the holding transaction
-(`fleet.budget_lock_busy`) and decides from `read_fleet_budget_snapshot`, the same
-producer read from a REPEATABLE READ, READ ONLY snapshot with no tenant or row
-locks and no writes, so contention never stops overrun cancellation. It still
-fails closed when one transaction holds the lock for `BUDGET_LOCK_BUSY_LIMIT_S`
-(10 s) or the lock stays busy for `BUDGET_LOCK_CONTENDED_LIMIT_S` (60 s), and
-after `BUDGET_READ_TIMEOUT_LIMIT` consecutive slow reads. The watcher has no separate worker
-deadline: `run_prepared_turn` owns it. Complete native execution, operator-funded
-admission, replacement inventory and exact final settlement remain unavailable
-here. These interfaces create no ledger charge or provider-native hard cap;
-other runs' undebited native floors are discovered by their own refresh.
-
-
-At the bound worker's before-input edge, hosts call the same
-`require_fleet_worker_admission` with the actual prepared `binding`. It requires
-an already funded running row and the exact current binding in that worker's
-private slot, including generation, configuration revision and native IDs.
-The call rechecks authorization, resolved worker tariff, priced floors and
-funds under the existing financial fence; it never reserves an unfunded worker.
-Callers commit refusals as well as successes before dispatch, and keep the
-existing lease, single-attempt input claim and canonical model/resource proof.
-Omitting `binding` keeps the unallocated starting-claim check.
-
-The worker store records the accepted initial input once under its stable
-operation identity. Financial guard recapture never increments that count.
-A funded running binding with one counted turn remains eligible for fresh
-checks and monitoring; the count is not proof of zero spend or final usage.
-Recovery attempts, extra turns and a used turn on an unallocated row stay
-refused in the single-input executor slice. The store's max-turn admission and
-input claim still precede dispatch; financial facts do not authorize replay.
-
-Optional worker request limits are part of the existing canonical intent and
-must narrow the parent's limits. Missing profile support refuses a requested
-limit before resource compilation; an output-token ceiling requires native
-enforcement. Host turn counts and observed model usage do not substitute for
-an enforced limit on internal model requests. Omitted limits preserve the
-existing serialized intent.
-
-An authenticated parent's optional `provider_limits_usd` fences each provider's
-sibling worker exposure within the run. A missing or zero line refuses that
-provider; a funded reservation cannot borrow unused capacity from another line.
-Provider lines must not add up to more than the grant's run budget: financial
-admission refuses every spawn of such a run, so the fleet grant preview refuses
-the grant first (`fleet provider limits exceed budget`).
-The same financial producer sums whole unknown reservations and measured
-overruns before admission, under its existing lock and exact decimal context.
-These worker sublimits do not reserve root inference or install credential-line
-guards. The caller must separately bind root admission and native request
-controls; a financial snapshot alone never certifies a provider spending cap.
-
-An optional `native_budget_usd` requests a native session spend control, in
-positive exact cents. It is a soft control, separate from the held worker
-budget. Its worker must have one host input and a deadline within 600 seconds;
-the existing input claim counts that input before dispatch and retains the
-count after an uncertain acknowledgement. Additional turn-input mutations are
-refused, while cancellation and archive remain available. A child cannot drop
-or increase a configured native budget. The driver must compile the control;
-missing profile support refuses it. Omission preserves ordinary execution.
-Native internal inference, token overshoot and remote cancellation delay are
-not bounded by that host input count. Requested hard token or model-request
-limits retain their separate unsupported-capability refusal.
-
-
-For an explicitly budgeted worker, the Anthropic session composer sends the
-canonical amount as positive integer USD cents in `budget.max_list_cost.amount`.
-The shared lifecycle codec carries that field through the SDK's extra body for
-both ordinary and repository-backed creation. The owned session's creation
-acknowledgement and fresh readback must retain the same budget before execution.
-The OpenAI preparation edge compiles the amount into the existing
-`spend_control.limit` integer cents and rejects conflicting deployment controls
-or missing, malformed or changed native echoes. Native rejection never retries
-without the control. Unconfigured calls omit these additional request fields;
-soft controls do not make provider-internal inference a hard bounded bill.
-
-
-An explicitly budgeted worker's scoped OpenAI creation acknowledgement is retained as a provisioning receipt
-before its native spend-control echo is validated. The receipt includes the
-native session reference and budget echo; it does not establish a runnable
-binding. A rejected acknowledgement or fresh readback refuses input and uses
-the existing owned, bounded session cleanup path. Cleanup failure retains the
-creation identity and financial hold for reconciliation; restart never allocates
-a replacement for that receipt. Unknown transport acceptance stays unknown.
-
-A configured provider map also requires a positive line for the financial
-parent's provider. This is an admission condition; the worker exposure producer
-does not thereby price or reserve root inference. Root admission, native budget,
-request count, wake lifetime and trusted grant installation remain separate
-caller obligations. Worker lines must fit alongside the reserved root room.
-
-Ordinary OpenAI sessions, including deployment-level spend limits without a
-worker `native_budget_usd`, preserve their prior request and readback behavior.
-Only an explicit worker budget enables strict native echo validation, against
-the exact integer cents sent in that session request. A deployment limit alone
-does not enable provisioning receipts or budget-rejection cleanup.
-
-The worker echo requirement is omitted from serialized controls when false.
-All prior control fields, including null caps and disabled delegation, remain
-verbatim in plan and creation digests. Existing ordinary bindings and retained
-creation receipts therefore recover under the same stable identity. A true
-worker echo requirement remains part of policy identity; no digest fallback or
-replacement key is used.
 
 Profile accounting modes select the existing settlement protocol. Request-span
 profiles retain their legacy arithmetic, projections and idempotency keys.
@@ -1299,7 +1128,7 @@ tokens) has the same 272,000-token threshold as Luna: above it OpenAI doubles
 input and cache rates and charges 1.5x output. A larger Astra aggregate is
 priced wholly at those long-context rates (it may mix tiers, so this is an
 upper bound); a larger Luna aggregate stays unpriced. An Astra session always
-runs under a native spend limit: a deployment row or worker that supplies none
+runs under a native spend limit: a deployment row that supplies none
 is refused at admission. Flash promotional rates expire at 2027-01-01.
 `gemini-4-argon` carries only its introductory rate (checked 2026-10-22: input
 $2, output $10, cached input $0.10 = 95% off, per 1M tokens), valid through
@@ -1315,47 +1144,6 @@ remains unknown. Missing cache-write counters also keep exact cost unknown.
 The tariff does not enforce an input cap or convert a token floor into a bill.
 Fast, Batch, Flex, regional and FedRAMP pricing are outside this supplier's
 request-tier contract; a registrar selecting them must refuse this supplier.
-
-The installed OpenAI and Gemini runtime callbacks pass these same price objects
-to the fleet pricing context and their native usage recorders. Default fleet
-startup discovers the callbacks without credentials or provider calls. Missing
-model rows do not reserve worker funds, and supplying a token tariff leaves
-unknown infrastructure and incomplete native counters pending.
-
-Root reservations use their original scoped operation and private thread slot.
-The monetary owner takes the tenant and actor financial fence before reading
-that operation. Financial proofs use persisted columns without autoflush;
-staged inserts, edits or deletes refuse before they can become admission evidence.
-Existing persisted readers retain their default pending-insert behavior.
-A replay proves its complete original cash reservation and adds
-no second hold. Missing, undersized, foreign or incomplete reservations refuse.
-Unknown allocation keeps its original hold; a cached native receipt cannot
-replace mutable financial evidence. Worker admission reads the same retained
-root exposure alongside original worker reservations and ledger debits.
-
-Explicitly budgeted private fleet roots select their finite native controls
-before session compilation and reserve cash before allocation. Unsupported
-native controls refuse. Distinct one-event input claims spend the root's
-retained allowance atomically with the existing send claim; a replay does not
-consume another input. The first active turn observer is retained with that
-input, including an explicit missing association when no observer exists.
-Completion wakes use the original root operation and reservation.
-
-Allocation preserves the caller's authorization guard. New claims recheck the
-current grant and original funding; revocation or exhausted cash blocks new
-inputs. Stop, archive and recovery interrupts remain available to drain work.
-A controlled root never silently falls back to an uncontrolled replacement.
-Unknown allocation keeps its original ACK and cash hold; this does not certify
-usage, final spend, or release of unknown holds. Ordinary unbudgeted turns keep
-their existing preparation path.
-
-Gemini fleet workers with explicit input/output token ceilings execute one
-bounded, tool-free model interaction. The input ceiling includes cached tokens;
-output includes thinking. Worst-case reservations price every input token at
-the maximum applicable input/cache-write rate and every output token at the
-output rate. Cache discounts can reduce actual cost but cannot expand the
-worker's token authority. Existing worker cash holds, funding checks and
-unknown-usage handling remain authoritative.
 
 ## Self-hosted request reconciliation
 

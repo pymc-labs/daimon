@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 138 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 130 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -17,7 +17,6 @@ tool is hidden by default and restored only for a matching caller.
 - **admin only** — carries the `admin` tag.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
-- **fleet orchestrator turns** — carries the `fleet` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
@@ -190,30 +189,6 @@ Environment tools: list / get / create / update / archive.
 | `list_environments` | operator tokens with tenant:read | List environments in the tenant pool. |
 | `update_environment` | admin only | Patch-update an environment. |
 
-## `fleet`
-
-Fleet tools (on by default) over the authorized host orchestration service.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `fleet_agents` | fleet orchestrator turns | List what this fleet run's workers can be: on-server agents, and models. |
-| `fleet_collect` | fleet orchestrator turns | Collect verified outputs only after contracts and required reviews pass. |
-| `fleet_cross_review` | fleet orchestrator turns | Spawn a reviewer of verified journal evidence through the same worker path. |
-| `fleet_kill` | fleet orchestrator turns | Request a scoped stop; acknowledgement is not proof the worker stopped. |
-| `fleet_resume` | fleet orchestrator turns | Reconcile and explicitly resume under original ceilings and current authority. |
-| `fleet_spawn` | fleet orchestrator turns | Start one worker in this turn's fleet run. |
-| `fleet_status` | fleet orchestrator turns | Read the run's durable worker status; do not start work. |
-
-## `fleet_config`
-
-Chat configuration over the fleet-grant and tenant-provider service owners.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `request_channel_pin_clear` | admin only | Show or clear THIS channel's model-provider pin, with admin confirmation. |
-| `request_fleet_config` | all callers | Configure this agent's fleet of worker agents, with owner/admin confirmation. |
-| `request_provider_allowlist` | admin only | Preview and confirm the server's allowed model providers. |
-
 ## `github_app`
 
 GitHub App install-link tool: post_github_app_install_link.
@@ -349,6 +324,15 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 | `clear_agent_default` | admin only, operator tokens with channels:write | Stop an agent answering in a channel by clearing its default routing. |
 | `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers, the environment it runs in, and which routing tier decided each. |
 | `set_agent_default` | admin only, operator tokens with channels:write | Make an agent answer in a channel or become the whole workspace's default. |
+
+## `provider_config`
+
+Provider and channel-pin configuration over the service owners.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `request_channel_pin_clear` | admin only | Show or clear THIS channel's model-provider pin, with admin confirmation. |
+| `request_provider_allowlist` | admin only | Preview and confirm the server's allowed model providers. |
 
 ## `publish`
 

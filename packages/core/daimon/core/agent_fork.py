@@ -259,8 +259,7 @@ async def copy_agent(
     (host-verified), which any person may copy; any other agent needs an admin.
     `hold` is the calling turn's hold, if any. `hide_setup` marks a copy whose
     inherited setup its non-admin owner may not read (`MA_METADATA_KEY_SETUP_HIDDEN`).
-    The copy gets every tool rule its source has, so it runs no looser. Its fleet
-    settings are not copied: it starts on the tenant's default fleet.
+    The copy gets every tool rule its source has, so it runs no looser.
     """
     async with sessionmaker() as session:
         try:

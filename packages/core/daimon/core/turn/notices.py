@@ -533,8 +533,7 @@ def provider_quota_copy(error: BaseException | None) -> tuple[str, str] | None:
     """Plain words for a provider quota refusal anywhere in `error`'s chain, else None.
 
     A model this deployment's provider plan gives no quota at all, or one that
-    is only rate-limited for now. Shared by a turn's notice and a fleet
-    worker's failure line, so both name the same cause and fix.
+    is only rate-limited for now.
     """
     for cause in _error_chain(error):
         if isinstance(cause, ProviderError) and cause.category == "rate_limited":

@@ -45,15 +45,7 @@ class TestDiscordRuntime:
             "owner_key",
             "ownership_lost",
             "gateway_lease",
-            "fleet_card_factory",
-            "fleet_run_cost",
-        }, f"expected 14 fields, got {fields}"
-        factory_field = next(
-            field
-            for field in dataclasses.fields(DiscordRuntime)
-            if field.name == "fleet_card_factory"
-        )
-        assert factory_field.default is None
+        }, f"expected 12 fields, got {fields}"
 
     def test_frozen(self) -> None:
         """DiscordRuntime should be immutable (frozen=True)."""

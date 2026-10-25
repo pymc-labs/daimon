@@ -207,9 +207,7 @@ def test_a_target_is_rebuilt_as_a_pre_1483_consent_named_it(
     before: tuple[str, ...],
     instructions: str | None,
 ) -> None:
-    from daimon.core.turn.runtime_manifest import (
-        _with_tools_dropped,  # pyright: ignore[reportPrivateUsage]
-    )
+    from daimon.core.turn.runtime_manifest import _with_tools_dropped
     from mux.contracts.ids import ModelRef
     from mux.contracts.resources import AgentSpec, ToolSpec
 
@@ -247,7 +245,6 @@ async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch)
     monkeypatch.setattr(runtime_manifest, "prepare_source", broken)
     request = SimpleNamespace(
         admission=SimpleNamespace(backend_revision=SimpleNamespace(profile="gemini.inline_reuse")),
-        worker=None,
     )
     with capture_logs() as logs, pytest.raises(AdmissionDenied) as refused:
         await runtime_manifest.read_preparation_counterpart(request)  # type: ignore[arg-type]

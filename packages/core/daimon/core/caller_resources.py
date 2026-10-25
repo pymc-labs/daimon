@@ -1,7 +1,6 @@
-"""Names of what a session carries for the person asking, never for a fleet worker.
+"""Names of what a session carries for the person asking.
 
-The session projector adds these to an agent's resources; the worker ceiling
-(runtime_manifest.worker_source_ceiling) excludes every one of them.
+The session projector adds these to an agent's resources.
 """
 
 from typing import Final

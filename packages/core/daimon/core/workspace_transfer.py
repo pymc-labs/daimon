@@ -54,10 +54,7 @@ from typing import Literal
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import (
-    BetaManagedAgentsSystemContentBlockParam,
-    FileMetadata,
-)
+from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam, FileMetadata
 from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
@@ -512,9 +509,6 @@ async def transfer_workspace(
     checkpoint_system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...] = (
         ({"type": "text", "text": prompt},) if privileged else ()
     )
-    # Preparation can run inside another turn's activated persistence (a fleet
-    # worker allocation). That turn owns a different session, so the checkpoint
-    # turn must not bind it: it executes the old session in a context of its own.
     persistence_token = current_persistence.set(None)
     try:
         state = await run_turn(

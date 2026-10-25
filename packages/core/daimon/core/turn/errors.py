@@ -77,7 +77,7 @@ class AdmissionDenied(DaimonError):
     and the `provider` involved, so the copy can name the fix.
 
     A `backend_unsupported` refusal also records its `site`, the code location
-    that raised it ("turn.runtime_manifest.select_worker_row:812"): about 150
+    that raised it ("turn.runtime_manifest.select_runtime_row:812"): about 150
     places raise it, and logs need to say which one. It is derived from our own
     module, function and line, so it never carries request data.
     """

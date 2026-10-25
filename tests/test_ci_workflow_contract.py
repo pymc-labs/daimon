@@ -525,7 +525,6 @@ def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
         "DAIMON_TURN__PATH=legacy",
         "DAIMON_TURN__CHANNEL_BACKENDS=false",
         "DAIMON_TURN__AGENT_BACKENDS=false",
-        "DAIMON_FLEET__ENABLED=false",
     )
     if environment == "production":
         assert all(pin in updates for pin in pins), updates
@@ -549,7 +548,6 @@ def test_production_worker_refresh_pins_the_old_turn_behaviour() -> None:
         "DAIMON_TURN__PATH=legacy",
         "DAIMON_TURN__CHANNEL_BACKENDS=false",
         "DAIMON_TURN__AGENT_BACKENDS=false",
-        "DAIMON_FLEET__ENABLED=false",
     ):
         assert line in block
     assert "tee -a /etc/daimon/daimon.env" in block
@@ -589,21 +587,18 @@ def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> Non
             "path": "mux",
             "channel_backends": "true",
             "agent_backends": "true",
-            "fleet_enabled": "true",
         },
         {
             "configuration": "legacy-off",
             "path": "legacy",
             "channel_backends": "false",
             "agent_backends": "false",
-            "fleet_enabled": "false",
         },
     ]
     for flag, matrix_key in (
         ("DAIMON_TURN__PATH", "path"),
         ("DAIMON_TURN__CHANNEL_BACKENDS", "channel_backends"),
         ("DAIMON_TURN__AGENT_BACKENDS", "agent_backends"),
-        ("DAIMON_FLEET__ENABLED", "fleet_enabled"),
         ("DAIMON_CI_CONFIGURATION", "configuration"),
     ):
         assert job["env"][flag] == f"${{{{ matrix.{matrix_key} }}}}"

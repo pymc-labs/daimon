@@ -38,7 +38,7 @@ from daimon.adapters.scheduler.main import (
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
     _sweep_wizard_sessions,  # pyright: ignore[reportPrivateUsage]  # test seam for the wizard sweep wrapper
     _usage_sweep_once,  # pyright: ignore[reportPrivateUsage]  # --once usage pass
-    _validate_mcp_settings,  # pyright: ignore[reportPrivateUsage]  # boot-validation seam
+    _validate_mcp_settings,
 )
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
@@ -3110,9 +3110,7 @@ async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.adapters.scheduler.main import (
-        _sweep_mcp_tokens,  # pyright: ignore[reportPrivateUsage]
-    )
+    from daimon.adapters.scheduler.main import _sweep_mcp_tokens
     from daimon.core.mcp_auth import mint_chat_mcp_token
     from daimon.core.stores.mcp_tokens import get_mcp_token
 
@@ -3137,25 +3135,6 @@ async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
     async with db_session_factory() as session:
         assert await get_mcp_token(session, jti=expired_jti) is None
         assert await get_mcp_token(session, jti=recent_jti) is not None
-
-
-@pytest.mark.parametrize("fails", [False, True])
-async def test_fleet_deadline_sweep_uses_store_owner_and_isolates_tick_failures(monkeypatch, fails):
-    from daimon.adapters.scheduler.main import _sweep_fleet_deadlines
-    from daimon.core.stores import fleet
-
-    calls = []
-
-    async def sweep(sessions):
-        calls.append(sessions)
-        if fails:
-            raise RuntimeError("temporary database outage")
-        return (2, 1)
-
-    monkeypatch.setattr(fleet, "sweep_expired", sweep)
-    sessions = object()
-    await _sweep_fleet_deadlines(sessions)
-    assert calls == [sessions]
 
 
 @pytest.mark.parametrize("at_destination", [False, True], ids=["origin", "destination"])

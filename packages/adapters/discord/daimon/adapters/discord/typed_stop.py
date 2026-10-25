@@ -3,15 +3,7 @@
 Deterministic, no model call: only a message that is nothing but a stop phrase
 (after the bot's own mention, case and trailing punctuation are removed), sent in
 the thread of a running turn by the person who asked or a server admin, sets that
-turn's cancel event. Anything longer is an ordinary message. A live fleet run is
-stopped only by a stop addressed to the bot (`DaimonBot._typed_stop`).
-
-"Addressed to the bot" is whatever the mention path treats as a mention: an
-@mention, the bot's name typed where plain-text mentions are on, or a Discord
-reply to one of the bot's posts (the reply's ping puts the bot in
-`message.mentions` even when the text is just "stop"). So replying "stop" to the
-fleet card or the bot's answer stops the fleet, for its starter or an admin. That
-is deliberate: the reply is addressed to the bot.
+turn's cancel event. Anything longer is an ordinary message.
 """
 
 from __future__ import annotations
@@ -29,12 +21,10 @@ STOP_PHRASES = frozenset(
         "stop this",
         "stop now",
         "stop the reply",
-        "stop the fleet",
         "cancel",
         "cancel it",
         "cancel that",
         "cancel this",
-        "cancel the fleet",
         "abort",
         "never mind",
         "nevermind",

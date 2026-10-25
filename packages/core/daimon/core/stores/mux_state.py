@@ -15,8 +15,8 @@ lock until the lease expired can use an expired lease.
 
 The module functions take an `AsyncSession` so the host can run one inside
 its own transaction: `mark_outbox_applied` belongs in the same transaction
-as the `usage_events` and `tenant_ledger` rows it accounts for. Nothing in
-Daimon calls this store yet.
+as the `usage_events` and `tenant_ledger` rows it accounts for. The host uses
+this store for ordinary native sessions.
 """
 
 from __future__ import annotations
@@ -27,21 +27,16 @@ from collections.abc import (
     Awaitable,
     Callable,
     Collection,
-    Iterable,
-    Iterator,
     Mapping,
     Sequence,
 )
-from contextlib import asynccontextmanager, contextmanager
-from contextvars import ContextVar
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from daimon.core._models import (
     AccountingOutbox,
     ChannelConfigRevision,
-    FleetRun,
     Journal,
     JournalSession,
     MuxOperation,
@@ -49,10 +44,9 @@ from daimon.core._models import (
     ProviderBindingSlot,
     ThreadLease,
     ThreadSession,
-    TurnCardIntent,
     UsageObservation,
 )
-from daimon.core.stores import agent_backends, check_persisted_read, read_persisted_columns
+from daimon.core.stores import agent_backends, read_persisted_columns
 from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
@@ -61,7 +55,7 @@ from mux.contracts.receipts import OperationStatus
 from mux.contracts.resources import ProjectionSnapshot
 from mux.contracts.resources import ProviderBinding as BindingContract
 from mux.contracts.usage import UsageObservation as ObservationContract
-from mux.errors import BindingConflict, OperationConflict, ScopeViolation
+from mux.errors import BindingConflict, ScopeViolation
 from mux.state import journal, operations, usage_ledger
 from mux.state import lease as leases
 from mux.state.journal import JournalAppend, JournalEntry
@@ -77,19 +71,7 @@ from mux.state.store import (
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
-from sqlalchemy import (
-    ColumnElement,
-    String,
-    and_,
-    cast,
-    func,
-    literal,
-    or_,
-    select,
-    text,
-    tuple_,
-    update,
-)
+from sqlalchemy import ColumnElement, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -129,10 +111,6 @@ def _where_slot(
 def _json(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
-
-type BeforeClaim = Callable[[AsyncSession, Scope, str, Lease | None], Awaitable[bool]]
-"""Runs in a send claim's transaction just before the claim. True claims (and a
-lost claim rolls back what it wrote); False commits what it wrote and refuses."""
 
 type Clock = Callable[[AsyncSession], Awaitable[datetime]]
 """Reads the time a lease decision is made at. Call it after taking the locks."""
@@ -345,108 +323,6 @@ async def get_binding(
     return None if is_released(binding) and not include_released else binding
 
 
-type SlotKey = tuple[uuid.UUID, str, str, str, str | None]
-
-
-def slot_key(slot: Slot) -> SlotKey:
-    """The columns `get_binding` matches a slot on, as one comparable key."""
-    values = _slot_values(slot)
-    return (
-        values["tenant_id"],
-        values["platform"],
-        values["channel_id"],
-        values["thread_id"],
-        values["account_id"],
-    )
-
-
-@dataclass(frozen=True)
-class SlotBindings:
-    """Binding rows of many slots from one batched read in the caller's transaction.
-
-    `slots` holds every slot key that was read: its (binding id, generation), or None
-    when the slot has no row. `bodies` holds every (binding id, generation) that was read.
-    """
-
-    slots: Mapping[SlotKey, tuple[str, int] | None]
-    bodies: Mapping[tuple[str, int], dict[str, Any] | None]
-
-
-async def read_slot_bindings(session: AsyncSession, slots: Iterable[Slot]) -> SlotBindings:
-    """`get_binding`'s two reads for every slot at once: two statements in total.
-
-    Reads only; refuses nothing. `cached_binding` answers `get_binding` from the result,
-    with the same refusals at the point the per-slot read would have refused.
-    """
-    keys = {slot_key(slot) for slot in slots}
-    if not keys:
-        return SlotBindings({}, {})
-    with session.no_autoflush:
-        found = {
-            (row.tenant_id, row.platform, row.channel_id, row.thread_id, row.account_id): (
-                row.binding_id,
-                row.generation,
-            )
-            for row in await session.execute(
-                select(
-                    ProviderBindingSlot.tenant_id,
-                    ProviderBindingSlot.platform,
-                    ProviderBindingSlot.channel_id,
-                    ProviderBindingSlot.thread_id,
-                    ProviderBindingSlot.account_id,
-                    ProviderBindingSlot.binding_id,
-                    ProviderBindingSlot.generation,
-                ).where(
-                    tuple_(
-                        ProviderBindingSlot.tenant_id,
-                        ProviderBindingSlot.platform,
-                        ProviderBindingSlot.channel_id,
-                        ProviderBindingSlot.thread_id,
-                    ).in_({key[:4] for key in keys})
-                )
-            )
-        }
-        located = {key: found.get(key) for key in keys}
-        pairs = {pair for pair in located.values() if pair is not None}
-        bodies: dict[tuple[str, int], dict[str, Any] | None] = dict.fromkeys(pairs)
-        if pairs:
-            for row in await session.execute(
-                select(
-                    ProviderBinding.binding_id, ProviderBinding.generation, ProviderBinding.binding
-                ).where(tuple_(ProviderBinding.binding_id, ProviderBinding.generation).in_(pairs))
-            ):
-                bodies[(row.binding_id, row.generation)] = row.binding
-    return SlotBindings(located, bodies)
-
-
-async def cached_binding(
-    session: AsyncSession,
-    cache: SlotBindings,
-    slot: Slot,
-    *,
-    read_persisted: bool = False,
-    include_released: bool = False,
-) -> BindingContract | None:
-    """`get_binding` answered from `read_slot_bindings`; a slot it did not read is read now."""
-    key = slot_key(slot)
-    if key not in cache.slots:
-        return await get_binding(
-            session, slot, read_persisted=read_persisted, include_released=include_released
-        )
-    if read_persisted:
-        check_persisted_read(session, select(ProviderBindingSlot.binding_id))
-    pair = cache.slots[key]
-    if pair is None:
-        return None
-    if read_persisted:
-        check_persisted_read(session, select(ProviderBinding.binding))
-    binding_id, generation = pair
-    body = cache.bodies[pair]
-    assert body is not None, f"binding {binding_id} lost generation {generation}"
-    binding = BindingContract.model_validate(body)
-    return None if is_released(binding) and not include_released else binding
-
-
 async def put_binding(
     session: AsyncSession, binding: BindingContract, *, expected_generation: int
 ) -> BindingContract:
@@ -582,17 +458,6 @@ async def release_lease(session: AsyncSession, lease: Lease) -> None:
     await _save_lease(session, leases.release(state, lease))
 
 
-async def active_lease(session: AsyncSession, slot: Slot) -> Lease | None:
-    """The slot's active lease as stored, expired or not; None if it has none.
-
-    A plain read, without a row lock, so a sweep never blocks lease renewals.
-    """
-    active = (
-        await session.execute(select(ThreadLease.active).where(*_where_slot(ThreadLease, slot)))
-    ).scalar_one_or_none()
-    return Lease.model_validate(active) if active is not None else None
-
-
 # Operations
 
 
@@ -676,348 +541,6 @@ async def get_operation(session: AsyncSession, scope: Scope, key: str) -> Operat
     return record
 
 
-async def active_leases(session: AsyncSession, slots: Collection[Slot]) -> dict[SlotKey, Lease]:
-    """Every given slot's active lease as stored (expired or not), in one read."""
-    if not slots:
-        return {}
-    rows = (
-        await session.execute(
-            select(
-                ThreadLease.tenant_id,
-                ThreadLease.platform,
-                ThreadLease.channel_id,
-                ThreadLease.thread_id,
-                ThreadLease.account_id,
-                ThreadLease.active,
-            ).where(or_(*(and_(*_where_slot(ThreadLease, slot)) for slot in slots)))
-        )
-    ).all()
-    return {
-        (row.tenant_id, row.platform, row.channel_id, row.thread_id, row.account_id): (
-            Lease.model_validate(row.active)
-        )
-        for row in rows
-        if row.active is not None
-    }
-
-
-async def bindings_for_slots(
-    session: AsyncSession, slots: Collection[Slot]
-) -> dict[SlotKey, BindingContract]:
-    """Every given slot's current binding, released slots included, in two reads."""
-    if not slots:
-        return {}
-    rows = (
-        await session.execute(
-            select(
-                ProviderBindingSlot.tenant_id,
-                ProviderBindingSlot.platform,
-                ProviderBindingSlot.channel_id,
-                ProviderBindingSlot.thread_id,
-                ProviderBindingSlot.account_id,
-                ProviderBindingSlot.binding_id,
-                ProviderBindingSlot.generation,
-            ).where(or_(*(and_(*_where_slot(ProviderBindingSlot, slot)) for slot in slots)))
-        )
-    ).all()
-    if not rows:
-        return {}
-    bodies = {
-        (binding_id, generation): body
-        for binding_id, generation, body in (
-            await session.execute(
-                select(
-                    ProviderBinding.binding_id, ProviderBinding.generation, ProviderBinding.binding
-                ).where(
-                    tuple_(ProviderBinding.binding_id, ProviderBinding.generation).in_(
-                        [(row.binding_id, row.generation) for row in rows]
-                    )
-                )
-            )
-        ).all()
-    }
-    return {
-        (row.tenant_id, row.platform, row.channel_id, row.thread_id, row.account_id): (
-            BindingContract.model_validate(bodies[(row.binding_id, row.generation)])
-        )
-        for row in rows
-        if (row.binding_id, row.generation) in bodies
-    }
-
-
-async def send_statuses_like(
-    session: AsyncSession, *, tenant_id: uuid.UUID, patterns: Collection[str]
-) -> list[tuple[str, str]]:
-    """(key, status) of the tenant's operations matching any LIKE pattern, in one read."""
-    if not patterns:
-        return []
-    rows = await session.execute(
-        select(MuxOperation.key, MuxOperation.status).where(
-            MuxOperation.tenant_id == tenant_id,
-            or_(*(MuxOperation.key.like(pattern) for pattern in patterns)),
-        )
-    )
-    return [(key, status) for key, status in rows.all()]
-
-
-async def send_receipts_like(
-    session: AsyncSession, *, tenant_id: uuid.UUID, patterns: Collection[str]
-) -> list[tuple[str, str, str | None]]:
-    """(key, status, receipt turn id) of the tenant's operations matching any LIKE
-    pattern, in one read. The turn id is the native turn the send started, if its
-    receipt names one."""
-    if not patterns:
-        return []
-    rows = await session.execute(
-        select(
-            MuxOperation.key,
-            MuxOperation.status,
-            MuxOperation.record["result"]["turn_id"].astext,
-        ).where(
-            MuxOperation.tenant_id == tenant_id,
-            or_(*(MuxOperation.key.like(pattern) for pattern in patterns)),
-        )
-    )
-    return [(key, status, turn_id) for key, status, turn_id in rows.all()]
-
-
-async def measured_applied_turns(
-    session: AsyncSession, *, tenant_id: uuid.UUID, binding_ids: Collection[str]
-) -> set[tuple[str, str]]:
-    """(binding, native turn) pairs with a measured usage revision on the ledger."""
-    if not binding_ids:
-        return set()
-    observation = AccountingOutbox.row["observation"]
-    rows = await session.execute(
-        select(AccountingOutbox.binding_id, observation["turn_id"].astext)
-        .where(
-            AccountingOutbox.tenant_id == tenant_id,
-            AccountingOutbox.binding_id.in_(list(binding_ids)),
-            AccountingOutbox.applied_at.is_not(None),
-            observation["completeness"].astext == "measured",
-            observation["turn_id"].astext.is_not(None),
-        )
-        .distinct()
-    )
-    return {(binding_id, turn_id) for binding_id, turn_id in rows.all()}
-
-
-async def bindings_with_pending_outbox(
-    session: AsyncSession, binding_ids: Collection[str]
-) -> set[str]:
-    """Which of these bindings have a usage revision not yet applied to the ledger."""
-    if not binding_ids:
-        return set()
-    return set(
-        await session.scalars(
-            select(AccountingOutbox.binding_id)
-            .where(
-                AccountingOutbox.binding_id.in_(list(binding_ids)),
-                AccountingOutbox.applied_at.is_(None),
-            )
-            .distinct()
-        )
-    )
-
-
-async def get_fleet_root_operation(
-    session: AsyncSession,
-    scope: Scope,
-    *,
-    intent_id: uuid.UUID | None = None,
-    origin_id: uuid.UUID | None = None,
-    run_id: uuid.UUID | None = None,
-    request_digest: str | None = None,
-    slot: Slot | None = None,
-    check_intent_owner: bool = False,
-    root_controls: Mapping[str, JsonValue] | None = None,
-    root_finance: Mapping[str, JsonValue] | None = None,
-    for_update: bool = False,
-) -> OperationRecord | None:
-    """Read or durably reserve the exact root association before run creation."""
-    if check_intent_owner and (
-        intent_id is None or (origin_id, run_id, request_digest) != (None, None, None)
-    ):
-        raise ValueError("intent-only root read required")
-    if request_digest is None and (root_controls is not None or root_finance is not None):
-        raise ValueError("control initialization requires a reservation")
-    if for_update and (
-        origin_id is None
-        or intent_id is not None
-        or run_id is not None
-        or request_digest is not None
-    ):
-        raise ValueError("locked read requires the original origin selector")
-    query = select(MuxOperation).where(
-        MuxOperation.tenant_id == _tenant(scope.tenant_id),
-        MuxOperation.key.startswith("fleet_root:"),
-        MuxOperation.record["result"]["intent_id"].astext == str(intent_id),
-    )
-    if request_digest is not None:
-        if root_finance is not None and root_controls is None:
-            raise ValueError("root finance requires immutable controls")
-        if intent_id is None or origin_id is None or slot is None or run_id is not None:
-            raise ValueError("complete root reservation required")
-        intent = await session.scalar(
-            select(TurnCardIntent.id)
-            .where(
-                TurnCardIntent.id == intent_id,
-                TurnCardIntent.tenant_id == _tenant(scope.tenant_id),
-                TurnCardIntent.status.in_(("prepared", "posted")),
-            )
-            .with_for_update()
-        )
-        if intent is None:
-            raise ScopeViolation(str(intent_id), "root intent is unavailable")
-        key = f"fleet_root:{origin_id}:root:0"
-        previous = (await read_persisted_columns(session, query)).one_or_none()
-        if previous is not None and (previous.account_id, previous.key) != (scope.account_id, key):
-            raise OperationConflict(key)
-        begun = await begin_operation(
-            session,
-            scope,
-            key=key,
-            request_digest=request_digest,
-            operation_id=key,
-            slot=slot,
-            now=await database_clock(session),
-        )
-        record = begun.record
-        if (
-            not begun.fresh
-            and root_controls is not None
-            and record.result.get("root_controls") != dict(root_controls)
-        ):
-            raise OperationConflict(key)
-        if begun.fresh:
-            result: dict[str, JsonValue] = {
-                "intent_id": str(intent_id),
-                "origin_id": str(origin_id),
-            }
-            if root_controls is not None:
-                result.update(
-                    root_controls=dict(root_controls), root_finance=dict(root_finance or {})
-                )
-            record = record.model_copy(update={"result": result})
-            await _save_operation(session, scope, record)
-        return record
-    if run_id is not None:
-        if intent_id is not None or origin_id is not None:
-            raise ValueError("exactly one root selector required")
-        run = await session.scalar(
-            select(FleetRun).where(
-                FleetRun.id == run_id,
-                FleetRun.tenant_id == _tenant(scope.tenant_id),
-                FleetRun.orchestrator_account_id == _tenant(scope.account_id),
-            )
-        )
-        if run is None:
-            return None
-        return await get_operation(session, scope, run.operation_key + ":root:0")
-    if (intent_id is None) == (origin_id is None):
-        raise ValueError("exactly one root selector required")
-    if origin_id is not None:
-        key = f"fleet_root:{origin_id}:root:0"
-        original = select(MuxOperation.record).where(*_op_where(scope, key))
-        body = (
-            await read_persisted_columns(
-                session, original.with_for_update() if for_update else original
-            )
-        ).scalar_one_or_none()
-        record = OperationRecord.model_validate(body) if body is not None else None
-        if record is not None:
-            operations.check_owner(record, scope)
-        return record
-    if not check_intent_owner:
-        query = query.where(MuxOperation.account_id == scope.account_id)
-    body = (await read_persisted_columns(session, query)).one_or_none()
-    if body is None:
-        return None
-    record = OperationRecord.model_validate(body.record)
-    operations.check_owner(record, scope)
-    return record
-
-
-async def update_fleet_root_finance(
-    session: AsyncSession,
-    scope: Scope,
-    *,
-    origin_id: uuid.UUID,
-    root_finance: Mapping[str, JsonValue],
-) -> OperationRecord:
-    """Update only mutable finance; caller holds fleet.lock_budget for the tenant first."""
-    record = await _owned(session, scope, f"fleet_root:{origin_id}:root:0")
-    if "root_controls" not in record.result:
-        raise OperationConflict(record.operation.key)
-    updated = record.model_copy(
-        update={"result": {**record.result, "root_finance": dict(root_finance)}}
-    )
-    await _save_operation(session, scope, updated)
-    return updated
-
-
-async def list_fleet_root_finances(
-    session: AsyncSession, *, tenant_id: uuid.UUID, locking: bool = True
-) -> tuple[OperationRecord, ...]:
-    """Retained financial roots, including unknown pre-allocation holds across actors.
-
-    Caller takes the tenant financial fence first. Column reads avoid stale ORM JSON.
-    Without `locking` this reads the caller's read-only snapshot and locks nothing.
-    """
-    statement = (
-        select(MuxOperation.record)
-        .where(
-            MuxOperation.tenant_id == tenant_id,
-            MuxOperation.key.startswith("fleet_root:", autoescape=True),
-            MuxOperation.record["result"]["root_finance"].is_not(None),
-        )
-        .order_by(MuxOperation.key)
-    )
-    if locking:
-        statement = statement.with_for_update()
-    bodies = await read_persisted_columns(session, statement, reject_new=True)
-    records = tuple(OperationRecord.model_validate(row.record) for row in bodies)
-    if any(record.tenant_id != str(tenant_id) for record in records):
-        raise ScopeViolation("root-budget", "financial root belongs to another tenant")
-    return records
-
-
-async def fleet_root_context_deadline(
-    session: AsyncSession,
-    *,
-    origin_id: uuid.UUID | None = None,
-    intent_id: uuid.UUID | None = None,
-    now: datetime,
-) -> datetime | None:
-    """Bound lifecycle retention by this exact processed root's live run."""
-    if (origin_id is None) == (intent_id is None):
-        raise ValueError("exactly one root selector required")
-    result = MuxOperation.record["result"]
-    run_id = func.coalesce(result["permissions"]["fleet"]["run_id"].astext, result["run_id"].astext)
-    original = func.coalesce(result["root_origin_id"].astext, result["origin_id"].astext)
-    selector = (
-        result["origin_id"].astext == str(origin_id)
-        if origin_id is not None
-        else result["intent_id"].astext == str(intent_id)
-    )
-    return (
-        await session.scalars(
-            select(FleetRun.deadline_at)
-            .join(MuxOperation, cast(FleetRun.id, String) == run_id)
-            .where(
-                MuxOperation.key.startswith("fleet_root:"),
-                MuxOperation.status == "processed",
-                FleetRun.tenant_id == MuxOperation.tenant_id,
-                cast(FleetRun.orchestrator_account_id, String) == MuxOperation.account_id,
-                FleetRun.operation_key == "fleet_root:" + original,
-                FleetRun.status.in_(("running", "collecting")),
-                FleetRun.deadline_at > now,
-                selector,
-            )
-        )
-    ).one_or_none()
-
-
 async def _owned(session: AsyncSession, scope: Scope, key: str) -> OperationRecord:
     record = await _operation(session, scope, key, lock=True)
     if record is None:
@@ -1058,11 +581,6 @@ async def advance_operation(
 ) -> OperationRecord:
     record = await _owned(session, scope, key)
     await _check_fence(session, record.slot, fence, clock)
-    if result is not None and "root_finance" in record.result:
-        result = {
-            **result,
-            **{name: record.result[name] for name in ("root_controls", "root_finance")},
-        }
     # Under the row lock `_owned` took, so the expected-state check is atomic.
     advanced = operations.advance(
         record,
@@ -1333,72 +851,6 @@ async def pending_outbox_for_profiles(
     ]
 
 
-async def unmeasured_outbox_for_profiles(
-    session: AsyncSession,
-    profiles: Collection[str],
-    *,
-    created_after: datetime,
-    created_before: datetime,
-    limit: int,
-) -> list[tuple[OutboxRow, uuid.UUID, BindingContract]]:
-    """Unapplied newest revisions without measured counts (unknown or partial).
-
-    Of bindings that only ever had one of `profiles` (as `pending_outbox_for_profiles`),
-    first written in [created_after, created_before), oldest first. Each comes with its
-    tenant and the binding's current generation.
-    """
-    generation = aliased(ProviderBinding)
-    other = (
-        select(generation.binding_id)
-        .where(
-            generation.binding_id == AccountingOutbox.binding_id,
-            generation.profile.not_in(profiles),
-        )
-        .correlate(AccountingOutbox)
-        .exists()
-    )
-    newer = aliased(AccountingOutbox)
-    superseded = (
-        select(newer.revision)
-        .where(
-            newer.binding_id == AccountingOutbox.binding_id,
-            newer.observation_id == AccountingOutbox.observation_id,
-            newer.revision > AccountingOutbox.revision,
-        )
-        .correlate(AccountingOutbox)
-        .exists()
-    )
-    latest = (
-        select(ProviderBinding.binding_id, func.max(ProviderBinding.generation).label("generation"))
-        .group_by(ProviderBinding.binding_id)
-        .subquery()
-    )
-    statement = (
-        select(AccountingOutbox.row, AccountingOutbox.tenant_id, ProviderBinding.binding)
-        .join(latest, latest.c.binding_id == AccountingOutbox.binding_id)
-        .join(
-            ProviderBinding,
-            (ProviderBinding.binding_id == latest.c.binding_id)
-            & (ProviderBinding.generation == latest.c.generation),
-        )
-        .where(
-            AccountingOutbox.applied_at.is_(None),
-            AccountingOutbox.created_at >= created_after,
-            AccountingOutbox.created_at < created_before,
-            AccountingOutbox.row["observation"]["completeness"].astext.in_(("unknown", "partial")),
-            ~other,
-            ~superseded,
-        )
-        .order_by(AccountingOutbox.created_at, AccountingOutbox.binding_id)
-        .limit(limit)
-    )
-    rows = (await session.execute(statement)).all()
-    return [
-        (OutboxRow.model_validate(row), tenant_id, BindingContract.model_validate(binding))
-        for row, tenant_id, binding in rows
-    ]
-
-
 async def mark_outbox_applied(session: AsyncSession, row: OutboxRow) -> bool:
     """True the first time. Run it in the transaction that writes the ledger rows."""
     where = (
@@ -1457,46 +909,13 @@ class PostgresStateStore:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         trust_caller_clock: bool = False,
-        before_claim: BeforeClaim | None = None,
     ) -> None:
         self._factory = session_factory
         self._trust_caller_clock = trust_caller_clock
-        self._before_claim = before_claim
-        self._active_check: ContextVar[BeforeClaim | None] = ContextVar(
-            f"before_claim_{id(self)}", default=None
-        )
 
     def owns_sessions(self, session_factory: async_sessionmaker[AsyncSession]) -> bool:
         """Whether journal claims use the host's actual transaction owner."""
         return self._factory is session_factory
-
-    @contextmanager
-    def checking_claims(self, check: BeforeClaim, *, compose: bool = False) -> Iterator[None]:
-        """Run `check` before this store's send claims, in this task only.
-
-        For the block's duration, claims made in the current task (and in tasks
-        it starts) run `check` instead of the constructor's. Other tasks sharing
-        this same store keep theirs, so concurrent workers never see each other's.
-        """
-        previous = self._active_check.get()
-        previous = previous if previous is not None else self._before_claim
-        if compose and previous is not None:
-
-            async def combined(
-                session: AsyncSession, scope: Scope, key: str, fence: Lease | None
-            ) -> bool:
-                return await previous(session, scope, key, fence) and await check(
-                    session, scope, key, fence
-                )
-
-            selected = combined
-        else:
-            selected = check
-        token = self._active_check.set(selected)
-        try:
-            yield
-        finally:
-            self._active_check.reset(token)
 
     def _clock(self, now: datetime) -> Clock:
         return fixed_clock(now) if self._trust_caller_clock else database_clock
@@ -1558,15 +977,10 @@ class PostgresStateStore:
     async def claim_send(
         self, scope: Scope, key: str, *, now: datetime, fence: Lease | None
     ) -> OperationRecord:
-        active = self._active_check.get()
-        check = active if active is not None else self._before_claim
         async with self._tx() as session:
-            if check is None or await check(session, scope, key, fence):
-                return await claim_send(
-                    session, scope, key, now=now, clock=self._clock(now), fence=fence
-                )
-        # Refused: what the check wrote (its evidence) is committed, nothing is claimed.
-        raise ScopeViolation(key, "the send was refused before its claim")
+            return await claim_send(
+                session, scope, key, now=now, clock=self._clock(now), fence=fence
+            )
 
     async def advance_operation(
         self,

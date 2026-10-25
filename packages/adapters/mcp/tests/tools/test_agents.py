@@ -1191,27 +1191,6 @@ async def test_a_member_copies_the_agent_answering_their_turn_and_owns_the_copy(
             session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_new1")
         )
     assert owner == auth.account_id, "the member who made the copy owns it"
-    # Owning the copy never raises its fleet: the default caps and models stay the ceiling.
-    from datetime import UTC, datetime
-
-    from daimon.core.authz import Subject
-    from daimon.core.channel_backend import AgentBackendRefused, AgentBackendService, BackendActor
-    from daimon.core.fleet_configuration import default_fleet_grant
-    from daimon.core.stores.domain import BackendAgent
-
-    service = AgentBackendService(db_session_factory, enabled=True)
-    default = default_fleet_grant(await service.tenant_policy(tenant_id))
-    assert default is not None
-    raised = default.model_copy(update={"max_workers": default.max_workers + 1})
-    mine = BackendAgent(
-        tenant_id=tenant_id,
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_new1"),
-        name="mycopy",
-        configuration_digest="c",
-    )
-    member = BackendActor(tenant_id, auth.account_id, Subject(platform_user_id="member-1"))
-    with pytest.raises(AgentBackendRefused, match="admin"):
-        await service.check_owner_fleet_ceiling(mine, raised, member, now=datetime.now(UTC))
 
 
 async def _member_copy(db_session_factory, monkeypatch, **auth_changes):

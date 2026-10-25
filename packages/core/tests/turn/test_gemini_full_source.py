@@ -926,7 +926,7 @@ async def test_unrelated_manifest_failure_preserves_ordinary_source_capture(
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-@pytest.mark.parametrize("surface", ["other_channel", "dm", "routine", "anthropic", "worker"])
+@pytest.mark.parametrize("surface", ["other_channel", "dm", "routine", "anthropic"])
 async def test_full_mode_row_does_not_affect_unrelated_source_capture(full, monkeypatch, surface):
     request, _, _, _, _, posts, _, archives, *_ = full
     from mux.profiles import backend_selection
@@ -948,8 +948,6 @@ async def test_full_mode_row_does_not_affect_unrelated_source_capture(full, monk
             admission,
             backend_revision=ConfigRevision.create(old.channel, 3, backend_selection("anthropic")),
         )
-    else:
-        request = replace(request, worker=object())
     request = replace(request, admission=admission)
     captured = await capture_preparation_source(request, fresh=True)
     assert not captured.representations

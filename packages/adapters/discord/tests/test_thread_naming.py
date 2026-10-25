@@ -526,7 +526,6 @@ async def test_selfhosted_opening_uses_text_title_without_touching_anthropic(
         _runtime(db_session_factory, router=MARouter(), thread_naming=ThreadNamingSettings()),
         anthropic=cast(AsyncAnthropic, NoAnthropic()),
     )
-    runtime = replace(runtime, turn_deps=replace(runtime.turn_deps, fleet_enabled=False))
     bot = _bot(runtime)
     message = _channel_message(guild_id=12345, content="<@999> keep this private\nsecond line")
     message.id = 8001

@@ -74,7 +74,7 @@ from mux.drivers.gemini import (
     compile_environment,
 )
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import ARGON_MODEL, WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL
 from mux.state.store import StateStore
 from pydantic import JsonValue, TypeAdapter
 
@@ -98,9 +98,7 @@ class GeminiDeployment:
     agent: AgentSpec
     environment: EnvironmentSpec
     native_agent: Agent | None = None
-    max_total_tokens: int | None = None
     max_output_tokens: int | None = None
-    max_input_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -132,13 +130,7 @@ def _runtime_model(runtime: TurnRuntime | None) -> str:
     if deployment is None:
         return FLASH_PRIMARY
     model = deployment.agent.model.id
-    capped = deployment.max_total_tokens is not None or deployment.max_input_tokens is not None
-    bounded = deployment.max_input_tokens is not None
-    if (capped and model in (FLASH_PRIMARY, WORKER_MODEL)) or (
-        model == ARGON_MODEL and (bounded or not capped)
-    ):
-        return model
-    return FLASH_PRIMARY
+    return model if model == ARGON_MODEL else FLASH_PRIMARY
 
 
 def compose_gemini_backend(request: TurnBackendRequest) -> TurnBackend:
@@ -187,41 +179,21 @@ def gemini_backend(
         or deployment.config_digest != config.digest
         or deployment.config_revision != config.local
         or deployment.account_scope_id != account_scope_id
-        or (
-            deployment.max_total_tokens is not None
-            and (
-                type(deployment.max_total_tokens) is not int
-                or deployment.max_total_tokens != WORKER_MAX_TOTAL_TOKENS
-            )
-        )
         or deployment.agent.model != ModelRef(provider="gemini", id=required_model)
     ):
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
-    if deployment.max_input_tokens is not None and (
-        type(deployment.max_input_tokens) is not int
-        or deployment.max_input_tokens <= 0
-        or deployment.max_output_tokens is None
-        or required_model not in (FLASH_PRIMARY, ARGON_MODEL)
-    ):
-        raise UnsupportedCapability(("worker_token_envelope",), PROFILE)
     if deployment.max_output_tokens is not None:
-        if (
-            deployment.native_agent is not None and deployment.max_input_tokens is None
-        ) or deployment.max_total_tokens is not None:
+        if deployment.native_agent is not None:
             raise UnsupportedCapability(("model_interaction_resources",), PROFILE)
         compile_agent(deployment.agent, max_output_tokens=deployment.max_output_tokens)
-        if deployment.max_input_tokens is None:
-            compile_environment(deployment.environment, model_only=True)
-        else:
-            compile_environment(deployment.environment)
+        compile_environment(deployment.environment, model_only=True)
     supplied = runtime.transport_factory(config, scope)
     if not isinstance(supplied, GeminiTransportRuntime):
         raise UnsupportedCapability(("gemini_private_transport",), PROFILE)
     transport = FlashTransport(
         supplied.transport,
         runtime.usage_store.accounting,
-        native_agent=deployment.native_agent if deployment.max_input_tokens is None else None,
-        bounded_worker=deployment.max_input_tokens is not None,
+        native_agent=deployment.native_agent,
         primary=ARGON_MODEL if required_model == ARGON_MODEL else FLASH_PRIMARY,
     )
     return GeminiManagedAgents(
@@ -233,9 +205,7 @@ def gemini_backend(
         resource_catalog_enabled=supplied.catalog_transport is not None,
         resource_catalog_transport=supplied.catalog_transport,
         native_agent=deployment.native_agent,
-        max_total_tokens=deployment.max_total_tokens,
         max_output_tokens=deployment.max_output_tokens,
-        max_input_tokens=deployment.max_input_tokens,
         mcp_secrets=supplied.mcp_secrets,
         gcs_secrets=supplied.gcs_secrets,
         skill_bundle_publisher=supplied.skill_bundle_publisher,

@@ -30,9 +30,7 @@ from daimon.core.continuity.continuation import (
 )
 from daimon.core.continuity.wakes import (
     WAKE_RETRY_DELAY,
-    WAKE_UNAVAILABLE_DELAY,
     WakeClaim,
-    WorkerFinishedRootChanged,
     busy_retry_at,
     claim_wake,
     list_dispatchable_wakes,
@@ -42,7 +40,6 @@ from daimon.core.continuity.wakes import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
-from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.errors import (
     AdmissionDenied,
@@ -65,7 +62,6 @@ __all__ = [
     "LatestMessageAt",
     "PostNotice",
     "RunFollowUp",
-    "WorkerFinishedDecision",
     "dispatch_pending_continuations",
 ]
 
@@ -78,9 +74,6 @@ PostNotice = Callable[[str], Awaitable[None]]
 DecisionContext = Callable[[TaskContinuationRow], Awaitable[tuple[datetime | None, bool]]]
 Notice = Callable[[TaskContinuationRow, str, str], Awaitable[None]]
 RunDecision = Callable[[TaskContinuationRow, ContinuationDecision], Awaitable[None]]
-WorkerFinishedDecision = Callable[
-    [TaskContinuationRow, datetime], Awaitable[ContinuationDecision | None]
-]
 
 
 async def _settle(
@@ -115,7 +108,6 @@ async def dispatch_pending_continuations(
     settle_before_notice: bool = True,
     run_decision: RunDecision | None = None,
     notify_missing_seed: bool = True,
-    worker_finished_decision: WorkerFinishedDecision | None = None,
 ) -> None:
     """Claim and settle every continuation or due wake this thread may run now, oldest first.
 
@@ -208,33 +200,23 @@ async def dispatch_pending_continuations(
             latest: datetime | None = None
             active_turn = False
             try:
-                if row.reason == "worker_finished":
-                    if worker_finished_decision is None:
-                        await release_wake(
-                            sessionmaker, claim, retry_at=now() + WAKE_UNAVAILABLE_DELAY
+                if decision_context is None:
+                    async with sessionmaker() as session:
+                        live = await get_live_thread_session(
+                            session,
+                            tenant_id=row.tenant_id,
+                            platform=platform,
+                            thread_id=row.thread_id,
+                            account_id=row.requester_account_id,
                         )
-                        continue
-                    decision = await worker_finished_decision(row, now())
-                    if decision is None:
-                        raise ContinuationContextUnavailable("worker_finished_not_ready")
+                    # Preserve core's clock read before the history callback.
+                    decision_now = now()
+                    assert latest_user_message_at is not None
+                    latest = await latest_user_message_at(row)
+                    active_turn = live is not None and live.active_turn_message_id is not None
                 else:
-                    if decision_context is None:
-                        async with sessionmaker() as session:
-                            live = await get_live_thread_session(
-                                session,
-                                tenant_id=row.tenant_id,
-                                platform=platform,
-                                thread_id=row.thread_id,
-                                account_id=row.requester_account_id,
-                            )
-                        # Preserve core's clock read before the history callback.
-                        decision_now = now()
-                        assert latest_user_message_at is not None
-                        latest = await latest_user_message_at(row)
-                        active_turn = live is not None and live.active_turn_message_id is not None
-                    else:
-                        latest, active_turn = await decision_context(row)
-                        decision_now = now()
+                    latest, active_turn = await decision_context(row)
+                    decision_now = now()
                 if decision is None:
                     assert decision_now is not None
                     decision = await decide_continuation(
@@ -273,17 +255,6 @@ async def dispatch_pending_continuations(
             if not await start_wake(sessionmaker, claim, now=now()):
                 continue  # Another dispatcher took the row over while this one decided.
             try:
-                if row.reason == "worker_finished":
-                    async with sessionmaker() as db:
-                        started_row = await get_continuation(
-                            db, idempotency_key=row.idempotency_key
-                        )
-                    if started_row is None or (started_row.lease_owner, started_row.attempts) != (
-                        claim.owner,
-                        claim.attempts,
-                    ):
-                        raise WorkerFinishedRootChanged("Completion claim changed before resume")
-                    row = started_row
                 if run_decision is not None:
                     await run_decision(row, decision)
                 else:

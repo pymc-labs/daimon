@@ -19,12 +19,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
-from daimon.core.neutral_resources import (
-    NeutralResourceHost,
-    ResolvedWorkerSpec,
-    WorkerSpecRefused,
-    require_gemini_worker_envelope,
-)
+from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -46,19 +41,16 @@ from daimon.core.turn.gemini_state import (
     SQLiteGeminiStorage,
 )
 from daimon.core.turn.io import register_turn_codec
-from daimon.core.turn.persistence import TurnPersistence, current_persistence
 from daimon.core.turn.prepare import ProviderPreparationRequest, register_turn_preparation
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
     SourceCapabilities,
     fixed_plan_origin_allowed,
-    materialize_counterpart,
     materialize_root_counterpart,
     read_counterpart,
     represented_source,
     select_runtime_manifest,
-    template_source,
     validate_counterpart_pins,
     validate_counterpart_request,
 )
@@ -66,7 +58,6 @@ from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini import (
-    FLASH_PRIMARY,
     FlashAccounting,
     GCSBundleDeployment,
     GeminiCatalogAdapter,
@@ -78,26 +69,10 @@ from mux.drivers.gemini import (
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import selectable_models
-from mux.profiles.gemini import (
-    ARGON_MODEL,
-    INLINE_REUSE,
-    WORKER_MAX_RUNTIME_S,
-    WORKER_MAX_TOTAL_TOKENS,
-    WORKER_MODEL,
-)
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    JsonValue,
-    field_validator,
-    model_validator,
-)
+from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
-
-# Models a bounded (token-envelope) fleet worker may run.
-BOUNDED_WORKER_MODELS = (FLASH_PRIMARY, ARGON_MODEL)
 
 
 def _private_storage_credential(
@@ -149,9 +124,6 @@ class GeminiPlan(BaseModel):
     source_agent_version: Annotated[int, Field(gt=0, strict=True)] | None = None
     counterpart_catalog_id: Nonblank | None = None
     counterpart_catalog_revision: Annotated[int, Field(gt=0, strict=True)] | None = None
-    worker_materialization: bool = Field(
-        default=False, strict=True, exclude_if=lambda value: not value
-    )
     # A tenant-wide agent template: each admitted agent version's counterpart is
     # published on its first turn (`materialize_root_counterpart`).
     root_materialization: bool = Field(
@@ -187,17 +159,13 @@ class GeminiPlan(BaseModel):
             raise ValueError("skill deployment receipt fields must be exact")
         return cast(object, value)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _any_source(cls, data: object) -> object:
-        # "*" (any granted agent of the tenant, at its live version): a worker template.
-        return template_source(data)
-
     @model_validator(mode="after")
     def _configuration_authorization(self) -> GeminiPlan:
         if self.config_digest is None and self.configuration_grant is None:
             raise ValueError("a deployment requires exact or bounded configuration authorization")
-        validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
+        validate_counterpart_pins(
+            self,
+        )
         if self.root_materialization and self.source_capabilities is not None:
             raise ValueError("an agent template carries no operator capability inputs")
         if self.template_capabilities is not None and (
@@ -206,8 +174,7 @@ class GeminiPlan(BaseModel):
             raise ValueError("template capabilities belong to a tool-free agent template")
         if self.source_capabilities is not None:
             if (
-                self.worker_materialization
-                or self.max_output_tokens is not None
+                (self.max_output_tokens is not None)
                 or self.mcp_credential_file is None
                 or not self.mcp_credential_file.is_absolute()
                 or self.source_capabilities.model.provider != INLINE_REUSE.provider
@@ -247,107 +214,6 @@ class GeminiPlan(BaseModel):
             raise ValueError("PostgreSQL state cannot silently replace supplied SQLite paths")
         return self
 
-    def worker_deployment(
-        self, worker: ResolvedWorkerSpec, revision: ConfigRevision, *, markup: Decimal = Decimal(1)
-    ) -> GeminiDeployment:
-        """Compile the resolved worker without adding resources or implicit execution."""
-        if self.source_capabilities is not None:
-            raise AdmissionDenied(reason="backend_unsupported")
-        spec, drops = worker.spec, worker.declared_drops
-        worker.limits.require_profile(INLINE_REUSE)
-        bounded = worker.limits.max_input_tokens is not None
-        if bounded and (revision.model not in BOUNDED_WORKER_MODELS or "sandbox" not in drops):
-            raise AdmissionDenied(reason="backend_unsupported")
-        # Argon runs only bounded; the unbounded path is Flash's 4096-token cap.
-        if revision.model == ARGON_MODEL and not bounded:
-            raise AdmissionDenied(reason="backend_unsupported")
-        if worker.limits.max_input_tokens is not None:
-            # The envelope's worst case at the model's tariff fits budget and hold.
-            try:
-                require_gemini_worker_envelope(
-                    revision.model or "",
-                    worker.limits.max_input_tokens,
-                    worker.limits.max_output_tokens,
-                    worker.limits.budget_usd,
-                    markup=markup,
-                    hold_usd=self.hold_usd,
-                )
-            except WorkerSpecRefused:
-                raise AdmissionDenied(reason="backend_unsupported") from None
-        scope = worker.permissions.fleet.scope
-        if (
-            "memory" not in drops
-            or self.max_output_tokens is not None
-            or worker.resources
-            or (self.worker_materialization and worker.permissions.seal_ids)
-            or revision.profile != self.profile
-            or revision.model not in (FLASH_PRIMARY, WORKER_MODEL, ARGON_MODEL)
-            or spec.model != ModelRef(provider="gemini", id=revision.model or "")
-            or worker.backend.profile != self.profile
-            or worker.backend.model != revision.model
-            or worker.backend.backend != revision.backend
-            or worker.backend.thread_mode != revision.thread_mode
-            or worker.backend.requires != revision.requires
-            or scope.is_platform
-            or scope.is_legacy_host_authorized
-            or (scope.tenant_id, scope.account_id) != (self.tenant_id, self.account_id)
-            or worker.permissions.fleet.root.channel != revision.channel
-            or (
-                not self.worker_materialization
-                and (
-                    spec.name != self.agent_name
-                    or spec.system != self.system
-                    or tuple(spec.tools or ()) != self.tools
-                    or tuple(pin.id for pin in spec.skills or ()) != self.skill_ids
-                )
-            )
-            or (
-                self.worker_materialization
-                and (
-                    any(tool not in self.tools for tool in spec.tools or ())
-                    or any(pin.id not in self.skill_ids for pin in spec.skills or ())
-                )
-            )
-            or ("skills" in drops and spec.skills)
-            or ("mcp" in drops and spec.mcp_servers)
-            or ("tools" in drops and (spec.tools or spec.mcp_servers))
-            or any(tool.kind == "custom" for tool in spec.tools or ())
-        ):
-            raise AdmissionDenied(reason="backend_unsupported")
-        if "sandbox" in drops:
-            if (
-                worker.environment is not None
-                or any(
-                    tool.kind != "builtin" or tool.name in INLINE_REUSE.execution_tools
-                    for tool in spec.tools or ()
-                )
-                or spec.mcp_servers
-            ):
-                raise AdmissionDenied(reason="backend_unsupported")
-            environment = self.environment
-        else:
-            if worker.environment is None or worker.environment != self.environment:
-                raise AdmissionDenied(reason="backend_unsupported")
-            environment = worker.environment
-        if environment.sources:
-            raise AdmissionDenied(reason="backend_unsupported")
-        try:
-            compile_agent(spec, max_output_tokens=worker.limits.max_output_tokens)
-            if compile_environment(environment) != {"type": "remote", "sources": []}:
-                raise AdmissionDenied(reason="backend_unsupported")
-        except UnsupportedCapability as error:
-            raise AdmissionDenied(reason="backend_unsupported") from error
-        return GeminiDeployment(
-            revision.digest,
-            revision.local,
-            self.project,
-            spec,
-            environment,
-            max_total_tokens=None if bounded else WORKER_MAX_TOTAL_TOKENS,
-            max_input_tokens=worker.limits.max_input_tokens,
-            max_output_tokens=worker.limits.max_output_tokens,
-        )
-
     def serves_template_mcp(self, target: AgentSpec) -> bool:
         """Whether this agent template gives `target` its Daimon MCP.
 
@@ -362,12 +228,10 @@ class GeminiPlan(BaseModel):
         )
 
     def deployment(self, request: ProviderPreparationRequest) -> GeminiDeployment:
-        """Compile the prepared source target without borrowing worker authority."""
+        """Compile the prepared source target for this agent."""
         revision = request.admission.backend_revision
         if revision is None:
             raise AdmissionDenied(reason="backend_unsupported")
-        if request.worker is not None:
-            return self.worker_deployment(request.worker, revision, markup=request.deps.markup)
         target, source = request.target_spec, request.source
         from daimon.core.turn.runtime_manifest import source_instructions_preserved
 
@@ -381,11 +245,12 @@ class GeminiPlan(BaseModel):
             represented_source(source, target) if source is not None and (full or mcp) else None
         )
         if (
-            request.admission.backend_revision_origin != "agent"
-            or target is None
-            or source is None
-            or source.effective_spec is None
-            or self.worker_materialization
+            (
+                request.admission.backend_revision_origin != "agent"
+                or target is None
+                or source is None
+                or source.effective_spec is None
+            )
             or self.max_output_tokens is not None
             or revision.profile != self.profile
             or revision.model not in selectable_models(INLINE_REUSE.provider)
@@ -423,7 +288,6 @@ class GeminiPlan(BaseModel):
             or (not full and self.skill_ids)
             or (full and tuple(target.tools or ()) != self.tools)
             or (full and tuple(pin.id for pin in target.skills or ()) != self.skill_ids)
-            or (full and request.worker is not None)
         ):
             raise AdmissionDenied(reason="backend_unsupported")
         try:
@@ -446,7 +310,7 @@ class GeminiPlan(BaseModel):
         """Read native named-agent intent; no full source or execution proof is implied."""
 
         expected = None
-        if request.worker is not None or request.target_spec is not None:
+        if request.target_spec is not None:
             expected = self.deployment(request)
 
         async def verify_native(checked: AgentRevision) -> None:
@@ -480,7 +344,6 @@ class GeminiPlan(BaseModel):
             source=source,
             resources=resources,
             verify_native=verify_native,
-            worker_materialization=self.worker_materialization,
         )
 
 
@@ -498,7 +361,8 @@ def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
         raise AdmissionDenied(reason="backend_unsupported")
     if origin == "agent":
         validate_counterpart_request(
-            plan, request, worker_materialization=plan.worker_materialization
+            plan,
+            request,
         )
     return plan
 
@@ -507,22 +371,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     revision, scope = request.admission.backend_revision, request.scope
     if (
         revision is None
-        or revision.model
-        not in (
-            (FLASH_PRIMARY, WORKER_MODEL, ARGON_MODEL)
-            if request.worker is not None
-            else selectable_models(INLINE_REUSE.provider)
-        )
+        or revision.model not in selectable_models(INLINE_REUSE.provider)
         # Argon has no checked-in price after its intro tariff; never run it unpriced.
         or (
             revision.model == ARGON_MODEL
             and (INLINE_REUSE.provider, ARGON_MODEL) not in pricing.provider_prices(PROFILE)
         )
         or request.deps.state_store is None
-        or (
-            request.worker is not None
-            and request.deadline > request.now() + timedelta(seconds=WORKER_MAX_RUNTIME_S)
-        )
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     assert revision.model is not None
@@ -532,11 +387,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     if plan.max_output_tokens is not None and (
-        request.worker is not None
-        or request.admission.backend_revision_origin == "agent"
+        (request.admission.backend_revision_origin == "agent")
         or plan.agent_id is not None
         or plan.skill_ids
-        or plan.worker_materialization
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     agent = AgentSpec(
@@ -547,7 +400,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     )
     # Validate native policy before reading the selected credential or opening
     # persistence. Unsupported MCP, confirmations and workspace sources refuse.
-    if request.worker is not None or request.target_spec is not None:
+    if request.target_spec is not None:
         deployment = plan.deployment(request)
     else:
         try:
@@ -687,12 +540,11 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         counterpart_verified = False
         template_mcp.catalogue = None
         validate_counterpart_request(
-            plan, preparation, worker_materialization=plan.worker_materialization
+            plan,
+            preparation,
         )
-        if preparation.worker != request.worker:
-            raise AdmissionDenied(reason="backend_unsupported")
         source = preparation.source
-        if preparation.worker is not None or preparation.target_spec is not None:
+        if preparation.target_spec is not None:
             if source is None or plan.deployment(preparation) != deployment:
                 raise AdmissionDenied(reason="backend_unsupported")
         elif source is None:
@@ -722,11 +574,6 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         return checked
 
     def resources(preparation: ProviderPreparationRequest) -> NeutralResourceHost:
-        if plan.worker_materialization:
-            persistence = current_persistence.get()
-            if persistence is None:
-                raise AdmissionDenied(reason="backend_unsupported")
-            persistence.check_session(preparation.scope, None)
         backend = gemini_backend(revision, preparation.scope, runtime, plan.project)
         return NeutralResourceHost(
             backend,
@@ -742,15 +589,6 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         return await materialize_root_counterpart(
             plan, preparation, resources=resources(preparation)
         )
-
-    async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
-        async def host(_: TurnPersistence, worker: ResolvedWorkerSpec) -> NeutralResourceHost:
-            markup = preparation.deps.markup
-            if plan.worker_deployment(worker, revision, markup=markup) != deployment:
-                raise AdmissionDenied(reason="backend_unsupported")
-            return resources(preparation)
-
-        return await materialize_counterpart(plan, preparation, request, resources=host)
 
     records: Storage
     accounting: FlashAccounting
@@ -784,7 +622,6 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     runtime = TurnRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,
-        materialize_worker=materialize if plan.worker_materialization else None,
         materialize_root=materialize_root if plan.root_materialization else None,
         end_of_turn=template_mcp.finalize if mcp_template else None,
         journal=GeminiJournal(

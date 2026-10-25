@@ -1,10 +1,4 @@
-"""A session runs the system prompt of the executing agent's own platform variant.
-
-A fleet worker swaps `admission.agent` for the worker agent, whose system carries
-the worker's extra instructions on top of the root's. The variant is cut from that
-executing agent's system when the session is created, never carried over from the
-root's, so the extra instructions survive and no other platform is named.
-"""
+"""Ordinary agent operation and configuration paths, using offline providers."""
 
 from __future__ import annotations
 

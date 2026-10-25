@@ -2,7 +2,7 @@
 
 Usage recorded while a profile's infrastructure cost was unknown stayed pending in the
 accounting outbox (SMOKE fc0fa16a: 156 of 156 rows on staging since 10-15), so it was
-never debited and the fleet runs it belonged to never settled. Once a profile is known
+never debited. Once a profile is known
 to have no infrastructure (infrastructure_cost.NO_INFRASTRUCTURE_PROFILES) this drain
 applies those rows through the same apply_usage_outbox the live path uses.
 

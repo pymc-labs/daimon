@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 import pytest
-from daimon.adapters.mcp.tools.fleet_config import _request_channel_pin_clear_impl
+from daimon.adapters.mcp.tools.provider_config import _request_channel_pin_clear_impl
 from daimon.core.channel_backend import channel_ref, current_backend, set_channel_backend
 from daimon.core.stores import mux_state
 from fastmcp.exceptions import ToolError
@@ -18,7 +18,6 @@ def gates(payload, frozen):
             {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
             for name in (
                 "request_agent_backend_switch",
-                "request_fleet_config",
                 "request_provider_allowlist",
                 "request_channel_pin_clear",
             )
@@ -159,9 +158,7 @@ async def test_a_session_recorded_before_the_pin_tool_cannot_gate_it(active_chat
         memory_store_id=None,
         vault_id=None,
         public_url=str(runtime.settings.mcp.public_url),
-        confirmed_tools=frozenset(
-            {"request_agent_backend_switch", "request_fleet_config", "request_provider_allowlist"}
-        ),
+        confirmed_tools=frozenset({"request_agent_backend_switch", "request_provider_allowlist"}),
     )
     async with runtime.session_factory.begin() as session:
         await record_snapshot(

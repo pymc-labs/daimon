@@ -46,7 +46,7 @@ from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import lock_preparation
-from daimon.core.stores.domain import TaskContinuationRow, TransferKind
+from daimon.core.stores.domain import TransferKind
 from daimon.core.stores.thread_session_lineage import link_replacement
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
@@ -630,10 +630,6 @@ async def _replace_dead_session_locked(
     recovery finds the first one's replacement live and adopts it, and a bind
     sees either the old row or the replacement, never neither.
     """
-    if prepared._preparation is not None and prepared._preparation.native_budget_usd is not None:  # pyright: ignore[reportPrivateUsage]
-        from daimon.core.neutral_resources import WorkerSpecRefused
-
-        raise WorkerSpecRefused("native_budget_usd", "unsupported")
     # A recovery can run long after admission: decide the turn again on the
     # current policy before its successor is created or adopted, and stamp any
     # seal added since (`reauthorize`).
@@ -915,7 +911,6 @@ async def run_prepared_turn(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
-    worker_finished: TaskContinuationRow | None = None,
 ) -> RunOutcome:
     observation = (
         prepared.admission.observation
@@ -972,7 +967,6 @@ async def run_prepared_turn(
                 active_turn_message_id=active_turn_message_id,
                 before_send=before_send,
                 turn_card_intent_id=turn_card_intent_id,
-                worker_finished=worker_finished,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -1032,7 +1026,6 @@ async def run_prepared_turn_impl(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
-    worker_finished: TaskContinuationRow | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -1090,7 +1083,6 @@ async def run_prepared_turn_impl(
     breach can never loop into a second wall-clock-priced attempt.
     """
     if origin in _CHAT_RENDERED_ORIGINS:
-        # A worker's lifecycle hands its result back to a model, not to a person.
         # `confirm_write` is deliberately not wrapped: an approval card shows exactly what
         # will be sent or run, so a scrubbed card over the original call would misstate it.
         lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)
@@ -1223,9 +1215,6 @@ async def run_prepared_turn_impl(
             operation_key=operation_key,
             session_ref=session_ref,
             scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
-            fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
-            # Overlapping turns on one thread queue behind the running one, for
-            # at most what this turn has left of its ceiling.
             lease_wait=LeaseWait(
                 timeout_s=remaining_s(effective_deadline, now=now()), cancel=attempt_cancel
             ),
@@ -1234,23 +1223,8 @@ async def run_prepared_turn_impl(
         with persistence.activate():
             yield
 
-    root_intent = turn_card_intent_id if deps.fleet_enabled and origin != "worker" else None
-
     async def checked_send() -> None:
         await decide_before_send(deps, prepared.admission)()
-        if worker_finished is not None:
-            from daimon.core.neutral_resources import WorkerSpecRefused
-            from daimon.core.turn.runtime_manifest import resume_prepared_root
-
-            if root_intent is None:
-                raise WorkerSpecRefused("origin", "unbound")
-            await resume_prepared_root(
-                deps, prepared, worker_finished, intent_id=root_intent, now=now
-            )
-        elif root_intent is not None:
-            from daimon.core.turn.runtime_manifest import freeze_prepared_root
-
-            await freeze_prepared_root(deps, prepared, intent_id=root_intent, now=now)
         if before_send is not None:
             await before_send()
 
@@ -1303,8 +1277,6 @@ async def run_prepared_turn_impl(
                     system_blocks=prepared.continuity.system_blocks,
                     before_send=checked_send
                     if before_send is not None
-                    or root_intent is not None
-                    or worker_finished is not None
                     else decide_before_send(deps, prepared.admission),
                     send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
                 )
@@ -1317,7 +1289,6 @@ async def run_prepared_turn_impl(
         if not (
             (superseded is not None or _is_dead_session(state))
             and before_send is None
-            and worker_finished is None
             and mapping_id is not None
             and (
                 prepared.admission.backend_revision is None

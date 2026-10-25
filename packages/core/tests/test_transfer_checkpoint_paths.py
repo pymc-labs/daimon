@@ -10,8 +10,8 @@ turn on the old session. These tests start from that preparation entry point
 Two contexts matter on mux, where the driver reads `current_persistence`:
 
 * chat preparation, which runs before any turn persistence is active;
-* preparation that runs inside another turn's activated persistence (a fleet
-  worker allocation, a headless run started from a turn). The checkpoint turn
+* preparation that runs inside another turn's activated persistence (a
+  headless run started from a turn). The checkpoint turn
   must not inherit that turn's persistence, which owns a different session.
 """
 
@@ -180,7 +180,7 @@ async def test_a_checkpoint_started_inside_another_turn_does_not_inherit_its_per
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Preparation can run while an unrelated turn's persistence is active (a
-    fleet worker allocation, a headless run started from a turn). On mux that
+    headless run started from a turn). On mux that
     persistence owns a different session, so a checkpoint turn that inherited
     it would be refused by `check_session`. The checkpoint turn runs in a
     context of its own and the outer turn's persistence is left active."""
@@ -253,16 +253,16 @@ async def test_a_headless_run_started_inside_another_turn_does_not_inherit_its_p
     turn_io_used.assert_ran(turn_path)
 
 
-async def test_a_checkpoint_inside_the_same_slots_worker_allocation_neither_waits_nor_is_fenced_by_it(
+async def test_a_checkpoint_inside_the_same_slots_allocation_neither_waits_nor_is_fenced_by_it(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fleet worker prepares inside `allocation.run(...)`, a binding-less
-    persistence for the worker's own slot that holds that slot's lease
-    (`headless_runner.py` allocation, `TurnPersistence.run`). If a live session
+    """A nested preparation runs inside `allocation.run(...)`, a binding-less
+    persistence for the same slot that holds that slot's lease
+    (`TurnPersistence.run`). If a live session
     for that same thread exists without a published binding (a crash between
     the mapping write and the binding), the replacement checkpoints it inside
     that allocation. The allocation can never own the session
@@ -300,7 +300,7 @@ async def test_a_checkpoint_inside_the_same_slots_worker_allocation_neither_wait
     assert store is not None
     assert await store.get_binding(scratch.slot) is None, "the old session has no published binding"
     allocation = TurnPersistence(
-        store, None, scratch.scope, slot=scratch.slot, operation_key="worker-allocation"
+        store, None, scratch.scope, slot=scratch.slot, operation_key="nested-allocation"
     )
     moved = _agent(model_id="claude-opus-5")
     _register(transport.state, moved)

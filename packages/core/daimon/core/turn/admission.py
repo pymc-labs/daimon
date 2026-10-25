@@ -33,9 +33,7 @@ import structlog
 from anthropic import APIError, APIStatusError
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
-from daimon.core.access_policy import (
-    TenantAccessPolicy,
-)
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -55,9 +53,7 @@ from daimon.core.channel_backend import (
     check_backend,
     current_backend_and_sharing,
 )
-from daimon.core.channel_backend import (
-    log_backend_unsupported as _log_backend_unsupported,
-)
+from daimon.core.channel_backend import log_backend_unsupported as _log_backend_unsupported
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
@@ -137,7 +133,7 @@ __all__ = [
 
 
 if TYPE_CHECKING:
-    from daimon.core.turn.prepare import ProviderPreparationRequest
+    pass
 
 _log = structlog.get_logger(__name__)
 
@@ -1068,10 +1064,7 @@ async def _admit_gates(
             return
         from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
         from daimon.core.turn.ceiling import turn_deadline
-        from daimon.core.turn.prepare import (
-            ProviderPreparationRequest,
-            admitted_session_scope,
-        )
+        from daimon.core.turn.prepare import ProviderPreparationRequest, admitted_session_scope
         from daimon.core.turn.runtime_manifest import read_preparation_counterpart
         from daimon.core.turn.runtimes import scope_channel_runtimes
 
@@ -1631,10 +1624,6 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         policy, grant, bool(seal_ids)
     )
     asks_before_publishing = _asks_before_publishing(policy, grant)
-    # The agent's rules on daimon's own tools, as they are now (one query, and
-    # none unless tool safety and agent rules are both on). A rule added or
-    # cleared since admission reaches the decider of this turn and a fleet
-    # worker prepared from an old root; the session's tools follow at its bind.
     rules = await daimon_rule_set_for(
         deps.sessionmaker, deps.tool_safety, tenant_id=grant.tenant_id, agent_id=admission.agent.id
     )
@@ -1982,99 +1971,6 @@ async def capture_backend_source(
         raise channel_backend.AgentBackendRefused("source_unavailable", detail="place") from error
 
 
-async def prepare_worker_agent(
-    deps: TurnDeps,
-    root: ProviderPreparationRequest,
-    source: BackendAgent,
-) -> ProviderPreparationRequest:
-    """The preparation request for a fleet worker that runs AS another on-server agent.
-
-    Built from the root's own preparation request: the same requester, run place,
-    thread, scope and environment, with the agent replaced and every agent-specific
-    admission fact decided again for that agent (memory, publishing, Daimon tool
-    rules, channel skills). `reauthorize` then asks the current policy whether this
-    requester may run that agent here; a refusal raises before any source read.
-    Agent backend facts are cleared: the worker's backend is resolved later from its
-    own worker grant. The captured source is that agent's, never the root's.
-    """
-    from daimon.core.mux_compat import retrieve_agent
-    from daimon.core.turn.runtime_manifest import capture_preparation_source
-
-    grant = root.admission.grant
-    if (
-        grant is None
-        or root.worker is not None
-        or source.source is None
-        or source.tenant_id != root.tenant_id
-        or grant.is_dm
-    ):
-        raise channel_backend.AgentBackendRefused("source_unavailable")
-    actual = await retrieve_agent(deps.anthropic, source.source.ref.id, scope=root.scope)
-    worker_grant = replace(
-        grant, agent=build_agent_ref(actual.name, actual.metadata or {}, source.name)
-    )
-    async with deps.sessionmaker() as db:
-        policy = await load_access_policy(db, tenant_id=root.tenant_id)
-    seals = root.admission.origin_seal_ids
-    rule_set = await daimon_rule_set_for(
-        deps.sessionmaker, deps.tool_safety, tenant_id=root.tenant_id, agent_id=actual.id
-    )
-    skills = (
-        await turn_channel_skills(
-            deps.sessionmaker,
-            deps.anthropic,
-            tenant_id=root.tenant_id,
-            platform=root.platform,
-            channel_id=worker_grant.channel_id,
-            agent=actual,
-            agent_names=worker_grant.agent.names,
-        )
-        if worker_grant.channel_id
-        else ()
-    )
-    admission = replace(
-        root.admission,
-        agent=actual,
-        config=root.admission.config.model_copy(
-            update={
-                "agent_name": source.name,
-                "responder_ma_agent_id": actual.id,
-                "configuration_target_ma_agent_id": None,
-                "configuration_target_name": None,
-            }
-        ),
-        grant=worker_grant,
-        # The root's read-only memory carries over (e.g. seals it inherited earlier
-        # that are not in origin_seal_ids), so a worker never writes sealed context
-        # into that agent's shared memory; the agent's own rule can only add to it.
-        memory_read_only=root.admission.memory_read_only
-        or _memory_read_only(policy, worker_grant, bool(seals)),
-        asks_before_publishing=_asks_before_publishing(policy, worker_grant),
-        daimon_rule_tools=rule_set.tools,
-        daimon_rules_need_driver=rule_set.needs_driver,
-        channel_skills=skills,
-        backend_revision=None,
-        backend=None,
-        backend_revision_origin=None,
-        backend_footer_profile=None,
-        backend_counterpart=None,
-        backend_agent_revision=None,
-    )
-    admission = await reauthorize(deps, admission)
-    request = replace(
-        root,
-        admission=admission,
-        source=None,
-        counterpart=None,
-        verified_counterpart=None,
-        target_spec=None,
-    )
-    captured = await capture_preparation_source(request)
-    if (captured.tenant_id, captured.agent_id) != (source.tenant_id, source.agent_id):
-        raise channel_backend.AgentBackendRefused("source_unavailable")
-    return replace(request, source=captured)
-
-
 async def capture_agent_source(
     deps: TurnDeps,
     source: BackendAgent,
@@ -2085,7 +1981,7 @@ async def capture_agent_source(
     """Capture the named agent's own source: the requester's tenant and account, no channel.
 
     The agent-scoped form of `capture_backend_source`, for settings that belong to the
-    agent wherever it answers (fleet config, provider and model).
+    agent wherever it answers (provider and model).
     """
     return await capture_backend_source(
         deps,

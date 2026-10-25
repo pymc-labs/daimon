@@ -109,7 +109,7 @@ class AgentSpec(Contract):
     extensions: tuple[ExtensionConfig, ...] | None = None
     metadata: FrozenMap[str, str] | None = None
     declared_drops: _DeclaredDrops = Field(default=(), exclude_if=lambda value: not value)
-    """Explicit worker-only reductions; omission preserves existing source requirements."""
+    """Explicit source capability reductions accepted during backend conversion."""
 
 
 class AgentPatch(Contract):

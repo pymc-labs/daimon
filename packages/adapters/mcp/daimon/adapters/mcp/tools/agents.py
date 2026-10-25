@@ -63,14 +63,8 @@ from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, member_copies_lock, record_agent_creator
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
-from daimon.core.defaults.ma_index import (
-    find_agents_by_daimon_tag,
-    list_agents_by_tenant,
-)
-from daimon.core.defaults.mcp_merge import (
-    DAIMON_MCP_SERVER_NAME,
-    get_reserved_mcp_rejection,
-)
+from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
@@ -97,11 +91,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
-from daimon.core.specs import (
-    AgentSpec,
-    SkillRepo,
-    merge_default_agent_toolset,
-)
+from daimon.core.specs import AgentSpec, SkillRepo, merge_default_agent_toolset
 from daimon.core.stores.domain import BackendAgent, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from fastmcp import Context, FastMCP
@@ -1565,10 +1555,7 @@ async def _fork_agent_impl(
     model: str | None = None,
 ) -> AgentInfo:
     from daimon.adapters.mcp.tools.task_continuity import forked_in_value
-    from daimon.core.defaults.metadata import (
-        MA_METADATA_KEY_FORKED_FROM,
-        MA_METADATA_KEY_FORKED_IN,
-    )
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_FORKED_FROM, MA_METADATA_KEY_FORKED_IN
 
     # A model named for the copy is checked before any permission gate: an unavailable
     # model must read as unavailable, never as "an admin has to do this" (J7).
@@ -1580,8 +1567,7 @@ async def _fork_agent_impl(
             requested = resolve_model(model)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
-        # So is a model the copy can't have: a saved copy keeps its source's model, which
-        # the person can act on (a fleet worker), unlike a permission rule. The source is
+        # A saved copy keeps its source's model. The source is
         # read as the caller sees it, so this names nothing they couldn't see.
         named = await resolve_setup_agent(
             runtime, auth, name=source_name, expected_ma_agent_id=expected_ma_agent_id
@@ -1591,15 +1577,15 @@ async def _fork_agent_impl(
 
             raise ToolError(
                 f"A saved copy keeps {source_name}'s model; it can't become "
-                f"{model_name(requested)}. To run a copy of {source_name} on it, start a "
-                "fleet task worker with fleet_spawn (model=...). Nothing was created."
+                f"{model_name(requested)}. Make the copy, then request a model provider switch "
+                "for the copy. Nothing was created."
             )
     # Forking another agent is an admin's call: a fork routes nowhere and has no
     # channel pin of its own, so it is free to run anywhere the source can't. Anyone
     # may copy the agent answering their own chat turn (it is theirs to own; TARGET-V2
     # J10), so only a person's own turn credential gets that far.
     if not auth.is_admin and (auth.chat_agent_id is None or not may_own(auth)):
-        _require_admin(auth)
+        _require_admin(auth)  # pyright: ignore[reportPrivateUsage]
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     public_url = runtime.settings.mcp.public_url
     async with contextlib.AsyncExitStack() as stack:
@@ -1630,7 +1616,7 @@ async def _fork_agent_impl(
             == auth.chat_agent_id
         )
         if not auth.is_admin and not answering:
-            _require_admin(auth)
+            _require_admin(auth)  # pyright: ignore[reportPrivateUsage]
         if not auth.is_admin:
             # Held through the create: two copies at once never both fit the cap.
             await stack.enter_async_context(
@@ -1695,7 +1681,7 @@ async def _archive_agent_impl(
     name: str,
     expected_ma_agent_id: str | None = None,
 ) -> None:
-    _require_admin(auth)
+    _require_admin(auth)  # pyright: ignore[reportPrivateUsage]
     agent = await resolve_setup_agent(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
@@ -2115,11 +2101,7 @@ async def _post_own_switch_card(
     here; the press re-verifies everything before applying.
     """
     from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
-    from daimon.core.confirmation import (
-        CardRefusal,
-        ConfirmationPrompt,
-        backend_switch_callbacks,
-    )
+    from daimon.core.confirmation import CardRefusal, ConfirmationPrompt, backend_switch_callbacks
     from daimon.core.stores import backend_switch_cards as cards
     from daimon.core.switch_cards import SWITCH_CARD_MAX_S, requested_switch_card
 
@@ -2266,11 +2248,7 @@ async def _request_agent_backend_switch_impl(
         _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
         copy_awaiting_its_switch,
     )
-    from daimon.core.channel_backend import (
-        BackendActor,
-        load_backend_agent,
-        make_backend_service,
-    )
+    from daimon.core.channel_backend import BackendActor, load_backend_agent, make_backend_service
     from daimon.core.confirmation import (
         BackendSwitchReference,
         reference_settings,
@@ -2835,10 +2813,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Anyone may copy you (the agent answering them), and owns that copy; copying
         any other agent is admin-only. Only for a saved, named copy someone asked
         to keep. The copy keeps its source's tool rules (copied once, at the fork:
-        later changes to the source's rules don't follow), and starts on the server's
-        default fleet (the source's own fleet settings don't carry over). Running
-        copies of yourself on several models at once is not this: that is a fleet
-        of task workers (fleet_spawn), which needs no admin.
+        later changes to the source's rules don't follow).
         Copies its prompt, model, skills and the MCP servers that need
         no stored token. The copy starts with no credentials: no repo binding or
         GitHub access, no API/service keys and no connector tokens; attach its own
@@ -2860,9 +2835,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         If the person names a model for the copy ("fork yourself onto
         gpt-3.5-turbo"), pass it as ``model``. A saved copy keeps its source's
         model: an unavailable model is refused as unavailable, and a different
-        available one points at ``fleet_spawn``. Never answer such an ask with an
-        admin/owner rule; "fork yourself onto <model>" is a fleet task worker, not
-        a saved copy. Pass this active turn's ``origin_context_id``."""
+        available one is refused; make the copy and then request a backend switch
+        for it. Pass this active turn's ``origin_context_id``."""
         return await _fork_agent_impl(
             runtime,
             await _auth(ctx),
@@ -2893,9 +2867,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     from daimon.core.channel_backend import backend_selection_enabled
 
     if backend_selection_enabled(runtime.settings.turn):
-        from daimon.adapters.mcp.tools.fleet_config import register_fleet_config_tools
+        from daimon.adapters.mcp.tools.provider_config import register_provider_config_tools
 
-        register_fleet_config_tools(mcp, runtime)
+        register_provider_config_tools(mcp, runtime)
 
         @mcp.tool
         async def request_agent_backend_switch(  # pyright: ignore[reportUnusedFunction]
@@ -2916,10 +2890,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
             Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
-            or Gemini. A member's "fork yourself onto <model>" is a fleet task worker
-            (fleet_spawn) or a copy of themselves they own, then a switch of that copy;
-            it never needs an admin/owner for the shared agent. If the named model isn't
-            available, say that with the allowed list, never an admin/owner rule.
+            or Gemini. A member can make a copy they own and switch that copy.
+            If the named model isn't available, say that with the allowed list.
             optionally naming a model naturally: "switch Researcher to argon" or
             "switch Researcher to luna". For an Anthropic model change such as
             "set Writer to opus 5.5", use update_agent with that natural model name.
