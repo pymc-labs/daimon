@@ -14,6 +14,123 @@ From the **Dev lane** GitHub Actions workflow, select that branch and dispatch `
 
 Each lane uses its own environment and repository variables for deployment. The host keeps the lane's secrets in a root-owned `.env` file. Normal lane services publish no container ports; the optional preview fixture below binds a loopback port.
 
+## Preview notebook host (row 52)
+
+`preview-notebook` is a dedicated, optional standalone host, disabled by default.
+It receives only notebook settings, retains the image's root/SETUID/SETGID jail,
+and stores `/data/notebooks` in the lane-scoped `preview-notebooks` volume.
+The container is capped at 768 MiB, 0.5 CPU and 256 PIDs: use tiny QA fixtures, not sampling
+workloads. Boot refuses an ADMIN_SECRET shorter than 32 characters or empty
+ALLOWED_ORIGINS. Keep ALLOW_UNJAILED_SPAWN, ALLOW_EDITABLE and ALLOW_HTTP_LINKS off.
+`no-new-privileges` is not enabled: jail privilege tests have not been verified
+inside the built notebook image with that option.
+
+**King setup, preview only, after merge:**
+
+- Record the current `lane-preview-env` version and preserve its exact bytes for
+  rollback. Add a version preserving all existing keys, with these values:
+
+  | Key | Value / derivation |
+  | --- | --- |
+  | `DAIMON_NOTEBOOK__HOST_URL` | `https://preview-notebook.136-90-64-248.sslip.io` (client upload/admin base) |
+  | `DAIMON_NOTEBOOK__ADMIN_SECRET` | Fresh 48 random bytes, URL-safe encoded; shared by client and host |
+  | `DAIMON_NOTEBOOK__PUBLIC_HOST` | `preview-notebook.136-90-64-248.sslip.io` (hostname from HOST_URL) |
+  | `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` | Same HTTPS origin as HOST_URL (public links omit internal :8001) |
+  | `DAIMON_NOTEBOOK__TENANTS` | `449f4dc5-5990-52c0-96e0-45a4ab3bf0e4` (Preview QA tenant for guild `1435062989119295640`) |
+  | `DAIMON_NOTEBOOK__ALLOWED_ORIGINS` | Same HTTPS origin as HOST_URL (browser WebSocket origin) |
+
+  Append `preview-notebook` to existing `COMPOSE_PROFILES`, preserving all profiles.
+  Keep the bearer only in Secret Manager and the root-owned lane `.env`; never
+  print it or put it in command arguments. HOST_URL configures lane clients;
+  the host receives only the other five keys. DATA_DIR and port use image defaults.
+- Before editing ingress, back up both `/etc/daimon-lanes/Caddyfile` and instance
+  startup-script metadata into `/etc/daimon-lanes/backups/notebook-host-<UTC>/`.
+  Record exact backup paths and old/new secret version IDs. Add this route to
+  **both** the Caddyfile and startup metadata, validate Caddy, then reload using
+  the supported mechanism:
+
+  ```caddy
+  preview-notebook.136-90-64-248.sslip.io {
+      reverse_proxy preview-notebook:8001
+  }
+  ```
+
+  Attach `lanes-caddy` to Preview's default network after that network exists.
+  Persist this idempotent attachment in the instance startup metadata and the
+  host's lane deploy/reset hook (operator-owned infrastructure outside this repo):
+
+  ```sh
+  docker inspect lanes-caddy --format '{{json .NetworkSettings.Networks}}' |
+    jq -e 'has("lane-preview_default")' >/dev/null ||
+    docker network connect lane-preview_default lanes-caddy
+  ```
+
+  Re-run this check after every deploy/reset/down-and-up, then check public health;
+  a one-time manual attachment is insufficient if the network gets recreated.
+  This compose publishes no ports. If persistent attachment cannot be arranged,
+  an operator override may instead add `ports: ["127.0.0.1:18001:8001"]` and route
+  a host-network proxy to `127.0.0.1:18001`. Containerized Caddy's own loopback
+  cannot reach the VM loopback: use a supported host-network proxy arrangement,
+  persist the override in deployment assets, and validate it after reset too.
+  Proxy the whole tree,
+  preserving Host, Authorization, upload PUTs and WebSocket upgrades. Provision
+  DNS/TLS; update all origins if the VM IP changes. Do not add ORIGIN_BASE:
+  this shared origin admits only the controlled QA tenant above.
+- Set the GitHub **lane-preview environment variable** `LANE_NOTEBOOK_HOST=true`
+  before redeploying; this PR does not set it. Keep it unset on other lanes.
+  Any lane enabling the profile must also set this variable to build its image.
+  Redeploy Preview through the lane workflow. Only environments with this variable
+  set to `true` build `lanes/notebook-host:<lane>-<SHA>` alongside the Daimon image.
+  Image rendering remains unconditional; enabling the profile without building
+  its matching tag fails at image pull.
+  `DAIMON_NOTEBOOK_IMAGE` carries its reference; the workflow renders only that
+  variable into the copied compose before `sudo lane deploy --compose ...`.
+  This persists the matching image in the host's recorded compose, including
+  reset, without adding an unsupported host CLI option or a secret image key.
+  Direct compose use must supply DAIMON_NOTEBOOK_IMAGE when enabling the profile.
+  Inspect host `limits.yml` overrides for conflicts with the new service caps.
+
+Post-deploy: verify the notebook image and OCI revision match the lane SHA,
+`/health` reports ok internally and over public HTTPS, and existing services
+remain healthy with no new restarts/OOM. Unauthenticated admin must refuse;
+authorized list must succeed. From an authorized QA fixture, mint and upload a
+tiny read-only notebook plus same-slug attachment; verify exact attachment bytes,
+rendered marker/widget and browser WebSocket. Verify single-use replay refusal,
+expiry, unlisted-tenant refusal, list/delete and absence readbacks. Check persistence
+across an authorized host restart, then delete only created fixtures. Minting alone
+does not pass row 52; keep it blocked until these checks pass.
+
+Before setup, in the operator's private root shell on the VM, set `PREVIEW_COMPOSE`
+to the deployed compose path and `BACKUP` to the timestamped directory above.
+Save the compose and any `limits.yml`, record `PREVIOUS_IMAGE` / `PREVIOUS_SHA`
+from `sudo lane status preview --json`, and save the previous secret bytes as
+`$BACKUP/lane-preview.env` (mode 0600). Name the ingress backups `Caddyfile` and
+`startup-script.sh`. Keep these files private; none belongs in the PR.
+
+Rollback commands (authorized operator only, VM root shell; set the recorded
+`BACKUP`, `PREVIEW_COMPOSE`, `PREVIOUS_IMAGE`, `PREVIOUS_SHA`, `OPERATOR` and
+`CHANGE_URL`; use the recorded project/zone/instance):
+
+```sh
+docker compose -p lane-preview --env-file "$(dirname "$PREVIEW_COMPOSE")/.env" \
+  -f "$PREVIEW_COMPOSE" --profile preview-notebook stop preview-notebook
+# Restore in place: Caddy may bind-mount this inode.
+cat "$BACKUP/Caddyfile" > /etc/daimon-lanes/Caddyfile
+gcloud compute instances add-metadata daimon-lanes --project pymc-daimon-dev \
+  --zone us-east4-c --metadata-from-file startup-script="$BACKUP/startup-script.sh"
+docker exec lanes-caddy caddy validate --config /etc/caddy/Caddyfile
+docker exec lanes-caddy caddy reload --config /etc/caddy/Caddyfile
+gcloud secrets versions add lane-preview-env --project pymc-daimon-dev \
+  --data-file="$BACKUP/lane-preview.env" >/dev/null
+sudo lane deploy preview --image "$PREVIOUS_IMAGE" --sha "$PREVIOUS_SHA" \
+  --compose "$BACKUP/compose.yml" --actor "$OPERATOR" --run-url "$CHANGE_URL"
+```
+
+Back up the deployed compose as `$BACKUP/compose.yml` before setup; restore any
+operator-owned `limits.yml`/proxy override from its backup before that deploy.
+Re-check the persistent Caddy attachment and existing Preview health afterward.
+Retain `preview-notebooks`; do not remove volumes during rollback.
+
 ## Preview parity MCP fixture (rows 15 and 34)
 
 `preview-parity-mcp` extends the existing QA host's bearer gate. It has no
