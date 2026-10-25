@@ -357,6 +357,7 @@ source_modules = [
     "daimon.core.usage_sweep",
     "daimon.core.caller_resources",
     "daimon.core.usage_outbox_drain",
+    "daimon.core.usage_reread",
     "daimon.core.infrastructure_cost",
     "daimon.core.wizard",
     "daimon.core.wizard_sweep",

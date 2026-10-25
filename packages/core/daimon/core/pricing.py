@@ -20,7 +20,13 @@ from typing import Protocol
 from mux.contracts.config import ResolvedBackend
 from mux.contracts.ids import ModelRef
 from mux.contracts.usage import UsageObservation
-from mux.profiles import CONVERSATION_ONLY, INLINE_REUSE, PERSISTENT_WORKSPACE, get_profile
+from mux.profiles import (
+    CONVERSATION_ONLY,
+    INLINE_REUSE,
+    PERSISTENT_WORKSPACE,
+    get_profile,
+    meters_cache_writes_for,
+)
 
 
 class LegacyUsage(Protocol):
@@ -320,6 +326,20 @@ class ProviderPrice:
                 raise ValueError("provider rates must be finite nonnegative Decimals")
 
 
+def unreported_cache_writes(usage: UsageObservation, price: ProviderPrice) -> bool:
+    """True when the tariff bills cache writes the meter never counts.
+
+    Such a turn is priced as if it wrote nothing to the cache (ROOT D2=B): its
+    non-cached input at the uncached rate, never above what its counts prove. The
+    debit is an estimate, marked `cache_writes_unreported` on its ledger row.
+    """
+    return (
+        price.cache_write is not None
+        and usage.input_cache_write_tokens is None
+        and not meters_cache_writes_for(usage.session.provider)
+    )
+
+
 def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice) -> int | None:
     """Validate attribution and project the input stage independently."""
     if usage.model is None or (usage.session.provider, usage.model.provider, usage.model.id) != (
@@ -332,6 +352,8 @@ def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice
     if price.cache_write is None:
         if written not in (None, 0):
             raise ValueError("provider reported an inapplicable cache-write stage")
+        written = 0
+    elif unreported_cache_writes(usage, price):
         written = 0
     if usage.input_tokens is None or usage.input_cached_tokens is None or written is None:
         return None

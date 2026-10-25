@@ -55,8 +55,10 @@ from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_balance
 from daimon.core.stores.turn_usage import (
     AccountingPrefetch,
+    managed_session,
     prefetch_accounting,
     read_accounting_revisions,
+    read_session_debits,
 )
 from daimon.core.usage_delegation import HostUsageBinding, read_delegated_usage
 from mux.contracts.ids import Scope
@@ -407,11 +409,20 @@ async def _fleet_worker_money(
     rows = await read_accounting_revisions(
         session, tenant_id=run.tenant_id, binding=binding, prefetch=prefetch
     )
+    native_session = managed_session(binding)
+    calls = (
+        await read_session_debits(
+            session,
+            tenant_id=run.tenant_id,
+            managed_session_id=native_session,
+            prefetch=prefetch,
+        )
+        if native_session is not None and not rows.revisions and not rows.outbox
+        else None
+    )
     with localcontext() as arithmetic:
         arithmetic.prec = 80
         debit = -sum((row.delta_usd for row in rows.ledger), Decimal(0))
-        if debit < 0:
-            raise FleetConflict("worker ledger cannot prove nonnegative spend")
         state: UsageState = (
             "none"
             if not rows.revisions and not rows.outbox
@@ -419,6 +430,21 @@ async def _fleet_worker_money(
             if rows.revisions and rows.outbox and all(o.settled for o in rows.outbox)
             else "pending"
         )
+        if calls is not None:
+            # A Managed Agents worker keeps no outbox: each model call's usage_events
+            # row and its debit are written together, keyed by its own session
+            # (staging 7aba3054: 60 finished MA workers read $0 and "no usage" while
+            # their sessions held $0.47 of debits, so every hold was kept).
+            debit = calls.debit_usd
+            state = (
+                "none"
+                if not calls.events
+                else "settled"
+                if calls.debited == calls.events
+                else "pending"
+            )
+        if debit < 0:
+            raise FleetConflict("worker ledger cannot prove nonnegative spend")
         if not rows.revisions or not price_floor:
             return debit, debit, False, False, state
         native = rows.revisions[0].observation.session
@@ -455,29 +481,51 @@ async def _worker_activity(
     `turn:<session>:<spawn>:send:N`), got past pending. Some send paths keep no operation
     row, so absent rows alone prove nothing. In flight: an unexpired lease on its slot,
     or any send unanswered (sent, accepted or of unknown outcome).
+
+    An `accepted` send is answered once the native turn its receipt names has a
+    measured usage revision on the ledger, on the worker's own binding: the Gemini
+    path never advances its sends past accepted (staging 7aba3054: all 192 sends of
+    finished Gemini workers), so without that every finished Gemini worker read as
+    in flight and kept its whole hold.
     """
     if not candidates:
         return set(), set()
+    workers = {worker.id: worker for _, worker in candidates}
     spawns = {spawn_operation_key(run.id, worker.ordinal): worker.id for run, worker in candidates}
-    statuses: dict[uuid.UUID, list[str]] = {}
-    for key, status in await mux_state.send_statuses_like(
+    sends: dict[uuid.UUID, list[tuple[str, str | None]]] = {}
+    for key, status, turn_id in await mux_state.send_receipts_like(
         session, tenant_id=tenant_id, patterns=[f"%{spawn}:send:%" for spawn in spawns]
     ):
         match = _SEND.search(key)
         if match is not None and match.group(1) in spawns:
-            statuses.setdefault(spawns[match.group(1)], []).append(status)
+            sends.setdefault(spawns[match.group(1)], []).append((status, turn_id))
+    accepted = {
+        workers[worker_id].binding_id
+        for worker_id, mine in sends.items()
+        if workers[worker_id].binding_id is not None
+        and any(status == "accepted" and turn for status, turn in mine)
+    }
+    measured = await mux_state.measured_applied_turns(
+        session, tenant_id=tenant_id, binding_ids={b for b in accepted if b is not None}
+    )
+
+    def unanswered(worker: FleetWorker, status: str, turn_id: str | None) -> bool:
+        if status == "accepted" and turn_id and worker.binding_id is not None:
+            return (worker.binding_id, turn_id) not in measured
+        return status in _UNANSWERED_SENDS
+
     slots = {worker.id: worker_slot(run, worker) for run, worker in candidates}
     leases = await mux_state.active_leases(session, list(slots.values()))
     now = await mux_state.database_clock(session) if leases else None
     sent: set[uuid.UUID] = set()
     in_flight: set[uuid.UUID] = set()
     for _, worker in candidates:
-        mine = statuses.get(worker.id, [])
-        if worker.turns_used or worker.attempts or any(s != "pending" for s in mine):
+        mine = sends.get(worker.id, [])
+        if worker.turns_used or worker.attempts or any(s != "pending" for s, _ in mine):
             sent.add(worker.id)
         lease = leases.get(mux_state.slot_key(slots[worker.id]))
         if (lease is not None and now is not None and lease.expires_at > now) or any(
-            s in _UNANSWERED_SENDS for s in mine
+            unanswered(worker, s, turn) for s, turn in mine
         ):
             in_flight.add(worker.id)
     return sent, in_flight

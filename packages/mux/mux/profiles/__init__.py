@@ -162,6 +162,18 @@ def accounting_mode_for(provider: Provider) -> AccountingMode:
     return modes.pop()
 
 
+def meters_cache_writes_for(provider: Provider) -> bool:
+    """Whether the provider's usage meter counts cache writes, read like
+    `accounting_mode_for`: all its profiles must agree; a provider with no profile
+    declares nothing and is taken as metered."""
+    declared = {
+        profile.meters_cache_writes for profile in PROFILES.values() if profile.provider == provider
+    }
+    if len(declared) > 1:
+        raise InvalidConfig("usage requires an unambiguous declared cache-write meter")
+    return declared.pop() if declared else True
+
+
 __all__ = [
     "CONVERSATION_ONLY",
     "PROVIDER_ALIASES",
@@ -171,6 +183,7 @@ __all__ = [
     "PERSISTENT_WORKSPACE",
     "PROFILES",
     "get_profile",
+    "meters_cache_writes_for",
     "worker_token_limits_supported",
     "emits_legacy_events_for",
     "native_agent_tools",

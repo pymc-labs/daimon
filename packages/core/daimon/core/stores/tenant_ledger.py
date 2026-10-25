@@ -17,7 +17,7 @@ from typing import Any, cast
 
 from daimon.core._models import Tenant, TenantLedger
 from daimon.core.stores import check_persisted_read, read_persisted_columns
-from daimon.core.stores.domain import TenantLedgerRow
+from daimon.core.stores.domain import LedgerEstimate, TenantLedgerRow
 from sqlalchemy import DateTime, Select, and_, func, or_, select
 from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -74,10 +74,12 @@ async def insert_entry(
     payment_intent: str | None = None,
     channel_id: str | None = None,
     occurred_at: datetime | None = None,
+    estimate: LedgerEstimate | None = None,
 ) -> bool:
     """INSERT ... ON CONFLICT (idempotency_key) DO NOTHING. True iff a row was inserted.
 
     `channel_id` is set on debits only: the channel whose budget the spend counts against.
+    `estimate` marks a debit priced from incomplete provider counts.
     ``occurred_at`` dates the entry by when it happened (a model call's own
     time) rather than when it was written; the database clock is the default.
     """
@@ -99,6 +101,7 @@ async def insert_entry(
             payment_event_id=payment_event_id,
             payment_intent=payment_intent,
             channel_id=channel_id,
+            estimate=estimate,
             **dated,
         )
         .on_conflict_do_nothing(index_elements=["idempotency_key"])

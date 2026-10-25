@@ -253,6 +253,7 @@ from daimon.core.turn_origin import (
     turn_origin,
 )
 from daimon.core.turn_queue import TurnQueue
+from daimon.core.usage_reread import run_usage_reread_poller
 from mux.contracts.ids import Scope
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
@@ -1266,6 +1267,15 @@ class DaimonBot(commands.Bot):
                         self.runtime.sessionmaker,
                         platform="discord",
                         post=self._post_fleet_run_end,
+                        should_stop=lambda: self.draining or self.is_closed(),
+                    )
+                )
+                # An OpenAI turn recorded before OpenAI metered it: read it again, so
+                # it settles and its worker's hold is released to what it spent.
+                self._spawn(
+                    run_usage_reread_poller(
+                        self.runtime.sessionmaker,
+                        markup=self.runtime.settings.billing.markup,
                         should_stop=lambda: self.draining or self.is_closed(),
                     )
                 )

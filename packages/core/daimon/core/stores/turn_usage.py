@@ -1,7 +1,7 @@
 """Read-only per-turn telemetry queries. Billing remains authoritative elsewhere."""
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
@@ -19,8 +19,9 @@ from daimon.core.fleet import FleetRun, worker_slot
 from daimon.core.stores import check_persisted_read, fleet, mux_state, read_persisted_columns
 from daimon.core.stores.domain import TenantLedgerRow, UsageEventRow
 from mux.contracts.resources import ProviderBinding
+from mux.profiles import MANAGED_AGENTS
 from mux.state.lease import Slot
-from mux.state.store import binding_slot
+from mux.state.store import SESSION_REF, binding_slot
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import RowMapping, Select, case, func, select, tuple_
@@ -86,6 +87,10 @@ class AccountingPrefetch:
     outbox: Mapping[str, tuple[tuple[str, int, Any, datetime | None], ...]]
     ledger_keys: frozenset[str]
     ledger: Mapping[str, tuple[RowMapping, ...]]
+    #: A Managed Agents binding's native session -> its usage_events ids.
+    session_events: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: dict[str, tuple[str, ...]]()
+    )
 
 
 def _columns(statement: Select[Any]) -> Select[Any]:
@@ -150,6 +155,18 @@ async def prefetch_accounting(
                 key = _ledger_key(row.binding_id, row.observation_id, row.revision, row.row)
                 if key is not None:
                     keys.add(key)
+        managed = sorted(
+            {
+                native
+                for body in bindings.bodies.values()
+                if body is not None and (native := _managed_session_body(body)) is not None
+            }
+        )
+        events: dict[str, list[str]] = {native: [] for native in managed}
+        if managed:
+            for row in await session.execute(_session_events_query(tenant_id, managed)):
+                events[row.managed_session_id].append(row.event_id)
+                keys.add(session_ledger_key(row.managed_session_id, row.event_id))
         ledger: dict[str, list[RowMapping]] = {key: [] for key in keys}
         if keys:
             for row in (
@@ -170,6 +187,85 @@ async def prefetch_accounting(
         {identity: tuple(rows) for identity, rows in outbox.items()},
         frozenset(keys),
         {key: tuple(rows) for key, rows in ledger.items()},
+        {native: tuple(ids) for native, ids in events.items()},
+    )
+
+
+def _managed_session_body(body: Mapping[str, Any]) -> str | None:
+    """A stored binding body's Managed Agents session, as `managed_session` reads it."""
+    if body.get("profile") != MANAGED_AGENTS.profile_id:
+        return None
+    refs = body.get("native_refs")
+    native = cast(Mapping[str, object], refs).get(SESSION_REF) if isinstance(refs, dict) else None
+    return native if isinstance(native, str) else None
+
+
+def session_ledger_key(managed_session_id: str, event_id: str) -> str:
+    """The debit key `record_turn_usage` writes for one Managed Agents model call."""
+    return f"turn:{managed_session_id}:{event_id}"
+
+
+def managed_session(binding: ProviderBinding) -> str | None:
+    """A Managed Agents binding's native session; None for any other profile."""
+    if binding.profile != MANAGED_AGENTS.profile_id:
+        return None
+    return binding.native_refs.get(SESSION_REF)
+
+
+def _session_events_query(tenant_id: UUID, sessions: Iterable[str]) -> Select[Any]:
+    return (
+        select(UsageEvent.managed_session_id, UsageEvent.event_id)
+        .where(UsageEvent.tenant_id == tenant_id, UsageEvent.managed_session_id.in_(sessions))
+        .order_by(UsageEvent.managed_session_id, UsageEvent.event_id)
+    )
+
+
+@dataclass(frozen=True)
+class SessionDebits:
+    """One Managed Agents session's recorded model calls and their ledger debits."""
+
+    events: int
+    debited: int
+    debit_usd: Decimal
+
+
+async def read_session_debits(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    managed_session_id: str,
+    prefetch: AccountingPrefetch | None = None,
+) -> SessionDebits:
+    """What a Managed Agents session has been debited: its usage_events rows and the
+    ledger rows keyed exactly `turn:<session>:<event_id>` for them, nothing else.
+
+    MA usage has no outbox: the live recorder and the usage sweep write a call's
+    usage_events row and its debit in one transaction, keyed by session and event.
+    Reads only. A `prefetch` from this transaction answers it with the same checks.
+    """
+    query = _session_events_query(tenant_id, (managed_session_id,))
+    if prefetch is not None and managed_session_id in prefetch.session_events:
+        check_persisted_read(session, query)
+        ids: Iterable[str] = prefetch.session_events[managed_session_id]
+    else:
+        ids = [row.event_id for row in await read_persisted_columns(session, query)]
+    keys = {session_ledger_key(managed_session_id, event_id) for event_id in ids}
+    ledger_query = select(TenantLedger.idempotency_key, TenantLedger.delta_usd).where(
+        TenantLedger.tenant_id == tenant_id, TenantLedger.idempotency_key.in_(keys)
+    )
+    if prefetch is not None and keys <= prefetch.ledger_keys:
+        check_persisted_read(session, ledger_query)
+        rows = [(key, row["delta_usd"]) for key in keys for row in prefetch.ledger[key]]
+    else:
+        rows = (
+            [tuple(row) for row in await read_persisted_columns(session, ledger_query)]
+            if keys
+            else []
+        )
+    return SessionDebits(
+        events=len(keys),
+        debited=len({key for key, _ in rows}),
+        debit_usd=-sum((delta for _, delta in rows), Decimal(0)),
     )
 
 

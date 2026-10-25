@@ -602,6 +602,15 @@ class PendingPaymentClawbackRow(BaseModel):
     received_at: datetime
 
 
+LedgerEstimate = Literal["cache_writes_unreported"]
+"""How a debit priced from incomplete provider counts was reached (`tenant_ledger.estimate`).
+
+`cache_writes_unreported`: the tariff bills cache writes but the meter has no
+write count (OpenAI Agents API turns), so the turn is priced as writing none.
+Column is Text + CHECK; keep this literal closed with it.
+"""
+
+
 class TenantLedgerRow(BaseModel):
     """Append-only ledger row. Balance = SUM(delta_usd). TOPUP-01."""
 
@@ -616,6 +625,7 @@ class TenantLedgerRow(BaseModel):
     payment_intent: str | None
     occurred_at: datetime
     channel_id: str | None = None
+    estimate: LedgerEstimate | None = None
 
 
 # `credit` codes add credit that never expires; `timed` codes add credit that

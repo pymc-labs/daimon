@@ -898,6 +898,24 @@ usage, unknown model attribution or unverified actual infrastructure leaves the
 observation pending for reconciliation. A known inapplicable cache-write bucket
 does not erase uncached input spend. Anthropic keeps its existing metering path.
 
+OpenAI bills cache writes on GPT-5.6 and later (1.25x uncached input), but its
+Agents API turn usage has no cache-write count. Such a turn is priced as if it
+wrote nothing to the cache: non-cached input at the uncached rate, cached input
+at the cache-read rate, then output. That is never above what the counts prove.
+Its ledger row carries `estimate = 'cache_writes_unreported'`; a fully metered
+debit has `estimate` NULL. Any true-up goes only in the customer's favour.
+OpenAI may report a turn's usage as null at first ("null does not mean zero").
+The Discord process reads a conversation-only turn recorded that way again
+(`usage_reread`), from 5 minutes to 24 hours after it was first recorded, and
+records the measured revision through the same applier. A turn still unmetered
+after 24 hours is logged (`accounting.usage_reread_expired`) and keeps its hold.
+
+A finished fleet worker settles its hold to what it was debited. Gemini sends stay
+`accepted`: one counts as answered once the turn its own receipt names has a
+measured, applied revision on the worker's binding. A Managed Agents worker's
+debits are the ledger rows keyed `turn:<its session>:<event>` for that session's
+`usage_events`. It is settled once every call has its debit.
+
 Prepared turns for an explicitly configured alternate provider use its authorized
 native session and bound observation recorder. Usage frames can arrive without
 a display event; nullable measurements and pending accounting stay intact.

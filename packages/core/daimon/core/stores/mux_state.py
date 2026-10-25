@@ -760,6 +760,48 @@ async def send_statuses_like(
     return [(key, status) for key, status in rows.all()]
 
 
+async def send_receipts_like(
+    session: AsyncSession, *, tenant_id: uuid.UUID, patterns: Collection[str]
+) -> list[tuple[str, str, str | None]]:
+    """(key, status, receipt turn id) of the tenant's operations matching any LIKE
+    pattern, in one read. The turn id is the native turn the send started, if its
+    receipt names one."""
+    if not patterns:
+        return []
+    rows = await session.execute(
+        select(
+            MuxOperation.key,
+            MuxOperation.status,
+            MuxOperation.record["result"]["turn_id"].astext,
+        ).where(
+            MuxOperation.tenant_id == tenant_id,
+            or_(*(MuxOperation.key.like(pattern) for pattern in patterns)),
+        )
+    )
+    return [(key, status, turn_id) for key, status, turn_id in rows.all()]
+
+
+async def measured_applied_turns(
+    session: AsyncSession, *, tenant_id: uuid.UUID, binding_ids: Collection[str]
+) -> set[tuple[str, str]]:
+    """(binding, native turn) pairs with a measured usage revision on the ledger."""
+    if not binding_ids:
+        return set()
+    observation = AccountingOutbox.row["observation"]
+    rows = await session.execute(
+        select(AccountingOutbox.binding_id, observation["turn_id"].astext)
+        .where(
+            AccountingOutbox.tenant_id == tenant_id,
+            AccountingOutbox.binding_id.in_(list(binding_ids)),
+            AccountingOutbox.applied_at.is_not(None),
+            observation["completeness"].astext == "measured",
+            observation["turn_id"].astext.is_not(None),
+        )
+        .distinct()
+    )
+    return {(binding_id, turn_id) for binding_id, turn_id in rows.all()}
+
+
 async def bindings_with_pending_outbox(
     session: AsyncSession, binding_ids: Collection[str]
 ) -> set[str]:
@@ -1284,6 +1326,72 @@ async def pending_outbox_for_profiles(
                 & (AccountingOutbox.revision < revision)
             )
         )
+    rows = (await session.execute(statement)).all()
+    return [
+        (OutboxRow.model_validate(row), tenant_id, BindingContract.model_validate(binding))
+        for row, tenant_id, binding in rows
+    ]
+
+
+async def unmeasured_outbox_for_profiles(
+    session: AsyncSession,
+    profiles: Collection[str],
+    *,
+    created_after: datetime,
+    created_before: datetime,
+    limit: int,
+) -> list[tuple[OutboxRow, uuid.UUID, BindingContract]]:
+    """Unapplied newest revisions without measured counts (unknown or partial).
+
+    Of bindings that only ever had one of `profiles` (as `pending_outbox_for_profiles`),
+    first written in [created_after, created_before), oldest first. Each comes with its
+    tenant and the binding's current generation.
+    """
+    generation = aliased(ProviderBinding)
+    other = (
+        select(generation.binding_id)
+        .where(
+            generation.binding_id == AccountingOutbox.binding_id,
+            generation.profile.not_in(profiles),
+        )
+        .correlate(AccountingOutbox)
+        .exists()
+    )
+    newer = aliased(AccountingOutbox)
+    superseded = (
+        select(newer.revision)
+        .where(
+            newer.binding_id == AccountingOutbox.binding_id,
+            newer.observation_id == AccountingOutbox.observation_id,
+            newer.revision > AccountingOutbox.revision,
+        )
+        .correlate(AccountingOutbox)
+        .exists()
+    )
+    latest = (
+        select(ProviderBinding.binding_id, func.max(ProviderBinding.generation).label("generation"))
+        .group_by(ProviderBinding.binding_id)
+        .subquery()
+    )
+    statement = (
+        select(AccountingOutbox.row, AccountingOutbox.tenant_id, ProviderBinding.binding)
+        .join(latest, latest.c.binding_id == AccountingOutbox.binding_id)
+        .join(
+            ProviderBinding,
+            (ProviderBinding.binding_id == latest.c.binding_id)
+            & (ProviderBinding.generation == latest.c.generation),
+        )
+        .where(
+            AccountingOutbox.applied_at.is_(None),
+            AccountingOutbox.created_at >= created_after,
+            AccountingOutbox.created_at < created_before,
+            AccountingOutbox.row["observation"]["completeness"].astext.in_(("unknown", "partial")),
+            ~other,
+            ~superseded,
+        )
+        .order_by(AccountingOutbox.created_at, AccountingOutbox.binding_id)
+        .limit(limit)
+    )
     rows = (await session.execute(statement)).all()
     return [
         (OutboxRow.model_validate(row), tenant_id, BindingContract.model_validate(binding))
