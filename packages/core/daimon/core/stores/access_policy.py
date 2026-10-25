@@ -113,7 +113,9 @@ async def policy_write_transaction(
             raise
         return stack, session
 
-    stack, session = await retry_fences(acquire, busy_error=PolicyBusyError)
+    stack, session = await retry_fences(
+        acquire, busy_error=PolicyBusyError, label="access_policy:write"
+    )
     async with stack:
         yield session
 

@@ -850,3 +850,82 @@ async def test_a_snapshot_read_that_gets_no_connection_is_busy_and_named(
     assert [(e["label"], e["reasons"]) for e in named] == [
         ("gemini_state:records:read", ["pool_timeout"])
     ]
+
+
+async def test_a_send_holds_no_records_lock_while_it_reads_the_provider(postgres_state):
+    """Smoke 1076226d J2 WHN37B: under 19-way load a copy's send waited out the 5 s bound
+    on the account's records row (label gemini_state:records), because the pre-dispatch
+    transaction held the row across the provider GET of the current interaction (and
+    credential resolution). The slow reads run first on the committed snapshot; the
+    transaction only re-checks, claims and commits."""
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+
+    sessions, scope, _, _ = postgres_state
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="project")
+    driver, transport, session = await _gemini_session(storage, scope)
+    reading, finish = asyncio.Event(), asyncio.Event()
+    real_get = transport.get
+
+    async def slow_get(interaction):
+        reading.set()
+        await finish.wait()
+        return await real_get(interaction)
+
+    stamp = datetime.now(UTC).isoformat()
+    transport.responses.append(
+        {
+            "id": "i2",
+            "status": "completed",
+            "created": stamp,
+            "updated": stamp,
+            "environment_id": "e1",
+            "steps": [{"type": "model_output", "content": [{"type": "text", "text": "two"}]}],
+            "usage": {"total_input_tokens": 1, "total_output_tokens": 2, "total_thought_tokens": 0},
+        }
+    )
+    transport.get = slow_get
+    posts = len(transport.requests)
+    send = asyncio.create_task(
+        driver.events.send(
+            scope, session.ref, (UserMessage(content=(TextPart(text="again"),)),), key="second"
+        )
+    )
+    await reading.wait()
+    try:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        async with storage.transaction():  # another copy's write while the GET runs
+            pass
+        assert loop.time() - started < 1, "the write did not wait for the send's provider read"
+    finally:
+        finish.set()
+    receipt = await send
+    assert receipt.status == "queued" and receipt.input_ids == ("i2",)
+    assert len(transport.requests) == posts + 1, "exactly one POST"
+
+
+async def test_a_snapshot_read_inside_a_callers_transaction_leaves_it_writable(
+    postgres_state,
+):
+    """A session factory bound to one connection joins its caller's open transaction.
+    The snapshot read must not make that transaction read-only: the caller's own later
+    writes (a send's claim, its state-store operation) would fail."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    sessions, scope, _, _ = postgres_state
+    async with PostgresGeminiStorage(sessions, scope=scope, project="project").transaction():
+        pass  # the row exists
+    engine = sessions.kw["bind"]
+    async with engine.connect() as connection:
+        await connection.begin()
+        await connection.execute(text("SELECT 1"))
+        bound = async_sessionmaker(bind=connection, expire_on_commit=False)
+        database = gemini_runtime_state.PostgresPayloadDatabase(
+            bound, scope=scope, project="project", kind="records"
+        )
+        assert await database.read() is not None
+        read_only = await connection.scalar(text("SHOW transaction_read_only"))
+        await connection.rollback()
+    assert read_only == "off"

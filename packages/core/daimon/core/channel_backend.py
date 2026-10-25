@@ -1830,7 +1830,7 @@ class AgentBackendService:
                 )
 
         revision, _shared, source = await retry_fences(
-            attempt, busy_error=policy_store.PolicyBusyError
+            attempt, busy_error=policy_store.PolicyBusyError, label="backend_policy:resolve"
         )
         return BackendResolution(source, resolve_agent_backend(revision, None), revision)
 

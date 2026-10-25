@@ -365,7 +365,9 @@ class ProviderPreparationRequest:
                         validate_origin=validate_origin,
                     )
 
-            revision, _, origin = await retry_fences(attempt, busy_error=PolicyBusyError)
+            revision, _, origin = await retry_fences(
+                attempt, busy_error=PolicyBusyError, label="backend_policy:worker"
+            )
             remaining_s(bound, now=self.now(), refuse_expired=True)
             if revision is None or origin != "agent":
                 raise WorkerSpecRefused("backend", "unsupported")

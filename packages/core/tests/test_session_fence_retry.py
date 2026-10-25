@@ -115,3 +115,30 @@ async def test_a_fence_that_runs_out_names_which_acquisition_failed():
         for e in logs
         if e["event"] == "session_fence.unavailable"
     ] == [("gemini_state:records", ["row_nowait"], "row_nowait")]
+
+
+def test_every_fence_retry_names_its_fence():
+    """1076226d J6g 8WS1J2: a preparation fence ran out and logged only the default
+    `session_fence` label, so nobody could tell which fence it was. Every caller of
+    retry_fences passes a fixed `label`."""
+    import ast
+    import pathlib
+    import subprocess
+
+    files = subprocess.run(
+        ["git", "ls-files", "packages"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    unlabelled = []
+    for name in files:
+        if not name.endswith(".py") or "/tests/" in name or "/daimon/" not in name:
+            continue
+        tree = ast.parse(pathlib.Path(name).read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "retry_fences"
+                and not any(k.arg == "label" for k in node.keywords)
+            ):
+                unlabelled.append(f"{name}:{node.lineno}")
+    assert unlabelled == [], unlabelled

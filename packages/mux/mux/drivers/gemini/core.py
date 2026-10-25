@@ -4,6 +4,7 @@ import asyncio
 import copy
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
 from uuid import uuid4
@@ -34,6 +35,7 @@ from mux.contracts.resources import (
     EnvironmentPatch,
     EnvironmentSpec,
     ExportRequirements,
+    MCPConnection,
     ProjectionSnapshot,
     ProviderBinding,
     Session,
@@ -126,6 +128,28 @@ def page_values[T](values: Sequence[T], page: PageRequest) -> Page[T]:
         has_more=end < len(ordered),
         next_cursor=str(end) if end < len(ordered) else None,
     )
+
+
+@dataclass(frozen=True)
+class _PreparedSend:
+    """A send request built from the committed snapshot, and what it was built from."""
+
+    current: str | None
+    environment_id: str | None
+    stored_request: Object
+    expected: Object
+    overrides: Object
+    request: Object
+
+    def still_valid(self, record: SessionRecord, expected: Object, overrides: Object) -> bool:
+        """Under the lock: the same interaction, workspace, saved request, intent and input."""
+        return (
+            record.current == self.current
+            and record.environment_id == self.environment_id
+            and record.request == self.stored_request
+            and expected == self.expected
+            and overrides == self.overrides
+        )
 
 
 class Base:
@@ -968,6 +992,166 @@ class GeminiEvents(Base):
             lambda: self._send(scope, session, events, key=key, expected_turn=expected_turn)
         )
 
+    def _send_intent(
+        self, records: Records, scope: Scope, record: SessionRecord
+    ) -> tuple[Object, tuple[MCPConnection, ...]]:
+        """The session's owned request intent and MCP connections, checked as saved."""
+        expected = self._mcp_request(records, scope, record.spec)
+        agent = records.agents[record.spec.agent.id]
+        connections = agent.spec.mcp_servers or ()
+        try:
+            validate_intent(
+                record.request, expected, connections, enabled=self._mcp_secrets is not None
+            )
+        except UnsupportedCapability as exc:
+            if exc.missing != (LEGACY_SERVER_NAME,):
+                raise
+            raise ContinuityLost(
+                record.session.binding.id,
+                (
+                    "This Gemini conversation was saved with an MCP server name Gemini "
+                    "no longer accepts (mcp_server_name); start a new thread.",
+                ),
+            ) from None
+        return expected, connections
+
+    def _send_overrides(
+        self, record: SessionRecord, events: Sequence[InputEvent], expected_turn: str | None
+    ) -> tuple[Object, bool]:
+        """The input overrides for `events` on `record`, refusing what can't be sent."""
+        if record.unknown_delivery:
+            refuse("unreconciled_delivery")
+        if self._max_output_tokens is not None and any(
+            not isinstance(event, UserMessage) for event in events
+        ):
+            refuse("model_interaction_resources")
+        if record.max_input_tokens != self._max_input_tokens:
+            refuse("changed_worker_token_envelope")
+        if (self._max_total_tokens is not None or self._max_input_tokens is not None) and (
+            record.current is not None
+            or len(events) != 1
+            or not isinstance(events[0], UserMessage)
+            or events[0].mode != "new_turn"
+        ):
+            refuse("worker_single_interaction")
+        if expected_turn is not None and expected_turn != record.session.active_root_turn:
+            raise ProviderError("conflict", retryable=False)
+        overrides: Object = {}
+        inputs: list[JsonValue] = []
+        is_result = all(isinstance(e, UserToolResult) for e in events)
+        if record.session.state == "running":
+            refuse("steer")
+        if record.session.state == "requires_action" and not is_result:
+            refuse("required_action_pending")
+        if is_result:
+            for input_ in events:
+                if not isinstance(input_, UserToolResult):
+                    refuse("function_result")
+                action = next(
+                    (a for a in record.session.required_actions if a.id == input_.action_id),
+                    None,
+                )
+                if action is None or action.kind != "function_result":
+                    refuse("unknown_function_action")
+                result_input: Object = {
+                    "type": "function_result",
+                    "name": action.payload["name"],
+                    "call_id": action.call_id,
+                    "result": _text(input_.content),
+                }
+                if input_.is_error:
+                    result_input["is_error"] = True
+                inputs.append(result_input)
+        else:
+            for input_ in events:
+                if not isinstance(input_, UserMessage) or input_.mode != "new_turn":
+                    refuse("native_input_or_confirmation_or_steer")
+                inputs.append({"type": "text", "text": _text(input_.content)})
+        overrides.update({"input": inputs, "background": True, "store": True})
+        return overrides, is_result
+
+    async def _send_request(
+        self,
+        scope: Scope,
+        record: SessionRecord,
+        expected: Object,
+        connections: tuple[MCPConnection, ...],
+        overrides: Object,
+    ) -> Object:
+        """The authenticated provider request: the slow reads (history, credentials,
+        token count). Holds no lock of its own."""
+        overrides = dict(overrides)
+        authenticated = any(c.credential_ref is not None for c in connections)
+        if record.current is not None:
+            if not authenticated:
+                await self._get(record, record.current)
+            if self._max_output_tokens is None and record.environment_id is None:
+                raise ContinuityLost(
+                    record.session.binding.id,
+                    ("Gemini did not provide a reusable environment ID.",),
+                )
+            overrides["previous_interaction_id"] = record.current
+            if self._max_output_tokens is None:
+                overrides["environment"] = record.environment_id
+        request = await authenticated_template(
+            scope,
+            record.request,
+            expected,
+            connections,
+            self._mcp_secrets,
+            overrides=overrides,
+            gcs_secrets=self._gcs_secrets,
+        )
+        if record.current is not None and authenticated:
+            # Admission/authentication precedes this native history read.
+            await self._get(record, record.current)
+        if self._max_input_tokens is not None:
+            from mux.drivers.gemini.transport import TokenCountingTransport
+
+            if not isinstance(self._transport, TokenCountingTransport):
+                refuse("worker_input_token_count")
+            count = await self._transport.count_input_tokens(request)
+            if type(count) is not int or count <= 0 or count > self._max_input_tokens:
+                refuse("worker_input_token_limit")
+        return request
+
+    async def _presend(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        events: Sequence[InputEvent],
+        *,
+        key: str,
+        expected_turn: str | None,
+    ) -> "_PreparedSend | None":
+        """Build the request from the committed snapshot, holding no records lock.
+
+        The provider GET, credential resolution and token count used to run inside the
+        pre-dispatch transaction, holding the account's records row (every copy in the
+        account) across network awaits: under load a send waited out the 5 s bound
+        (smoke 1076226d J2 WHN37B). Anything unusual (a prior send for this key, an
+        unreconciled delivery, any error) returns None: the transaction then does the
+        work under the lock exactly as before, and raises what it raised before.
+        """
+        try:
+            async with read_records(self._storage) as snapshot:
+                record = self._record(snapshot, scope, session)
+                if record.unknown_delivery or (*owner(scope), key) in snapshot.sends:
+                    return None
+                expected, connections = self._send_intent(snapshot, scope, record)
+                overrides, _ = self._send_overrides(record, events, expected_turn)
+            request = await self._send_request(scope, record, expected, connections, overrides)
+        except Exception:
+            return None
+        return _PreparedSend(
+            current=record.current,
+            environment_id=record.environment_id,
+            stored_request=record.request,
+            expected=expected,
+            overrides=overrides,
+            request=request,
+        )
+
     async def _send(
         self,
         scope: Scope,
@@ -987,25 +1171,10 @@ class GeminiEvents(Base):
                 "expected_turn": expected_turn,
             }
         )
+        prepared = await self._presend(scope, session, events, key=key, expected_turn=expected_turn)
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
-            expected = self._mcp_request(records, scope, record.spec)
-            agent = records.agents[record.spec.agent.id]
-            connections = agent.spec.mcp_servers or ()
-            try:
-                validate_intent(
-                    record.request, expected, connections, enabled=self._mcp_secrets is not None
-                )
-            except UnsupportedCapability as exc:
-                if exc.missing != (LEGACY_SERVER_NAME,):
-                    raise
-                raise ContinuityLost(
-                    record.session.binding.id,
-                    (
-                        "This Gemini conversation was saved with an MCP server name Gemini "
-                        "no longer accepts (mcp_server_name); start a new thread.",
-                    ),
-                ) from None
+            expected, connections = self._send_intent(records, scope, record)
             prior = records.sends.get((*owner(scope), key))
             if prior is not None:
                 if prior[0] != scope.principal_id:
@@ -1045,87 +1214,13 @@ class GeminiEvents(Base):
                         records.sends[(*owner(scope), key)] = scope.principal_id, digest, receipt
                         return receipt
                 return prior[2]
-            if record.unknown_delivery:
-                refuse("unreconciled_delivery")
-            if self._max_output_tokens is not None and any(
-                not isinstance(event, UserMessage) for event in events
-            ):
-                refuse("model_interaction_resources")
-            if record.max_input_tokens != self._max_input_tokens:
-                refuse("changed_worker_token_envelope")
-            if (self._max_total_tokens is not None or self._max_input_tokens is not None) and (
-                record.current is not None
-                or len(events) != 1
-                or not isinstance(events[0], UserMessage)
-                or events[0].mode != "new_turn"
-            ):
-                refuse("worker_single_interaction")
-            if expected_turn is not None and expected_turn != record.session.active_root_turn:
-                raise ProviderError("conflict", retryable=False)
-            overrides: Object = {}
-            inputs: list[JsonValue] = []
-            is_result = all(isinstance(e, UserToolResult) for e in events)
-            if record.session.state == "running":
-                refuse("steer")
-            if record.session.state == "requires_action" and not is_result:
-                refuse("required_action_pending")
-            if is_result:
-                for input_ in events:
-                    if not isinstance(input_, UserToolResult):
-                        refuse("function_result")
-                    action = next(
-                        (a for a in record.session.required_actions if a.id == input_.action_id),
-                        None,
-                    )
-                    if action is None or action.kind != "function_result":
-                        refuse("unknown_function_action")
-                    result_input: Object = {
-                        "type": "function_result",
-                        "name": action.payload["name"],
-                        "call_id": action.call_id,
-                        "result": _text(input_.content),
-                    }
-                    if input_.is_error:
-                        result_input["is_error"] = True
-                    inputs.append(result_input)
+            overrides, is_result = self._send_overrides(record, events, expected_turn)
+            if prepared is not None and prepared.still_valid(record, expected, overrides):
+                # The slow reads ran on the committed snapshot and nothing they depend on
+                # changed: claim with that request, holding the records row briefly.
+                request = prepared.request
             else:
-                for input_ in events:
-                    if not isinstance(input_, UserMessage) or input_.mode != "new_turn":
-                        refuse("native_input_or_confirmation_or_steer")
-                    inputs.append({"type": "text", "text": _text(input_.content)})
-            overrides.update({"input": inputs, "background": True, "store": True})
-            authenticated = any(c.credential_ref is not None for c in connections)
-            if record.current is not None:
-                if not authenticated:
-                    await self._get(record, record.current)
-                if self._max_output_tokens is None and record.environment_id is None:
-                    raise ContinuityLost(
-                        record.session.binding.id,
-                        ("Gemini did not provide a reusable environment ID.",),
-                    )
-                overrides["previous_interaction_id"] = record.current
-                if self._max_output_tokens is None:
-                    overrides["environment"] = record.environment_id
-            request = await authenticated_template(
-                scope,
-                record.request,
-                expected,
-                connections,
-                self._mcp_secrets,
-                overrides=overrides,
-                gcs_secrets=self._gcs_secrets,
-            )
-            if record.current is not None and authenticated:
-                # Admission/authentication precedes this native history read.
-                await self._get(record, record.current)
-            if self._max_input_tokens is not None:
-                from mux.drivers.gemini.transport import TokenCountingTransport
-
-                if not isinstance(self._transport, TokenCountingTransport):
-                    refuse("worker_input_token_count")
-                count = await self._transport.count_input_tokens(request)
-                if type(count) is not int or count <= 0 or count > self._max_input_tokens:
-                    refuse("worker_input_token_limit")
+                request = await self._send_request(scope, record, expected, connections, overrides)
             root = record.root if is_result else str(uuid4())
             if root is None:
                 refuse("unknown_function_action")

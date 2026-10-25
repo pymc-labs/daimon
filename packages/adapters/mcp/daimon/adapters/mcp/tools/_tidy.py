@@ -571,7 +571,7 @@ async def run_action(
                     await mark_deleted(session, post_ids=[post.id], now=datetime.now(UTC))
 
     try:
-        await retry_fences(attempt, busy_error=PolicyBusyError)
+        await retry_fences(attempt, busy_error=PolicyBusyError, label="access_policy:tidy")
     except PolicyBusyError as exc:
         await _record_after_begin(
             runtime,

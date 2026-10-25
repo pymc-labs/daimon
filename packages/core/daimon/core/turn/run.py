@@ -600,7 +600,7 @@ async def _replace_dead_session(
                 active_turn_message_id=active_turn_message_id,
             )
 
-    return await retry_fences(attempt)
+    return await retry_fences(attempt, label="session_replacement")
 
 
 async def _replace_dead_session_locked(

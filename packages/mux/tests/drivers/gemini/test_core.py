@@ -1309,3 +1309,79 @@ async def test_a_stop_observation_holds_no_lock_while_it_reads_the_provider(
     assert wrote and stop.stopped and stop.outcome == "interrupted"
     t.get = real_get  # type: ignore[method-assign]  # retrieve still reads under the lock
     assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_a_send_whose_turn_moved_on_meanwhile_never_posts_on_stale_state(
+    setup: Setup,
+) -> None:
+    """The send's slow reads run before its transaction; if the session moved on in the
+    meantime (another turn became current), the stale request is never posted."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native())
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    real_get = t.get
+
+    async def get_while_another_turn_starts(interaction: str) -> Object:
+        raw = await real_get(interaction)
+        async with storage.transaction() as records:
+            record = records.sessions[s.ref.id]
+            record.current, record.root = "i9", "another-turn"
+            record.session = record.session.model_copy(
+                update={"state": "running", "active_root_turn": "another-turn"}
+            )
+        return raw
+
+    t.get = get_while_another_turn_starts  # type: ignore[method-assign]
+    posts = len(t.requests)
+    with pytest.raises(UnsupportedCapability):
+        await asyncio.wait_for(ma.events.send(SCOPE, s.ref, (MESSAGE,), key="second"), 5)
+    assert len(t.requests) == posts, "no POST on stale state"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sends_with_one_key_post_once(setup: Setup) -> None:
+    """Idempotency still holds with the slow reads outside the transaction."""
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native())
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.responses.append(native("i2"))
+    posts = len(t.requests)
+    receipts = await asyncio.wait_for(
+        asyncio.gather(
+            ma.events.send(SCOPE, s.ref, (MESSAGE,), key="same"),
+            ma.events.send(SCOPE, s.ref, (MESSAGE,), key="same"),
+        ),
+        5,
+    )
+    assert len(t.requests) == posts + 1, "one POST for one key"
+    assert {r.operation_id for r in receipts} == {"same"}
+
+
+@pytest.mark.asyncio
+async def test_a_send_chains_from_the_turn_that_finished_while_it_read(setup: Setup) -> None:
+    """Another turn completed while the send read the provider (the session is idle
+    again, so nothing refuses it): the request built from the snapshot names the old
+    interaction, so the send rebuilds it under the lock and continues from the new one,
+    never forking the conversation's history."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native())
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i9"] = native("i9")
+    real_get = t.get
+    moved = False
+
+    async def get_while_another_turn_finishes(interaction: str) -> Object:
+        nonlocal moved
+        raw = await real_get(interaction)
+        if not moved:
+            moved = True
+            async with storage.transaction() as records:
+                record = records.sessions[s.ref.id]
+                record.current, record.root = "i9", "another-turn"
+        return raw
+
+    t.get = get_while_another_turn_finishes  # type: ignore[method-assign]
+    t.responses.append(native("i10"))
+    await asyncio.wait_for(ma.events.send(SCOPE, s.ref, (MESSAGE,), key="second"), 5)
+    assert t.requests[-1]["previous_interaction_id"] == "i9"
