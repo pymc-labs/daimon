@@ -19,8 +19,11 @@ Each lane uses its own environment and repository variables for deployment. The 
 `preview-notebook` is a dedicated, optional standalone host, disabled by default.
 It receives only notebook settings, retains the image's root/SETUID/SETGID jail,
 and stores `/data/notebooks` in the lane-scoped `preview-notebooks` volume.
-The container is capped at 768 MiB and 0.5 CPU: use tiny QA fixtures, not sampling
-workloads. Keep ALLOW_UNJAILED_SPAWN, ALLOW_EDITABLE and ALLOW_HTTP_LINKS off.
+The container is capped at 768 MiB, 0.5 CPU and 256 PIDs: use tiny QA fixtures, not sampling
+workloads. Boot refuses an ADMIN_SECRET shorter than 32 characters or empty
+ALLOWED_ORIGINS. Keep ALLOW_UNJAILED_SPAWN, ALLOW_EDITABLE and ALLOW_HTTP_LINKS off.
+`no-new-privileges` is not enabled: jail privilege tests have not been verified
+inside the built notebook image with that option.
 
 **King setup, preview only, after merge:**
 
@@ -52,13 +55,34 @@ workloads. Keep ALLOW_UNJAILED_SPAWN, ALLOW_EDITABLE and ALLOW_HTTP_LINKS off.
   }
   ```
 
-  Confirm `lanes-caddy` is attached to Preview's default lane network, as for
-  `preview-parity-mcp`. No container ports are published. Proxy the whole tree,
+  Attach `lanes-caddy` to Preview's default network after that network exists.
+  Persist this idempotent attachment in the instance startup metadata and the
+  host's lane deploy/reset hook (operator-owned infrastructure outside this repo):
+
+  ```sh
+  docker inspect lanes-caddy --format '{{json .NetworkSettings.Networks}}' |
+    jq -e 'has("lane-preview_default")' >/dev/null ||
+    docker network connect lane-preview_default lanes-caddy
+  ```
+
+  Re-run this check after every deploy/reset/down-and-up, then check public health;
+  a one-time manual attachment is insufficient if the network gets recreated.
+  This compose publishes no ports. If persistent attachment cannot be arranged,
+  an operator override may instead add `ports: ["127.0.0.1:18001:8001"]` and route
+  a host-network proxy to `127.0.0.1:18001`. Containerized Caddy's own loopback
+  cannot reach the VM loopback: use a supported host-network proxy arrangement,
+  persist the override in deployment assets, and validate it after reset too.
+  Proxy the whole tree,
   preserving Host, Authorization, upload PUTs and WebSocket upgrades. Provision
   DNS/TLS; update all origins if the VM IP changes. Do not add ORIGIN_BASE:
   this shared origin admits only the controlled QA tenant above.
-- Redeploy Preview through the lane workflow. Every lane deploy builds
-  `lanes/notebook-host:<lane>-<SHA>` alongside the unchanged Daimon image.
+- Set the GitHub **lane-preview environment variable** `LANE_NOTEBOOK_HOST=true`
+  before redeploying; this PR does not set it. Keep it unset on other lanes.
+  Any lane enabling the profile must also set this variable to build its image.
+  Redeploy Preview through the lane workflow. Only environments with this variable
+  set to `true` build `lanes/notebook-host:<lane>-<SHA>` alongside the Daimon image.
+  Image rendering remains unconditional; enabling the profile without building
+  its matching tag fails at image pull.
   `DAIMON_NOTEBOOK_IMAGE` carries its reference; the workflow renders only that
   variable into the copied compose before `sudo lane deploy --compose ...`.
   This persists the matching image in the host's recorded compose, including
@@ -76,9 +100,35 @@ expiry, unlisted-tenant refusal, list/delete and absence readbacks. Check persis
 across an authorized host restart, then delete only created fixtures. Minting alone
 does not pass row 52; keep it blocked until these checks pass.
 
-Rollback: stop only `preview-notebook`, restore Caddyfile in place and startup
-metadata from the recorded backups, validate/reload, restore the exact prior secret
-bytes as a new version, and redeploy the previous reviewed compose/images.
+Before setup, in the operator's private root shell on the VM, set `PREVIEW_COMPOSE`
+to the deployed compose path and `BACKUP` to the timestamped directory above.
+Save the compose and any `limits.yml`, record `PREVIOUS_IMAGE` / `PREVIOUS_SHA`
+from `sudo lane status preview --json`, and save the previous secret bytes as
+`$BACKUP/lane-preview.env` (mode 0600). Name the ingress backups `Caddyfile` and
+`startup-script.sh`. Keep these files private; none belongs in the PR.
+
+Rollback commands (authorized operator only, VM root shell; set the recorded
+`BACKUP`, `PREVIEW_COMPOSE`, `PREVIOUS_IMAGE`, `PREVIOUS_SHA`, `OPERATOR` and
+`CHANGE_URL`; use the recorded project/zone/instance):
+
+```sh
+docker compose -p lane-preview --env-file "$(dirname "$PREVIEW_COMPOSE")/.env" \
+  -f "$PREVIEW_COMPOSE" --profile preview-notebook stop preview-notebook
+# Restore in place: Caddy may bind-mount this inode.
+cat "$BACKUP/Caddyfile" > /etc/daimon-lanes/Caddyfile
+gcloud compute instances add-metadata daimon-lanes --project pymc-daimon-dev \
+  --zone us-east4-c --metadata-from-file startup-script="$BACKUP/startup-script.sh"
+docker exec lanes-caddy caddy validate --config /etc/caddy/Caddyfile
+docker exec lanes-caddy caddy reload --config /etc/caddy/Caddyfile
+gcloud secrets versions add lane-preview-env --project pymc-daimon-dev \
+  --data-file="$BACKUP/lane-preview.env" >/dev/null
+sudo lane deploy preview --image "$PREVIOUS_IMAGE" --sha "$PREVIOUS_SHA" \
+  --compose "$BACKUP/compose.yml" --actor "$OPERATOR" --run-url "$CHANGE_URL"
+```
+
+Back up the deployed compose as `$BACKUP/compose.yml` before setup; restore any
+operator-owned `limits.yml`/proxy override from its backup before that deploy.
+Re-check the persistent Caddy attachment and existing Preview health afterward.
 Retain `preview-notebooks`; do not remove volumes during rollback.
 
 ## Preview parity MCP fixture (rows 15 and 34)

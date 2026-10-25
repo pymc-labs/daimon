@@ -193,7 +193,6 @@ services:
       - preview-parity-calls:/home/daimon
     restart: unless-stopped
 
-
   preview-notebook:
     profiles: ["preview-notebook"]
     # The workflow resolves this variable before handing compose to the host CLI.
@@ -209,8 +208,15 @@ services:
       DAIMON_NOTEBOOK__ALLOWED_ORIGINS: ${DAIMON_NOTEBOOK__ALLOWED_ORIGINS:-}
     volumes:
       - preview-notebooks:/data/notebooks
-    # Default lane network, also used by preview-parity-mcp and lanes-caddy.
+    # Default lane network; ingress must attach lanes-caddy (see README).
     # Retain image root + Docker's default SETUID/SETGID capabilities for the jail.
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        [ "$${#DAIMON_NOTEBOOK__ADMIN_SECRET}" -ge 32 ] &&
+        [ -n "$$DAIMON_NOTEBOOK__ALLOWED_ORIGINS" ] ||
+        { echo 'notebook settings missing or unsafe' >&2; exit 1; };
+        exec uv run python -m notebook_host
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8001/health"]
       interval: 15s
@@ -219,6 +225,7 @@ services:
       start_period: 30s
     mem_limit: 768m
     cpus: 0.5
+    pids_limit: 256
     restart: unless-stopped
 
 volumes:

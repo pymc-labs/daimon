@@ -104,7 +104,7 @@ jobs:
           cache-from: type=gha,scope=daimon-lane
           cache-to: type=gha,mode=max,scope=daimon-lane,ignore-error=true
       - name: Build and push notebook host
-        if: needs.prepare.outputs.action == 'deploy'
+        if: needs.prepare.outputs.action == 'deploy' && vars.LANE_NOTEBOOK_HOST == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -133,6 +133,9 @@ jobs:
             # Render only the image variable; never interpolate lane secrets here.
             sed "s|\${DAIMON_NOTEBOOK_IMAGE:-notebook-host:unconfigured}|$DAIMON_NOTEBOOK_IMAGE|g" \
               deploy/lanes/compose.lane.yml > "$RUNNER_TEMP/compose.lane.yml"
+            grep -qF "image: $DAIMON_NOTEBOOK_IMAGE" "$RUNNER_TEMP/compose.lane.yml" || {
+              echo 'notebook image not rendered' >&2; exit 1;
+            }
             gcloud compute scp "$RUNNER_TEMP/compose.lane.yml" "$HOST:$remote" \
               --project="$PROJECT" --zone="$ZONE" --tunnel-through-iap --quiet
             printf -v command '%q ' sudo lane deploy "$LANE" --image "$DAIMON_LANE_IMAGE" \
