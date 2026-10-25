@@ -998,6 +998,9 @@ class EndNotice:
     #: A wake delivered the root's answer: settle the card, post no notice.
     delivered: bool
     attempts: int
+    #: The card was shown with a cost still being counted: once the cost settles,
+    #: edit only the card with it, post nothing (`end_notice = 'cost_owed'`).
+    cost_only: bool = False
 
 
 async def claim_end_notices(
@@ -1019,7 +1022,7 @@ async def claim_end_notices(
                 select(FleetRunRow)
                 .where(
                     FleetRunRow.platform == platform,
-                    FleetRunRow.end_notice == "owed",
+                    FleetRunRow.end_notice.in_(("owed", "cost_owed")),
                     FleetRunRow.end_notice_due_at <= now,
                 )
                 .order_by(FleetRunRow.end_notice_due_at, FleetRunRow.id)
@@ -1043,13 +1046,23 @@ async def claim_end_notices(
                 row.end_notice = None
                 row.end_notice_due_at = None
                 continue
-            started, delivered = await task_continuations.run_end_wakes(session, run=run)
-            if started is not None and started + WAKE_TURN_GRACE > now:
-                row.end_notice_due_at = started + WAKE_TURN_GRACE
-                continue
+            cost_only = row.end_notice == "cost_owed"
+            if cost_only:
+                # Its end was shown already: only the card's cost is owed, no wake waits.
+                delivered = True
+            else:
+                started, delivered = await task_continuations.run_end_wakes(session, run=run)
+                if started is not None and started + WAKE_TURN_GRACE > now:
+                    row.end_notice_due_at = started + WAKE_TURN_GRACE
+                    continue
             if row.end_notice_attempts >= END_NOTICE_MAX_ATTEMPTS:
-                row.end_notice = "given_up"
-                log.error("fleet.end_notice_given_up", run_id=str(run.id), reason="attempts")
+                if cost_only:
+                    # The card keeps its honest "cost so far"; nothing is released.
+                    row.end_notice = "shown"
+                    log.error("fleet.cost_update_given_up", run_id=str(run.id), reason="attempts")
+                else:
+                    row.end_notice = "given_up"
+                    log.error("fleet.end_notice_given_up", run_id=str(run.id), reason="attempts")
                 continue
             row.end_notice_attempts += 1
             row.end_notice_due_at = now + min(
@@ -1062,6 +1075,7 @@ async def claim_end_notices(
                     card_message_id=row.card_message_id,
                     delivered=delivered,
                     attempts=row.end_notice_attempts,
+                    cost_only=cost_only,
                 )
             )
         await session.flush()
@@ -1073,18 +1087,28 @@ async def settle_end_notice(
     *,
     tenant_id: uuid.UUID,
     run_id: uuid.UUID,
-    outcome: Literal["shown", "given_up"],
+    outcome: Literal["shown", "given_up", "cost_owed"],
 ) -> bool:
-    """Close an owed notice; False when something else already closed it."""
+    """Close an owed notice or cost update; False when something else already closed it.
+
+    `cost_owed`: the end was shown while a worker's cost was still being counted, so
+    only the card's cost is still owed, due after the first backoff.
+    """
+    owed = {"end_notice": outcome}
+    if outcome == "cost_owed":
+        owed |= {
+            "end_notice_due_at": func.now() + _END_NOTICE_BACKOFF,
+            "end_notice_attempts": 0,
+        }
     async with sessionmaker.begin() as session:
         settled = await session.scalar(
             update(FleetRunRow)
             .where(
                 FleetRunRow.tenant_id == tenant_id,
                 FleetRunRow.id == run_id,
-                FleetRunRow.end_notice == "owed",
+                FleetRunRow.end_notice.in_(("owed", "cost_owed")),
             )
-            .values(end_notice=outcome)
+            .values(**owed)
             .returning(FleetRunRow.id)
         )
     return settled is not None
@@ -1097,12 +1121,26 @@ async def record_card(
     run_id: uuid.UUID,
     message_id: str,
     terminal: bool,
+    cost_owed: bool = False,
 ) -> None:
-    """Remember the run's card; a rendered terminal card settles an owed notice."""
+    """Remember the run's card; a rendered terminal card settles an owed notice.
+
+    One shown while a worker's cost is still being counted (`cost_owed`) leaves the
+    run owing a cost update instead: the run-end poller edits the card again once
+    the cost settles. A terminal card with its final cost settles either.
+    """
     values: dict[str, Any] = {"card_message_id": message_id}
-    if terminal:
+    if terminal and cost_owed:
+        owed = FleetRunRow.end_notice == "owed"
+        values["end_notice"] = case((owed, "cost_owed"), else_=FleetRunRow.end_notice)
+        values["end_notice_due_at"] = case(
+            (owed, func.now() + _END_NOTICE_BACKOFF), else_=FleetRunRow.end_notice_due_at
+        )
+        values["end_notice_attempts"] = case((owed, 0), else_=FleetRunRow.end_notice_attempts)
+    elif terminal:
         values["end_notice"] = case(
-            (FleetRunRow.end_notice == "owed", "shown"), else_=FleetRunRow.end_notice
+            (FleetRunRow.end_notice.in_(("owed", "cost_owed")), "shown"),
+            else_=FleetRunRow.end_notice,
         )
     async with sessionmaker.begin() as session:
         await session.execute(

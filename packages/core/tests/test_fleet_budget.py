@@ -3084,31 +3084,34 @@ async def test_watch_logs_why_it_releases_a_terminal_worker(sm):
 
 async def test_a_runs_cost_is_its_own_workers_observed_usage_before_any_debit(sm):
     """J3's cost line: read fresh from this run's rows, priced usage counts at once."""
-    from daimon.core.channel_budget import read_fleet_run_cost
+    from daimon.core.agent_model_names import model_name
+    from daimon.core.channel_budget import FleetCost, read_fleet_run_cost
 
     parent, run = await setup(sm)
     worker = await add(sm, parent, budget="2")
     assert (await reserve(sm, parent, worker)).admitted
     assert await read_fleet_run_cost(
         sm, parent=parent, prices=tariffs(parent), markup=Decimal(1)
-    ) == Decimal(0)
+    ) == FleetCost(Decimal(0))
     await usage(sm, parent, run, worker, inputs=600_000, outputs=0)
     cost = await read_fleet_run_cost(sm, parent=parent, prices=tariffs(parent), markup=Decimal(1))
-    assert cost == Decimal("1.2"), "the measured usage, not the stored run figure"
+    # The measured usage, not the stored run figure; not yet on the ledger (its
+    # infrastructure is unknown), so it is a cost so far, naming the worker's model.
+    assert cost == FleetCost(Decimal("1.2"), (model_name(parent.spec.model),))
     # Another run's spend is never this run's.
     other_parent, other = await next_run(sm, parent, run)
     stranger = await add(sm, other_parent, budget="2")
     assert (await reserve(sm, other_parent, stranger)).admitted
     await usage(sm, other_parent, other, stranger, inputs=600_000, outputs=0)
-    assert await read_fleet_run_cost(
-        sm, parent=parent, prices=tariffs(parent), markup=Decimal(1)
-    ) == Decimal("1.2")
+    again = await read_fleet_run_cost(sm, parent=parent, prices=tariffs(parent), markup=Decimal(1))
+    assert again is not None and again.usd == Decimal("1.2")
 
 
 async def test_a_slow_or_failed_cost_read_says_not_available_never_zero(monkeypatch):
     import asyncio
 
     from daimon.core import channel_budget, fleet_orchestration
+    from daimon.core.channel_budget import FleetCost
     from daimon.core.fleet_orchestration import (
         FleetOrchestrator,
         HostFleetPorts,
@@ -3133,8 +3136,8 @@ async def test_a_slow_or_failed_cost_read_says_not_available_never_zero(monkeypa
     orchestrator = FleetOrchestrator(Failing())  # pyright: ignore[reportArgumentType]
     assert await orchestrator.run_cost(parent, run) is None  # pyright: ignore[reportArgumentType]
     assert fleet_cost_sentence(None) == "This cost isn't available yet."
-    assert fleet_cost_sentence(Decimal("0.001911")) == "This cost less than $0.01."
-    assert fleet_cost_sentence(Decimal("0.425")) == "This cost $0.43."
+    assert fleet_cost_sentence(FleetCost(Decimal("0.001911"))) == "This cost less than $0.01."
+    assert fleet_cost_sentence(FleetCost(Decimal("0.425"))) == "This cost $0.43."
 
 
 async def test_a_held_tenant_lock_never_makes_the_watch_park_a_pooled_connection(

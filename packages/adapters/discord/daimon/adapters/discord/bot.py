@@ -3949,9 +3949,14 @@ class DaimonBot(commands.Bot):
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
 
     async def _post_fleet_run_end(self, notice: EndNotice) -> EndOutcome:
-        """Settle an ended run's card and post its line in the run's own thread."""
+        """Settle an ended run's card and post its line in the run's own thread.
+
+        The card carries the run's cost. While a worker's usage is still being counted
+        it says "cost so far" and the run owes a cost update ("cost_owed"); a cost
+        update (`notice.cost_only`) edits only the card, once the cost has settled.
+        """
         from daimon.adapters.discord.posted_controls.fleet import record_card, show_fleet_ended
-        from daimon.core.fleet_orchestration import FleetRefused
+        from daimon.core.fleet_orchestration import FleetRefused, fleet_cost_line
 
         run = notice.run
         try:
@@ -3963,8 +3968,18 @@ class DaimonBot(commands.Bot):
                 or not await self._may_post_in(tenant_id=run.tenant_id, channel=channel)
             ):
                 return "give_up"
-            await show_fleet_ended(channel, notice, record_card(self.runtime.sessionmaker))
-            return "shown"
+            reader = getattr(self.runtime, "fleet_run_cost", None)
+            cost = await reader(run.tenant_id, run.id) if reader is not None else None
+            final = cost is not None and not cost.pending
+            if notice.cost_only and not final:
+                return "retry"  # still being counted: the claim's backoff applies
+            await show_fleet_ended(
+                channel,
+                notice,
+                record_card(self.runtime.sessionmaker),
+                cost=fleet_cost_line(cost) if reader is not None else None,
+            )
+            return "shown" if final or notice.cost_only or reader is None else "cost_owed"
         except (ValueError, FleetRefused):
             return "give_up"
         except discord.HTTPException as exc:

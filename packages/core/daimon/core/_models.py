@@ -4022,14 +4022,14 @@ class FleetRun(Base):
             name="ck_fleet_run_amounts",
         ),
         CheckConstraint(
-            "end_notice IS NULL OR end_notice IN ('owed', 'shown', 'given_up')",
+            "end_notice IS NULL OR end_notice IN ('owed', 'cost_owed', 'shown', 'given_up')",
             name="ck_fleet_run_end_notice",
         ),
         Index(
             "ix_fleet_run_end_notice_owed",
             "platform",
             "end_notice_due_at",
-            postgresql_where=text("end_notice = 'owed'"),
+            postgresql_where=text("end_notice IN ('owed', 'cost_owed')"),
         ),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)

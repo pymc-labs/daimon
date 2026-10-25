@@ -46,7 +46,8 @@ class TestDiscordRuntime:
             "ownership_lost",
             "gateway_lease",
             "fleet_card_factory",
-        }, f"expected 13 fields, got {fields}"
+            "fleet_run_cost",
+        }, f"expected 14 fields, got {fields}"
         factory_field = next(
             field
             for field in dataclasses.fields(DiscordRuntime)

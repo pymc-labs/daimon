@@ -916,6 +916,19 @@ measured, applied revision on the worker's binding. A Managed Agents worker's
 debits are the ledger rows keyed `turn:<its session>:<event>` for that session's
 `usage_events`. It is settled once every call has its debit.
 
+A fleet's cost on its card and in the root's reply is never shown as final while
+a worker's usage is still pending:
+- Card: "Cost so far $0.01 · GPT-6 Astra's cost is still being counted".
+- Reply: "This cost $0.01 so far; ...".
+
+A worker is pending when the newest revision of one of its observations isn't on
+the ledger yet. A superseded revision doesn't count. A terminal card shown with a
+pending cost leaves the run's `end_notice` at `cost_owed`. The run-end poller then
+reads the cost by tenant and run, with no frozen root. It edits only that card, with
+no new message, once the cost settles. It backs off from 30 s to 15 min over six
+attempts. If the cost is still pending after that, the card keeps "so far" and one
+`fleet.cost_update_given_up` line is logged.
+
 Prepared turns for an explicitly configured alternate provider use its authorized
 native session and bound observation recorder. Usage frames can arrive without
 a display event; nullable measurements and pending accounting stay intact.

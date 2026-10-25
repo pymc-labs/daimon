@@ -34,6 +34,7 @@ from mux.contracts.resources import (
 from pydantic import JsonValue, TypeAdapter
 
 if TYPE_CHECKING:
+    from daimon.core.channel_budget import FleetCost
     from daimon.core.fleet import FleetRun, FleetWorker
     from daimon.core.neutral_resources import ResolvedWorkerSpec, WorkerLimits, WorkerPermissions
     from daimon.core.pricing import ModelRates, ProviderPrice
@@ -390,11 +391,36 @@ def fleet_cost_words(usd: Decimal | None) -> str:
     return f"${usd.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
 
 
-def fleet_cost_sentence(usd: Decimal | None) -> str:
-    """The plain line a fleet's result reply ends with (J3: "the cost is shown")."""
-    if usd is None:
+def _still_counted(pending: tuple[str, ...]) -> str:
+    """ "GPT-6 Astra's cost is still being counted", for every model named."""
+    owners = [f"{name}'s" for name in pending]
+    named = owners[0] if len(owners) == 1 else ", ".join(owners[:-1]) + " and " + owners[-1]
+    return (
+        f"{named} cost is still being counted"
+        if len(owners) == 1
+        else (f"{named} costs are still being counted")
+    )
+
+
+def fleet_cost_line(cost: FleetCost | None) -> str:
+    """The card's cost, never final-looking while a worker's usage is still pending."""
+    if cost is None:
+        return "Cost not available yet"
+    if cost.pending:
+        return f"Cost so far {fleet_cost_words(cost.usd)} · {_still_counted(cost.pending)}"
+    return f"Cost {fleet_cost_words(cost.usd)}"
+
+
+def fleet_cost_sentence(cost: FleetCost | None) -> str:
+    """The plain line a fleet's result reply ends with (J3: "the cost is shown").
+
+    The same rule as the card: while a worker's usage is pending, a cost so far.
+    """
+    if cost is None:
         return "This cost isn't available yet."
-    return f"This cost {fleet_cost_words(usd)}."
+    if cost.pending:
+        return f"This cost {fleet_cost_words(cost.usd)} so far; {_still_counted(cost.pending)}."
+    return f"This cost {fleet_cost_words(cost.usd)}."
 
 
 def fleet_limits_sentence(max_workers: int, budget_usd: Decimal) -> str:
@@ -1428,18 +1454,33 @@ class FleetOrchestrator:
         }
 
     async def _cost_fields(self, parent: WorkerPermissions, run: FleetRun) -> dict[str, JsonValue]:
-        """The reply's cost line, and the figure behind it (None while not available)."""
+        """The reply's cost line, and the figure behind it (None while not available).
+
+        While a worker's usage is still being counted the figure is a cost so far,
+        and the line says so, naming the model.
+        """
         cost = await self._run_cost(parent, run)
         return {
             "cost": fleet_cost_sentence(cost),
-            "cost_usd": None if cost is None else str(cost),
+            "cost_usd": None if cost is None else str(cost.usd),
         }
 
-    async def run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal | None:
+    async def run_cost(self, parent: WorkerPermissions, run: FleetRun) -> FleetCost | None:
         """What the run's workers cost so far, for the result reply and the card."""
         return await self._run_cost(parent, run)
 
-    async def _run_cost(self, parent: WorkerPermissions, run: FleetRun) -> Decimal | None:
+    async def ended_run_cost(self, tenant_id: uuid.UUID, run_id: uuid.UUID) -> FleetCost | None:
+        """An ended run's cost read fresh by tenant and run (no frozen root), or None."""
+        reader = getattr(self._owner(), "ended_run_cost", None)
+        if reader is None:
+            return None
+        try:
+            return await reader(tenant_id, run_id)
+        except Exception as error:  # a cost read never blocks the card
+            log.warning("fleet.run_cost_unavailable", error=type(error).__name__)
+            return None
+
+    async def _run_cost(self, parent: WorkerPermissions, run: FleetRun) -> FleetCost | None:
         """The run's cost read fresh, or None: never the stored figure, which trails."""
         reader = getattr(self._owner(), "run_cost", None)
         if reader is None:
@@ -1633,7 +1674,7 @@ class HostFleetPorts:
             uuid.UUID, tuple[dict[uuid.UUID, asyncio.Event], asyncio.Event, asyncio.Task[None]]
         ] = {}
 
-    async def run_cost(self, parent: WorkerPermissions, run_id: uuid.UUID) -> Decimal | None:
+    async def run_cost(self, parent: WorkerPermissions, run_id: uuid.UUID) -> FleetCost | None:
         """This run's cost from its own rows, bounded in time; None if not available.
 
         A pooled connection under load, or a run whose usage can't be priced yet,
@@ -1649,6 +1690,28 @@ class HostFleetPorts:
             async with asyncio.timeout(RUN_COST_TIMEOUT_S):
                 return await read_fleet_run_cost(
                     self.sessions, parent=parent, prices=self.prices, markup=self.markup
+                )
+        except (TimeoutError, FleetConflict, DaimonError) as error:
+            log.warning("fleet.run_cost_unavailable", error=type(error).__name__)
+            return None
+
+    async def ended_run_cost(self, tenant_id: uuid.UUID, run_id: uuid.UUID) -> FleetCost | None:
+        """An ended run's cost by tenant and run, for its card once the root turn is over.
+
+        Bounded like `run_cost`; None when not available (the card keeps what it said).
+        """
+        from daimon.core.channel_budget import read_ended_run_cost
+        from daimon.core.errors import DaimonError
+        from daimon.core.fleet import FleetConflict
+
+        try:
+            async with asyncio.timeout(RUN_COST_TIMEOUT_S):
+                return await read_ended_run_cost(
+                    self.sessions,
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    prices=self.prices,
+                    markup=self.markup,
                 )
         except (TimeoutError, FleetConflict, DaimonError) as error:
             log.warning("fleet.run_cost_unavailable", error=type(error).__name__)

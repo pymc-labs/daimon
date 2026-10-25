@@ -2648,7 +2648,7 @@ async def test_an_ended_run_settles_its_stored_card_and_says_so():
     assert "@everyone" not in line and "<#50>" not in line
     assert kwargs["allowed_mentions"].everyone is False
     # Remembered, but not settled here: the line was still owed.
-    record.assert_awaited_once_with(notice.run, card, False)
+    record.assert_awaited_once_with(notice.run, card, False, cost_owed=False)
 
 
 async def test_a_card_found_by_its_run_is_edited_when_none_is_stored():
@@ -2826,3 +2826,108 @@ def test_a_claude_worker_of_an_app_repository_agent_shows_its_repository_as_lost
     view = build_fleet_view(run(), (replace(copy, spec=spec, model="claude-opus-5-5"),))
     # The short loss line (#1532): what this worker runs without, in plain words.
     assert any("(no repository)" in text for text in _view_texts(view)), _view_texts(view)
+
+
+async def test_an_ended_card_never_shows_a_final_cost_while_a_worker_is_being_counted():
+    """J10 rehearsal: the card said "Cost $0.01" with Astra's usage still pending."""
+    from daimon.core.channel_budget import FleetCost
+
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (replace(run(), status="completed"), (worker(),))
+    owner.run_cost = AsyncMock(
+        side_effect=[
+            FleetCost(Decimal("0.0145"), ("GPT-6 Astra",)),
+            FleetCost(Decimal("0.184408")),
+        ]
+    )
+    send.return_value = _message(900)
+    edit.side_effect = lambda message, **kwargs: message
+    record = AsyncMock()
+    card._record = record
+    await card.refresh()
+    text = "\n".join(_view_texts(send.call_args.kwargs["view"]))
+    assert "Cost so far $0.01 · GPT-6 Astra's cost is still being counted · Budget cap" in text
+    assert "Cost $0.01 ·" not in text
+    assert record.await_args.kwargs == {"cost_owed": True}
+    # Read again on the next render: now settled, and kept.
+    await card.refresh()
+    text = "\n".join(_view_texts(edit.call_args.kwargs["view"]))
+    assert "Cost $0.18 · Budget cap" in text and "so far" not in text
+    assert record.await_args.kwargs == {"cost_owed": False}
+    await card.refresh()
+    assert owner.run_cost.await_count == 2
+
+
+def _cost_bot(thread, cost):
+    bot = _run_end_bot(thread)
+    bot.runtime.fleet_run_cost = AsyncMock(return_value=cost)
+    return bot
+
+
+async def test_a_cost_update_still_being_counted_waits_and_touches_nothing(monkeypatch):
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.adapters.discord.posted_controls import fleet as fleet_card
+    from daimon.core.channel_budget import FleetCost
+
+    shown = AsyncMock()
+    monkeypatch.setattr(fleet_card, "show_fleet_ended", shown)
+    thread = _ended_thread()
+    thread.guild.id = 60
+    notice = replace(_notice(()), cost_only=True, delivered=True)
+    for cost in (FleetCost(Decimal("0.01"), ("GPT-6 Astra",)), None):
+        bot = _cost_bot(thread, cost)
+        assert await DaimonBot._post_fleet_run_end(bot, notice) == "retry"  # type: ignore[arg-type]
+    shown.assert_not_awaited()
+    thread.send.assert_not_awaited()
+
+
+async def test_a_settled_cost_update_edits_only_the_card_with_the_settled_total():
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.core.channel_budget import FleetCost
+
+    card = _ended_card(with_controls=False)
+    thread = _ended_thread(stored=card)
+    thread.guild.id = 60
+    notice = replace(
+        _notice((worker(ordinal=1, status="succeeded"),), card_message_id="700"),
+        cost_only=True,
+        delivered=True,
+    )
+    bot = _cost_bot(thread, FleetCost(Decimal("0.184408")))
+    assert await DaimonBot._post_fleet_run_end(bot, notice) == "shown"  # type: ignore[arg-type]
+    text = "\n".join(_view_texts(card.edit.await_args.kwargs["view"]))
+    assert "Cost $0.18 · Budget cap" in text
+    thread.send.assert_not_awaited()  # no second end line, no new message
+
+
+async def test_an_end_posted_with_a_cost_still_being_counted_says_so_and_owes_it():
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.core.channel_budget import FleetCost
+
+    card = _ended_card(with_controls=False)
+    thread = _ended_thread(stored=card)
+    thread.guild.id = 60
+    notice = _notice((worker(ordinal=1, status="succeeded"),), card_message_id="700")
+    bot = _cost_bot(thread, FleetCost(Decimal("0.0145"), ("GPT-6 Astra",)))
+    assert await DaimonBot._post_fleet_run_end(bot, notice) == "cost_owed"  # type: ignore[arg-type]
+    text = "\n".join(_view_texts(card.edit.await_args.kwargs["view"]))
+    assert "Cost so far $0.01 · GPT-6 Astra's cost is still being counted" in text
+
+
+async def test_a_cost_update_never_posts_a_card_it_cannot_find():
+    from daimon.adapters.discord.posted_controls.fleet import show_fleet_ended
+
+    notice = replace(
+        _notice((worker(ordinal=1, status="succeeded"),)), cost_only=True, delivered=True
+    )
+    for card, failure in (
+        (None, None),
+        (_ended_card(), discord.NotFound(MagicMock(status=404), "gone")),
+    ):
+        if card is not None:
+            card.edit.side_effect = failure
+        thread = _ended_thread(card)
+        record = AsyncMock()
+        await show_fleet_ended(thread, notice, record, cost="Cost $0.18")
+        thread.send.assert_not_awaited()
+        record.assert_not_awaited()
