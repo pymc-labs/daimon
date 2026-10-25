@@ -3366,3 +3366,74 @@ async def test_every_ledger_insert_takes_the_tenant_share_lock_first(sm):
         )
     )
     assert writers == [], writers
+
+
+async def test_concurrent_run_watches_share_one_locked_refresh_per_tenant(sm, monkeypatch):
+    """Smokes dce44708 and 7da21ee3: the tenant fleet lock `fleet:<tenant>` had hundreds of
+    waits of up to 16 s. Its holder was the passive watch refresh: every live run's watch
+    retook the lock every BUDGET_LOCKED_REFRESH_S for a pass that row-locks, recomputes
+    and persists the whole tenant graph, so N runs held it N times as often for the same
+    work. One locked pass per tenant per interval now refreshes every run's exposure;
+    the other watches decide from the snapshot (and still cancel an overrun), and each
+    run still persists its own priced floor under the lock at least every
+    `own_refresh_s` (a pass prices only its caller's run)."""
+    from daimon.core import channel_budget
+
+    parent, run = await setup(sm, cap="2", funds="10")
+    runs = [(parent, run), *[await next_run(sm, parent, run) for _ in range(3)]]
+    workers = []
+    for index, (run_parent, _) in enumerate(runs):
+        # The last run's worker overruns its $0.01 hold once its usage is recorded.
+        worker = await add(sm, run_parent, budget=".01" if index == 3 else ".5")
+        assert (await reserve(sm, run_parent, worker)).admitted
+        workers.append(worker)
+    overrun_parent, overrun_run = runs[3]
+    await usage(sm, overrun_parent, overrun_run, workers[3], inputs=10_000, outputs=None)
+
+    passes: list[UUID] = []
+    real = channel_budget.produce_fleet_budget
+
+    async def counted(session, *, parent, **kwargs):
+        passes.append(parent.fleet.run_id)
+        return await real(session, parent=parent, **kwargs)
+
+    monkeypatch.setattr(channel_budget, "produce_fleet_budget", counted)
+    events = [asyncio.Event() for _ in runs]
+    finished = asyncio.Event()
+    tasks = [
+        asyncio.create_task(
+            watch_fleet_budget(
+                sessionmaker=sm,
+                parent=run_parent,
+                prices=tariffs(run_parent),
+                markup=Decimal(1),
+                cancelled={worker.id: event},
+                finished=finished,
+                poll_interval=0.02,
+                read_timeout=3,
+                locked_refresh_s=0.4,
+                own_refresh_s=10,
+            )
+        )
+        for (run_parent, _), worker, event in zip(runs, workers, events, strict=True)
+    ]
+    try:
+        await asyncio.wait_for(events[3].wait(), 5)  # the overrun is still cancelled
+        await asyncio.sleep(0.5)  # past every run's first pass
+        before = len(passes)
+        await asyncio.sleep(2.0)
+        steady = len(passes) - before
+        finished.set()
+        assert await asyncio.wait_for(asyncio.gather(*tasks), 5) == ["finished"] * 4
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert not any(event.is_set() for event in events[:3]), "only the overrun is cancelled"
+    # Each run takes its own first pass; then about one per 0.4 s for the whole tenant:
+    # ~5 in 2 s, not one per run per interval (four runs: ~20).
+    assert set(passes) == {run_parent.fleet.run_id for run_parent, _ in runs}
+    assert steady <= 8, steady
+    # The overrunning worker's priced floor is persisted (by its own run's pass).
+    _, persisted = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=overrun_run.id)
+    assert {w.id: w.reserved_usd for w in persisted}[workers[3].id] == Decimal(".02")
