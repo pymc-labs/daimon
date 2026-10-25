@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from secrets import randbits
-from typing import TYPE_CHECKING, Protocol
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
@@ -29,14 +28,12 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.discord_gateway_lease import GatewayLease, GatewayLeaseLost
-from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.worker_ownership import (
     OWNER_LOSS_GRACE_S,
     OWNER_PROBE_INTERVAL_S,
     OWNER_PROBE_TIMEOUT_S,
     OWNER_RETRY_BUDGET_S,
 )
-from daimon.core.turn.admission import AdmissionGrant
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy import text
@@ -44,31 +41,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
-    from daimon.adapters.discord.lifecycle import EditFn, SendFn
-    from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard, ParentResolver
-    from daimon.core.channel_budget import FleetCost
-    from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
-    from daimon.core.neutral_resources import WorkerPermissions
-    from daimon.core.pricing import ModelRates, ProviderPrice
-    from daimon.core.stores.agent_posts import AgentPostRow
-
-    import discord
-
-
-class FleetCardFactory(Protocol):
-    def __call__(
-        self,
-        thread: discord.abc.Messageable,
-        requester_id: int,
-        send: SendFn,
-        edit: EditFn,
-        *,
-        run_id: UUID | None = None,
-        turn_card_intent_id: UUID | None = None,
-        recorded_post: AgentPostRow | None = None,
-        on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
-        wake_id: UUID | None = None,
-    ) -> DiscordFleetCard | None: ...
+    pass
 
 
 log = structlog.get_logger()
@@ -266,24 +239,12 @@ class DiscordRuntime:
     # Decides which Discord process may hold the gateway during a deploy overlap.
     # None means "no lease to take" (tests, tools that never connect).
     gateway_lease: GatewayLease | None = None
-    # Host-built current-root service binding; ordinary construction discovers nothing.
-    fleet_card_factory: FleetCardFactory | None = None
-    # An ended run's cost by (tenant, run), for its card after the root turn is over.
-    fleet_run_cost: Callable[[UUID, UUID], Awaitable[FleetCost | None]] | None = None
 
 
 @asynccontextmanager
 async def build_runtime(
     settings: Settings,
-    *,
-    fleet_service: FleetOrchestrator | None = None,
-    fleet_parent_loader: ParentResolver | None = None,
-    fleet_prices: Mapping[tuple[str, str], ModelRates | ProviderPrice] | None = None,
-    fleet_root_grants: Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]]
-    | None = None,
 ) -> AsyncIterator[DiscordRuntime]:
-    fleet_factory: FleetCardFactory | None = None
-    owned_fleet_ports: HostFleetPorts | None = None
     engine = build_engine(
         str(settings.database.url),
         pool_size=settings.database.pool_size,
@@ -316,35 +277,7 @@ async def build_runtime(
             deployment_default=deployment_default,
             resolver_cache=resolver_cache,
             billing_config=billing_config,
-            fleet_root_grants=fleet_root_grants if settings.fleet.enabled else None,
         )
-        if settings.fleet.enabled:
-            from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCardFactory
-            from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
-            from daimon.core.stores.fleet import WorkerPool
-            from daimon.core.stores.mux_state import PostgresStateStore
-
-            if turn_deps.state_store is None:
-                turn_deps = replace(turn_deps, state_store=PostgresStateStore(sessionmaker))
-            if fleet_service is None:
-                owned_fleet_ports = HostFleetPorts(
-                    sessionmaker,
-                    prices=fleet_prices,
-                    markup=turn_deps.markup,
-                    deps=turn_deps,
-                    pool=WorkerPool(
-                        max_concurrent_workers=settings.fleet.max_concurrent_workers,
-                        max_concurrent_workers_per_tenant=(
-                            settings.fleet.max_concurrent_workers_per_tenant
-                        ),
-                    ),
-                )
-                fleet_service = FleetOrchestrator(owned_fleet_ports)
-            fleet_factory = (
-                DiscordFleetCardFactory.from_runtime(fleet_service, turn_deps)
-                if fleet_parent_loader is None
-                else DiscordFleetCardFactory(fleet_service, fleet_parent_loader)
-            )
         owner_key = randbits(63)
         ownership_lost = asyncio.Event()
         # Keep ownership outside the turn pool's preparation/mutation budget.
@@ -368,14 +301,10 @@ async def build_runtime(
                     turn_deps=turn_deps,
                     mcp_token_probe=probe_bearer_token,
                     gateway_lease=gateway_lease,
-                    fleet_card_factory=fleet_factory,
-                    fleet_run_cost=None if fleet_service is None else fleet_service.ended_run_cost,
                 )
         finally:
             try:
-                if owned_fleet_ports is not None:
-                    turn_deps.running_turns.begin_shutdown()
-                    await owned_fleet_ports.close()
+                pass
             finally:
                 await drain_outcomes()
                 await drain_budget_notices()

@@ -57,8 +57,6 @@ def agent_catalog() -> tuple[AgentModel, ...]:
             f"~${rates.input:g} input / ${rates.output:g} output per million tokens",
         )
         for name, rates in AGENT_MODEL_PRICING.items()
-        # A "-fast" id is a local preset (model_presets), not a provider model id:
-        # only the legacy path expands it, so it is never a catalog/fleet choice.
         if not name.endswith("-fast")
     ]
     for provider in PROVIDERS:
@@ -185,20 +183,6 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
         else "isn't a known available agent model"
     )
     raise ValueError(f'"{value}" {explanation}. Ask which models are available for this agent.')
-
-
-def resolve_models(value: str) -> tuple[ModelRef, ...]:
-    """Accept a list or common requests such as '3 workers: sonnet, luna, flash'."""
-    value = re.sub(r"^\s*(?:use|compare with)\s+|^\s*\d+\s+workers?\s*:\s*", "", value, flags=re.I)
-    parts = re.split(r"\s*,\s*|\s+and\s+", value, flags=re.I)
-    return tuple(
-        {
-            (model.provider, model.id): model
-            for part in parts
-            if part.strip()
-            for model in (resolve_model(part.strip()),)
-        }.values()
-    )
 
 
 def _provider_words() -> dict[str, Provider]:

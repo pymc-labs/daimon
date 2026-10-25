@@ -382,7 +382,6 @@ def test_allowlist_excludes_the_administrative_and_directory_tools() -> None:
         "github_connect",
         "request_github_access",
         "set_working_repo",
-        "fleet_spawn",
         "set_channel_budget",
         "set_channel_rule",
         "list_agent_keys",

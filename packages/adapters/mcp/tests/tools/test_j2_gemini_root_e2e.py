@@ -8,7 +8,7 @@ only the deployment's provider keys. Every step is the production path behind th
 MCP tools, with fake provider HTTP edges. Any refusal here is a product bug (the
 "Gemini isn't set up here yet" J2 failure).
 
-The fresh-chat harness follows nc-fleetfix's J1 switch-card guard.
+The fresh-chat harness follows the J1 switch-card guard.
 """
 
 from __future__ import annotations
@@ -434,12 +434,6 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
     assert posts and posts[-1]["agent_config"]["model"] == ARGON
     # The copy starts on Argon from the hand-off's summary, quoted as untrusted text.
     sent = json.dumps(posts[-1])
-    # M07g (SMOKE 455c58a6): a Gemini copy with no fleet tools wrote "hypothetical"
-    # worker verdicts. It runs with none here too, and its instructions carry the rule
-    # that a worker's answer is only what the host returns.
-    assert "FLEET WORKERS ARE REAL ONLY WHEN THE HOST RUNS THEM" in json.dumps(
-        posts[-1]["system_instruction"]
-    )
     offered = [
         name
         for tool in posts[-1]["tools"]

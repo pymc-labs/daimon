@@ -656,7 +656,7 @@ async def test_admission_reads_agent_rules_only_when_tool_safety_and_rules_are_o
         same = await reauthorize(scoped, admission)
         assert len(statements) == 2 and same is admission, "unchanged rules return the admission"
 
-        # A rule set after admission reaches the next reauthorize (fleet workers, retries).
+        # A rule set after admission reaches the next reauthorize (nested runs, retries).
         async with db_session_factory() as other, other.begin():
             await agent_tool_rules.set_rule(
                 other,

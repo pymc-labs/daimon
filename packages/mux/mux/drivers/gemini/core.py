@@ -138,17 +138,9 @@ class Base:
         mcp_secrets: MCPSecretResolver | None = None,
         gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
-        max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
-        max_input_tokens: int | None = None,
     ) -> None:
-        self._max_input_tokens = max_input_tokens
-        if max_input_tokens is not None and (
-            type(max_input_tokens) is not int or max_input_tokens <= 0 or max_output_tokens is None
-        ):
-            refuse("worker_token_envelope")
         self._max_output_tokens = max_output_tokens
-        self._max_total_tokens = max_total_tokens
         self._native_agent = native_agent
         self._transport, self._storage, self._account = transport, storage, account_scope_id
         self._mcp_secrets = mcp_secrets
@@ -171,15 +163,10 @@ class Base:
         request = compile_agent(
             agent.spec,
             authenticated_mcp=self._mcp_secrets is not None,
-            max_total_tokens=self._max_total_tokens,
             max_output_tokens=self._max_output_tokens,
         )
         if self._max_output_tokens is not None:
-            if (
-                (self._native_agent is not None and self._max_input_tokens is None)
-                or spec.environment is not None
-                or spec.resources
-            ):
+            if self._native_agent is not None or spec.environment is not None or spec.resources:
                 refuse("model_interaction_resources")
             return request
         if self._native_agent is not None:
@@ -564,7 +551,6 @@ def compile_agent(
     spec: AgentSpec,
     *,
     authenticated_mcp: bool = False,
-    max_total_tokens: int | None = None,
     max_output_tokens: int | None = None,
 ) -> Object:
     if spec.model.provider != "gemini" or not spec.model.id or spec.model.options:
@@ -572,7 +558,7 @@ def compile_agent(
     if spec.extensions:
         refuse("agent_extensions")
     if max_output_tokens is not None:
-        if max_total_tokens is not None or spec.tools or spec.skills or spec.mcp_servers:
+        if spec.tools or spec.skills or spec.mcp_servers:
             refuse("model_interaction_resources")
         result: Object = {
             "model": spec.model.id,
@@ -589,10 +575,6 @@ def compile_agent(
         # Omission would enable provider defaults, including billable web tools.
         "tools": [],  # filled below; never sent empty
     }
-    if max_total_tokens is not None:
-        if type(max_total_tokens) is not int or max_total_tokens <= 0:
-            refuse("agent_token_budget")
-        object_value(result["agent_config"])["max_total_tokens"] = max_total_tokens
     if spec.system is not None:
         result["system_instruction"] = spec.system
     if spec.tools is not None or spec.mcp_servers is not None:
@@ -799,7 +781,6 @@ class GeminiSessions(Base):
                 spec,
                 agent.spec.model,
                 request,
-                max_input_tokens=self._max_input_tokens,
                 mcp_server_names=server_names(agent.spec.mcp_servers or ()),
             )
             records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
@@ -899,9 +880,7 @@ class GeminiEvents(Base):
         mcp_secrets: MCPSecretResolver | None = None,
         gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
-        max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
-        max_input_tokens: int | None = None,
     ) -> None:
         super().__init__(
             transport,
@@ -910,9 +889,7 @@ class GeminiEvents(Base):
             mcp_secrets=mcp_secrets,
             gcs_secrets=gcs_secrets,
             native_agent=native_agent,
-            max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
-            max_input_tokens=max_input_tokens,
         )
         self._state_store = state_store
         self._model_for_interaction = model_for_interaction
@@ -1051,15 +1028,6 @@ class GeminiEvents(Base):
                 not isinstance(event, UserMessage) for event in events
             ):
                 refuse("model_interaction_resources")
-            if record.max_input_tokens != self._max_input_tokens:
-                refuse("changed_worker_token_envelope")
-            if (self._max_total_tokens is not None or self._max_input_tokens is not None) and (
-                record.current is not None
-                or len(events) != 1
-                or not isinstance(events[0], UserMessage)
-                or events[0].mode != "new_turn"
-            ):
-                refuse("worker_single_interaction")
             if expected_turn is not None and expected_turn != record.session.active_root_turn:
                 raise ProviderError("conflict", retryable=False)
             overrides: Object = {}
@@ -1118,14 +1086,6 @@ class GeminiEvents(Base):
             if record.current is not None and authenticated:
                 # Admission/authentication precedes this native history read.
                 await self._get(record, record.current)
-            if self._max_input_tokens is not None:
-                from mux.drivers.gemini.transport import TokenCountingTransport
-
-                if not isinstance(self._transport, TokenCountingTransport):
-                    refuse("worker_input_token_count")
-                count = await self._transport.count_input_tokens(request)
-                if type(count) is not int or count <= 0 or count > self._max_input_tokens:
-                    refuse("worker_input_token_limit")
             root = record.root if is_result else str(uuid4())
             if root is None:
                 refuse("unknown_function_action")

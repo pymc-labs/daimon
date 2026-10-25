@@ -14,11 +14,7 @@ from daimon.core.channel_budget import ChannelBudgetError
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.continuity.messages import render_responder_changed_without_handoff
 from daimon.core.cron import InvalidScheduleError
-from daimon.core.errors import (
-    AgentNameCollision,
-    TurnError,
-    UserFacingError,
-)
+from daimon.core.errors import AgentNameCollision, TurnError, UserFacingError
 from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.platform_words import words_for
 from daimon.core.session_fence_retry import FenceUnavailable
@@ -147,18 +143,6 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, discord.HTTPException):
         return _PLATFORM_REFUSED
     return _OUR_SIDE
-
-
-WAKE_REFUSED_LINES = (
-    "The fleet finished, but I couldn't pick this conversation back up to report on it. "
-    "That's a problem on our side.",
-    "Mention me to continue.",
-)
-
-
-def render_wake_refused(*, request_id: str) -> str:
-    """A fleet completion wake that was refused before its turn ran, with its `Ref`."""
-    return "\n\n".join((*WAKE_REFUSED_LINES, f"-# Ref {short_ref(request_id)}"))
 
 
 def error_lines(exc: BaseException) -> tuple[str, ...]:

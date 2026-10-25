@@ -1,32 +1,18 @@
-"""J9 offline E2E: fresh-install parity. Defaults are ON, flags only turn things off.
-
-A brand-new tenant on a deployment that only has its provider keys gets every
-journey with zero setup: no runtime rows, no env opt-ins, no data installs. The
-turn path, channel and agent backends and fleets are on by default. Each flag is an
-emergency stop that turns its own feature off and nothing else. The tenant's
-providers are Anthropic plus every keyed one, it gets code-default runtime rows, and
-the computed default fleet applies where its adapter delivers workers. The fresh-chat
-harness is J2's: the tenant it creates has never been seen.
-
-A gap on main is a strict xfail naming its owner (lanes/V2/JOURNEY-GAPS.md).
-"""
+"""Ordinary agent operation and configuration paths, using offline providers."""
 
 from __future__ import annotations
 
 import uuid
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from daimon.adapters.mcp.tools.agents import (
     _fork_agent_impl,  # pyright: ignore[reportPrivateUsage]
-    _request_agent_backend_switch_impl,  # pyright: ignore[reportPrivateUsage]
+    _request_agent_backend_switch_impl,
 )
-from daimon.adapters.mcp.tools.task_continuity import (
-    _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
-)
+from daimon.adapters.mcp.tools.task_continuity import _hand_off_task_impl
 from daimon.core.channel_backend import backend_selection_enabled
-from daimon.core.config import FleetSettings, Settings, TurnSettings
+from daimon.core.config import Settings, TurnSettings
 from daimon.core.provider_keys import DEFAULT_KEY_ENV, default_enabled_backends
 
 from .test_j2_gemini_root_e2e import fresh_chat as fresh_chat
@@ -36,7 +22,6 @@ FLAGS = (
     "DAIMON_TURN__PATH",
     "DAIMON_TURN__CHANNEL_BACKENDS",
     "DAIMON_TURN__AGENT_BACKENDS",
-    "DAIMON_FLEET__ENABLED",
 )
 
 
@@ -59,7 +44,6 @@ def test_j9_every_feature_default_is_on(no_flags):
     settings = _settings()
     assert settings.turn.path == "mux"
     assert settings.turn.channel_backends and settings.turn.agent_backends
-    assert settings.fleet.enabled
     assert backend_selection_enabled(settings.turn), "switch tools are offered by default"
 
 
@@ -71,21 +55,9 @@ def test_j9_every_feature_default_is_on(no_flags):
     ],
 )
 def test_j9_a_turn_flag_only_stops_its_own_feature(no_flags, flag, stopped):
-    """Turning one switch off stops backend selection; fleets stay on."""
+    """Turning one switch off stops backend selection."""
     settings = _settings(**stopped)
     assert not backend_selection_enabled(settings.turn)
-    assert settings.fleet.enabled, f"{flag} must not turn fleets off"
-
-
-async def test_j9_the_fleet_flag_stops_every_fleet(no_flags):
-    """`FLEET__ENABLED=false` stops even the computed default fleet; turns are untouched."""
-    from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
-
-    settings = _settings(fleet=FleetSettings(enabled=False))
-    assert backend_selection_enabled(settings.turn)
-    deps = SimpleNamespace(fleet_enabled=settings.fleet.enabled)
-    grant = await read_agent_fleet_grant(cast(Any, deps), cast(Any, None), now=cast(Any, None))
-    assert grant is None
 
 
 def test_j9_a_new_tenant_has_every_keyed_provider_and_its_code_default_rows(monkeypatch):
@@ -101,36 +73,8 @@ def test_j9_a_new_tenant_has_every_keyed_provider_and_its_code_default_rows(monk
         monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "offline")
     assert set(default_enabled_backends()) == {"anthropic", "openai", "gemini"}
     rows = default_rows(tenant)
-    assert {row["profile"] for row in rows} >= {"gemini.inline_reuse", "openai.conversation_only"}
+    assert {row["profile"] for row in rows} == {"gemini.inline_reuse"}
     assert all(row["tenant_id"] == tenant for row in rows)
-
-
-@pytest.mark.parametrize("fresh_chat", ["admin"], indirect=True)
-async def test_j9_a_new_tenant_gets_the_default_fleet_on_its_enabled_providers(fresh_chat):
-    """The tenant was created just now: its policy follows the deployment's keys."""
-    from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS, default_fleet_grant
-    from daimon.core.stores.access_policy import load_access_policy
-
-    async with fresh_chat.runtime.session_factory() as session:
-        policy = await load_access_policy(session, tenant_id=fresh_chat.auth.tenant_id)
-    assert not policy.backends_explicit
-    assert set(policy.enabled_backends) == {"anthropic", "openai", "gemini"}
-    grant = default_fleet_grant(policy)
-    assert grant is not None
-    assert {"anthropic", "openai", "gemini"} <= {backend.backend for backend, _ in grant.choices}
-    assert "discord" in FLEET_LIFECYCLE_PLATFORMS
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="fleets are Discord-only: Slack/Teams adapters don't own the worker lifecycle"
-    " (fleet_configuration.py FLEET_LIFECYCLE_PLATFORMS) - fleet lanes",
-)
-@pytest.mark.parametrize("platform", ["slack", "teams"])
-def test_j9_the_default_fleet_runs_on_every_chat_platform(platform):
-    from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS
-
-    assert platform in FLEET_LIFECYCLE_PLATFORMS
 
 
 @pytest.mark.parametrize("backend", ["openai", "gemini"])

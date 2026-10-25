@@ -20,8 +20,7 @@ the one that dispatches their click (this bot) -- there is no live in-memory
 View instance to attach a non-persistent handler to. `FeedbackButton` is
 persistent for a related but distinct reason: it is delivered into a direct
 message and must still dispatch after this bot process restarts, so there is
-again no live View instance to rely on. Opt-in fleet controls likewise use the
-registered `posted_controls.fleet.FleetControl` item to recover after restart.
+again no live View instance to rely on.
 """
 
 from __future__ import annotations

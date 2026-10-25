@@ -14,14 +14,13 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
-from daimon.core.stores.mux_state import BeforeClaim, PostgresStateStore
-from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance
+from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, OperationStatus
 from mux.contracts.resources import ProviderBinding
 from mux.drivers.anthropic import classify_mutation_failure, single_attempt_mutation
 from mux.errors import ProviderError, ScopeViolation
-from mux.state.journal import JournalAppend, JournalEntry, is_authoritative
+from mux.state.journal import JournalAppend, JournalEntry
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.mutation_retry import MutationFailure, MutationRetryPolicy, RetryStop
 from mux.state.operations import OperationRecord, SendClaimed, request_digest
@@ -29,7 +28,7 @@ from mux.state.store import StateStore, binding_slot
 from pydantic import BaseModel, JsonValue
 
 if TYPE_CHECKING:
-    from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer
+    pass
 
 
 log = structlog.get_logger(__name__)
@@ -122,7 +121,6 @@ class TurnPersistence:
         holder: str | None = None,
         source_agent_id: str | None = None,
         session_ref: ResourceRef | None = None,
-        fleet_capture: bool = False,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         ttl: timedelta = timedelta(minutes=5),
         renew_interval_s: float = 60.0,
@@ -146,7 +144,6 @@ class TurnPersistence:
             or not 0 < renew_interval_s < ttl.total_seconds()
         ):
             raise ValueError("send timeout and renewal interval must be below the lease TTL")
-        self.root_claim: Callable[[ResourceRef | None, bool], BeforeClaim] | None = None
         self.store = store
         self._binding = binding
         self._slot = slot
@@ -154,7 +151,6 @@ class TurnPersistence:
         self.operation_key = operation_key
         self.source_agent_id = source_agent_id
         self.session_ref = session_ref
-        self.fleet_capture = fleet_capture
         self._holder = holder or secrets.token_hex(16)
         self._now = now
         self._ttl = ttl
@@ -336,7 +332,7 @@ class TurnPersistence:
                 "request": request,
             }
         )
-        may_retry = retry_failed and begin is None and not self._counts_input(kind)
+        may_retry = retry_failed and begin is None
         base = f"{operation_key or self.operation_key}:{kind}"
         # The in-call failure a retry follows; re-raised if the retry stops.
         refused: Exception | None = None
@@ -488,10 +484,6 @@ class TurnPersistence:
         error.add_note(f"{note}; nothing was sent")
         return error
 
-    def _counts_input(self, kind: str) -> bool:
-        """A root-funded claim counts each attempt key; a retry would count twice."""
-        return self.root_claim is not None and kind not in _UNCOUNTED_KINDS
-
     def _retry_remaining_s(self) -> float | None:
         deadline = self._retry.deadline
         return None if deadline is None else deadline - time.monotonic()
@@ -510,20 +502,9 @@ class TurnPersistence:
     async def _claim(
         self, session: ResourceRef | None, kind: str, key: str, request: JsonValue
     ) -> None:
-        """Win `pending -> sent` under the lease fence (and the root budget)."""
+        """Claim one provider mutation under the existing lease fence."""
         try:
-            store = self.store
-            check = self.root_claim
-            context = contextlib.nullcontext()
-            if check is not None and kind not in _UNCOUNTED_KINDS:
-                if not isinstance(store, PostgresStateStore):
-                    raise ScopeViolation("root-budget", "transactional root store required")
-                inputs = request.get("events") if isinstance(request, dict) else request
-                if kind == "send" and (not isinstance(inputs, list) or len(inputs) != 1):
-                    raise ScopeViolation("root-budget", "one counted input required")
-                context = store.checking_claims(check(session, kind == "send"), compose=True)
-            with context:
-                await store.claim_send(self.scope, key, now=self._now(), fence=self._fence())
+            await self.store.claim_send(self.scope, key, now=self._now(), fence=self._fence())
         except SendClaimed as error:
             raise UncertainSend(f"{kind} was claimed by another sender") from error
 
@@ -640,50 +621,6 @@ class TurnPersistence:
             now=self._now(),
             fence=self._fence(),
             resource=session,
-        )
-
-    async def publish_worker_result(
-        self,
-        run: FleetRun,
-        worker: FleetWorker,
-        session: ResourceRef,
-        *,
-        accepted_event_ids: frozenset[str],
-    ) -> ResultPointer:
-        """Point at an accepted recorded message under this worker's active lease."""
-        from daimon.core.fleet import FleetConflict, append_result
-
-        self.check_session(self.scope, session)
-        lease = self._fence()
-        after = -1
-        result: Event | None = None
-        while events := await self.store.read_events(session.id, after=after):
-            for event in events:
-                if (
-                    event.type == "agent.message"
-                    and is_authoritative(event)
-                    and (
-                        event.id in accepted_event_ids
-                        or event.native.event_id in accepted_event_ids
-                    )
-                    and AgentMessagePayload.model_validate(event.payload).complete
-                ):
-                    result = event
-            after = events[-1].sequence
-        if result is None:
-            raise FleetConflict("worker has no accepted recorded final message")
-        projection = await self.store.projection(session.id)
-        if projection is None:
-            raise FleetConflict("worker has no owned journal projection")
-        return await append_result(
-            self.store,
-            run,
-            worker,
-            session,
-            result,
-            lease=lease,
-            cursor=projection.cursor,
-            now=self._now(),
         )
 
     async def gap(self, session: ResourceRef) -> None:

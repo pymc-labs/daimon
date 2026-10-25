@@ -7,14 +7,12 @@ these models before returning (`Row.model_validate(orm, from_attributes=True)`).
 from __future__ import annotations
 
 import enum
-import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-import structlog
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope
@@ -27,15 +25,7 @@ from mux.contracts.resources import (
     ResourceBinding,
     WorkspaceSource,
 )
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    JsonValue,
-    TypeAdapter,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, field_validator
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -56,7 +46,10 @@ PreparationFailureKind = Literal["skill_unavailable"]
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
 ContinuationReason = Literal[
-    "task_handoff", "private_input_applied", "timer", "github_access_ready", "worker_finished"
+    "task_handoff",
+    "private_input_applied",
+    "timer",
+    "github_access_ready",
 ]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 UserSkillSource = Literal["repo", "upload"]
@@ -1239,11 +1232,6 @@ class _BackendConsentFacts(_Facts):
         return self.drop_consent.declared_drops if self.drop_consent is not None else ()
 
 
-#: Stored in `fleet_grant` when an owner or admin turned fleet off. Without it a
-#: revision with no grant reads as the deployment's default fleet (on).
-FLEET_OFF: dict[str, JsonValue] = {"disabled": True}
-
-
 class AgentBackendRevision(_BackendConsentFacts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
@@ -1259,34 +1247,6 @@ class AgentBackendRevision(_BackendConsentFacts):
     digest: str
     previous_local: int | None
     created_at: datetime
-    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
-    fleet_grant_invalid: bool = Field(default=False, exclude=True, repr=False)
-
-    @model_validator(mode="after")
-    def _read_fleet_grant(self) -> AgentBackendRevision:
-        if self.fleet_grant is None or self.fleet_off:
-            return self
-        from daimon.core.neutral_resources import AgentFleetGrant
-
-        try:
-            grant = AgentFleetGrant.model_validate_json(json.dumps(self.fleet_grant))
-            if not 0 < grant.epoch <= self.local:
-                raise ValueError("invalid grant epoch")
-        except ValueError:
-            object.__setattr__(self, "fleet_grant", None)
-            object.__setattr__(self, "fleet_grant_invalid", True)
-            structlog.get_logger(__name__).warning(
-                "fleet.grant_invalid",
-                tenant_id=self.tenant_id,
-                agent_id=self.agent_id,
-                revision=self.local,
-            )
-        return self
-
-    @property
-    def fleet_off(self) -> bool:
-        """Fleet was turned off explicitly; the default never applies to it."""
-        return self.fleet_grant == FLEET_OFF
 
 
 class CompatibilityPreview(_BackendConsentFacts):
@@ -1308,4 +1268,3 @@ class CompatibilityPreview(_BackendConsentFacts):
     target_settings: dict[str, JsonValue] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)

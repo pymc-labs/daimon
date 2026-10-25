@@ -1,6 +1,6 @@
 # Dev lanes
 
-Staging tracks `main`. A lane is separate: a Preview lane deploys a chosen branch on demand, and a fleet lane is for agents.
+Staging tracks `main`. A lane is separate: a Preview lane deploys a chosen branch on demand, and an agent lane is for agents.
 
 Push a branch named `lane/<you>` to deploy its current commit:
 

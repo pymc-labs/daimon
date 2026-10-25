@@ -462,14 +462,6 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
             def upgrade(sync):
                 with Operations.context(MigrationContext.configure(sync)):
                     module.upgrade()
-                    fleet_path = path.with_name("0096_agent_fleet_grant.py")
-                    fleet_spec = importlib.util.spec_from_file_location(
-                        "fleet_grant_restore", fleet_path
-                    )
-                    assert fleet_spec is not None and fleet_spec.loader is not None
-                    fleet_module = importlib.util.module_from_spec(fleet_spec)
-                    fleet_spec.loader.exec_module(fleet_module)
-                    fleet_module.upgrade()
                     consent_module.upgrade()
                     model_module.upgrade()
                     owner_module.upgrade()

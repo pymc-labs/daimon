@@ -203,23 +203,6 @@ def test_shared_refusal_labels_retain_only_typed_admission_codes(reason):
     assert error.reason == reason
 
 
-def test_worker_refusal_operation_is_closed_and_private_data_stays_redacted():
-    from daimon.core.channel_backend import backend_refusal_causes
-
-    secret = "short_secret_code"
-    error = UnsupportedCapability(("native_worker_resource_drop", secret), secret)
-    error.__cause__ = RuntimeError("private SDK message and SQL")
-    assert backend_refusal_causes(error) == [
-        {
-            "type": "UnsupportedCapability",
-            "missing": ["native_worker_resource_drop", "redacted"],
-        },
-        {"type": "RuntimeError"},
-    ]
-    assert error.missing == ("native_worker_resource_drop", secret)
-    assert secret not in json.dumps(backend_refusal_causes(error))
-
-
 @pytest.mark.parametrize(
     ("sqlstate", "busy"),
     [

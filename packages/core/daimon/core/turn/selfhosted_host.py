@@ -346,8 +346,6 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
     if (
         not request.deps.channel_backends
         or request.deps.turn_path != "mux"
-        or request.worker is not None
-        or request.native_budget_usd is not None
         or request.admission.shared_owner is not None
         or request.admission.hold is not None
         or request.admission.backend_revision_origin != "channel"

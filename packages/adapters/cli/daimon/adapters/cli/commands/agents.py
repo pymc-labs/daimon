@@ -1557,7 +1557,7 @@ def agents_owner_set_command(
     """Make one person the agent's owner: they may edit it without being an admin.
 
     The owner may change its prompt, model, provider, settings, skills, connections
-    and fleet; never the provider allowlist, budgets or GitHub access.
+    ; never the provider allowlist, budgets or GitHub access.
     """
     settings = load_settings()
     console = Console(highlight=False)

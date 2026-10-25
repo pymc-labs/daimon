@@ -17,38 +17,6 @@ retain their resolver and self-healing behavior. The operator entry point
 `daimon selfhosted init` creates or reuses these records without provider
 credentials.
 
-Agent fleet configuration uses `request_fleet_config` in an active chat with a
-verified confirmation card. The owner or a current admin chooses worker agents
-by name and the run's worker, spending and deadline limits. The host resolves the
-names within the tenant. Partial edits retain all omitted limits and the saved
-expiry; the card lists explicit cap removals. Current-settings reads return the
-complete editable configuration. The host reloads the preview and editor permission when Confirm
-is clicked, and applies the revision-checked write. Provider allowlist changes
-use a separate admin-only confirmation; API keys never enable providers by themselves.
-
-Opted-in Discord worker fleets use the existing posted-card renderer and Stop
-guard. The card shows each worker's role, backend, model and current state.
-Complete rows stay in ordinal order within Discord's total text limit; large
-fleets show one `+N more` count for the rows that do not fit.
-Enabled runtime composition requires the shared fleet service and authenticated
-root resolver. Root lookup waits until render time; control recovery and
-replacement capture reuse the recorded post and existing Discord transport.
-Proven fleet absence preserves ordinary sealed and final delivery. Unresolved
-or foreign roots and active fleets never disclose intermediate sealed text.
-Live and recovered replacement posts share the bounded core turn-post writer.
-With the explicit trusted grant loader and shared service supplied, Discord's
-runtime installs the real frozen-root reader over the same Postgres state
-store as the turn. It selects by the genuine intent, verifies a recovered run,
-and preserves the original account and host scope while refreshing the click
-subject through existing role readers. Unbound or stale authority refuses.
-Stop and Resume reload current root permissions and use the shared fleet
-operation owner with a scoped version and idempotency key. The fleet's starter
-or a current server admin may press them; each accepted press logs
-`fleet.control_pressed` with who pressed it. The ordinary
-orchestrator answer is delivered only after authoritative collection and
-required result reviews succeed. Default fleet settings create no card,
-service discovery or additional sender.
-
 Self-hosted channels use the opening message as the Discord thread title and
 stay mention-only on Discord and Teams, without the optional Anthropic
 participation classifier. Responder-change notices use a generic previous-agent
@@ -1524,21 +1492,6 @@ session is actually running (`packages/core/daimon/core/session_snapshot.py`),
 and that snapshot, not the current spec, is what later turns compare and bill
 against.
 
-### Worker fleets
-
-A fleet run is an orchestrator turn's durable fan-out
-(`packages/core/daimon/core/fleet.py`, rows in `fleet_run` and `fleet_worker`).
-Each worker gets a private binding slot of its own in the state store, under the
-orchestrator's channel and account. Its session, fenced lease, idempotent spawn
-operation, journal and usage are the store's existing ones. A worker's result is
-one entry in its own journal; the worker row keeps only a pointer to it, with its
-digest and a short excerpt. Every status change is a compare-and-swap on the
-row's version. Worker turns have a concurrency pool of their own, counted from
-these rows per tenant (`DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`) and
-per process, so a fan-out never takes the chat turns' slots. Fleets are on by
-default; `DAIMON_FLEET__ENABLED=false` is an emergency stop that refuses new
-workers before they are funded.
-
 ### Same-thread handoff
 
 A thread can move to another agent without a new thread. Two triggers:
@@ -1942,30 +1895,6 @@ nothing personal is to be recorded. Who else gets one:
   (`cli.local_user`), which is configuration rather than a verified person, so it gets
   no personal store.
 
-**Held turns.** A turn is held (`Admission.hold`) when its requester is from another
-organisation or unknown, or its channel is shared with another organisation. A held
-session mounts its channel's store read-write (read-only when the turn's memory is
-restricted) and no other: not the shared store and no personal store, whoever asks. The
-channel store's instructions tell the agent that everyone in the channel, including
-people from another organisation, sees it and that it must not record anything it would
-not say there. The isolation holds both ways: a held session never has the shared or a
-personal store mounted, and an unheld session never has a channel store. A thread shares
-its parent channel's store, and a shared-thread session (no caller account, so no held
-credential) mounts the place's store too. `desired_snapshot_for` takes the same store, so
-a session still on the shared store when its channel turns shared (or the reverse) is
-replaced, with nothing carried over and refused while a turn is active (the memory
-boundary above); a session already on the channel store is reused. The session snapshot
-also records the isolation scope (`memory_scope`: absent when unheld, else
-`channel:<platform>:<id>`), whether or not a store mounted, so a held place whose store
-failed to provision is still told apart from an unheld one and from another place. Any
-scope change is a boundary, a permitted handoff to another agent included: it carries
-nothing across, though a handoff that stays on one side of the boundary keeps its carry
-rule. The field is omitted when unset, so the previous build reads the stored snapshot. A fleet worker
-captures exactly one memory resource, the shared store, so a held admission never reaches
-that capture. Archiving an agent archives its channel stores with the others. Rolling back
-to a build without channel stores replaces those sessions with shared-store ones (again
-carrying nothing over); the table is ignored.
-
 MA attaches memory stores only when a session is created. A live session recorded
 without a personal store is reused, not replaced, after the caller's store exists
 (`session_compat`); the store is mounted on the caller's next new session. A session
@@ -2062,18 +1991,6 @@ See [selfhosted billing](billing.md#selfhosted-azure-usage) for admission and
 reconciliation details.
 
 ### Durable turn outcomes
-
-`turn_outcomes` stores one content-free terminal record per logical turn. A UUID
-follows admission, session binding and execution; a dead-session recovery remains
-one turn. Discord, Slack, their continuation/wizard paths, headless routines,
-fleet workers and CLI runs use the same recorder. Fleet workers retain their own
-`worker` origin; their diagnostic never masquerades as an orchestrator or routine. Admission and concurrency refusals are recorded
-even when no model runs. The row contains tenant/account and agent identifiers,
-platform/channel/thread identifiers, the shared `TerminationReason`, UTC start/end
-and monotonic duration, recovery status, exception class, package release and
-observed usage-event keys. It contains no messages, prompts, answers, tool inputs,
-rendered error strings or credentials. Missing attribution stays null (for example,
-a CLI run against an existing MA session); no tenant is inferred from user text.
 
 The terminal path schedules a bounded background write and never awaits database
 I/O. Inserts are idempotent on the turn UUID. At most 256 writes are pending; each

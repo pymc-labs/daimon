@@ -8,18 +8,11 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 
 import httpx
 import pytest
-from daimon.core.config import (
-    AnthropicSettings,
-    DatabaseSettings,
-    FleetSettings,
-    Settings,
-    TurnSettings,
-)
+from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.mux_state import PostgresStateStore
@@ -43,7 +36,7 @@ from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ThreadRef
 from mux.drivers.openai import deployment
-from mux.errors import ContinuityLost, ScopeViolation
+from mux.errors import ScopeViolation
 from mux.state.lease import Slot
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from openai import AsyncOpenAI
@@ -51,7 +44,7 @@ from pydantic import JsonValue, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..test_native_tariffs import fixed_source_date as fixed_source_date
-from .test_openai_host import Wire, openai_native_spend_cap
+from .test_openai_host import Wire
 from .test_openai_host import composed as composed
 from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission
 
@@ -67,7 +60,6 @@ async def application(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
         turn=TurnSettings(path="mux", channel_backends=True),
-        fleet=FleetSettings(enabled=False),
     )
     native = ScriptedTransport()
     async with native.client() as client:
@@ -245,7 +237,6 @@ async def test_plan_is_scoped_and_credential_access_is_deferred(
     assert runtime.price is provider_prices(PROFILE)[("openai", REVISION.model)]
     # Our OpenAI project rejects `spend_control`: Luna never asks for a native cap.
     assert runtime.controls.spend_limit_usd_cents is None
-    assert runtime.controls.require_spend_control_echo is False
     plan = await runtime.session_plan(application)
     assert plan.agent.id == "native-agent" and plan.agent.id != application.admission.agent.id
     assert plan.environment is not None and plan.environment.id == "native-template"
@@ -274,7 +265,6 @@ async def test_omitted_native_spend_control_is_preserved(
     runtime = build_channel_runtime(application)
     assert isinstance(runtime, OpenAIHostRuntime)
     assert runtime.controls.spend_limit_usd_cents is None
-    assert runtime.controls.require_spend_control_echo is False
     assert runtime.controls.multi_agent_enabled is False
     assert runtime.controls.container_size == "small"
 
@@ -300,73 +290,11 @@ async def test_a_luna_root_sends_no_native_spend_control(application, monkeypatc
     monkeypatch.setattr(deployment, "_http_transport", lambda: httpx.MockTransport(handle))
     runtime = build_openai_runtime(application)
     assert runtime.controls.spend_limit_usd_cents is None
-    assert runtime.controls.require_spend_control_echo is False
     spec = await runtime.session_plan(application)
     backend = openai_host.driver(runtime, REVISION, SCOPE)
-    acknowledged = await backend.sessions.create(SCOPE, spec, key="root-controlled-create")
-    backend.sessions.validate_spend_control(acknowledged)
+    await backend.sessions.create(SCOPE, spec, key="root-controlled-create")
     assert len([call for call in wire.requests if call.method == "POST"]) == 1
     assert not wire.turns
-
-
-async def test_a_native_budget_is_refused_not_dropped(application, monkeypatch, tmp_path):
-    """No native cap here: a root's native budget refuses rather than run without it."""
-    row = entry()
-    del row["spend_limit_usd_cents"]
-    manifest(monkeypatch, tmp_path / "runtime.json", [row])
-    with pytest.raises(AdmissionDenied):
-        build_openai_runtime(replace(application, native_budget_usd=Decimal("0.20")))
-
-
-@pytest.mark.parametrize(
-    "budget", [Decimal("0"), Decimal("NaN"), Decimal("0.201"), Decimal("0.20")]
-)
-async def test_root_native_budget_refuses_invalid_or_conflicting_controls_before_key_or_plan(
-    application, monkeypatch, tmp_path, budget
-):
-    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
-    original = os.environ.get
-
-    def forbidden(name, default=None):
-        if name == "N4_OFFLINE_OPENAI_KEY":
-            raise AssertionError("refused native control accessed credentials")
-        return original(name, default)
-
-    monkeypatch.setattr(os.environ, "get", forbidden)
-    with pytest.raises(AdmissionDenied):
-        build_openai_runtime(replace(application, native_budget_usd=budget))
-
-
-async def test_root_budget_refuses_an_existing_unverified_binding_before_native_input(
-    application, composed, monkeypatch, tmp_path
-):
-    request, wire, store, _, runtime = composed
-    first = await openai_host.prepare_openai(request)
-    binding = await store.get_binding(
-        Slot(
-            thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
-            account_id=SCOPE.account_id,
-        )
-    )
-    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
-    # A root native budget needs a project that honours `spend_control` (ours doesn't).
-    openai_native_spend_cap(monkeypatch)
-    compiled = build_openai_runtime(replace(application, native_budget_usd=Decimal("0.04")))
-    controlled = replace(runtime, controls=compiled.controls)
-    candidate = replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: controlled}))
-    calls = len(wire.requests)
-    with pytest.raises(ContinuityLost):
-        await openai_host.prepare_openai(candidate)
-    assert len(wire.requests) == calls and not wire.turns
-    assert (
-        await store.get_binding(
-            Slot(
-                thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
-                account_id=SCOPE.account_id,
-            )
-        )
-    ) == binding
-    assert first.session_ref is not None
 
 
 async def test_other_channel_keys_and_plans_are_never_reused(

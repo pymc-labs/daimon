@@ -72,7 +72,7 @@ when it supports all nine.
 | --- | --- | --- |
 | `anthropic.managed_agents` | yes | Every core capability is native. `reconcile` reads the session status and the newest 5,000 events; older history is reported as a `history_truncated` gap. Steering, stream-cursor replay, environment fork and native schedules are not offered. |
 | `openai.persistent_workspace` | yes | `reconcile` is emulated from saved items; missed events cannot be replayed. |
-| `openai.conversation_only` | no | No workspace. Runnable for explicitly granted conversation-only fleet workers. |
+| `openai.conversation_only` | no | No workspace; provider conformance profile. The application uses persistent workspaces. |
 | `gemini.inline_reuse` | no | The inline environment expires after inactivity, so workspace persistence is not guaranteed. Its usage reporting is undeclared, so admission refuses it until a driver shows usage observations. |
 
 A profile only declares what its driver does. The profile honesty test
@@ -134,22 +134,6 @@ channel can be cleared: the card binds the channel it is posted in (the
 admitted turn's origin channel), never a channel named in the tool call, and it
 re-checks the pin's revision and digest and that the clicker is a current
 admin. Existing threads keep their model.
-
-A channel may also name `gemini-4-argon` (Gemini 4 Argon, 1M-token context)
-on `gemini.inline_reuse`, and an agent's config may pick it (below); the
-default stays `gemini-3.8-flash`. An Argon turn makes one attempt: a 503 is the
-turn's answer, never a fallback to the Flash chain. A fleet worker runs Argon
-only on the bounded token envelope (as Flash does, at Argon's tariff, within its
-budget and the per-turn hold); an Argon worker that cannot get one is refused at
-spawn, never run on the 4096-token cap. Token limits a caller sets explicitly
-get the same bound: a Gemini worker whose worst case (max input at the model's
-input rate plus max output at its output rate) exceeds min(budget / markup,
-hold) is refused at spawn, and again at plan admission against the row's hold.
-Configuring a channel to Argon, and admitting its turns, both refuse whenever
-`provider_prices` has no current Argon row (today: from 2026-12-01; see
-[billing](billing.md)); the message names the date the price window ended.
-Argon's rates are about 2.7x Flash's, so raise the runtime row's `hold_usd`
-(and `cap_usd`) for an Argon channel rather than reusing a Flash row's values.
 
 A channel whose configuration says `thread_mode="shared"` shares one session
 per new thread between everyone who writes in it
@@ -1832,16 +1816,6 @@ unpriced alias) expires after `HOLD_TTL` (24 hours), logged as
 finds them is refused, so a full ledger ages out; a hold from before stamping
 starts its clock when first seen. Released rows stay as evidence.
 
-`cap_usd` therefore bounds the unsettled exposure in flight per (tenant, account,
-project) ledger, not total spend: a settled or expired attempt no longer counts.
-Total Gemini spend is bounded by the turn gates every backend passes (the
-prepaid balance gate, the per-person monthly cap and channel budgets, plus a
-fleet worker's run budget; see
-[billing](billing.md#the-gates-in-order)) and, outside Daimon, by the Google Cloud project's own
-billing budget or quota. Billing follows the usage outbox, never holds.
-`scripts/gemini_hold_report.py` reports each ledger's outstanding holds from one
-READ ONLY transaction; this runtime is not a live certificate or QA parity claim.
-
 Credential discovery happens only in the selected authorized transport factory.
 Private request-owned SDK clients use the explicit key, pinned Google origin,
 `vertexai=False`, no environment proxies and no native mutation retries. Stream
@@ -2305,18 +2279,6 @@ preview requires a fresh preview. **Use default** clears the agent preference.
 Existing threads retain their backend, and explicit channel overrides still
 have precedence.
 
-An admin may also pick a model with the provider: `model` on
-`request_agent_backend_switch` and `set_agent_backend`, and `--model` on the
-CLI ("switch agent to gemini-4-argon"). Only the provider's selectable models
-are accepted: Gemini's gemini-3.8-flash (the default) and gemini-4-argon;
-OpenAI's gpt-6-luna (the default) and gpt-6-astra. Gemini's gemini-3.5-flash-lite stays a fleet-worker model:
-the host runs it only token-capped. Naming the default stores no model,
-as before. The model is part of the preview digest and the stored revision;
-revert restores the previous model; the card names it. Switching the
-deployment's default agent says it affects new conversations in every channel
-on the server (workspace on Slack, team on Teams); a lost capability (memory
-on Gemini and OpenAI) is listed before Confirm.
-
 An agent also states its own **settings** on the same revision: its thread
 mode (`shared` is the agent's intent to share threads), its required
 capabilities and, rarely, a profile of its backend. Unset is the backend's
@@ -2435,29 +2397,6 @@ Selection only offers a row to the turn origin it serves: an agent's turn
 considers template and source-pinned rows; a channel's turn considers fixed
 plans with neither. A tenant-wide channel row and a template row therefore
 coexist without ambiguity.
-
-### Worker template rows
-
-A fleet worker row normally pins the source agent and its version
-(`source_agent_id`, `source_agent_version`) and usually the root's channel, so
-editing the agent or running it elsewhere refuses its workers. A **worker
-template row** sets `"worker_materialization": true` with `"*"` (or no value)
-for both source fields, and usually `"*"` on platform, channel and account. It
-serves every granted agent of its one tenant, at the agent's live version, in
-any channel: identity comes from the worker request's own admitted source
-agent (the agent the worker runs as), never from the row. `tenant_id` and
-`profile` stay exact, the configuration grant bounds the models, and the
-per-request checks are unchanged (tenant, caller and session account, the
-root's thread and run). A row pins both source fields or neither, and `"*"`
-source pins are refused on any row that is not a worker row. A row pinned to a
-source agent serves only that agent at that version: another agent's worker,
-or the same agent after an edit, falls through to the template. A pinned row
-still wins over the template in its channel. Selection partitions rows by turn
-kind: a root turn considers root templates and pinned rows, a worker considers
-worker rows and pinned rows, and a channel's turn considers only fixed plans.
-So a root template and a worker template coexist in one tenant, and the
-manifest hold a fleet worker is sized for follows the same rule. Workers still publish their per-run counterpart from the resolved
-worker spec, as before.
 
 ### Output delivery pagination
 
@@ -2598,542 +2537,6 @@ keeps the existing required-action termination path without sending an
 unsupported confirmation event.
 
 
-### Fleet worker slots
-
-A fleet worker (`daimon.core.fleet`) is one more private binding slot in the
-state store: its thread is `fleet/<run id>/<ordinal>` under the orchestrator's
-channel, owned by the orchestrator's account, so it never touches a shared slot.
-Its binding, fenced lease, idempotent spawn operation (`fleet:<run>:spawn:<n>`),
-journal and usage are the store's existing ones. The worker's result is one
-journal entry of its own, with an id and source key derived from the worker
-(`fleet:<worker>:result`), so it never repeats an event the turn already
-journaled and a lease successor appending it again is a duplicate.
-### Worker permission derivation
-
-Backend loaders and worker derivation use the same skill and MCP requirement mapping. Worker skills retain their root provider restriction; catalog previews retain their portable skill capability check. SDK MCP sources keep their conservative vault requirement because their records do not expose credential intent.
-
-The core resource owner exposes one worker spec resolver over existing
-`AgentSpec` and sparse `AgentPatch` shapes. Host-supplied current root facts bind
-the real tenant, account, channel, thread and origin, and retain the existing
-host-loaded `Place`, including category and unresolved-category facts; the same
-facts are retained in the derived grant and reused by every agent decision.
-The place must match the root thread and channel. Hosted network omission is
-an unknown provider default and refuses until the driver supplies a proved,
-normalized network ceiling. Spawning uses the existing
-writer, invoker and agent policy on the fleet surface, with no private-admin
-exemption. Worker depth is one; workers cannot spawn more workers.
-
-The resolver preserves the protected root prompt and derives finite model,
-backend, exact skill version, tool schema, MCP endpoint and credential, resource,
-network, budget, deadline and turn-count subsets. A clone requires an authorized
-source reference and independently loaded current revision. Opaque native
-extensions, effort options and environment knobs refuse when their effect has
-no proven attenuation mapping. Neutral per-tool confirmation also refuses until
-its compiler maps that control. MCP attenuation requires one resolver-bound
-server and the profile-declared finite tool policy keys; a native compiler that
-drops those keys cannot admit the connection. An implicit execution tool still counts toward
-authority when omitted from the requested tool list.
-
-Worker skills and MCP use the same provider and capability predicate as the
-backend compatibility preview. Native skill pins stay on their proved source
-provider; equal names or IDs do not prove cross-provider portability. Unknown
-or unsupported selected-profile capabilities refuse before derivation returns.
-Credential-backed MCP also requires the preview's declared vault capability;
-a native compiler alone does not establish that profile contract.
-
-Clone metadata uses patch semantics: omitted keys stay, an empty patch changes
-nothing, and null values remove individual source-only keys. An explicit null
-map clears metadata only when the root has no stamps. All root metadata is an
-immutable ceiling for fresh specs and clones: removing or changing a root stamp,
-or adding an ungranted stamp, refuses. The clone source is never mutated.
-
-This is an admission primitive, not a launch operation. The host must
-preflight the resolved configuration through the existing native compiler
-before allocation; known generic controls can still be unsupported natively.
-It must reload current authority at preparation and resume, retain the original ceiling, apply
-the derived grants at every resource/tool edge, and reserve funds with the worker
-transition in one transaction. Audit uses the existing scoped append-only store
-and contains identities and typed outcomes rather than prompts or credentials.
-A missing or erased actor cannot authorize launch. Existing turn paths do not
-call the resolver and remain unchanged.
-### Worker completion wakes
-
-Queue readers filter reasons against their own closed reason vocabulary in SQL,
-before selecting a thread batch or decoding rows. Unknown reasons cannot hide
-known timers or acquire a lease through an older compatible reader. The same
-filter covers direct reads, mutations and expired-claim cleanup; known rows
-retain strict validation of every other field. These readers retain the existing
-readable worker-completion groundwork while completion publication stays closed.
-Operators must establish this compatible reader release as the deployed and
-permitted rollback floor before installing any producer activation.
-
-Legacy request-based completion writes remain closed. An authorized host can
-freeze an exact worker batch with `arm_worker_finished` in its own transaction.
-The existing continuation row holds the canonical batch, frozen quorum and
-original root binding/session; unready waits are excluded from normal scans.
-`enqueue_worker_finished` passes frozen members and quorum to `fleet.run_settled`
-and offers each ready wait once, in the terminal writer's transaction. Initial
-and review batches have separate deterministic keys; reviews await every member.
-The run stays running so it can admit cross-review. Deadline refusal preserves
-the worker's terminal write. Generic completion enqueue helpers remain refused.
-No caller is installed; run-end cancellation and original-root dispatch remain required.
-
-The prior release aborts an entire queue scan on the new reason, hiding
-unrelated legacy timers. Before enabling completion writes, deploy a separate
-compatible-reader release whose closed queue readers ignore unsupported
-reasons, and prove every reader and permitted rollback version is at least
-that release. Installation of frozen-wait publication remains deferred
-until that boundary is established. Rows must never be relabeled as timers or
-handoffs. Reader tests can inject future rows directly into an isolated test
-schema; those fixtures are not successful host production or fleet execution.
-
-Bind `worker_finished_decision` to `decide_worker_finished` with the host factory.
-It re-reads frozen batches, original roots and live turns. Missing hooks use the
-unavailable backoff; stale facts defer. Normal runner checks remain required, without a legacy agent
-lookup or human-history supersession rule. The existing claim/start/settle
-ladder fences the turn before its first effect, so an expired started wake is
-interrupted rather than automatically replayed. Native execution and result
-collection still require their independently authorized host integrations.
-
-Migration `0094_worker_finished_wakes`, after `0093_fleet_runs`, widens only
-the existing reason check. Its downgrade removes worker-completion rows that
-older applications cannot interpret before restoring the previous reasons.
-
-
-## Fleet orchestration tools
-
-The opt-in fleet registration exposes `fleet_spawn`, `fleet_status`, `fleet_kill`,
-`fleet_resume`, `fleet_cross_review` and `fleet_collect`. Registration requires
-fleet enablement plus the mux turn path and channel-backend configuration. It is
-disabled by default. An authenticated live-root loader and the host fleet owner
-ports must be installed; absent bindings refuse before worker effects. A chat
-agent ID, run handle, role or matching agent name does not supply those grants.
-Every root and session decision reuses the host-loaded complete `Place`, including
-category and unresolved-category facts, against current tenant policy.
-Kill, resume and collect additionally require the original orchestrator principal
-or a trusted tenant admin; an agent key cannot supply the admin exemption. The
-loader retains the run's original scope principal independently of the current
-interaction's subject. The shared service owns this check for every adapter;
-open channel policy alone does not grant control of another person's run.
-Role refusals use the existing request audit as `authz:controller_required`
-denials, rather than tool errors; outside an audit capture the recorder is a no-op.
-
-Workers reuse `AgentSpec`, `BackendConfig` and a pinned `Agent` revision with
-sparse `AgentPatch` overrides. The single worker resolver derives their tools,
-models, resources, safety prompt and limits from the root. Arbitrary caller
-`SessionSpec` resources are currently refused until scoped worker preparation is
-bound. Resume rechecks current permissions and keeps the original budget, turn
-and deadline ceilings; it cannot reopen a terminal worker or reset a hold.
-
-Cross-review attaches the target's verified journal event through the same spawn
-path, with a backend different from the primary's. Admission refuses a same-backend
-reviewer, and collection rechecks retained review rows before reporting. The host
-pins a closed review contract: JSON containing `verdict`
-(`approved` or `refused`) and the exact `reviewed_digest`. A primary's stored
-result contract declares a required review with `review_required: true`; omitted
-or false does not require one, and any non-boolean value refuses. Reviewers use
-the same admission path, capacity slots, budgets and deadlines as primaries and
-count within the run's worker limit. Three primaries and one required review
-therefore use four workers. Collection waits for unfinished workers and blocks on failed
-workers, refused reviews, stale digests or invalid output contracts. A wake or
-quorum is scheduling evidence, never output approval. `ready` returns validated
-primary outputs for the orchestrator's summary; card excerpts and review prose
-are not used as results.
-
-The shared `FleetOrchestrator` serves both MCP and authenticated platform
-controls. Store, budget, driver and wake bindings own atomic admission, audit,
-reservation, operation replay, scoped binding reads and frozen wait generations.
-The tool service adds no database tables, native client or permission resolver.
-Missing bindings stay unavailable; offline dependency stubs do not certify
-native worker execution. Existing self-only agent-chat tools continue to refuse
-inside chat turns.
-### Source intent before native execution
-
-Backend selection retains the authorized source definition and concrete revision, including instructions, tools, skills and native constraints. The existing session owner can project caller-specific tool policy and resource intent using metadata-only store reads. Projection never decrypts credentials, uploads files, mints tokens or provisions native resources. It retains the actual admission scope; an unknown native workspace is unbound rather than assigned an invented routing identity.
-
-Persistent memory is required even when no binding exists: the ordinary session composer lazily provisions it. The projection records required provisioning, access and guidance without creating a store. Source environment defaults, repository access, credentials and inherited restrictions also remain obligations. The projection carries captured facts; the preparation boundary alone derives the outstanding preservation obligations. Projection and materialization share the same repository, PAT, caller-vault and Copilot selectors, including the app-mode Copilot exclusion. The projection receives the actual credential-key availability without decrypting anything; metadata reads share the PAT resolver’s overlay-only selector. Caller JWT vault capability and fresh app-vault intent are explicit owned references. A fresh app vault remains opaque until the existing authorization/materializer proves its remote access; a memory or sandbox drop does not remove that obligation. Source capture and counterpart identity readback do not establish preservation. All unproved target mappings remain typed refusals at the existing preparation boundary; default and channel-origin turn dispatch remain unchanged.
-
-The shared preparation seam reports closed obligation labels for instructions,
-tools and approval, skills, MCP, credentials, files, repository, memory and
-environment under the existing `backend_unsupported` refusal. It captures the
-actual caller's effective seals, read-only memory and publishing restrictions
-before checking an agent-origin revision. A native catalog component remains
-readback evidence; it cannot replace the complete source and resource proof.
-No installed source-preservation positive is claimed by this capture path.
-
-Obligation labels are derived only at the shared preparation boundary from the actual captured definition and resource intent. An empty source baseline still requires implicit memory and an unproved environment; unrelated instruction, tool, attachment and credential labels are not pre-filled. With agent backend capture enabled, existing balance, cap and channel-budget refusals win before source projection and publish no backend revision.
-
-### Declared worker restrictions
-
-Worker specs accept one default-empty `declared_drops` tuple: `memory`, `sandbox`, `skills`, `mcp`, `tools`, `files`, or `repository`. These declarations apply only to authorized fleet derivation; ordinary agent backend changes retain their source-preservation refusals. Unknown/duplicate declarations refuse. Scope, source revision, current policy, budget, protected guidance, seals and readonly ceilings still apply. Inherited declarations cannot be cleared.
-
-A sandbox declaration removes its environment and execution builtins and prevents implicit execution injection. Tools declarations remove tools and remote MCP connections; MCP declarations also remove their toolsets. Other declarations remove the corresponding owned mounts or attachments. The validated spec, digest and derived permissions retain the declarations; worker guidance describes relevant restrictions. Call the existing audit helper with `worker=resolved_spec` to record the closed labels in its existing reason field and verify root provenance. Pure attenuation is not native execution authority: the registered preparer must consume the exact restricted plan and independently refuse any implicit tool/resource it cannot remove.
-
-The existing provider preparation request can carry the canonical resolved worker beside its actual source and scoped counterpart. The worker is hidden from representation and absent by default. Carrying a resolved spec alone is not an execution grant: the shared source proof and registered native plan must independently verify and consume the same restrictions before a worker can run.
-
-OpenAI hosted worker plans require an explicit persistent-memory drop, an authorized Bash grant, known hosted network/package policy, explicit empty template inputs and no inherited resource mounts. Readback compares the exact resolved agent and environment, including protected instructions, attachments and metadata stamps. Residual template files, opaque environment configuration and unbound MCP credentials refuse. A no-tools or no-sandbox declaration cannot silently retain hosted Bash. An explicitly selected `openai.conversation_only` worker instead requires all five losses (`sandbox`, `tools`, `mcp`, `memory`, `skills`) and no remaining tools, skills, connections, environments or resource mounts. Its deployment must omit `environment_id` and skill identities. Creation includes the task's initial input under the same fenced worker input claim used by turn sends. Acknowledged creation is replayed without another input; an uncertain create retains its reservation and requires reconciliation. Read-only memory posture remains recorded and can execute only because the worker has no memory mounts. Ordinary persistent-workspace channel plans and their seal, read-only and publishing restrictions retain their behavior.
-
-Gemini's deployment owner checks the exact resolved worker instructions, tools,
-skill pins and native catalog readback before its preparer consumes the checked
-native identity. A Gemini worker must declare persistent memory dropped. A
-sandbox drop uses an explicitly authored remote environment without sources
-and removes execution tools; it does not remove the provider-hosted runtime.
-Retained session resources, unsupported environment policies and custom host
-functions refuse. Seals, shared ownership, publishing restrictions and transfer
-remain admission constraints; dropping memory leaves the admission's readonly
-ceiling intact. Ordinary agent switches without a resolved worker remain
-refused.
-
-The shared worker preparation proof captures the authorized source through the
-existing session resource composer. A canonical resolved worker can discharge
-only its explicitly declared attachment, memory and sandbox losses; protected
-instructions, publication policy, credentials and opaque private resources are
-still obligations. The proof checks root scope, source identity/version, derived
-permissions and deadline, reads the complete native counterpart, then re-reads
-resource intent to reject drift before handing that exact verified snapshot to
-preparation. Gemini preparation consumes that snapshot without another native
-read. OpenAI and Gemini allocation share the held-owner validation and guarded
-catalog publication; provider environment and deployment checks remain scoped.
-Existing agent switches without a resolved worker remain refused. Configured
-caller MCP credentials also remain obligations, so these workers refuse in a
-host configuration requiring them until a credential materializer exists.
-
-Native readback does not grant fleet execution authority: the headless caller
-must use the canonical resolver output and obtain fresh fleet/budget admission
-before native execution. Ordinary OpenAI legacy-source environment preservation
-remains refused. All switches remain default off; the legacy and channel paths
-keep their existing behavior.
-
-Restricted worker preparation uses the earlier of the caller's turn deadline and
-the canonical worker deadline. A shorter caller bound is valid. The same bound
-travels with the preparation request through source capture, counterpart readback,
-source recapture and native preparation. Expiry is checked before successful proof
-and prepared-turn handoffs; exhausted authority uses the existing ceiling refusal.
-The headless caller must pass that bound to the existing turn runner as well.
-
-Worker preparation can use the existing `TurnPersistence` on an explicitly
-authorized private `Slot` before any binding exists. `mutate(session=None, ...)`
-uses the same lease, durable operation and native single-attempt context; no
-placeholder session or binding is created. Allocation callers supply a fresh
-financial guard and set `retry_failed=False`. An acknowledged native resource is
-restored from its real receipt; an unknown or refused attempt never creates again.
-The result seam selects only complete, authoritative journal messages accepted by
-the worker driver and calls the existing fleet result writer under that lease.
-
-Source facts are captured through the same preparation request for preservation
-proof and worker resource composition. Capture does not grant execution or
-allocation; the existing proof and materializer validate the captured identity
-and obligations. Worker preparation carries its derived scope through the real
-binding and turn codec. Expiry after preparation or its binding callback invokes
-the existing orphan cleanup before refusing the handoff.
-
-Prepared native scope is checked by the existing admitted-session scope owner.
-Binding publication, turn I/O and worker handoff use that single identity rule.
-The worker allocation prototype is deferred with its actual caller and complete
-source/native preservation proof; it is not an exported preparation path.
-
-Worker normalization accepts an optional `captured_source` on the existing
-`resolve_worker_spec`. Only the scoped loader and read-only resource projector
-supply this input. Root authorization, finite role-selected models and backend
-grants remain the ceiling; names and stored digests grant no authority. Captured
-instructions and represented tools, skills, MCP, environment and resource intent
-must be retained unless explicitly narrowed through declared drops. Accepted native
-namespaces flow through preparation's shared source-obligation classifier; represented
-tool intent uses the existing profile projection and closed provider compiler.
-Opaque native extensions, model options, unretained memory (including existing
-memory-store bindings) and credential resources refuse with
-`WorkerSpecRefused` before allocation rather than being silently discarded.
-The canonical digest includes the complete owner capture (including hidden source
-and resource-generation facts), so stale stored intent must be refused rather
-than rewritten. Inherited seals and read-only restrictions remain in force.
-This normalization does not prove native execution; the existing preparation
-owner still classifies obligations and independently recaptures source and native
-readback before input. Omitting the new argument preserves the existing path.
-
-Normalization and preparation use one exact source-instruction prefix rule. The
-source prefix is retained ahead of the root and role text; a shared leading root
-paragraph appears once. The default path without a capture retains its earlier
-composition bytes. A successful normalization proves representability and root
-authorization; native execution still requires independent preparation readback.
-
-
-The headless `run_worker` entry accepts an already-claimed pool worker and its
-original root authority. It reloads current policy and captures the actual source
-before resolving and comparing stored intent. Supported pre-provisioned targets
-use the registered preparer and their real journal store; unsupported allocation
-paths refuse. The caller owns pool release and the existing run-level budget watch.
-
-The first primary input joins the current bound budget guard, worker turn-count
-CAS and journal send claim in one transaction. A lost acknowledgment consumes at
-most that one claimed input and retains the hold for reconciliation; recovery
-cannot create another session. Successful results come from accepted authoritative
-journal messages through the existing fleet result writer. Ordinary headless and
-legacy turns keep their existing behavior.
-
-A worker dispatch exception does not mark its input rejected, refund its reserve
-or release the caller's pool slot. The caller releases its slot in `finally` and
-uses the existing journal operation readback before classifying a possibly-sent
-input. A count returned inside the claim transaction is never adopted as durable
-worker state; terminal updates reread the worker through the budget lock owner.
-
-The existing `TurnRuntime` can expose an optional `materialize_worker(request)`
-callback returning the existing `AgentRevision` acknowledgement. It is absent by
-default. Read-only counterpart proof does not invoke it. The headless worker
-passes its existing fresh financial guard as `before_native`; preparation checks
-the full scope, shared store and private slot before invoking materialization.
-The existing publisher owns the lease, single-attempt mutation and acknowledgment.
-Counterpart readback verifies that actual publication through the catalog owner,
-then preparation recaptures the source and checks the worker deadline before
-handoff. Missing authority, unknown outcomes and mismatched readback refuse.
-
-Source environment capture projects a closed cloud policy only when networking
-and every package-manager list are explicit. Limited networking must explicitly
-disable implicit MCP-server and package-manager access. Apt, pip and npm map to
-the neutral system, Python and npm lists; other managers must be explicitly
-empty. Unknown fields, missing defaults and self-hosted policy retain their
-native obligation and refuse when unrepresented. The source's native snapshot,
-identity metadata and visibility remain intact. Ordinary Anthropic environment
-requests retain their native configuration bytes. A projected environment is
-still subject to the root's sandbox grant and independent native readback.
-
-Worker clone normalization retains the actual authorized source reference and
-revision through the existing resolver. A changed source or missing source grant
-refuses before allocation; stored worker intent and digests are never rewritten.
-
-Worker cleanup uses the verified prepared resource ports through the existing
-bounded archive owner. Unsupported archive remains a logged limitation and
-preserves the original dispatch failure, input count and reconciliation hold.
-
-A clone retains the native source reference's tenant-wide service identity. The
-root must explicitly grant that exact source and revision, and the owner capture
-must bind the complete source snapshot to the root's authorized account scope.
-An arbitrary foreign or unbound account reference cannot use this path; the
-source identity is never relabeled as the worker's account.
-
-An OpenAI deployment can explicitly enable `worker_materialization` (default
-`false`) with exact source identity/revision pins and finite configuration bounds.
-Dynamic plans omit fixed native agent and catalog target pins. The actual worker
-uses the existing scoped publisher and session mutation owner with one attempt;
-unknown acknowledgments retain their operation for reconciliation. The verified
-native target is consumed directly without changing the deployment manifest.
-Complete message journal identities match the stable accepted provider item ID;
-the true native stream event ID remains in provenance. Unconfigured and fixed
-deployments retain their existing behavior.
-
-A Gemini deployment can explicitly enable `worker_materialization` (default
-`false`) under its existing finite source/configuration/tool bounds. Fresh and
-cloned targets use the same scoped publisher, owned creation acknowledgment and
-independent catalog readback before preparation. Unsupported retained memory,
-private resources and approval requirements refuse; tools remain explicit.
-The worker input and authoritative result reference the acknowledged native
-agent, and an unknown creation outcome is retained without another allocation.
-
-Fleet host composition uses the existing store and budget admission owners and
-reads full results from each worker's actual private binding and journal. Card
-excerpts cannot substitute for result contracts or mandatory review evidence.
-Text/JSON contracts are checked before funding. A retry dispatches a committed
-worker while it is pending; the existing pool claim prevents another execution.
-Refused admissions remain typed refusals when replayed.
-An explicitly installed MCP bridge requires the live turn's exact
-`origin_context_id`; stale, foreign or mismatched contexts refuse before the
-root loader runs. Native dispatch, control and frozen-batch wake bindings must
-be installed by the host; an unavailable binding does not authorize work.
-
-Gemini fleet workers use an explicit managed-agent token budget of 4096 per
-interaction. A worker can select the supported cost-oriented
-`gemini-3.5-flash-lite` model only through its canonical spec, backend revision,
-root model grant and independently verified native definition; execution never
-rewrites a retained model identity. The existing journal and input claim permit
-one worker interaction, including after restart; continuation requires another
-interaction and is refused. Non-worker runtime selection keeps its existing
-primary model.
-
-The Gemini managed-agent token budget is best-effort and excludes cached tokens.
-It is not a hard spending ceiling. Worker runtime admission refuses a deadline
-more than 600 seconds away. Worker execution retains its admitted deadline,
-cancellation and financial guard; complete measured usage is required for exact
-settlement.
-The session creator accepts complete scoped worker preparation through its existing
-host entry. A root-granted warm memory binding must still match at the memory
-owner's lookup; missing or changed bindings refuse without provisioning.
-The creation operation retains the acknowledgement before independent readback.
-A lost acknowledgement keeps an unknown outcome and cannot allocate again;
-interrupted proof restores a known receipt and resumes readback. Rejected sessions
-are archived through the bounded orphan owner only after independent identity and
-tenant/account ownership proof. Foreign or unproved sessions are never archived.
-Ordinary session calls keep their existing request and lazy-memory behavior.
-
-Explicitly selected Anthropic fleet workers can allocate a fresh native agent
-under the existing private-slot lease and claimed operation. The captured source,
-compiled agent readback and verified warm session must remain exact before the
-binding is published and input is sent. The root must grant the original scoped
-warm memory resource; readonly narrowing is retained. Cold memory and
-unrepresented credential, file, repository or application resources refuse.
-Ordinary turns and deployments without explicit backend selection retain their
-existing path.
-Frozen fleet root permissions are built from trusted finite host grants, the
-original admission and the scoped source/resource capture. The existing worker
-resolver checks policy, profiles, limits and source obligations; the root keeps
-its complete admitted place, subject and exact source revision pins. Missing,
-foreign, stale or unsupported facts refuse. The caller must first verify the
-exact active origin, native binding and card intent association. This projection
-does not derive authority from balance, pricing, mutable agent names or tool
-requests, and does not reserve funds or activate a run.
-
-
-Fleet roots are projected only when fleet orchestration is enabled and the actual admitted agent has a current DB fleet grant. The captured-source constructor supplies finite authority through the existing `WorkerPermissions` contract; installed `TurnDeps.fleet_root_grants` loaders are refused when a grant exists. Tool bodies, cards, tenant balances and current model prices cannot supply authority. Session preparation retains its scoped source capture privately. Before native input, the real turn joins its genuine card intent, active origin, original requester and accepted private binding under the existing lease, then uses `freeze_root_permissions` and the existing fleet/operation owners to retain one immutable root. Turns without a root intent, including ordinary turns with the loader installed, keep their normal input path. Missing prerequisites refuse; unconfigured turns perform no new capture or persistence.
-
-`read_frozen_root` in `daimon.core.turn.runtime_manifest` takes the original scope and exactly one selector: the genuine card `intent_id` or verified native `origin_id`. A captured `run_id`, when provided, must match. Cards and authenticated tools consume the same record and fresh policy; recovered controls must provide their captured run. The lookup preserves the original scope principal and finite bounds, checks the current origin, intent, requester, binding and run, and refuses stale or foreign associations. Fresh read authorization cannot enlarge or replace the frozen authority. This seam does not install an operator grant policy or certify a live deployment.
-
-Before creating a root run, the existing operation owner durably reserves its exact origin and intent. The intent reservation checks prior associations across all accounts in the tenant under the card row lock; public readers remain account-scoped. The origin key and immutable intent association remain authoritative while delivery is pending, claimed, unknown or processed; neither a competing intent nor a missing receipt can allocate a second run or root budget. Only a processed receipt is readable as a frozen root. Stored receipts are decoded through the existing persistence owner in JSON mode, preserving strict money and scope fields.
-
-
-
-Fleet controls read the prepared root through the existing frozen-root projection.
-The MCP service can use the real turn dependencies and verified active origin;
-handles do not supply authority. Controller admission resolves the caller's
-platform identity to the original account. A trusted tenant administrator may
-control an already-authorized root.
-Scoped, versioned stop acknowledgements and their retries use the existing
-operation store. They preserve worker bindings, usage and held reservations;
-a stop acknowledgement does not certify native termination. Resume without
-accepted-attempt reconciliation refuses explicitly. Completion waits freeze an
-exact initial cohort, then separate review cohorts for each reviewed target,
-in the existing continuation queue. Each wait reloads the original frozen root
-through the turn dependencies; a shared ports instance never holds a fixed wake
-address. A successful worker
-result publishes that cohort's wake in the same transaction. The deployment must
-install the compatible completion reader and the normal runner's fresh root
-checks. Native dispatch and its budget watchdog remain separate installation
-prerequisites; absent hooks keep spawn unavailable. A run-wide stop does not
-publish an armed completion wait.
-Discord installs the completion decision in its existing guarded continuation
-caller only when fleet is enabled. The normal admission and responder checks
-still apply. The same root validator fences card/preparation entry, the prepared
-session/account and the runner's input; that input hook disables replacement
-recovery. Other wake reasons and fleet-disabled calls keep their existing path.
-Original-run tool authority, collection certification, run-end cleanup and the
-deployed compatible-reader/rollback floor require their separate owner proofs.
-
-QA cleanup evidence uses `daimon.testing.admin_resources.ResourceManifestEntry`
-and `freeze_resource_manifest` to retain exact scope/run/binding/native references
-and owner creation receipts. `ownership` and `eligible_actions` are derived;
-borrowed resources have no destructive eligibility, and unknown creations retain
-no guessed native identity. The signed action list is only a ceiling, never a
-production authorization. Original admitted input receipts bind cancellation.
-
-`verify_cancel_readback` performs the existing driver's independent stop readback
-and retains its actual observation. `verify_archive_readback` performs the scoped
-session-admin GET, verifies identity/account/agent/environment and an aware archive
-timestamp, and never sets a native-stop result. Unknown, missing or unsupported
-readbacks remain pending/retained. These read-only QA functions do not cancel,
-archive, delete, release holds, authorize live work or award a scenario point.
-N9 must supply the owner-captured records and independently pinned operation IDs;
-creation receipt provenance and current mutation authorization remain with their
-existing owners. Borrowed memory bindings remain unchanged; the helper does not
-certify DB binding preservation or deletion, which need their real owner readbacks.
-
-Ordinary tool-free Gemini channel turns can opt into a native output-token limit
-through the existing operator runtime manifest. Set `max_output_tokens` to a
-strict integer from 1 to 65,536;4096 is a small example. This requires
-`environment: {"name": "no-execution", "execution": "none"}` and `tools: []`.
-The existing driver compiles a model interaction with
-`generation_config.max_output_tokens`, retains the same scoped journal and
-conversation history, and preserves the limit on subsequent turns and 503
-fallbacks. No sandbox environment is created or reused in this configuration.
-
-Managed tools, skills, MCP, mounts and native agent definitions are incompatible
-with this ordinary-turn configuration and refuse before provider access.
-Omitting the field preserves existing managed-agent turns and worker option-A
-budgets. The native model response limit is distinct from the managed-agent
-`max_total_tokens` budget, which is best-effort and does not enforce an output
-ceiling. No input-token or final-cost bound is implied.
-
-A terminal fleet run transition retires its addressed completion wakes in the
-same transaction. Pending/claimed rows become cancelled and their lease metadata
-is cleared; delivered/skipped records remain unchanged. Stale claim writes
-cannot revive scheduling. This does not interrupt native work or release
-money. Other runs, roots and wake reasons retain their scheduling.
-Fleet completion turns carry the actual claimed and started durable wake row to
-the normal prepared-turn runner. They retain a locator in the existing root
-operation, referencing the exact original processed root and run rather than
-creating another run or reloading grants. Authenticated tools verify the current
-live origin; cards use their genuine current intent. Both resolve the same
-one-hop association and recheck original scope, source, native binding, account,
-policy and finite deadline. Unknown receipts and conflicting claims refuse.
-
-Opted-in original root origins and mapped card intents are retained at exit
-only while their exact run is active and unexpired. Original origin expiry is
-capped to its existing expiry and the original deadline. Wake origins keep their
-normal execution lifetime. The frozen-root reader rechecks durable run state on
-every resolution: only running or collecting runs retain execution authority.
-Completing, failing or cancelling a run after its original turn exits invalidates
-both original and completion-locator readers even if bounded origin/card records
-remain. Removing those audit records at run end is a separate lifecycle owner
-unit. Ordinary turns and disabled lifecycle calls retain their existing behavior.
-
-Fleet dispatch obtains each original preparation request through a trusted owner
-callable keyed by the verified root. The request's existing source capture and
-worker derivation validate the original subject, place, scope, pinned source and
-bounded deadline before resolving a worker revision. The shared ports use the
-process worker pool to claim the exact admitted worker, then call the existing
-headless worker driver. Native cancellation events are monitored by the existing
-budget watch, shared across review cohorts, and tasks join the turn shutdown
-registry. Unknown outcomes retain their existing reservations. The store refuses to claim
-pending workers with a retained stop intent, and the same budget producer
-withdraws admission so the existing watch cancels bound workers. Neither action
-releases native outcome reservations. Dispatch remains unavailable without its
-explicit owner dependencies.
-Preparation-owner loading shares the original root/worker deadline and shutdown
-registry. Known refusals during preparation derivation or the headless driver's
-initial policy, funding and backend checks end only the same pre-native claim
-through its existing locked transition owner, retaining reservations and
-publishing eligible frozen completion wakes. Cleanup allows a concurrent stop
-intent and refuses changed attempts, bindings or native phases. Once allocation
-starts, native-unknown outcomes stay with the existing reconciliation owner.
-The minimum deployed rollback reader is `>= #963`: the completion-aware reader
-with closed SQL reason predicates and fair callback-unavailable deferral.
-It recognizes `worker_finished`; it does not ignore that
-reason. Without an installed completion callback, dispatch releases the row
-without provider input, history fallback or a notice, refunds the claim attempt
-and advances availability. That backoff lets later threads reach the next
-bounded poll batch. Readers that decode unsupported reasons before selection
-are below this floor; no legacy-vocabulary backport is implied.
-
-Before removing completion-wake schema support, stop fleet publication and
-dispatch, drain native work, and retire pending/claimed scheduling through the
-existing owners. Read back zero `worker_finished` rows in `pending` or `claimed`
-before starting restore. The reason-check downgrade takes a bounded table lock
-and refuses while any such row remains; refusal rolls back the restore step.
-After retirement, its reason-only deletion and legacy-check restoration can
-succeed. Removing queue rows is not cancellation of native work or a refund of
-usage; those confirmations remain independent requirements.
-
-Per-agent fleet grants are finite admin settings in the existing immutable
-`agent_backend_revision` lineage. The nullable grant retains exact paired
-backend/profile and model references, worker count, per-run worker authority budget,
-expiry and explicit run/worker/input ceilings. The current admin must confirm a
-fresh preview and setting revision; backend and grant edits share one policy-
-fenced revision insert and security audit transaction. An epoch is the local revision that granted or amended authority.
-Backend set, clear and revert carry the current grant unchanged; grant-only
-appends preserve the backend undo pointer. Revoke appends no grant, and re-grant
-uses a new epoch. A backend revert never restores a historical grant.
-
-Grant reads do not infer funding, prices, source fidelity or a native final-bill
-cap. Missing or expired grants supply no fleet authority; malformed grant data
-is logged without its body and refused by the fleet reader while ordinary
-backend reads remain usable. A backend edit after an invalid grant appends no
-grant, retiring that authority without rewriting the malformed history. Old
-rows have no grant. During a mixed-image
-rollout, an old neutral writer appends no grant and therefore revokes rather
-than broadens authority; re-granting cannot reuse its former epoch. Dropping the
-grant column removes all grants. Runtime construction and admin surfaces are
-separate installation steps; this persistence API alone enables no fleet task.
-The financial grant ceiling covers workers only. The ordinary orchestrator root
-retains its normal billing and input path; whole-root financial and input
-controls must be installed separately before a fleet live retry.
-Operator policy mutations can verify Discord authority through `core.native_admins.verify_backend_actor`. It reads the registered guild, current owner/roles/member and existing account binding with bounded requests; unknown or revoked authority refuses. Verification never creates an account, promotes a stored role or saves an authorization token. The mutation owner still checks its policy revision and writes its audit atomically.
-
 ### Operator tenant backend policy
 
 `daimon tenants backend-policy` snapshots and changes the backend allowlist
@@ -3159,141 +2562,6 @@ revision refuses, including a concurrent change to any other policy field.
 Revert restores only the allowlist and preserves the remaining policy.
 Mutations append the service's scoped security audit in the same transaction.
 
-Snapshot files contain only tenant/workspace identifiers, the backend allowlist
-and policy revision. Creation is exclusive: an existing snapshot is never
-overwritten. Dry-run performs current admin, policy and CAS validation without
-policy or audit writes; snapshot dry-run also creates no file. Current authority
-is required again for rollback. These commands grant no fleet permissions and
-do not make provider calls, allocate native resources or change default chat
-behavior.
-The continuation store exposes a read-only tenant/run-scoped completion audit
-reader. It requires an actual owned run, returns all statuses in creation/ID
-order, and matches the literal canonical run prefix before decoding. Malformed
-owned bodies and mismatched roots remain visible for exporter refusal;
-canonical cohort/key/address validation and snapshot coherence remain exporter
-checks. Reads project persisted columns without flushing or overwriting caller
-objects; effective dirty or deleted state for its source tables is refused by
-the shared store reader. Reading this audit never claims or runs a wake.
-
-## Captured root permission composition
-
-`neutral_resources.fleet_root_permissions` derives the existing `WorkerPermissions`
-from an owner-captured `BackendAgent`, its actual `AdmissionGrant`, a current scoped
-`AgentFleetGrant`, and the caller's joined `FleetFacts`. The caller rechecks the grant
-epoch and expiry around awaited reads and validates the original origin/binding.
-The constructor preserves the exact admitted subject/place/category, source revision,
-environment, seals, and paired backend/model ceilings, including explicit model pins.
-It delegates normalization and source-obligation checking to `freeze_root_permissions`.
-
-The common permission deadline is conservatively bounded by grant expiry and the
-smaller of the finite run/worker durations and the existing turn ceiling.
-Worker budget and request ceilings come
-from the grant's existing `WorkerLimits`; funding remains a separate owner decision.
-The caller retains worker counts, grant epoch, and root-input controls through the
-existing run/context. This constructor does not impose a whole-root financial cap.
-
-Only a captured, already-bound warm memory store can become a mount. It uses the
-existing memory mount codec and exact caller resource scope, with the captured access
-mode; there is no provisioning. The complete source remains available to the existing
-obligation classifier after represented native custom tools are projected. Credentials,
-unsupported MCP/native controls, missing memory, repositories, and opaque requirements
-remain typed refusals. No obligations or declared drops are inferred or filtered.
-This API alone does not install runtime fleet execution or prove main defaults portable.
-
-
-An enabled fleet freezes worker authority from the actual admitted agent's
-current per-agent grant. A missing grant leaves ordinary root input unchanged.
-Revocation or replacement invalidates retained roots by their pinned epoch and
-grant digest. The frozen worker deadline is the minimum of the original request
-bound, grant expiry and finite permission duration; reconstruction cannot extend
-that bound. Worker budget, model choices and request ceilings come only from the current
-DB grant through the captured-source permission constructor. An installed
-permission loader is refused before allocation when a DB grant exists; loader
-narrowing is not supported. The worker request reader joins the exact original run, origin,
-account, binding, source revision and current policy; it refuses missing or
-legacy preparation facts and source or environment drift. It retains neutral
-facts, never SDK clients, transports, credential values or accounting callbacks.
-
-The grant's budget ceiling covers workers only. The ordinary root's requests
-are separate; fleet installation does not establish a whole-root provider bill
-cap. Root financial controls require their own installation before a bounded
-root-and-workers run.
-
-
-### Fleet runtime composition and draining
-
-With `DAIMON_FLEET__ENABLED=true` (the default), the ordinary Discord `build_runtime(settings)`
-and MCP `create_mcp_app` factories construct the existing fleet orchestrator,
-worker pool and scoped host ports. They use the process's real sessions, client,
-markup and turn dependencies. No permission loader needs to be injected: root
-preparation uses the current per-agent DB grant. The factories own only what
-they construct, and close fleet work before draining and disposing their existing
-clients and database pools. With the flag off they construct no fleet owner,
-pool, state store or tariff lookup.
-
-The existing runtime registry can supply cold native tariff callbacks without
-constructing a provider client or inspecting credentials or deployment files.
-The host pricing context retains canonical managed-agent rates and every supplied
-native rate. Actual attenuated worker backend/model pairs resolve through the
-pricing owner before financial admission; a new pair does not discard rates for
-prior workers. A missing native tariff remains missing and is refused by financial
-admission. Registering a callback is not proof of a complete provider bill, funding
-or execution authority. Native deployment suppliers must supply matching dated
-request-tier rates; this composition does not invent them.
-
-An ordinary initial card read may return no fleet only after the shared reader
-verifies the current admitted source/session, original origin/account/thread,
-current persisted binding and policy, genuinely absent per-agent grant, and no
-root reservation in any state. A foreign account's reservation on the exact
-intent refuses rather than appearing absent. Ordinary sealed and final responses
-then retain their existing delivery path.
-
-Revocation blocks new inputs and allocation. Scoped Stop, status, wait and
-collection for an already-running root continue under its original frozen epoch;
-they do not refresh authority or permit new worker inputs. Native preparation,
-spawn and resume stay strict, and completed/cancelled/failed roots remain refused.
-Grant ceilings cover workers only. Whole-root financial/input controls are a
-separate prerequisite before any live fleet execution.
-Per-agent fleet grants can carry `native_root_budget_usd` and
-`root_cash_budget_usd` together through the existing audited preference service.
-Both are optional; omitting them preserves the previous grant encoding. Native
-budget values use the same strict, finite, positive cent precision as worker
-native budgets. Cash values must be strict, finite and positive. The pair is
-separate from `limits`, which continue to govern workers and retain their
-single-input native dispatch restriction.
-
-The session compilers accept an explicit root native budget: Anthropic compiles
-USD cents into its native session budget, while OpenAI compiles cents into
-`spend_control.limit`. Explicit compilation requires exact acknowledgement and
-owned-session readback; a missing or mismatched budget refuses. OpenAI native
-spend-control acceptance remains a live-provider gap: prior attempts were
-rejected, so offline request-shape proofs do not certify provider acceptance.
-No ordinary root selects these new grant values yet. Root funding, distinct-send
-counting and attributed settlement are separate prerequisites for activation.
-The normal request continues to omit the optional budget.
-
-With fleet enabled and an applicable per-agent grant, Discord establishes the
-real card intent and scoped origin before binding and retains the same origin
-through execution. Preparation failure, cancellation and completion release
-that context once. With fleet disabled or no applicable grant, the caller keeps
-its previous preparation arguments and origin timing.
-
-
-Failed controlled native session allocation archives a returned session only
-when its native readback proves the expected tenant, requester, agent and
-environment. That verified session uses the existing bounded single-attempt
-orphan cleanup, including after cancellation; an unverified readback or unknown
-allocation acknowledgement does not authorize a native archive. The ordinary
-uncontrolled app-session archive remains the mutually exclusive fallback.
-App-access revocation and cleanup of the session's owned app vault continue
-independently. Cleanup does not erase the allocator's original acknowledgement
-or authorize release of an unknown financial hold.
-
-Discord orchestration callers may omit the origin stack. The existing owner then
-manages its lifetime internally; constructing the stack makes no database or
-provider change. Admission and the queue gate still complete before entering
-the opt-in fleet origin or binding its session.
-
 ### Source-loss consent persistence
 
 Agent backend revisions can retain a closed source-loss consent body containing
@@ -3314,23 +2582,6 @@ Cached ORM values cannot hide cleared or malformed consent. Effective dirty or
 deleted proof sources refuse without flushing, refreshing or overwriting caller
 state; pending new objects remain unflushed. Ordinary revision reads retain their
 existing ORM behavior unless the authoritative persisted mode is selected.
-
-The backend service may receive a trusted complete source-capture callback. Its
-preview derives losses through the existing worker source-preservation rule and
-includes the exact losses, source pin and target digest in the confirmation
-digest. A switch must accept exactly that tuple. Switching from Anthropic to
-another provider declares `model_controls` when the source's valid effort or
-speed controls cannot be represented. Identical same-provider native model
-controls are preserved. Unknown or invalid controls still refuse as
-`source_definition`, even with `model_controls` consent. DD3 cards, CLI previews
-and MCP results show this loss through the same canonical declared-drop tuple.
-A credential paired to an MCP server is lost with an explicit `mcp` declaration
-only when that server is absent from the target. The session composer's scoped
-caller-MCP credential is paired to its injected MCP server even if the native
-agent's MCP list is empty. Credentials for retained servers, unpaired credentials,
-instructions, unknown obligations and publishing approval cannot be discarded. Missing source
-or publishing context refuses. Clear removes consent; revert rechecks the original
-consent against a fresh capture, and fleet-grant changes carry the current consent.
 
 Turn preparation reads the original accepted revision through the effective
 configuration association, never through the latest preference. It freshly reads
@@ -3353,10 +2604,9 @@ explicitly dropped; tools, skills and MCP are empty, and the target uses an
 explicit remote environment without sources. Credentials, publishing approval,
 unknown source controls, shared ownership, seals and transfer remain refused.
 The source instructions and logical name are retained; operator deployment text
-cannot replace them. No worker is fabricated, and ordinary chat does not inherit
-worker token controls. Missing consent, source drift or incomplete native proof
+cannot replace them. Missing consent, source drift or incomplete native proof
 refuses preparation. The existing explicit backend-selection flags remain
-required; unconfigured channels and the worker option-A limits are unchanged.
+required; unconfigured channels retain their existing behavior.
 ### Preview and accept backend losses from the CLI
 
 With model backend selection enabled, `daimon agents backend set Research openai
@@ -3373,24 +2623,6 @@ resolves credential values or starts a provider session. Missing or foreign
 context, an unrelated configuration target, credentials, private resources and
 unknown source obligations remain refusals. The explicit feature-off path stays
 cold. A setting applies to new threads; existing threads retain their backend.
-
-`daimon agents backend revert Research` previews the actual preceding retained
-setting and applies the existing revision compare-and-set. Source drift requires
-confirmation again; revert does not restore historical fleet grants. `--dry-run`
-on revert is read-only. Clearing still uses the existing explicit clear operation.
-
-Gemini fleet workers can explicitly request both `max_input_tokens` and
-`max_output_tokens` in their existing `WorkerLimits`. This requires
-`max_turns=1`, `gemini-3.8-flash`, no tools, skills, MCP or mounted resources,
-and explicit memory/sandbox drops. The worker retains counterpart verification
-and uses a model interaction for execution. The complete prompt, including
-system instructions, is counted before dispatch; missing counts or excess input
-refuse. Cached input remains inside the ceiling, and output includes thinking.
-The existing journal permits one accepted or uncertain interaction across the
-worker lifetime; subsequent turns refuse, including after restart. This mode
-has no fallback to another model. Worker limits remain monotonic under the
-existing permission resolver. Other profiles and uncapped Gemini turns retain
-their existing behavior.
 
 ### Explicit source capability representations for Gemini
 
@@ -3435,15 +2667,15 @@ before each provider exposure, after independent native counterpart verification
 It does not mint or store a bearer in a catalog or runtime manifest.
 
 This mode requires agent-origin preparation and all existing source/catalog/
-configuration pins; channel plans and workers cannot activate it. Unconfigured
-turns remain cold and the explicit Gemini worker token envelope is unchanged.
+configuration pins; channel plans cannot activate it. Unconfigured
+turns remain cold.
 
 A representation row applies only to its exact agent-origin platform, channel,
 account, source version and backend profile. Verified public backend previews
 explicitly use their existing channel context before a backend revision exists;
 the preview owner considers the evidence only for the requested target. Ordinary
 headless captures do not select this preview context. DMs, routines without that binding,
-workers and other profiles keep their original source capture. Invalid or stale
+and other profiles keep their original source capture. Invalid or stale
 representation evidence is discarded; the full deployment independently refuses
 without it. Capture never substitutes a reduced target after that refusal.
 
@@ -3455,7 +2687,7 @@ enabled defaults), the same profile mapping retains them as `url_context` and
 `google_search`. They are never silently omitted to fit a token-only quote;
 provider web-tool fees need their own finance terms before a live attempt.
 The native per-toolset schema represents MCP only with an explicitly verified
-catalogue and fully resolved automatic enablement; legacy and worker projections
+catalogue and fully resolved automatic enablement; legacy projections
 still exclude native-only MCP toolsets. Capture authenticates to the configured
 server using a registered short-lived chat-execution credential from the existing
 MCP mint/registry owner, reads `tools/list`, and revokes that preview credential
@@ -3562,8 +2794,7 @@ requires a newly authorized credential through the existing mint owner.
 
 An agent-origin `openai.persistent_workspace` deployment can use the same
 `source_capabilities` proof as the inline profile. This is explicit operator
-configuration; unconfigured channels and conversation-only workers keep their
-existing paths. Preview and preparation capture the actual source again and
+configuration; unconfigured channels keep their existing paths. Preview and preparation capture the actual source again and
 check the same source pin, account, agent version, channel and exact MCP
 catalogue. All six automatic filesystem builtins map through the profile's
 hosted bash capability. Unknown tools, confirmation policies and unrepresented

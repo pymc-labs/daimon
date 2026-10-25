@@ -119,31 +119,6 @@ once (`--collect-only`, no database), places its files the way CI will, and
 fails if a shard is empty or the shards omit or repeat a test, so a new test
 file lands in exactly one shard without any edit.
 
-Production defaults to mux with backends and fleets on; the flags are emergency
-stops. A test run that sets no `DAIMON_TURN__PATH` runs on the stop leg (legacy,
-backend flags off) through `daimon.testing.stop_leg_default`, which the root
-`addopts` load. The turn-relevant suites (`packages/core/tests/turn`, `tests/parity`, the
-Slack, Discord, Teams and scheduler adapters, `daimon run`, and the non-chat
-turn files: headless, routines, smoke, workspace transfer and session
-preparation) also run on a second, blocking `pytest-mux-leg` job
-with `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`, the
-production default, which gates the deploy; its suites
-carry a `-mux` suffix. Fixtures read the leg through `daimon.testing.turn_leg`
-(`deps_for` and the parity drivers), so run a suite locally on the mux leg by
-setting those two variables. The mux leg is a ratchet: `tests/mux_leg_known_failures.txt` lists the
-failures that exist today and `-p daimon.testing.mux_leg_known` marks them strict
-expected failures, so a new failure fails the leg and a listed test that starts
-passing must be removed from the list. It is not a prerequisite of the staging
-deploy, because legacy is the production default. A test that only holds on mux builds its deps with
-`deps_for_pinned_mux`; the rest must hold on both legs.
-
-The blocking `pytest-staging-config` job also runs focused turn checks in two
-configurations. Its enabled leg sets `DAIMON_TURN__PATH=mux`,
-`DAIMON_TURN__CHANNEL_BACKENDS=true`, `DAIMON_TURN__AGENT_BACKENDS=true`, and
-`DAIMON_FLEET__ENABLED=true`; its legacy leg sets the path and all three switches
-off. The tests verify the selected platform turn path, native agent counterpart
-proof, and fleet grant admission. Both legs must pass before staging deploys.
-
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.
 

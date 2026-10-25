@@ -64,9 +64,7 @@ from daimon.core.github_app_session import (
     rotate_live_app_tokens,
 )
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.github_installation_reconcile import (
-    drain_github_installation_reconciliations,
-)
+from daimon.core.github_installation_reconcile import drain_github_installation_reconciliations
 from daimon.core.github_issued_token_sweep import sweep_closed_github_issued_tokens
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
@@ -153,12 +151,7 @@ from mux.errors import ScopeViolation
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import (
-    AsyncConnection,
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-)
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
@@ -619,16 +612,6 @@ async def _build_fire(
             )
 
     return _fire
-
-
-async def _sweep_fleet_deadlines(sm: async_sessionmaker[AsyncSession]) -> None:
-    """Release expired fleet slots; failures retry on the next scheduler tick."""
-    from daimon.core.stores.fleet import sweep_expired
-
-    try:
-        await sweep_expired(sm)
-    except Exception:
-        log.exception("scheduler.fleet_deadline_sweep.failed")
 
 
 async def _drain_pending_usage(sm: async_sessionmaker[AsyncSession], *, markup: Decimal) -> None:
@@ -1403,7 +1386,6 @@ async def run(
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 wait_for_completion=True,
             )
-            await _sweep_fleet_deadlines(sm)
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_privacy_deletes(client, sm)
@@ -1445,7 +1427,6 @@ async def run(
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 dispatcher=dispatcher,
             )
-            await _sweep_fleet_deadlines(sm)
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)

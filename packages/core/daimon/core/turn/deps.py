@@ -12,7 +12,7 @@ No I/O in this module; `build_turn_deps` derives the bundle from settings.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -50,9 +50,7 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
-    from daimon.core.neutral_resources import WorkerPermissions
-    from daimon.core.stores.domain import BackendAgent
-    from daimon.core.turn.admission import AdmissionGrant
+    pass
 
 
 @dataclass(frozen=True)
@@ -109,7 +107,6 @@ class TurnDeps:
     state_store: StateStore | None = None
     # Every turn inside `run_prepared_turn`, whatever started it; read by shutdown drains.
     running_turns: RunningTurns = field(default_factory=RunningTurns)
-    fleet_enabled: bool = False
     # `DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD`: each OpenAI model's daily spend cap
     # per tenant. None (a bundle built by hand) checks nothing.
     openai_daily_model_cap_usd: Decimal | None = None
@@ -118,10 +115,6 @@ class TurnDeps:
     # `DAIMON_PROGRESS_PLANS__MODE`: the deployment tier of the progress-plans cascade.
     # Disabled unless built from settings, so a bundle assembled by hand never reads it.
     progress_plans: CascadeMode = CascadeMode.DISABLED
-    fleet_max_workers: int = 8
-    fleet_root_grants: (
-        Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]] | None
-    ) = None
     # Each default agent's platform-limited skills, read from `defaults_root`
     # once (`load_platform_skills`); admission adds them on their platforms.
     platform_skills: Mapping[str, tuple[SkillRef, ...]] = field(
@@ -175,8 +168,6 @@ def build_turn_deps(
     deployment_default: DeploymentDefault,
     resolver_cache: ResolverCache,
     billing_config: BillingConfig | None,
-    fleet_root_grants: Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]]
-    | None = None,
 ) -> TurnDeps:
     """Derive `TurnDeps` from `settings`, once per adapter runtime."""
     turn_settings = cast(object, settings.turn)
@@ -212,7 +203,6 @@ def build_turn_deps(
         microsoft_send=settings.microsoft_accounts.configured,
         preparation_gate=PreparationGate(_preparation_limit(settings)),
         budget_notices_off=_notices_off(settings),
-        fleet_enabled=settings.fleet.enabled,
         openai_daily_model_cap_usd=settings.billing.openai_daily_model_cap_usd,
         gemini_daily_model_cap_usd=settings.billing.gemini_daily_model_cap_usd,
         progress_plans=(
@@ -220,8 +210,6 @@ def build_turn_deps(
             if isinstance(plans := cast(object, settings.progress_plans), ProgressPlansSettings)
             else CascadeMode.DISABLED
         ),
-        fleet_max_workers=settings.fleet.max_workers_per_run,
-        fleet_root_grants=fleet_root_grants,
         platform_skills=load_platform_skills(
             settings.defaults_root, features=settings.configured_features
         ),

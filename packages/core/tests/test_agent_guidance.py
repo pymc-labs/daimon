@@ -12,10 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-from daimon.core.agent_guidance import (
-    CREDENTIAL_GUIDANCE_BLOCK,
-    apply_credential_guidance,
-)
+from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK, apply_credential_guidance
 
 
 def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
@@ -32,7 +29,7 @@ def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
     assert CREDENTIAL_GUIDANCE_BLOCK.count(paragraph) == 1
     before = CREDENTIAL_GUIDANCE_BLOCK.replace(paragraph, "")
     assert hashlib.sha256(before.encode()).hexdigest() == (
-        "cbdb7ffcb06082d5dc26b411b5709e162d584331c2aafb5880b61d312c5af33d"
+        "f0cbfd773f6fd765d6812797f9f90ccfc4d35dcf1e626eecc486712cbf42ec2b"
     )
     assert apply_credential_guidance("base prompt").count(paragraph) == 1
 
@@ -425,17 +422,3 @@ def test_commit_guidance_adds_no_personal_access_token_hint() -> None:
     block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
     assert block.count("personal access token") == 1, "only the existing prohibition"
     assert re.search(r"\bPATs?\b", block) is None, "no PAT hint (PATCH is an HTTP method)"
-
-
-def test_fleet_guidance_forbids_imagined_worker_output() -> None:
-    # M07g: a Gemini Flash copy that couldn't fork wrote "If each were to give a
-    # one-sentence verdict..." as if it had run the workers. The block travels
-    # with every agent and every copy, including ones whose custom skills and
-    # fleet tools are missing, so this rule cannot live only in a skill.
-    block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
-    assert "FLEET WORKERS ARE REAL ONLY WHEN THE HOST RUNS THEM" in block
-    assert "A worker's answer is only what fleet_collect returns" in block
-    assert "If you have no fleet tools, or they refuse, say so and why" in block
-    assert "Never write what a worker or model would have said" in block
-    assert "not even as a hypothetical" in block
-    assert "made-up model output, not a comparison" in block

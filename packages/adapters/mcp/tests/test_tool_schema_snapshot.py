@@ -30,6 +30,7 @@ from daimon.core.config import (
     NotebookSettings,
     Settings,
     SlackSettings,
+    TurnSettings,
 )
 from daimon.core.scope import DeploymentDefault
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -57,6 +58,7 @@ def _fully_configured_settings() -> Settings:
     which is the exact partial-truth failure this test exists to catch."""
     return Settings(
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+        turn=TurnSettings(path="mux", channel_backends=True, agent_backends=True),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(
             jwt_secret=SecretStr("a" * 32),
@@ -266,8 +268,8 @@ async def test_the_tools_for_forking_onto_a_model_name_the_real_reason(sessionma
     """J7: "fork yourself onto gpt-3.5-turbo" must never read as an admin/owner rule.
 
     The model only knows what these descriptions say. A copy can name the model the
-    person asked for, so an unavailable one is refused as unavailable; the fleet tool
-    is what actually runs a copy on another model.
+    person asked for, so an unavailable one is refused as unavailable. A saved copy
+    can subsequently switch its provider through the ordinary confirmation flow.
     """
     app = create_mcp_app(
         settings=_fully_configured_settings(),
@@ -278,4 +280,6 @@ async def test_the_tools_for_forking_onto_a_model_name_the_real_reason(sessionma
     tools = {tool.name: tool for tool in await app.state.mcp.local_provider.list_tools()}
     fork = tools["fork_agent"].description or ""
     assert "pass it as ``model``" in fork, fork
-    assert "admin/owner rule" in fork, fork
+    assert "request a backend switch" in fork, fork
+    assert not any("fleet" in name.lower() for name in tools)
+    assert {"fork_agent", "request_provider_allowlist", "request_channel_pin_clear"} <= tools.keys()

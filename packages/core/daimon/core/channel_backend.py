@@ -26,7 +26,6 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 from functools import partial
 from typing import Literal, Protocol, cast, get_args
 
@@ -43,7 +42,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import source_agent_record
-from daimon.core.neutral_resources import AgentFleetGrant, NeutralResourceHost, ResolvedWorkerSpec
+from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.pricing import (
     MODEL_PRICING,
     ProviderPrice,
@@ -55,7 +54,6 @@ from daimon.core.provider_keys import default_enabled_backends
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import agent_backends, agent_owners, mux_state, security_audit
 from daimon.core.stores.domain import (
-    FLEET_OFF,
     AgentBackendRevision,
     BackendAgent,
     CompatibilityItem,
@@ -89,7 +87,6 @@ from mux.profiles import (
     selectable_models,
     shared_threads_available,
     tariff_gated,
-    worker_selection_allowed,
 )
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
@@ -306,12 +303,8 @@ def check_backend(
     revision: ConfigRevision,
     *,
     enabled_backends: tuple[Provider, ...] | None = None,
-    worker: bool = False,
 ) -> BackendAdmission:
-    """Admit `revision`, or raise `BackendUnsupported`.
-
-    `worker` admits it for a fleet worker or grant, which refuses channel-only models.
-    """
+    """Admit `revision`, or raise `BackendUnsupported`."""
     if revision.backend == "selfhosted" and not load_selfhosted_settings().admission_enabled:
         log_backend_unsupported(
             "backend_runnable", reason="selfhosted_admission_disabled", revision=revision
@@ -336,9 +329,6 @@ def check_backend(
             "backend_runnable", reason="profile_not_runnable", revision=revision
         )
         raise BackendUnsupported(f"{revision.profile} is not runnable in this release")
-    if worker and not worker_selection_allowed(revision):
-        log_backend_unsupported("backend_runnable", reason="channel_only_model", revision=revision)
-        raise BackendUnsupported(f"{revision.model} can't run fleet workers. Pick another model.")
     require_current_tariff(revision)
     return admission
 
@@ -450,7 +440,7 @@ type BackendRefusalStage = Literal[
 #: The capability names our own code raises in UnsupportedCapability (never request
 #: data), so a refusal log can name them. An explicit list: any other name, even a
 #: plain lowercase one (a future path passing a skill or agent name without its
-#: "kind:" prefix), stays redacted. Carlos's Opus worker (f95639c4) failed with its
+#: "kind:" prefix), stays redacted. An Opus turn (f95639c4) failed with its
 #: only clue redacted.
 _RAISED_CAPABILITIES: frozenset[str] = frozenset(
     {
@@ -540,18 +530,10 @@ _RAISED_CAPABILITIES: frozenset[str] = frozenset(
         "unseeded_skill",
         "unseeded_skill_upload",
         "unseeded_usage",
-        "unsupported_worker_source",
         "usage",
         "vault_conditional_or_native_credential",
         "vault_list_order",
-        "worker_token_envelope",
         "workspace_source",
-        "worker_extra_resources",
-        "worker_memory_store_absent",
-        "worker_repository_sources",
-        "worker_repository_undeclared",
-        "worker_resource_requirements",
-        "worker_sandbox_drop",
     }
 )
 #: Provider-specific names our code raises: "<provider>_<suffix>" for these suffixes
@@ -747,13 +729,10 @@ def transient_failure(error: BaseException | None) -> bool:
 
 
 def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object]]:
-    """One closed-label sanitizer for turn and background worker refusals."""
-    # Delay this import: the turn package itself imports channel_backend.
-    from daimon.core.fleet import FleetConflict, FleetConflictReason
+    """One closed-label sanitizer for turn and background refusals."""
     from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 
     safe_types: dict[type[BaseException], str] = {
-        FleetConflict: "FleetConflict",
         AgentBackendRefused: "AgentBackendRefused",
         AdmissionDenied: "AdmissionDenied",
         BackendUnsupported: "BackendUnsupported",
@@ -773,16 +752,6 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "drops_mismatch",
         "drops_required",
         "feature_disabled",
-        "invalid_fleet_grant",
-        "fleet_raise_admin_required",
-        "fleet_provider_limits_exceed_budget",
-        "fleet_root_credentials",
-        "fleet_root_mcp",
-        "fleet_root_files",
-        "fleet_root_repository",
-        "fleet_root_tools",
-        "fleet_root_memory",
-        "fleet_root_unsupported",
         "no_previous_revision",
         "owner_or_admin_required",
         "admin_required_for_shared_threads",
@@ -796,19 +765,14 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "stale_preview",
         "stale_revision",
         "tenant_mismatch",
-        "worker_identity_required",
         "backend_unsupported",
     }
     safe_reasons.update(get_args(AdmissionDenialReason))
     safe_missing = set(get_args(Capability)) | {
-        "native_worker_resource_drop",
         "source_definition",
         "source_context",
         "source_drift",
-        "worker_context",
         "native_counterpart",
-        "worker_materialization",
-        "worker_acknowledgement",
         "instructions",
         "tools",
         "skills",
@@ -835,12 +799,6 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
             cause["reason"] = error.reason if error.reason in safe_reasons else "redacted"
         if isinstance(error, AdmissionDenied) and error.site is not None:
             cause["site"] = error.site  # Our own module.function:line, never request data.
-        if isinstance(error, FleetConflict):
-            cause["reason"] = (
-                error.reason
-                if error.reason in get_args(FleetConflictReason.__value__)
-                else "redacted"
-            )
         if isinstance(error, UnsupportedCapability):
             cause["missing"] = sorted(
                 {
@@ -905,7 +863,6 @@ def _digest(facts: object) -> str:
 def _revision_digest(
     agent: BackendAgent,
     backend: Provider | None,
-    fleet_grant: JsonValue | None,
     drop_consent: JsonValue | None = None,
     model: str | None = None,
     settings: AgentSettings | None = None,
@@ -920,8 +877,6 @@ def _revision_digest(
     if settings is not None:
         # Only set fields are hashed, so a revision without them keeps its digest.
         facts.update(settings.facts())
-    if fleet_grant is not None:
-        facts["fleet_grant"] = fleet_grant
     if drop_consent is not None:
         facts["drop_consent"] = drop_consent
     return _digest(facts)
@@ -930,7 +885,7 @@ def _revision_digest(
 def spec_compatibility_items(
     spec: AgentSpec | BetaManagedAgentsAgent, *, skill_providers: tuple[Provider, ...] = PROVIDERS
 ) -> tuple[Iterator[CompatibilityItem], Iterator[CompatibilityItem]]:
-    """Map source skills and MCP requirements once for preview and worker derivation."""
+    """Map source skills and MCP requirements once for preview and target preparation."""
     if isinstance(spec, AgentSpec):
         skill_names = (pin.id for pin in spec.skills or ())
         servers = ((server.name, bool(server.credential_ref)) for server in spec.mcp_servers or ())
@@ -956,7 +911,7 @@ def spec_compatibility_items(
 def compatibility_missing(
     item: CompatibilityItem, target_backend: Provider, profile: Profile
 ) -> bool:
-    """One provider/capability predicate for preview and worker derivation."""
+    """One provider/capability predicate for preview and target preparation."""
     return target_backend not in item.providers or any(
         profile.support_for(cap) not in SUPPORTED for cap in item.requires
     )
@@ -1271,11 +1226,13 @@ class AgentBackendService:
         expected_revision: int,
         actor: BackendActor,
         operation: Literal[
-            "set", "clear", "revert", "settings", "fleet_grant_set", "fleet_grant_revoke"
+            "set",
+            "clear",
+            "revert",
+            "settings",
         ],
         expected_preview_digest: str | None,
         *,
-        fleet_grant: AgentFleetGrant | None = None,
         accepted_drops: tuple[str, ...] | None = None,
         now: datetime | None = None,
         model: str | None = None,
@@ -1322,36 +1279,17 @@ class AgentBackendService:
                 # it stays an admin's call until a destination can consent to it.
                 # TODO: a per-channel setting allowing shared threads, then owners too.
                 raise AgentBackendRefused("admin_required_for_shared_threads")
-            grant_operation = operation in ("fleet_grant_set", "fleet_grant_revoke")
-            if grant_operation:
-                if now is None:
-                    raise AgentBackendRefused("invalid_fleet_grant")
-                if operation == "fleet_grant_set" and not admin:
-                    # An owner only tightens: within the default, or within the
-                    # agent's current custom grant (an admin's raise).
-                    await self._require_owner_ceiling(session, agent, current, fleet_grant, now=now)
-                preview = await self._fleet_preview(session, agent, fleet_grant, now=now)
-                backend = current.backend if current else None
-                model = current.model if current else None
-                previous_local = current.previous_local if current else None
-                retained_grant = preview.fleet_grant
-            else:
-                preview = await self._preview(session, agent, backend, model, settings)
-                if not preview.allowed:
-                    raise AgentBackendRefused("backend_not_allowed")
-                previous_local = local or None
-                retained_grant = current.fleet_grant if current else None
-            consent = (
-                current.drop_consent
-                if grant_operation and current is not None
-                else preview.drop_consent
-            )
+            preview = await self._preview(session, agent, backend, model, settings)
+            if not preview.allowed:
+                raise AgentBackendRefused("backend_not_allowed")
+            previous_local = local or None
+            consent = preview.drop_consent
             if (
                 operation == "revert"
                 and (previous.drop_consent if previous is not None else None) != consent
             ):
                 raise AgentBackendRefused("re_confirm")
-            if not grant_operation and consent is not None:
+            if consent is not None:
                 if operation != "revert":
                     if accepted_drops is None and consent.declared_drops:
                         raise AgentBackendRefused("drops_required")
@@ -1370,24 +1308,21 @@ class AgentBackendService:
                         raise AgentBackendRefused("drops_mismatch")
                 if expected_preview_digest is None:
                     raise AgentBackendRefused("stale_preview")
-            elif not grant_operation and accepted_drops not in (None, ()):
+            elif accepted_drops not in (None, ()):
                 raise AgentBackendRefused("source_unavailable")
             consent_json = consent.model_dump(mode="json") if consent is not None else None
-            if (grant_operation or expected_preview_digest is not None) and (
-                preview.digest != expected_preview_digest
-            ):
+            if expected_preview_digest is not None and (preview.digest != expected_preview_digest):
                 raise AgentBackendRefused("stale_preview")
-            if not grant_operation:
-                # Validation is the same owner used for explicit channel selections.
-                check_backend(
-                    ConfigRevision.create(
-                        ChannelRef(
-                            tenant_id=str(agent.tenant_id), platform="cli", channel_id=agent.name
-                        ),
-                        1,
-                        agent_selection(preview.target_backend, model, settings),
-                    )
+            # Validation is the same owner used for explicit channel selections.
+            check_backend(
+                ConfigRevision.create(
+                    ChannelRef(
+                        tenant_id=str(agent.tenant_id), platform="cli", channel_id=agent.name
+                    ),
+                    1,
+                    agent_selection(preview.target_backend, model, settings),
                 )
+            )
             try:
                 revision = await agent_backends.put_revision(
                     session,
@@ -1397,11 +1332,8 @@ class AgentBackendService:
                     local=local + 1,
                     backend=backend,
                     previous_local=previous_local,
-                    digest=_revision_digest(
-                        agent, backend, retained_grant, consent_json, model, settings
-                    ),
+                    digest=_revision_digest(agent, backend, consent_json, model, settings),
                     preview_digest=preview.digest,
-                    fleet_grant=retained_grant,
                     drop_consent=consent_json,
                     model=model,
                     profile=settings.profile,
@@ -1429,243 +1361,6 @@ class AgentBackendService:
                 scope=f"agent_backend:{agent.agent_id}:{revision.local}",
             )
             return revision
-
-    async def _require_owner_ceiling(
-        self,
-        session: AsyncSession,
-        agent: BackendAgent,
-        current: AgentBackendRevision | None,
-        value: AgentFleetGrant | None,
-        *,
-        now: datetime,
-    ) -> None:
-        from daimon.core.fleet_configuration import default_fleet_grant, fleet_grant_within
-
-        if value is None:
-            raise AgentBackendRefused("invalid_fleet_grant")
-        ceilings: list[AgentFleetGrant] = []
-        default = default_fleet_grant(await self._policy(session, agent.tenant_id))
-        if default is not None:
-            ceilings.append(default)
-        if current is not None and current.fleet_grant is not None and not current.fleet_off:
-            stored = AgentFleetGrant.model_validate_json(json.dumps(current.fleet_grant))
-            if stored.expires_at > now:
-                ceilings.append(stored)
-        if not any(fleet_grant_within(value, ceiling) for ceiling in ceilings):
-            raise AgentBackendRefused("fleet_raise_admin_required")
-
-    async def check_owner_fleet_ceiling(
-        self, agent: BackendAgent, value: AgentFleetGrant, actor: BackendActor, *, now: datetime
-    ) -> None:
-        """The same rule, read-only, so a preview refuses before showing a card."""
-        async with self._sessions() as session:
-            if await self._authorize_edit(session, agent, actor):
-                return
-            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-            await self._require_owner_ceiling(session, agent, current, value, now=now)
-
-    async def read_fleet_grant(
-        self, tenant_id: uuid.UUID, agent_id: uuid.UUID, *, now: datetime
-    ) -> AgentFleetGrant | None:
-        if not self.enabled:
-            return None
-        if now.utcoffset() is None:
-            raise AgentBackendRefused("invalid_fleet_grant")
-        if not isinstance(cast(object, tenant_id), uuid.UUID) or not isinstance(
-            cast(object, agent_id), uuid.UUID
-        ):
-            raise AgentBackendRefused("agent_identity_required")
-        async with self._sessions() as session:
-            current = await agent_backends.current(session, tenant_id, agent_id)
-        if current is None:
-            return None
-        if current.fleet_grant_invalid:
-            raise AgentBackendRefused("invalid_fleet_grant")
-        if current.fleet_grant is None or current.fleet_off:
-            return None
-        value = AgentFleetGrant.model_validate_json(json.dumps(current.fleet_grant))
-        return value if value.expires_at > now else None
-
-    async def fleet_setting(
-        self, tenant_id: uuid.UUID, agent_id: uuid.UUID, *, now: datetime
-    ) -> FleetSetting:
-        """The agent's fleet as it applies now: custom, off, or the computed default.
-
-        An agent with no stored grant gets the default (nothing is written). An
-        explicit grant always wins, and an explicit "off" or an expired grant stays
-        off: the default never widens what an owner or admin chose.
-        """
-        from daimon.core.fleet_configuration import default_fleet_grant
-
-        if not self.enabled:
-            return FleetSetting("off", None, None)
-        explicit = await self.read_fleet_grant(tenant_id, agent_id, now=now)
-        async with self._sessions() as session:
-            current = await agent_backends.current(session, tenant_id, agent_id)
-            default = default_fleet_grant(await self._policy(session, tenant_id))
-            # Before the explicit "off" marker a revoke stored no grant. A grant only
-            # leaves the current revision by a revoke (other changes carry it), so an
-            # agent whose earlier revision held one was turned off and stays off.
-            legacy_off = (
-                explicit is None
-                and current is not None
-                and current.fleet_grant is None
-                and await agent_backends.ever_had_fleet_grant(session, tenant_id, agent_id)
-            )
-        if explicit is not None:
-            return FleetSetting("custom", explicit, explicit)
-        if legacy_off or (current is not None and current.fleet_grant is not None):
-            # Turned off, or a custom grant that expired.
-            return FleetSetting("off", None, default)
-        return FleetSetting("default", default, default)
-
-    async def _fleet_preview(
-        self,
-        session: AsyncSession,
-        agent: BackendAgent,
-        value: AgentFleetGrant | None,
-        *,
-        now: datetime,
-    ) -> CompatibilityPreview:
-        current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-        local = current.local if current else 0
-        policy = await self._policy(session, agent.tenant_id)
-        normalized: JsonValue | None = None
-        if value is not None:
-            try:
-                value = AgentFleetGrant.model_validate_json(value.model_dump_json())
-                if now.utcoffset() is None or value.expires_at <= now:
-                    raise ValueError("expired grant")
-                for choice in value.backends:
-                    check_backend(
-                        ConfigRevision.create(
-                            ChannelRef(
-                                tenant_id=str(agent.tenant_id),
-                                platform="cli",
-                                channel_id=agent.name,
-                            ),
-                            1,
-                            choice,
-                        ),
-                        enabled_backends=policy.enabled_backends,
-                        worker=True,
-                    )
-                    # Agent workers choose their own profile at dispatch. Legacy
-                    # choices on an agent grant don't require funding a denied
-                    # provider; its zero cap still refuses every worker there.
-                    if not (
-                        value.worker_agents is not None
-                        and value.limits.provider_limits_usd is not None
-                        and value.limits.provider_limits_usd.get(choice.backend, 0) <= 0
-                    ):
-                        value.limits.require_profile(get_profile(choice.profile))
-            except (ValueError, DaimonError, UnsupportedCapability):
-                raise AgentBackendRefused("invalid_fleet_grant") from None
-            lines = value.limits.provider_limits_usd
-            if lines is not None and sum(lines.values(), Decimal(0)) > value.limits.budget_usd:
-                # Financial admission refuses every spawn of such a run; say so now.
-                raise AgentBackendRefused("fleet_provider_limits_exceed_budget")
-            normalized = value.model_copy(update={"epoch": local + 1}).model_dump(mode="json")
-        else:
-            # Off is stored, so a revoked agent never falls back to the default fleet.
-            normalized = dict(FLEET_OFF)
-        preview = compatibility_preview(
-            agent,
-            (current.backend if current else None) or DEFAULT_BACKEND,
-            policy,
-            setting_revision=local,
-            cost_line="Fleet grant is an authority ceiling; funding is checked separately.",
-        ).model_copy(update={"fleet_grant": normalized})
-        return preview.model_copy(
-            update={
-                "digest": _digest(
-                    {
-                        **preview.model_dump(mode="json"),
-                        "configuration_digest": agent.configuration_digest,
-                    }
-                )
-            }
-        )
-
-    async def preview_fleet_grant(
-        self,
-        agent: BackendAgent,
-        value: AgentFleetGrant | None,
-        *,
-        now: datetime,
-        check_root: bool = False,
-    ) -> CompatibilityPreview:
-        """Preview a fleet grant; `check_root` first refuses an agent that can't run one.
-
-        That check captures the agent's source the way its turns do and asks the
-        same ceiling and obligations freezing a fleet root asks, so turning fleet on
-        never promises something every turn would then have to refuse.
-        """
-        self._require_enabled()
-        if check_root and value is not None and self._capture_source is not None:
-            from daimon.core.neutral_resources import FLEET_ROOT_OBSTACLES, fleet_root_obstacle
-
-            try:
-                captured = await self._capture_source(agent)
-            except AgentBackendRefused as error:
-                # No capture here, so no up-front answer; its turns still refuse
-                # a fleet plainly, with the turn answered (freeze_prepared_root).
-                log.warning("fleet.root_check_skipped", reason=error.reason)
-                captured = None
-            if captured is not None and (captured.tenant_id, captured.agent_id) != (
-                agent.tenant_id,
-                agent.agent_id,
-            ):
-                raise AgentBackendRefused("tenant_mismatch")
-            obstacle = fleet_root_obstacle(captured) if captured is not None else None
-            if obstacle is not None:
-                raise AgentBackendRefused(
-                    f"fleet_root_{obstacle}"
-                    if obstacle in FLEET_ROOT_OBSTACLES
-                    else "fleet_root_unsupported"
-                )
-        async with self._sessions() as session:
-            return await self._fleet_preview(session, agent, value, now=now)
-
-    async def set_fleet_grant(
-        self,
-        agent: BackendAgent,
-        value: AgentFleetGrant,
-        expected_revision: int,
-        actor: BackendActor,
-        *,
-        expected_preview_digest: str,
-        now: datetime,
-    ) -> AgentBackendRevision:
-        return await self._change(
-            agent,
-            None,
-            expected_revision,
-            actor,
-            "fleet_grant_set",
-            expected_preview_digest,
-            fleet_grant=value,
-            now=now,
-        )
-
-    async def revoke_fleet_grant(
-        self,
-        agent: BackendAgent,
-        expected_revision: int,
-        actor: BackendActor,
-        *,
-        expected_preview_digest: str,
-        now: datetime,
-    ) -> AgentBackendRevision:
-        return await self._change(
-            agent,
-            None,
-            expected_revision,
-            actor,
-            "fleet_grant_revoke",
-            expected_preview_digest,
-            now=now,
-        )
 
     async def set_backend(
         self,
@@ -1873,7 +1568,6 @@ async def resolve_turn_backend(
     *,
     enabled: bool,
     retained_revision: int | None = None,
-    worker: ResolvedWorkerSpec | None = None,
     validate_origin: Callable[
         [ResolvedBackend, Literal["channel", "agent"], ConfigRevision | None],
         Awaitable[None] | None,
@@ -1883,7 +1577,7 @@ async def resolve_turn_backend(
     """Resolve and retain through the existing immutable channel revision namespace."""
     if not enabled or retained_revision == 0:
         return None, False, "default"
-    if retained_revision is not None and worker is None:
+    if retained_revision is not None:
         retained = await mux_state.get_config_revision(session, channel, retained_revision)
         origin = await mux_state.config_origin(session, channel, retained_revision)
         if retained is None or origin not in ("channel", "channel_clear", "agent"):
@@ -1900,47 +1594,17 @@ async def resolve_turn_backend(
     await policy_store.lock_policy_writes_shared(session, tenant_id=tenant_id)
     override, ever_shared = await current_backend_and_sharing(session, channel)
     setting: AgentBackendRevision | None = None
-    if worker is None:
-        setting = await agent_backends.current(session, tenant_id, agent.agent_id)
-        if (
-            override is not None
-            and await mux_state.config_origin(session, channel, override.local) != "channel_clear"
-        ):
-            require_pin_meets_agent(override, setting)
-            return override, ever_shared, "channel"
-        agent_choice = revision_selection(setting)
-        if agent_choice is None:
-            return None, ever_shared, "default"
-        selection = agent_choice
-    else:
-        fleet = worker.permissions.fleet
-        if (
-            validate_origin is None
-            or fleet.root.channel != channel
-            or fleet.depth != 1
-            or not fleet.enabled
-            or not fleet.active
-            or fleet.scope.is_platform
-            or fleet.scope.is_legacy_host_authorized
-            or fleet.scope.tenant_id != channel.tenant_id
-            or fleet.scope.account_id != str(fleet.account_id)
-            or worker.permissions.spec != worker.spec
-            or worker.permissions.backend_grants != (worker.backend,)
-            or worker.spec.model.provider != worker.backend.backend
-            or worker.permissions.models != (worker.spec.model,)
-            or (worker.backend.model is not None and worker.spec.model.id != worker.backend.model)
-            or (
-                worker.source_agent is None
-                and worker.permissions.agent_id is not None
-                and worker.permissions.agent_id != agent.agent_id
-            )
-        ):
-            raise AgentBackendRefused("worker_identity_required")
-        if worker.source_agent is not None and (
-            agent.source is None or worker.source_agent != (agent.source.ref, agent.source.revision)
-        ):
-            raise AgentBackendRefused("stale_revision")
-        selection = worker.backend
+    setting = await agent_backends.current(session, tenant_id, agent.agent_id)
+    if (
+        override is not None
+        and await mux_state.config_origin(session, channel, override.local) != "channel_clear"
+    ):
+        require_pin_meets_agent(override, setting)
+        return override, ever_shared, "channel"
+    agent_choice = revision_selection(setting)
+    if agent_choice is None:
+        return None, ever_shared, "default"
+    selection = agent_choice
     if selection.backend == "selfhosted":
         raise AgentBackendRefused("selfhosted_requires_channel_configuration")
     consent_revision = setting if setting is not None and setting.drop_consent is not None else None
@@ -1957,7 +1621,9 @@ async def resolve_turn_backend(
         checking = validate_origin(selection, "agent", None)
         if inspect.isawaitable(checking):
             await checking
-    check_backend(ConfigRevision.create(channel, 1, selection), worker=worker is not None)
+    check_backend(
+        ConfigRevision.create(channel, 1, selection),
+    )
     if retained_revision is not None:
         retained = await mux_state.get_config_revision(session, channel, retained_revision)
         if (
@@ -2095,15 +1761,6 @@ async def load_backend_agent(
         required_capabilities=("multiagent",) if actual.multiagent is not None else (),
         source=source_agent_record(actual, resource_scope(tenant_id=str(tenant_id))),
     )
-
-
-@dataclass(frozen=True)
-class FleetSetting:
-    """`grant` is what turns may use (None: off); `base` is what an edit starts from."""
-
-    kind: Literal["custom", "default", "off"]
-    grant: AgentFleetGrant | None
-    base: AgentFleetGrant | None
 
 
 def backend_is_enabled(backend: Provider, enabled_backends: tuple[Provider, ...]) -> bool:

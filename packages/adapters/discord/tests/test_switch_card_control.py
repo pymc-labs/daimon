@@ -39,7 +39,7 @@ def test_the_control_reads_its_card_and_action_from_the_custom_id():
     )
     assert (control.card_id, control.press) == (card_id, "cancel")
     with pytest.raises(ValueError):
-        module.SwitchCardControl(discord.ui.Button(label="x", custom_id="fleet:nope"))
+        module.SwitchCardControl(discord.ui.Button(label="x", custom_id="invalid:nope"))
 
 
 async def test_someone_elses_press_is_answered_privately_and_the_card_stays(monkeypatch):

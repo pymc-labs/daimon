@@ -150,52 +150,16 @@ def _pricing_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
     monkeypatch.setattr(pricing, "datetime", Clock)
 
 
-def test_argon_is_admitted_for_channels_and_workers_only_inside_its_price_window(
+def test_argon_is_admitted_for_channels_only_inside_its_price_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _pricing_clock(monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
     check_backend(_revision(_ARGON))
-    # A fleet worker may run Argon (the host keeps it on the bounded envelope).
-    check_backend(_revision(_ARGON), worker=True)
     _pricing_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
-    for worker in (False, True):
-        with pytest.raises(
-            BackendUnsupported, match="gemini-4-argon's price window ended on 2026-11-30"
-        ):
-            check_backend(_revision(_ARGON), worker=worker)
-    # The Flash default and the cheap worker model are not tariff-gated.
-    flash = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash")
-    check_backend(_revision(flash))
-    check_backend(
-        _revision(flash.model_copy(update={"model": "gemini-3.5-flash-lite"})), worker=True
-    )
-
-
-async def test_argon_cannot_be_configured_after_its_price_window(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    tenant = await make_tenant(db_session)
-    channel = channel_ref(tenant.id, "discord", "chan-argon")
-    _pricing_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
-    with pytest.raises(BackendUnsupported, match="price window ended on 2026-11-30"):
-        await set_channel_backend(db_session, channel, _ARGON)
-    assert await current_backend(db_session, channel) is None
-    _pricing_clock(monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
-    written = await set_channel_backend(db_session, channel, _ARGON)
-    assert (written.local, written.model) == (1, "gemini-4-argon")
-
-
-# Admission
-
-
-async def _tenant(session: AsyncSession) -> TenantRow:
-    tenant = await make_tenant(session)
-    await make_tenant_config(
-        session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
-    await make_ledger_entry(session, tenant=tenant, delta_usd=Decimal("10"))
-    await session.commit()
-    return tenant
+    with pytest.raises(
+        BackendUnsupported, match="gemini-4-argon's price window ended on 2026-11-30"
+    ):
+        check_backend(_revision(_ARGON))
 
 
 def _deps(
@@ -419,3 +383,27 @@ def test_selfhosted_admission_enabled_refuses_missing_usage_capability(monkeypat
                 BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna")
             )
         )
+
+
+async def test_argon_cannot_be_configured_after_its_price_window(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await make_tenant(db_session)
+    channel = channel_ref(tenant.id, "discord", "chan-argon")
+    _pricing_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
+    with pytest.raises(BackendUnsupported, match="price window ended on 2026-11-30"):
+        await set_channel_backend(db_session, channel, _ARGON)
+    assert await current_backend(db_session, channel) is None
+    _pricing_clock(monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
+    written = await set_channel_backend(db_session, channel, _ARGON)
+    assert (written.local, written.model) == (1, "gemini-4-argon")
+
+
+async def _tenant(session: AsyncSession) -> TenantRow:
+    tenant = await make_tenant(session)
+    await make_tenant_config(
+        session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(session, tenant=tenant, delta_usd=Decimal("10"))
+    await session.commit()
+    return tenant

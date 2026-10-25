@@ -9,13 +9,10 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from daimon.core.turn.persistence import TurnPersistence, current_persistence
-from mux.contracts.actions import UserMessage
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef
-from mux.contracts.resources import Session
 from mux.drivers.openai import merge_history, object_json
 from mux.errors import ScopeViolation
-from mux.state.operations import request_digest
 from pydantic import JsonValue
 
 _BASELINE = "native.openai.host_invocation_baseline"
@@ -91,44 +88,10 @@ class OpenAIRecoveryJournal:
         )
 
 
-async def initial_input_consumed(session: ResourceRef, initial: UserMessage | None = None) -> bool:
-    """Recognize only this invocation's acknowledged, input-bearing creation.
-
-    The allocation send claim owns the turn count, digest and receipt. A new
-    invocation cannot inherit it, and an unknown outcome never permits a send.
-    """
-    active = persistence(session)
-    refs = active.binding.native_refs
-    allocation = refs.get("initial_input_turn")
-    if allocation is None or active.operation_key != f"turn:{session.id}:{allocation}":
-        return False
-    key = refs.get("initial_input_operation")
-    if key is None or key != allocation + ":send:0":
-        raise ScopeViolation(session.id, "initial input has a foreign operation")
-    operation = await active.store.get_operation(active.scope, key)
-    if operation is None or operation.operation.status != "processed":
-        raise ScopeViolation(session.id, "initial input has no acknowledged creation")
-    native = Session.model_validate(dict(operation.result))
-    if native.ref != session or native.binding.native_refs != {
-        k: v for k, v in refs.items() if k not in {"account_scope", "model", "plan_digest"}
-    }:
-        raise ScopeViolation(session.id, "initial input receipt differs from binding")
-    if initial is not None and refs.get("initial_input_digest") != request_digest(
-        initial.model_dump(mode="json")
-    ):
-        raise ScopeViolation(session.id, "initial input differs from acknowledged creation")
-    return True
-
-
 async def invocation_baseline(
     session: ResourceRef, observed_roots: tuple[str, ...]
 ) -> tuple[tuple[str, ...], bool]:
     active = persistence(session)
-    created_input = await initial_input_consumed(session)
-    if created_input:
-        # Creation has already started the first root; it is part of this turn,
-        # even when all its events were available before the first host read.
-        observed_roots = ()
     identity = "openai:baseline:" + active.operation_key
     for row in await journal(session):
         if row.type == _BASELINE and row.id == identity:
@@ -139,11 +102,11 @@ async def invocation_baseline(
                 active.scope, active.operation_key + ":send:0"
             )
             sent = operation is not None and operation.operation.status != "pending"
-            return tuple(str(root) for root in roots), sent or created_input
+            return tuple(str(root) for root in roots), sent
     await active.record(
         session, checkpoint(session, identity, _BASELINE, {"roots": list(observed_roots)})
     )
-    return observed_roots, created_input
+    return observed_roots, False
 
 
 class OpenAIUsageRevisions:

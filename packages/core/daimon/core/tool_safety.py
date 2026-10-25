@@ -160,7 +160,6 @@ ANY_KEY: Final[str] = "*"
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_skill": "content_hash",
     "request_agent_backend_switch": "preview_digest",
-    "request_fleet_config": "preview_digest",
     "request_provider_allowlist": "preview_digest",
     "request_channel_pin_clear": "preview_digest",
     # Every call names its action, so every call asks.
@@ -190,7 +189,6 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
         frozenset(
             {
                 "request_agent_backend_switch",
-                "request_fleet_config",
                 "request_provider_allowlist",
                 "request_channel_pin_clear",
             }

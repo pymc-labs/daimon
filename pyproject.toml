@@ -154,6 +154,7 @@ source_modules = [
     "daimon.core.agent_details",
     "daimon.core.agent_env_crypto",
     "daimon.core.agent_faces",
+    "daimon.core.agent_configuration",
     "daimon.core.agent_fork",
     "daimon.core.agent_guidance",
     "daimon.core.agent_identity",
@@ -199,10 +200,6 @@ source_modules = [
     "daimon.core.env_file",
     "daimon.core.direct_messages",
     "daimon.core.errors",
-    "daimon.core.fleet",
-    "daimon.core.fleet_configuration",
-    "daimon.core.fleet_orchestration",
-    "daimon.core.fleet_run_end",
     "daimon.core.fonts",
     "daimon.core.github_app_auth",
     "daimon.core.github_app_session",
@@ -357,7 +354,6 @@ source_modules = [
     "daimon.core.usage_sweep",
     "daimon.core.caller_resources",
     "daimon.core.usage_outbox_drain",
-    "daimon.core.usage_reread",
     "daimon.core.infrastructure_cost",
     "daimon.core.wizard",
     "daimon.core.wizard_sweep",
@@ -440,8 +436,6 @@ forbidden_modules = [
 ]
 allow_indirect_imports = true
 ignore_imports = [
-    "daimon.core.turn.openai_deployment -> mux.drivers.openai.mcp_auth",
-    "daimon.core.turn.openai_deployment -> mux.drivers.openai.skill_bindings",
     "daimon.core.turn.gemini_deployment -> mux.drivers.gemini.mcp_auth",
     # `mux.drivers.selfhosted.wire` is public (the daimon-harness/0 protocol).
     "daimon.core.** -> mux.drivers.selfhosted.wire",

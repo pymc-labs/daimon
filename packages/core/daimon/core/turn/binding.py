@@ -32,7 +32,6 @@ async def prepared_persistence(
     operation_key: str | None = None,
     session_ref: ResourceRef | None = None,
     scope: Scope | None = None,
-    fleet_capture: bool = False,
     lease_wait: LeaseWait | None = None,
 ) -> TurnPersistence:
     """Adopt existing native ids; publish ownership through put_binding only.
@@ -88,7 +87,6 @@ async def prepared_persistence(
             operation_key=f"turn:{session_id}:{key}",
             source_agent_id=admission.agent.id,
             session_ref=session_ref,
-            fleet_capture=fleet_capture,
             lease_wait=lease_wait,
         )
     channel_id = admission.origin_channel_id or ""
@@ -196,6 +194,5 @@ async def prepared_persistence(
         operation_key=f"turn:{session_id}:{key}",
         source_agent_id=admission.agent.id,
         session_ref=session_ref,
-        fleet_capture=fleet_capture,
         lease_wait=lease_wait,
     )

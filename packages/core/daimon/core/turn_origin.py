@@ -153,7 +153,6 @@ async def turn_origin(
     is_setup: bool = False,
     message_text: str | None = None,
     queued_message: bool = False,
-    keep_fleet_root: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -204,15 +203,6 @@ async def turn_origin(
         current_origin_id.reset(origin_context)
         async with sessionmaker.begin() as session:
             retain_until = None
-            if keep_fleet_root:
-                from daimon.core.stores.mux_state import database_clock, fleet_root_context_deadline
-
-                current = await database_clock(session)
-                deadline = await fleet_root_context_deadline(
-                    session, origin_id=origin.id, now=current
-                )
-                if deadline is not None and min(deadline, origin.expires_at) > current:
-                    retain_until = min(deadline, origin.expires_at)
             if retain_until is None:
                 await delete_origin(session, origin_id=origin.id)
             else:

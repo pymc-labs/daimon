@@ -7,58 +7,26 @@ import hashlib
 import json
 import os
 import re
-from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime
-from decimal import Decimal
-from functools import partial
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Annotated,
-    Final,
-    Literal,
-    Protocol,
-    Self,
-    cast,
-    get_type_hints,
-    overload,
-)
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, Self, cast, get_type_hints
 from uuid import UUID
 
 import structlog
-from daimon.core.caller_resources import (
-    APP_SESSION_VAULT_PREFIX,
-    CALLER_RESOURCES_ID,
-    CALLER_VAULT_PREFIX,
-)
 from daimon.core.errors import DaimonError
-from daimon.core.neutral_resources import (
-    AgentFleetGrant,
-    WorkerPermissions,
-    WorkerSpecRefused,
-    resolve_worker_spec,
-)
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
-from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode, resolve_default
+from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, ResourceRef, Scope, SkillRef
+from mux.contracts.ids import ModelRef, ResourceRef, SkillRef
 from mux.contracts.profile import Capability
-from mux.contracts.resources import (
-    AgentSpec,
-    EnvironmentSpec,
-    ProviderBinding,
-    ResourceBinding,
-    ToolSpec,
-)
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding, ToolSpec
 from mux.errors import InvalidConfig, MuxError, UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
-from mux.state.operations import OperationRecord, request_digest
-from mux.state.store import binding_slot
+from mux.state.operations import request_digest
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -71,22 +39,15 @@ from pydantic import (
 )
 
 if TYPE_CHECKING:
-    from daimon.core.access_policy import TenantAccessPolicy
-    from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
+    from daimon.core.neutral_resources import NeutralResourceHost
     from daimon.core.stores.domain import (
         BackendAgent,
         SourceRepresentation,
-        TaskContinuationRow,
         _BackendDropConsent,  # pyright: ignore[reportPrivateUsage]
     )
-    from daimon.core.stores.mux_state import BeforeClaim
     from daimon.core.stores.neutral_catalog import AgentRevision
-    from daimon.core.turn.deps import TurnDeps
-    from daimon.core.turn.persistence import TurnPersistence
-    from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
+    from daimon.core.turn.prepare import ProviderPreparationRequest
     from mux.contracts.ports import ManagedAgents
-    from mux.state.lease import Lease
-    from sqlalchemy.ext.asyncio import AsyncSession
 
 _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
@@ -114,1320 +75,6 @@ _ADMISSION_FACTS = {
 _LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
 
 log = structlog.get_logger(__name__)
-
-
-async def read_agent_fleet_grant(
-    deps: TurnDeps, admission: Admission, *, now: datetime
-) -> AgentFleetGrant | None:
-    """The fleet the actual admitted source may use now, without name lookup.
-
-    Its own grant when it has one; otherwise the computed default, unless fleet
-    was turned off for it or the turn's platform doesn't run fleets yet
-    (`FLEET_LIFECYCLE_PLATFORMS`). `FLEET__ENABLED=false` stops all of them.
-    """
-    from daimon.core.channel_backend import AgentBackendService
-    from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS
-    from daimon.core.ma_identity import derive_agent_uuid
-
-    if not deps.fleet_enabled:
-        return None
-    if admission.grant is None:
-        raise WorkerSpecRefused("origin", "unbound")
-    setting = await AgentBackendService(deps.sessionmaker, enabled=True).fleet_setting(
-        admission.grant.tenant_id,
-        derive_agent_uuid(tenant_id=admission.grant.tenant_id, ma_agent_id=admission.agent.id),
-        now=now,
-    )
-    if setting.kind == "default" and admission.grant.platform not in FLEET_LIFECYCLE_PLATFORMS:
-        # The default fleet only where the adapter settles and delivers workers.
-        return None
-    return setting.grant
-
-
-async def default_fleet_unavailable_here(
-    deps: TurnDeps,
-    *,
-    tenant_id: UUID,
-    agent_id: UUID,
-    platform: str | None,
-    now: datetime,
-) -> bool:
-    """Whether this agent has only the default fleet and this platform doesn't run it.
-
-    A custom grant is a different story (its root may just have gone stale), so it is
-    never reported as "not available here".
-    """
-    from daimon.core.channel_backend import AgentBackendService
-    from daimon.core.fleet_configuration import FLEET_LIFECYCLE_PLATFORMS
-
-    if platform in FLEET_LIFECYCLE_PLATFORMS:
-        return False
-    setting = await AgentBackendService(deps.sessionmaker, enabled=True).fleet_setting(
-        tenant_id, agent_id, now=now
-    )
-    return setting.kind == "default"
-
-
-async def read_agent_fleet_grant_or_off(
-    deps: TurnDeps, admission: Admission, *, now: datetime
-) -> AgentFleetGrant | None:
-    """`read_agent_fleet_grant` for a chat turn: a failed read is fleet off, not a failed turn.
-
-    Refusals (an unbound origin, an invalid stored grant) still raise. Anything else
-    (the database, a timeout) is logged and read as no fleet: nothing is retained.
-    """
-    from daimon.core.channel_backend import AgentBackendRefused
-
-    try:
-        return await read_agent_fleet_grant(deps, admission, now=now)
-    except (WorkerSpecRefused, AgentBackendRefused):
-        raise
-    except Exception as error:  # a fleet read never fails a chat turn
-        log.error("fleet.read_failed", error_type=type(error).__name__)
-        return None
-
-
-class _FrozenRoot(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    intent_id: UUID
-    origin_id: UUID
-    binding: ProviderBinding
-    permissions: WorkerPermissions
-    grant_epoch: int | None = Field(default=None, exclude_if=lambda value: value is None)
-    grant_digest: str | None = Field(default=None, exclude_if=lambda value: value is None)
-    default_backend_revision: ConfigRevision | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    root_controls: dict[str, JsonValue] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    root_finance: JsonValue = Field(default=None, exclude=True)
-    preparation: dict[str, JsonValue] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-
-
-class _ResumedRoot(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    intent_id: UUID
-    origin_id: UUID
-    root_origin_id: UUID
-    run_id: UUID
-    wake_id: UUID
-    wake_key: UUID
-    wake_owner: str
-    wake_attempt: int
-    wake_started_at: datetime
-    scope: Scope
-    binding: ProviderBinding
-
-
-async def _root_context(
-    deps: TurnDeps,
-    root: _FrozenRoot | None,
-    *,
-    now: datetime,
-    intent_id: UUID | None = None,
-    drain: bool = False,
-    resumed: _ResumedRoot | None = None,
-    execution_origin: bool = False,
-) -> TenantAccessPolicy:
-    from daimon.core.channel_backend import AgentBackendService
-    from daimon.core.stores import turn_card_intents, turn_origins
-    from daimon.core.stores.access_policy import load_access_policy
-    from daimon.core.stores.accounts import get_account_with_tenant
-    from mux.state.operations import request_digest
-
-    parent = root.permissions if root is not None else None
-    facts = parent.fleet if parent is not None else None
-    if root is None:
-        from daimon.core.turn.persistence import current_persistence
-        from daimon.core.turn_origin import current_origin_id
-
-        active = current_persistence.get()
-        origin_id = current_origin_id.get()
-        if (
-            active is None
-            or origin_id is None
-            or intent_id is None
-            or not active.source_agent_id
-            or active.session_ref is None
-            or active.fleet_capture
-        ):
-            raise WorkerSpecRefused("origin", "unbound")
-        binding, scope, source_id = active.binding, active.scope, active.source_agent_id
-        active.check_session(scope, active.session_ref)
-    else:
-        assert parent is not None and facts is not None
-        binding, scope = root.binding, facts.scope
-        origin_id, intent_id = root.origin_id, root.intent_id
-        if (
-            parent.agent_id is None
-            or len(parent.source_agents) != 1
-            # Epoch 0 is the computed default; the digest check below binds it.
-            or root.grant_epoch is None
-            or root.grant_epoch < 0
-            or not root.grant_digest
-        ):
-            raise WorkerSpecRefused("origin", "stale")
-        source_id = parent.source_agents[0].id
-    async with deps.sessionmaker() as db:
-        origin = await turn_origins.get_active_origin(
-            db,
-            origin_id=origin_id,
-            tenant_id=UUID(scope.tenant_id),
-            account_id=UUID(scope.account_id),
-            platform=binding.thread.channel.platform,
-            now=now,
-        )
-        intent = await turn_card_intents.get_turn_card_intent(db, id=intent_id)
-        account = await get_account_with_tenant(db, account_id=UUID(scope.account_id))
-        policy = await load_access_policy(db, tenant_id=UUID(scope.tenant_id))
-        if resumed is not None:
-            assert root is not None and parent is not None and facts is not None
-            execution_intent = await turn_card_intents.get_turn_card_intent(
-                db, id=resumed.intent_id
-            )
-            execution = (
-                await turn_origins.get_active_origin(
-                    db,
-                    origin_id=resumed.origin_id,
-                    tenant_id=UUID(scope.tenant_id),
-                    account_id=UUID(scope.account_id),
-                    platform=binding.thread.channel.platform,
-                    now=now,
-                )
-                if execution_origin
-                else None
-            )
-            if (
-                resumed.root_origin_id != root.origin_id
-                or resumed.run_id != facts.run_id
-                or resumed.binding != binding
-                or len(parent.source_agents) != 1
-                or (resumed.scope.tenant_id, resumed.scope.account_id, resumed.scope.principal_id)
-                != (scope.tenant_id, scope.account_id, scope.principal_id)
-                or execution_intent is None
-                or (
-                    execution_intent.tenant_id,
-                    execution_intent.platform,
-                    execution_intent.channel_id,
-                    execution_intent.thread_id,
-                )
-                != (
-                    UUID(scope.tenant_id),
-                    binding.thread.channel.platform,
-                    facts.root.channel.channel_id,
-                    facts.root.thread_id,
-                )
-                or execution_intent.status not in ("prepared", "posted")
-                or (
-                    execution_origin
-                    and (
-                        execution is None
-                        or execution.is_setup
-                        or execution.responder_ma_agent_id != parent.source_agents[0].id
-                        or execution.parent_channel_id != facts.root.channel.channel_id
-                        or execution.thread_id != facts.root.thread_id
-                    )
-                )
-            ):
-                raise WorkerSpecRefused("origin", "stale")
-    if root is not None and root.preparation is not None:
-        admission_facts = root.preparation.get("admission")
-        if isinstance(admission_facts, dict) and admission_facts.get("backend_revision") is None:
-            default = ConfigRevision.create(binding.thread.channel, 0, resolve_default(None))
-            if (
-                admission_facts.get("backend_revision_origin") is not None
-                or root.default_backend_revision != default
-                or binding.config_revision != default.local
-                or binding.provider != default.backend
-                or binding.profile != default.profile
-            ):
-                raise WorkerSpecRefused("origin", "stale")
-        elif root.default_backend_revision is not None:
-            raise WorkerSpecRefused("origin", "stale")
-    if not (origin and intent and account and deps.state_store):
-        raise WorkerSpecRefused("origin", "stale")
-    if (
-        binding.legacy_account_id != scope.account_id
-        or origin.responder_ma_agent_id != source_id
-        or origin.parent_channel_id != binding.thread.channel.channel_id
-        or origin.thread_id != binding.thread.thread_id
-        or (account.tenant_id, account.platform) != (origin.tenant_id, origin.platform)
-        or intent.tenant_id != origin.tenant_id
-        or intent.platform != origin.platform
-        or intent.channel_id != origin.parent_channel_id
-        or intent.thread_id != origin.thread_id
-        or intent.status not in ("prepared", "posted")
-        or await deps.state_store.get_binding(binding_slot(binding)) != binding
-    ):
-        raise WorkerSpecRefused("origin", "stale")
-    if parent is not None:
-        assert facts is not None and root is not None
-        if (
-            facts.depth != 0
-            or not facts.enabled
-            or not facts.active
-            or facts.origin_id != root.origin_id
-            or str(facts.account_id) != scope.account_id
-            or facts.root != binding.thread
-            or account.platform_user_id != parent.subject.platform_user_id
-            or (not drain and parent.limits.deadline <= now)
-        ):
-            raise WorkerSpecRefused("origin", "stale")
-    if parent is None or not drain:
-        from daimon.core.channel_backend import AgentBackendRefused
-        from daimon.core.ma_identity import derive_agent_uuid
-
-        agent_id = (
-            parent.agent_id
-            if parent is not None
-            else derive_agent_uuid(tenant_id=UUID(scope.tenant_id), ma_agent_id=source_id)
-        )
-        assert agent_id is not None
-        try:
-            setting = await AgentBackendService(deps.sessionmaker, enabled=True).fleet_setting(
-                UUID(scope.tenant_id), agent_id, now=now
-            )
-        except AgentBackendRefused:
-            raise WorkerSpecRefused("origin", "unsupported") from None
-        value = setting.grant
-        if parent is None:
-            # A turn under the default fleet may run without a root (it answers with
-            # fleet off); a custom grant's turn always retains one.
-            if setting.kind == "custom" or origin.is_setup:
-                raise WorkerSpecRefused("origin", "unbound")
-        else:
-            assert root is not None
-            if (
-                value is None
-                or value.epoch != root.grant_epoch
-                or request_digest(value.model_dump(mode="json")) != root.grant_digest
-            ):
-                raise WorkerSpecRefused("origin", "stale")
-    return policy
-
-
-async def prepare_controlled_root(
-    request: ProviderPreparationRequest, intent_id: UUID | None
-) -> ProviderPreparationRequest:
-    """Select and reserve finite grant controls before the native compiler runs."""
-    from daimon.core.channel_budget import require_root_funding
-    from daimon.core.config import load_turn_settings
-    from daimon.core.stores import mux_state
-    from daimon.core.stores.turn_origins import get_active_origin
-    from daimon.core.turn.prepare import _admitted_profile  # pyright: ignore[reportPrivateUsage]
-    from daimon.core.turn_origin import current_origin_id
-    from mux.contracts.ids import ChannelRef, ThreadRef
-    from mux.state.lease import Slot
-    from mux.state.operations import request_digest
-
-    value = (
-        await read_agent_fleet_grant(request.deps, request.admission, now=request.now())
-        if request.worker is None and request.deps.fleet_enabled
-        else None
-    )
-    if value is None or value.native_root_budget_usd is None:
-        return request
-    revision, grant = request.admission.backend_revision, request.admission.grant
-    # Reuse `_admitted_profile`'s own fallback rather than re-stating the
-    # default-backend literal here -- a second site would grow the provider
-    # literal count outside the profile/driver seam (`test_provider_literal_ratchet`).
-    profile = _admitted_profile(request.admission)
-    model = (revision.model if revision else None) or request.admission.agent.model.id
-    origin_id = current_origin_id.get()
-    if (
-        (request.deps.turn_path or load_turn_settings().path) != "mux"
-        or grant is None
-        or request.admission.shared_owner is not None
-        or request.admission.hold is not None
-        or request.session_account_id != request.admission.account_id
-        or not any(
-            backend.profile == profile and selected.id == model
-            for backend, selected in value.choices
-        )
-    ):
-        raise WorkerSpecRefused("native_budget_usd", "unsupported")
-    # A provider without a native session cap (OpenAI on our project) gets the same
-    # host-side controls and cash hold, and no native budget it can't honour.
-    native_budget = (
-        value.native_root_budget_usd
-        if get_profile(profile).support.get("session_spend_control") == "native"
-        else None
-    )
-    slot = Slot(
-        thread=ThreadRef(
-            channel=ChannelRef(
-                tenant_id=request.scope.tenant_id,
-                platform=request.platform,
-                channel_id=grant.channel_id,
-            ),
-            thread_id=request.thread_id,
-        ),
-        account_id=request.scope.account_id,
-    )
-    store = request.deps.state_store or mux_state.PostgresStateStore(request.deps.sessionmaker)
-    if not isinstance(store, mux_state.PostgresStateStore):
-        raise WorkerSpecRefused("native_budget_usd", "unsupported")
-    binding = await store.get_binding(slot)
-    if binding is not None and intent_id is None:
-        return replace(request, native_budget_usd=native_budget)
-    if binding is not None or origin_id is None or intent_id is None:
-        raise WorkerSpecRefused("origin", "unbound")
-    deadline = min(request.deadline, value.expires_at)
-    remaining_s(deadline, now=request.now(), refuse_expired=True)
-    controls: dict[str, JsonValue] = {
-        "origin_id": str(origin_id),
-        "grant_digest": request_digest(value.model_dump(mode="json")),
-        "deadline": deadline.isoformat(),
-        "max_inputs": min(3, value.max_root_turns),
-        # Without a native cap the grant's figure only sizes the cash hold: say so.
-        ("native_budget_usd" if native_budget is not None else "hold_budget_usd"): str(
-            value.native_root_budget_usd
-        ),
-        "cash_budget_usd": str(value.root_cash_budget_usd),
-        "profile": profile,
-        "model": model,
-    }
-    async with request.deps.sessionmaker.begin() as db:
-        await require_root_funding(
-            db,
-            request.scope,
-            slot,
-            origin_id=origin_id,
-            intent_id=intent_id,
-            controls=controls,
-            markup=request.deps.markup,
-        )
-        origin = await get_active_origin(
-            db,
-            origin_id=origin_id,
-            tenant_id=request.tenant_id,
-            account_id=request.admission.account_id,
-            platform=request.platform,
-            now=await mux_state.database_clock(db),
-            for_update=True,
-        )
-        if (
-            origin is None
-            or origin.is_setup
-            or (origin.responder_ma_agent_id, origin.parent_channel_id, origin.thread_id)
-            != (request.admission.agent.id, grant.channel_id, request.thread_id)
-        ):
-            raise WorkerSpecRefused("origin", "unbound")
-
-    caller_guard = request.before_native
-
-    async def guard() -> None:
-        if caller_guard is not None:
-            await caller_guard()
-        remaining_s(deadline, now=request.now(), refuse_expired=True)
-        current = await read_agent_fleet_grant(request.deps, request.admission, now=request.now())
-        if (
-            current is None
-            or request_digest(current.model_dump(mode="json")) != controls["grant_digest"]
-        ):
-            raise WorkerSpecRefused("origin", "stale")
-
-    return replace(
-        request,
-        deps=replace(request.deps, state_store=store),
-        deadline=deadline,
-        root_controls=controls,
-        native_budget_usd=native_budget,
-        before_native=guard,
-    )
-
-
-async def run_controlled_preparation(
-    request: ProviderPreparationRequest, preparing: Awaitable[PreparedTurn]
-) -> PreparedTurn:
-    from daimon.core.turn.persistence import TurnPersistence
-    from mux.contracts.ids import ChannelRef, ThreadRef
-    from mux.state.lease import Slot
-
-    if request.root_controls is None:
-        return await preparing
-    assert request.admission.grant is not None and request.deps.state_store is not None
-    controls = request.root_controls
-    origin = UUID(str(controls["origin_id"]))
-    slot = Slot(
-        thread=ThreadRef(
-            channel=ChannelRef(
-                tenant_id=request.scope.tenant_id,
-                platform=request.platform,
-                channel_id=request.admission.grant.channel_id,
-            ),
-            thread_id=request.thread_id,
-        ),
-        account_id=request.scope.account_id,
-    )
-    persistence = TurnPersistence(
-        request.deps.state_store,
-        None,
-        request.scope,
-        slot=slot,
-        operation_key=f"fleet_root:{origin}",
-        now=request.now,
-    )
-    assert request.before_native is not None
-    persistence.root_claim = partial(
-        root_claim_check, request.deps, origin, controls, request.before_native
-    )
-
-    async def pump() -> PreparedTurn:
-        with persistence.activate():
-            return await preparing
-
-    try:
-        return await persistence.run(pump)
-    finally:
-        if isinstance(preparing, Coroutine):
-            preparing.close()
-
-
-def root_claim_check(
-    deps: TurnDeps,
-    origin_id: UUID,
-    controls: dict[str, JsonValue],
-    guard: Callable[[], Awaitable[object]],
-    target: ResourceRef | None,
-    count: bool,
-) -> BeforeClaim:
-    """Keep the original hold and distinct input association in the send transaction."""
-    from daimon.core.channel_budget import require_root_funding
-    from daimon.core.stores import mux_state
-    from daimon.core.usage_delegation import root_usage_outcome_id
-
-    async def check(db: AsyncSession, scope: Scope, key: str, fence: Lease | None) -> bool:
-        if fence is None:
-            raise WorkerSpecRefused("origin", "unbound")
-        # The guard reads the current grant on its own sessions: run it before taking the
-        # tenant fleet lock, which every fleet admission and budget read in the tenant
-        # waits on for as long as this send claim holds it (SMOKE J4).
-        await guard()
-        root = await require_root_funding(
-            db, scope, fence.slot, origin_id=origin_id, controls=controls, markup=deps.markup
-        )
-        if datetime.fromisoformat(str(controls["deadline"])) <= await mux_state.database_clock(db):
-            raise WorkerSpecRefused("origin", "stale")
-        if count:
-            finance = root.result["root_finance"]
-            if target is None or not isinstance(finance, dict):
-                raise WorkerSpecRefused("origin", "unbound")
-            prior, outcomes, limit = (
-                finance.get("input_keys"),
-                finance.get("input_outcomes"),
-                controls.get("max_inputs"),
-            )
-            if (
-                not isinstance(prior, list)
-                or not all(isinstance(k, str) for k in prior)
-                or not isinstance(outcomes, dict)
-                or set(prior) != set(outcomes)
-                or len(set(prior)) != len(prior)
-                or type(limit) is not int
-                or not 0 < limit <= 3
-            ):
-                raise WorkerSpecRefused("max_turns", "unbound")
-            fresh = key not in prior
-            if fresh and len(prior) >= limit:
-                raise WorkerSpecRefused("max_turns", "unsupported")
-            previous = UUID(str(outcomes[key])) if not fresh and outcomes[key] is not None else None
-            outcome = root_usage_outcome_id(scope, target, previous=previous, fresh=fresh)
-            if fresh:
-                await mux_state.update_fleet_root_finance(
-                    db,
-                    scope,
-                    origin_id=origin_id,
-                    root_finance={
-                        **finance,
-                        "input_keys": [*prior, key],
-                        "input_outcomes": {**outcomes, key: str(outcome) if outcome else None},
-                    },
-                )
-        return True
-
-    return check
-
-
-async def _reserve_root(
-    deps: TurnDeps,
-    persistence: TurnPersistence,
-    intent_id: UUID,
-    origin_id: UUID,
-    _key: str,
-    digest: str,
-) -> OperationRecord:
-    from daimon.core.stores import mux_state
-
-    async with deps.sessionmaker.begin() as db:
-        original = await mux_state.get_fleet_root_operation(
-            db, persistence.scope, origin_id=origin_id
-        )
-        if original is not None and "root_controls" in original.result:
-            return original
-        record = await mux_state.get_fleet_root_operation(
-            db,
-            persistence.scope,
-            intent_id=intent_id,
-            origin_id=origin_id,
-            slot=persistence.slot,
-            request_digest=digest,
-        )
-    if record is None:
-        raise WorkerSpecRefused("origin", "unbound")
-    return record
-
-
-#: Why the latest turns couldn't retain a fleet root, by origin. In-process and
-#: bounded: another replica, or a restart, falls back to the generic refusal.
-_ROOT_REFUSALS: OrderedDict[UUID, str] = OrderedDict()
-_ROOT_REFUSALS_MAX = 1024
-
-
-def _remember_root_refusal(origin_id: UUID, obstacle: str) -> None:
-    _ROOT_REFUSALS[origin_id] = obstacle
-    _ROOT_REFUSALS.move_to_end(origin_id)
-    while len(_ROOT_REFUSALS) > _ROOT_REFUSALS_MAX:
-        _ROOT_REFUSALS.popitem(last=False)
-
-
-def root_refusal(origin_id: UUID) -> str | None:
-    """The obstacle that kept this origin's turn from retaining a fleet root, if known."""
-    return _ROOT_REFUSALS.get(origin_id)
-
-
-async def freeze_prepared_root(
-    deps: TurnDeps,
-    prepared: PreparedTurn,
-    *,
-    intent_id: UUID,
-    now: Callable[[], datetime],
-) -> None:
-    """Retain the exact host-owned root under its input's existing mutation fence.
-
-    Under an agent's own grant a refusal fails the turn, as it always has. Under
-    the computed default (every agent, nothing configured), a turn that can't
-    become a fleet root is an ordinary turn: it answers with fleet off and the
-    fleet tools say why. The default never makes a chat turn fail.
-    """
-    from daimon.core.fleet_configuration import is_default_fleet
-    from daimon.core.neutral_resources import fleet_root_obstacle
-    from daimon.core.turn_origin import current_origin_id
-
-    try:
-        value = await read_agent_fleet_grant(deps, prepared.admission, now=now())
-    except Exception as error:
-        from daimon.core.channel_backend import AgentBackendRefused
-
-        if isinstance(error, (WorkerSpecRefused, AgentBackendRefused)):
-            raise
-        # The grant can't be read: retain nothing; the turn answers with fleet off.
-        log.error("fleet.read_failed", error_type=type(error).__name__, at="freeze")
-        if (origin_id := current_origin_id.get()) is not None:
-            _remember_root_refusal(origin_id, "unavailable")
-        return
-    if value is None:
-        if prepared._source is not None or prepared._preparation is not None:  # pyright: ignore[reportPrivateUsage]
-            raise WorkerSpecRefused("origin", "stale")
-        return
-    if not is_default_fleet(value):
-        await _freeze_root(deps, prepared, value, intent_id=intent_id, now=now)
-        return
-    try:
-        await _freeze_root(deps, prepared, value, intent_id=intent_id, now=now)
-    except Exception as error:
-        # Any failure (a refusal, a conflict, the database) only turns fleet off for this
-        # turn. Cancellation is a BaseException and still propagates.
-        source = prepared._source  # pyright: ignore[reportPrivateUsage]
-        if prepared.admission.hold is not None:
-            obstacle = "held"
-        elif prepared.admission.shared_owner is not None:
-            obstacle = "shared_thread"
-        else:
-            obstacle = (fleet_root_obstacle(source) if source is not None else None) or (
-                "unavailable"
-            )
-        from daimon.core.turn.persistence import BindingSuperseded
-        from mux.state.lease import StaleFence
-
-        # A lost fence or binding means another writer moved on: worth an error line.
-        (log.error if isinstance(error, (StaleFence, BindingSuperseded)) else log.warning)(
-            "fleet.default_root_skipped",
-            # One stable field to group by: the setup obstacle, else the error's class.
-            cause=obstacle if obstacle != "unavailable" else type(error).__name__,
-            error_type=type(error).__name__,
-            field=getattr(error, "field", None),
-            reason=getattr(error, "reason", None),
-            obstacle=obstacle,
-        )
-        if (origin_id := current_origin_id.get()) is not None:
-            _remember_root_refusal(origin_id, obstacle)
-
-
-def _counterpart_admitted(admission: Admission, scope: Scope) -> bool:
-    """A root that answers through a native counterpart (a GPT or Gemini agent) can
-    coordinate a fleet: its counterpart must be the one admission verified for this
-    turn, in this tenant and account, on the admitted backend revision's provider and
-    model, active.
-
-    The logical agent is what the fleet freezes; the counterpart is only how it runs.
-    """
-    counterpart, revision = admission.backend_counterpart, admission.backend_revision
-    if counterpart is None:
-        return True
-    agent = counterpart.agent
-    return (
-        revision is not None
-        and agent.ref.tenant_id == scope.tenant_id
-        and agent.ref.account_id == scope.account_id
-        and agent.spec.model.id == revision.model
-        and agent.spec.model.provider == revision.backend
-        and agent.lifecycle == "active"
-        and agent.archived_at is None
-    )
-
-
-async def _freeze_root(
-    deps: TurnDeps,
-    prepared: PreparedTurn,
-    value: AgentFleetGrant,
-    *,
-    intent_id: UUID,
-    now: Callable[[], datetime],
-) -> None:
-    from uuid import uuid5
-
-    from daimon.core.authz import FleetFacts
-    from daimon.core.mux_compat import source_environment_record
-    from daimon.core.neutral_resources import fleet_root_permissions
-    from daimon.core.session_compat import MaCapabilities
-    from daimon.core.stores import fleet
-    from daimon.core.stores.access_policy import load_access_policy
-    from daimon.core.turn.persistence import current_persistence
-    from daimon.core.turn_origin import current_origin_id
-    from mux.state.operations import request_digest
-
-    persistence, origin_id = current_persistence.get(), current_origin_id.get()
-    grant, source = prepared.admission.grant, prepared._source  # pyright: ignore[reportPrivateUsage]
-    if not (persistence and origin_id and grant and source):
-        raise WorkerSpecRefused("origin", "unbound")
-    scope, binding = persistence.scope, persistence.binding
-    if (
-        not deps.fleet_enabled
-        or prepared.admission.shared_owner is not None
-        or prepared.admission.hold is not None
-        or binding.native_refs.get("session") != prepared.ma_session_id
-        or prepared.admission.account_id != UUID(scope.account_id)
-        or source.resource_scope != scope
-        or not source.source
-        or source.source.ref.id != prepared.admission.agent.id
-        or binding.config_revision
-        != (prepared.admission.backend_revision.local if prepared.admission.backend_revision else 0)
-    ):
-        raise WorkerSpecRefused("origin", "unbound")
-    request = prepared._preparation  # pyright: ignore[reportPrivateUsage]
-    if request is None or not _counterpart_admitted(prepared.admission, scope):
-        raise WorkerSpecRefused("origin", "unbound")
-    admission = prepared.admission
-    if grant.thread_id is None:
-        from daimon.core.turn.admission import reauthorize
-
-        # A channel mention is admitted before Discord acknowledges its new thread.
-        # Bind that grant only to this same-channel execution, then ask the existing
-        # policy owner again before retaining any authority for the thread.
-        if (
-            grant.is_dm
-            or request.reuse_existing
-            or grant.channel_id != binding.thread.channel.channel_id
-            or grant.run_place.channel_id != grant.channel_id
-            or grant.turn_place.channel_id != grant.channel_id
-        ):
-            raise WorkerSpecRefused("origin", "unbound")
-        grant = replace(
-            grant,
-            thread_id=binding.thread.thread_id,
-            turn_place=replace(
-                grant.turn_place,
-                channel_id=binding.thread.thread_id,
-                parent_channel_id=grant.channel_id,
-            ),
-            run_place=replace(
-                grant.run_place,
-                channel_id=binding.thread.thread_id,
-                parent_channel_id=grant.channel_id,
-            ),
-        )
-        admission = await reauthorize(deps, replace(admission, grant=grant))
-        if (
-            admission.memory_read_only != prepared.admission.memory_read_only
-            or admission.asks_before_publishing != prepared.admission.asks_before_publishing
-            or admission.origin_seal_ids != prepared.admission.origin_seal_ids
-            or admission.hold != prepared.admission.hold
-        ):
-            raise WorkerSpecRefused("origin", "stale")
-    default_revision = None
-    if admission.backend_revision is None:
-        if admission.backend_revision_origin is not None:
-            raise WorkerSpecRefused("origin", "unbound")
-        default_revision = ConfigRevision.create(binding.thread.channel, 0, resolve_default(None))
-    async with deps.sessionmaker() as db:
-        policy = await load_access_policy(db, tenant_id=grant.tenant_id)
-    if deps.fleet_root_grants is not None:
-        raise WorkerSpecRefused("origin", "unsupported")
-    try:
-        permissions = fleet_root_permissions(
-            source,
-            grant,
-            value,
-            fleet=FleetFacts(
-                scope=scope,
-                root=binding.thread,
-                origin_id=origin_id,
-                account_id=prepared.admission.account_id,
-                # A placeholder, replaced by the run's id; derived, so a root draws no
-                # random id (shared legacy/mux goldens replay the same id sequence).
-                run_id=uuid5(origin_id, "fleet-root-placeholder"),
-                place=grant.run_place,
-                enabled=True,
-                active=True,
-            ),
-            policy=policy,
-            now=now(),
-            seal_ids=prepared.admission.origin_seal_ids,
-            # A GPT/Gemini root runs on its counterpart's model: that is its own model.
-            execution_model=(
-                ModelRef(
-                    provider=prepared.admission.backend_revision.backend,
-                    id=prepared.admission.backend_revision.model,
-                )
-                if prepared.admission.backend_counterpart is not None
-                and prepared.admission.backend_revision is not None
-                and prepared.admission.backend_revision.model is not None
-                else None
-            ),
-        )
-    except WorkerSpecRefused as error:
-        # Only when the agent's own setup can't become worker authority (e.g. a
-        # connected tool with its own login, or its very first turn, before its
-        # memory store exists) does the turn run with fleet off: nothing is
-        # retained and the fleet tools say why. Any other refusal (policy, grant,
-        # backend, budget, identity) still fails the turn as before.
-        from daimon.core.neutral_resources import fleet_root_obstacles
-
-        obstacles = fleet_root_obstacles(source)
-        obstacle = obstacles[0] if obstacles else None
-        if obstacle is None and error.field == "memory" and source.memory_store_id is None:
-            obstacle = "memory"
-        if obstacle is None:
-            raise
-        log.warning(
-            "fleet.root_freeze_refused",
-            cause=obstacle,
-            field=error.field,
-            reason=error.reason,
-            obstacle=obstacle,
-            # Every obstacle, not only the one shown: one can mask another.
-            obstacles=list(obstacles),
-            origin_id=str(origin_id),
-        )
-        _remember_root_refusal(origin_id, obstacle)
-        return
-    permissions = replace(
-        permissions,
-        limits=permissions.limits.model_copy(
-            update={"deadline": min(request.deadline, permissions.limits.deadline)}
-        ),
-    )
-    environment = source_environment_record(prepared.admission.environment, scope)
-    root = _FrozenRoot(
-        intent_id=intent_id,
-        origin_id=origin_id,
-        binding=binding,
-        permissions=permissions,
-        default_backend_revision=default_revision,
-        root_controls=request.root_controls,
-        grant_epoch=value.epoch,
-        grant_digest=request_digest(value.model_dump(mode="json")),
-        preparation={
-            "admission": {
-                name: adapter.dump_python(getattr(admission, name), mode="json")
-                for name, adapter in _ADMISSION_FACTS.items()
-            },
-            "source": source.source.model_dump(mode="json", exclude={"native"}),
-            "environment": environment.model_dump(mode="json", exclude={"native"}),
-            "external_user_id": request.external_user_id,
-            "reuse_existing": request.reuse_existing,
-            "capabilities": TypeAdapter(MaCapabilities).dump_python(
-                request.capabilities, mode="json"
-            ),
-        },
-    )
-
-    async def validate() -> None:
-        if (
-            root.root_controls is not None
-            and root.root_controls.get("grant_digest") != root.grant_digest
-        ):
-            raise WorkerSpecRefused("origin", "stale")
-        await _root_context(deps, root, now=now())
-
-    async def retain(_key: str) -> _FrozenRoot:
-        await validate()
-        run = await fleet.create_run(
-            deps.sessionmaker,
-            tenant_id=grant.tenant_id,
-            orchestrator_account_id=prepared.admission.account_id,
-            orchestrator_session_id=prepared.ma_session_id,
-            orchestrator_binding_id=binding.id,
-            platform=binding.thread.channel.platform,
-            channel_id=grant.channel_id,
-            thread_id=binding.thread.thread_id,
-            operation_key=f"fleet_root:{origin_id}",
-            total_budget_usd=permissions.limits.budget_usd,
-            deadline_at=permissions.limits.deadline,
-            max_workers=min(deps.fleet_max_workers, value.max_workers),
-            created_by="host",
-        )
-        await validate()
-        return root.model_copy(
-            update={
-                "permissions": replace(permissions, fleet=replace(permissions.fleet, run_id=run.id))
-            }
-        )
-
-    await validate()
-    if root.root_controls is not None:
-        persistence.root_claim = partial(
-            root_claim_check, deps, root.origin_id, root.root_controls, validate
-        )
-    await persistence.mutate(
-        prepared.session_ref,
-        "root",
-        root.model_dump(mode="json", exclude={"permissions"}),
-        retain,
-        _FrozenRoot,
-        lambda _: "processed",
-        guard=validate,
-        retry_failed=False,
-        operation_key=f"fleet_root:{origin_id}",
-        begin=partial(_reserve_root, deps, persistence, intent_id, origin_id),
-    )
-
-
-async def resume_prepared_root(
-    deps: TurnDeps,
-    prepared: PreparedTurn,
-    row: TaskContinuationRow,
-    *,
-    intent_id: UUID,
-    now: Callable[[], datetime],
-) -> None:
-    """Retain only a locator to the completion claim's original frozen authority."""
-    from daimon.core.continuity.wakes import FrozenWorkerBatch, require_worker_finished_root
-    from daimon.core.stores import mux_state
-    from daimon.core.turn.persistence import current_persistence
-    from daimon.core.turn.prepare import admitted_session_scope
-    from daimon.core.turn_origin import current_origin_id
-
-    def refuse(reason: str) -> WorkerSpecRefused:
-        # One closed, log-safe name per failed condition; the refusal itself is unchanged.
-        log.warning("fleet.resume_root_refused", reason=reason, continuation_id=str(row.id))
-        return WorkerSpecRefused("origin", "unbound")
-
-    persistence, origin_id = current_persistence.get(), current_origin_id.get()
-    source, grant = prepared._source, prepared.admission.grant  # pyright: ignore[reportPrivateUsage]
-    for missing, reason in (
-        (not deps.fleet_enabled, "fleet_disabled"),
-        (persistence is None, "no_persistence"),
-        (origin_id is None, "no_origin"),
-        (source is None, "no_captured_source"),
-        (grant is None, "no_grant"),
-    ):
-        if missing:
-            raise refuse(reason)
-    assert persistence is not None and source is not None and grant is not None
-    # An ordinary Anthropic turn carries no prepared scope: its persistence adopts
-    # the admitted scope, exactly as the root's first turn froze it.
-    expected_scope = (
-        prepared._scope  # pyright: ignore[reportPrivateUsage]
-        or admitted_session_scope(
-            prepared.admission, tenant_id=row.tenant_id, session_id=prepared.ma_session_id
-        )
-    )
-    for failed, reason in (
-        (prepared.admission.shared_owner is not None, "shared_owner"),
-        (prepared.admission.hold is not None, "held_turn"),
-        (expected_scope != persistence.scope, "prepared_scope"),
-        (source.resource_scope != persistence.scope, "source_scope"),
-        (row.tenant_id != UUID(persistence.scope.tenant_id), "tenant"),
-        (row.requester_account_id != UUID(persistence.scope.account_id), "requester_account"),
-        (prepared.session_account_id != prepared.admission.account_id, "session_account"),
-        (grant.subject.platform_user_id != row.requester_external_user_id, "grant_subject"),
-        (row.started_at is None, "not_started"),
-        (not row.lease_owner, "no_lease"),
-    ):
-        if failed:
-            raise refuse(reason)
-    # Narrowing only: each case was refused above.
-    assert origin_id is not None and row.lease_owner is not None and row.started_at is not None
-
-    async def claim() -> None:
-        await require_worker_finished_root(
-            deps.sessionmaker,
-            row,
-            session_id=prepared.ma_session_id,
-            account_id=prepared.admission.account_id,
-            agent_id=prepared.admission.agent.id,
-            now=now(),
-        )
-
-    await claim()
-    batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
-    async with deps.sessionmaker() as db:
-        record = await mux_state.get_fleet_root_operation(
-            db, persistence.scope, run_id=batch.run_id
-        )
-    if record is None or record.operation.status != "processed":
-        raise WorkerSpecRefused("origin", "unbound")
-    try:
-        root = _FrozenRoot.model_validate_json(json.dumps(dict(record.result)))
-    except ValidationError:
-        raise WorkerSpecRefused("origin", "unbound") from None
-    locator = _ResumedRoot(
-        intent_id=intent_id,
-        origin_id=origin_id,
-        root_origin_id=root.origin_id,
-        run_id=batch.run_id,
-        wake_id=row.id,
-        wake_key=row.idempotency_key,
-        wake_owner=row.lease_owner,
-        wake_attempt=row.attempts,
-        wake_started_at=row.started_at,
-        scope=persistence.scope,
-        binding=persistence.binding,
-    )
-
-    async def validate() -> None:
-        await claim()
-        await read_frozen_root(
-            deps,
-            persistence.scope,
-            origin_id=root.origin_id,
-            run_id=batch.run_id,
-            now=now(),
-        )
-        await _root_context(deps, root, now=now(), resumed=locator, execution_origin=True)
-
-    async def retain(_key: str) -> _ResumedRoot:
-        await validate()
-        return locator
-
-    await validate()
-    if root.root_controls is not None:
-        persistence.root_claim = partial(
-            root_claim_check,
-            deps,
-            root.origin_id,
-            root.root_controls,
-            lambda: _root_context(deps, root, now=now(), resumed=locator, execution_origin=True),
-        )
-    await persistence.mutate(
-        prepared.session_ref,
-        "root",
-        locator.model_dump(mode="json"),
-        retain,
-        _ResumedRoot,
-        lambda _: "processed",
-        guard=validate,
-        retry_failed=False,
-        operation_key=f"fleet_root:{origin_id}",
-        begin=partial(_reserve_root, deps, persistence, intent_id, origin_id),
-    )
-    await validate()
-
-
-async def _read_frozen_root(
-    deps: TurnDeps,
-    scope: Scope,
-    *,
-    intent_id: UUID | None = None,
-    origin_id: UUID | None = None,
-    run_id: UUID | None = None,
-    now: datetime,
-    drain: bool = False,
-) -> tuple[_FrozenRoot, TenantAccessPolicy]:
-    """Load one exact retained root, with its original finite authority and current policy."""
-    from daimon.core.stores import fleet, mux_state
-
-    if not deps.fleet_enabled or deps.state_store is None:
-        raise WorkerSpecRefused("origin", "unbound")
-    async with deps.sessionmaker() as db:
-        record = await mux_state.get_fleet_root_operation(
-            db,
-            scope,
-            intent_id=intent_id,
-            origin_id=origin_id,
-        )
-    if record is None or record.operation.status != "processed":
-        raise WorkerSpecRefused("origin", "unbound")
-    resumed = None
-    try:
-        if "root_origin_id" in record.result:
-            resumed = _ResumedRoot.model_validate_json(json.dumps(dict(record.result)))
-            if (
-                (intent_id is not None and intent_id != resumed.intent_id)
-                or (origin_id is not None and origin_id != resumed.origin_id)
-                or record.slot != binding_slot(resumed.binding)
-            ):
-                raise WorkerSpecRefused("origin", "unbound")
-            async with deps.sessionmaker() as db:
-                record = await mux_state.get_fleet_root_operation(
-                    db,
-                    scope,
-                    origin_id=resumed.root_origin_id,
-                )
-            if record is None or record.operation.status != "processed":
-                raise WorkerSpecRefused("origin", "unbound")
-        root = _FrozenRoot.model_validate_json(json.dumps(dict(record.result)))
-    except ValidationError:
-        raise WorkerSpecRefused("origin", "unbound") from None
-    parent, binding = root.permissions, root.binding
-    original = parent.fleet.scope
-    if (original.tenant_id, original.account_id, original.principal_id) != (
-        scope.tenant_id,
-        scope.account_id,
-        scope.principal_id,
-    ) or record.slot != binding_slot(binding):
-        raise WorkerSpecRefused("origin", "unbound")
-    policy = await _root_context(
-        deps,
-        root,
-        now=now,
-        resumed=resumed,
-        execution_origin=origin_id is not None,
-        drain=drain,
-    )
-    selected = parent.fleet.run_id
-    if run_id is not None and selected != run_id:
-        raise WorkerSpecRefused("origin", "unbound")
-    run, _ = await fleet.run_status(
-        deps.sessionmaker, tenant_id=UUID(scope.tenant_id), run_id=selected
-    )
-    if (
-        run.status not in ("running", "collecting")
-        or run.orchestrator_session_id != binding.native_refs.get("session")
-        or run.orchestrator_binding_id != binding.id
-        or run.orchestrator_account_id != parent.fleet.account_id
-        or run.platform != binding.thread.channel.platform
-        or run.channel_id != binding.thread.channel.channel_id
-        or run.thread_id != binding.thread.thread_id
-        or run.total_budget_usd != parent.limits.budget_usd
-        or run.deadline_at != parent.limits.deadline
-    ):
-        raise WorkerSpecRefused("origin", "stale")
-    return root, policy
-
-
-@overload
-async def read_frozen_root(
-    deps: TurnDeps,
-    scope: Scope,
-    *,
-    intent_id: UUID | None = None,
-    origin_id: UUID | None = None,
-    run_id: UUID | None = None,
-    now: datetime,
-    drain: bool = False,
-    allow_absent: Literal[False] = False,
-) -> tuple[WorkerPermissions, TenantAccessPolicy]: ...
-
-
-@overload
-async def read_frozen_root(
-    deps: TurnDeps,
-    scope: Scope,
-    *,
-    intent_id: UUID | None = None,
-    origin_id: UUID | None = None,
-    run_id: UUID | None = None,
-    now: datetime,
-    drain: bool = False,
-    allow_absent: Literal[True],
-) -> tuple[WorkerPermissions, TenantAccessPolicy] | None: ...
-
-
-async def read_frozen_root(
-    deps: TurnDeps,
-    scope: Scope,
-    *,
-    intent_id: UUID | None = None,
-    origin_id: UUID | None = None,
-    run_id: UUID | None = None,
-    now: datetime,
-    drain: bool = False,
-    allow_absent: bool = False,
-) -> tuple[WorkerPermissions, TenantAccessPolicy] | None:
-    if allow_absent and intent_id is not None and origin_id is None and run_id is None:
-        from daimon.core.stores import mux_state
-        from daimon.core.turn.persistence import current_persistence
-
-        active = current_persistence.get()
-        if active is not None and (
-            active.scope.tenant_id,
-            active.scope.account_id,
-            active.scope.principal_id,
-        ) == (scope.tenant_id, scope.account_id, scope.principal_id):
-            async with deps.sessionmaker() as db:
-                record = await mux_state.get_fleet_root_operation(
-                    db, scope, intent_id=intent_id, check_intent_owner=True
-                )
-            if record is None:
-                await _root_context(deps, None, intent_id=intent_id, now=now)
-                return None
-    root, policy = await _read_frozen_root(
-        deps, scope, intent_id=intent_id, origin_id=origin_id, run_id=run_id, now=now, drain=drain
-    )
-    return root.permissions, policy
-
-
-async def read_frozen_preparation(
-    deps: TurnDeps,
-    parent: WorkerPermissions,
-    *,
-    deadline: datetime,
-    now: Callable[[], datetime],
-) -> ProviderPreparationRequest:
-    """Reconstruct the exact retained root request under the original finite authority."""
-    from daimon.core.mux_compat import (
-        retrieve_environment,
-        sdk_agent,
-        sdk_environment,
-        source_environment_record,
-    )
-    from daimon.core.session_compat import MaCapabilities
-    from daimon.core.turn.prepare import ProviderPreparationRequest
-    from mux.contracts.resources import Agent, Environment
-    from mux.state.operations import request_digest
-
-    root, _ = await _read_frozen_root(
-        deps,
-        parent.fleet.scope,
-        origin_id=parent.fleet.origin_id,
-        run_id=parent.fleet.run_id,
-        now=now(),
-    )
-    if root.permissions != parent or root.preparation is None:
-        raise WorkerSpecRefused("origin", "unbound")
-    bound = min(deadline, parent.limits.deadline)
-    async with asyncio.timeout(remaining_s(bound, now=now(), refuse_expired=True)):
-        try:
-            facts = root.preparation
-            admission_facts = facts["admission"]
-            if not isinstance(admission_facts, dict) or not (
-                set(_ADMISSION_FACTS) - _LEGACY_ADMISSION_FACTS
-                <= set(admission_facts)
-                <= set(_ADMISSION_FACTS)
-            ):
-                raise WorkerSpecRefused("origin", "unbound")
-            retained_source = Agent.model_validate_json(json.dumps(facts["source"]))
-            retained_env = Environment.model_validate_json(json.dumps(facts["environment"]))
-            if (
-                (retained_source.ref, retained_source.revision) not in parent.source_revisions
-                or (retained_env.ref.tenant_id, retained_env.ref.account_id)
-                != (parent.fleet.scope.tenant_id, parent.fleet.scope.account_id)
-                or retained_source.native is not None
-                or retained_env.native is not None
-            ):
-                raise WorkerSpecRefused("scope", "unbound")
-            admission = Admission(
-                agent=sdk_agent(retained_source),
-                environment=sdk_environment(retained_env),
-                **{
-                    name: adapter.validate_json(json.dumps(admission_facts[name]))
-                    for name, adapter in _ADMISSION_FACTS.items()
-                    if name in admission_facts
-                },
-            )
-            request = ProviderPreparationRequest(
-                deps,
-                admission,
-                parent.fleet.scope,
-                UUID(parent.fleet.scope.tenant_id),
-                root.binding.thread.channel.platform,
-                TypeAdapter(str).validate_python(facts["external_user_id"]),
-                root.binding.thread.thread_id,
-                parent.fleet.account_id,
-                TypeAdapter(bool).validate_python(facts["reuse_existing"]),
-                TypeAdapter(MaCapabilities).validate_python(facts["capabilities"]),
-                None,
-                bound,
-                now,
-            )
-        except (ValidationError, KeyError):
-            raise WorkerSpecRefused("origin", "unbound") from None
-        if admission.backend_revision_origin == "agent" and admission.backend_revision is not None:
-            from daimon.core.ma_identity import derive_agent_uuid
-            from daimon.core.stores import mux_state
-
-            # Reuse the original immutable consent association, never the latest preference.
-            async with deps.sessionmaker() as db:
-                association = await mux_state.get_config_agent_revision(
-                    db,
-                    admission.backend_revision,
-                    agent_id=derive_agent_uuid(
-                        tenant_id=UUID(parent.fleet.scope.tenant_id),
-                        ma_agent_id=retained_source.ref.id,
-                    ),
-                )
-            if association is None:
-                raise WorkerSpecRefused("origin", "unbound")
-            request = replace(
-                request,
-                admission=replace(admission, backend_agent_revision=association),
-            )
-        request = await request.capture_root(parent, deadline=bound)
-        if (
-            request.source is None
-            or request.source.source is None
-            or request.source.source.spec != retained_source.spec
-        ):
-            raise WorkerSpecRefused("scope", "stale")
-        await _root_context(deps, root, now=now())
-        actual_env = await retrieve_environment(
-            deps.anthropic, retained_env.ref.id, scope=parent.fleet.scope
-        )
-        actual = source_environment_record(actual_env, parent.fleet.scope)
-        if (
-            actual.ref != retained_env.ref
-            or actual.revision != retained_env.revision
-            or actual.lifecycle != "active"
-            or actual.archived_at is not None
-            or request_digest(actual.spec.model_dump(mode="json"))
-            != request_digest(retained_env.spec.model_dump(mode="json"))
-        ):
-            raise WorkerSpecRefused("scope", "stale")
-        request = replace(request, admission=replace(request.admission, environment=actual_env))
-        # Refresh the captured resources from the verified native readback while
-        # preserving the source-first refusal order above.
-        request = replace(
-            request, source=await capture_preparation_source(replace(request, source=None))
-        )
-        policy = await _root_context(deps, root, now=now())
-        resolve_worker_spec(
-            parent,
-            parent.spec,
-            policy=policy,
-            now=now(),
-            resources=parent.resources,
-            environment=parent.environment,
-            limits=parent.limits.for_provider(parent.spec.model.provider),
-            captured_source=request.source,
-        )
-        remaining_s(bound, now=now(), refuse_expired=True)
-        return request
 
 
 class ProviderRuntimeConfigurationError(RuntimeError):
@@ -1612,7 +259,7 @@ async def capture_preparation_source(
     if request.admission.hold is not None:
         # The source records the agent-wide memory store; a held turn mounts its
         # channel's store only, so it never has a source to capture.
-        raise ScopeViolation("source-preparation", "a held turn never captures a fleet source")
+        raise ScopeViolation("source-preparation", "a held turn cannot capture an unheld source")
     if fresh:
         from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 
@@ -1730,8 +377,7 @@ async def _capture_source_capabilities(
     ]
     revision = request.admission.backend_revision
     if (
-        request.worker is not None
-        or request.admission.private_dm_id is not None
+        (request.admission.private_dm_id is not None)
         or request.admission.slack_turn_context_id is not None
         or request.admission.origin_channel_id is None
         or not capability_preview
@@ -2156,7 +802,7 @@ async def _capture_source_capabilities(
         return source.model_copy(update={"representations": tuple(represented)})
     except (OSError, ValueError, DaimonError, MuxError, AnthropicError, SQLAlchemyError) as error:
         # Representations are optional capture evidence, never a new failure
-        # mode for native callers or worker ceilings. Full deployments require
+        # mode for native callers. Full deployments require
         # this evidence independently and refuse before any provider exposure.
         # Said once here, though: without it the agent silently loses its MCP
         # on the new provider (J2's Argon preview). Only our own fixed
@@ -2296,185 +942,6 @@ def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> f
     return frozenset(paired)
 
 
-def _caller_private(binding: ResourceBinding) -> bool:
-    """A login that belongs to the person asking (their caller-mcp vault, in any of
-    its variants), never to the agent or a worker."""
-    return any(
-        value is not None and value.startswith(CALLER_VAULT_PREFIX)
-        for value in (binding.id, binding.credential_ref)
-    )
-
-
-def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
-    """Exclude validated native-only capabilities and their paired resources.
-
-    Nothing with its own login enters a worker ceiling: the agent can still run a
-    fleet, its workers run without it, and no credential ever reaches a worker. Each
-    loss is declared (`mcp`, `files`, `repository`, `memory`):
-    - a connector with its own login (an MCP server carrying a credential, or one a
-      projected credential pairs with), with its toolset and binding;
-    - a stored connector login the projector can't pair with one server
-      (`agent-mcp:<id>`): fail safe, workers then run without any external connector;
-    - stored secrets the session would write to a file (`.env`);
-    - repositories cloned with a login;
-    - the caller's own logins (every `caller-mcp:` vault variant), never carried, and
-      their private carry (`caller-resources`), declared as `files`;
-    - a GitHub App session's repository vault (`app-session-vault:*`), as `repository`;
-    - memory, while the agent's memory store doesn't exist yet (its first turn).
-    """
-    spec = source.effective_spec
-    if spec is None:
-        return source
-    normalized, excluded = worker_spec_ceiling(spec)
-    logins = login_mcp_servers(source)
-    stored_logins = any(
-        _stored_connector_login(binding) for binding in source.resource_requirements
-    )
-    if stored_logins:
-        logins |= {server.name for server in spec.mcp_servers or ()}
-    drops: set[str] = set()
-    if logins - excluded:
-        drops.add("mcp")
-        normalized = normalized.model_copy(
-            update={
-                "mcp_servers": tuple(
-                    server for server in normalized.mcp_servers or () if server.name not in logins
-                ),
-                "tools": tuple(
-                    tool
-                    for tool in normalized.tools or ()
-                    if not (tool.kind == "mcp_toolset" and tool.name in logins)
-                )
-                if normalized.tools is not None
-                else None,
-            }
-        )
-    excluded |= logins
-    credentials = {
-        server.credential_ref
-        for server in spec.mcp_servers or ()
-        if server.name in logins and server.credential_ref is not None
-    }
-    resources: list[ResourceBinding] = []
-    for binding in source.resource_requirements:
-        paired = _mcp_credential_servers(source, binding)
-        if (paired and paired <= excluded) or (
-            binding.kind == "credential" and binding.credential_ref in credentials
-        ):
-            continue
-        if _stored_connector_login(binding):
-            continue
-        if binding.kind == "credential" and binding.target_path is not None:
-            drops.add("files")
-            continue
-        if _caller_private(binding):
-            # The caller's own login (every caller-mcp vault variant, Slack turn and
-            # hold included) is never worker authority: excluded, so nothing carries it.
-            continue
-        if binding.kind == "native" and binding.id == CALLER_RESOURCES_ID:
-            # The caller's private carry (a DM, a seal, attached material): workers run
-            # without it, declared. Not as `credentials`: that would discharge the
-            # check for a login still among the resources.
-            drops.add("files")
-            continue
-        if binding.kind == "native" and binding.id.startswith(APP_SESSION_VAULT_PREFIX):
-            # A GitHub App session's repository vault: workers run without it, declared.
-            drops.add("repository")
-            continue
-        resources.append(binding)
-    repositories = tuple(repo for repo in source.repository_sources if repo.credential_ref is None)
-    if len(repositories) != len(source.repository_sources):
-        drops.add("repository")
-    if source.memory_store_id is None and source.memory_required is not False:
-        # The agent's memory store is created by its first session, so on its very
-        # first turn there is none to mount: its workers run without memory.
-        drops.add("memory")
-    if drops:
-        normalized = normalized.model_copy(
-            update={"declared_drops": tuple(sorted({*normalized.declared_drops, *drops}))}
-        )
-    return source.model_copy(
-        update={
-            "effective_spec": normalized,
-            "resource_requirements": tuple(resources),
-            "repository_sources": repositories,
-        }
-    )
-
-
-def _stored_connector_login(binding: ResourceBinding) -> bool:
-    """A projected stored MCP login (`agent-mcp:<id>`), which names no server."""
-    return (
-        binding.kind == "credential"
-        and binding.credential_ref is not None
-        and binding.id == binding.credential_ref
-        and binding.credential_ref.startswith("agent-mcp:")
-        and binding.native is None
-        and binding.resource is None
-        and binding.target_path is None
-    )
-
-
-def login_mcp_servers(source: BackendAgent) -> frozenset[str]:
-    """The agent's connectors that carry their own paired login; workers run without them."""
-    spec = source.effective_spec
-    if spec is None:
-        return frozenset()
-    names = {server.name for server in spec.mcp_servers or () if server.credential_ref}
-    for binding in source.resource_requirements:
-        names |= _mcp_credential_servers(source, binding)
-    return frozenset(names)
-
-
-def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
-    """Normalize native toolsets without changing unrelated field presence."""
-    from mux.drivers.anthropic import AGENT_TOOLS_NAMESPACE, agent_tools
-
-    updates: dict[str, object] = {}
-    excluded: set[str] = set()
-    retained: list[ExtensionConfig] = []
-    for extension in spec.extensions or ():
-        if extension.namespace == AGENT_TOOLS_NAMESPACE:
-            native = agent_tools(extension)
-            updates["tools"] = native.intent()
-            excluded.update(native.excluded_mcp_servers())
-        elif _source_extension_obligation(extension) is not None:
-            retained.append(extension)
-    if len(retained) != len(spec.extensions or ()):
-        updates["extensions"] = tuple(retained) or None
-    if any(server.name in excluded for server in spec.mcp_servers or ()):
-        updates["mcp_servers"] = tuple(
-            server for server in spec.mcp_servers or () if server.name not in excluded
-        )
-    return spec.model_copy(update=updates) if updates else spec, frozenset(excluded)
-
-
-def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
-    """Carry granted native controls exactly, or require their declared loss."""
-    normalized, _ = worker_spec_ceiling(ceiling)
-    controls = tuple(normalized.extensions or ())
-    if len(controls) > 1 or any(
-        _source_extension_obligation(extension, foreign_target=True) != "model_controls"
-        for extension in controls
-    ):
-        raise ValueError("unsupported native worker ceiling")
-    if target.extensions and target.extensions != controls:
-        raise ValueError("worker native controls differ from the ceiling")
-    if not controls:
-        return target
-    extension = controls[0]
-    if (target.model.provider, target.model.id) == (ceiling.model.provider, ceiling.model.id):
-        retained = target.model_copy(update={"extensions": controls})
-        if _source_extension_obligation(extension, native_target=retained) is not None:
-            raise ValueError("native worker model does not represent the granted controls")
-        return retained
-    # Another model, even of the same provider, may not accept the root's controls
-    # (e.g. its effort level); the worker runs at its model's defaults, declared.
-    if "model_controls" not in target.declared_drops:
-        raise ValueError("native model controls require an explicit declared loss")
-    return target.model_copy(update={"extensions": None})
-
-
 def memory_mount_retained(source: BackendAgent, resources: tuple[ResourceBinding, ...]) -> bool:
     """Whether `resources` carry the agent's memory store exactly as its sessions mount
     it: the store is the only resource, in the agent's own resource scope, with a
@@ -2511,33 +978,18 @@ def classify_source_obligations(
     environment: EnvironmentSpec | None,
     resources: tuple[ResourceBinding, ...] = (),
     asks_before_publishing: bool = False,
-    worker_ceiling: bool = False,
     retained_agent: ResourceRef | None = None,
 ) -> frozenset[str]:
     """One source-preservation rule for pre-allocation normalization and preparation."""
-    ceiling_drops: set[str] = set()
-    if worker_ceiling:
-        before: set[str] = (
-            set(source.effective_spec.declared_drops) if source.effective_spec else set()
-        )
-        try:
-            source = worker_source_ceiling(source)
-        except ValueError:
-            return frozenset({"source_definition", "tools"})
-        if source.effective_spec is not None:
-            # What the ceiling left out (logins, stored secrets, logged-in repos) is
-            # only discharged when the target declares the same loss.
-            ceiling_drops = set(source.effective_spec.declared_drops) - before
     spec = source.effective_spec
     if spec is None:
         return frozenset({"source_definition"})
     drops = target.declared_drops if target is not None else ()
     represented = represented_source(source, target)
     # Existing native sessions retain their agent and composer inputs;
-    # this proof never authorizes a newly compiled worker or counterpart.
+    # this proof never authorizes a newly compiled counterpart.
     native_retained = (
-        not worker_ceiling
-        and retained_agent is not None
+        (retained_agent is not None)
         and source.source is not None
         and retained_agent == source.source.ref
         and retained_agent.kind == "agent"
@@ -2556,7 +1008,7 @@ def classify_source_obligations(
         and environment == source.environment.spec
         and resources == source.resource_requirements
     )
-    missing: set[str] = ceiling_drops - set(drops)
+    missing: set[str] = set()
     if represented is not None:
         missing.update(set(represented.unavailable_mcp_tools) - set(drops))
         missing.update(set(represented.unavailable_builtin_tools) - set(drops))
@@ -2585,11 +1037,6 @@ def classify_source_obligations(
                         missing.add("tools")
         else:
             foreign_target = target is not None and target.model.provider != spec.model.provider
-            # A fleet worker on another model may declare the loss of the root's
-            # controls exactly as a foreign-provider worker does.
-            foreign_target = foreign_target or (
-                worker_ceiling and target is not None and target.model.id != spec.model.id
-            )
             obligation = _source_extension_obligation(
                 extension,
                 native_target=target if not foreign_target else None,
@@ -2988,9 +1435,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         deadline=turn_deadline(
             now=request.now(),
             deadline=request.deadline,
-            authority_deadline=request.worker.limits.deadline
-            if request.worker is not None
-            else None,
+            authority_deadline=None,
         ),
     )
 
@@ -2998,36 +1443,31 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
     )
     setting = None
-    if request.worker is None:
-        from daimon.core.stores import agent_backends, mux_state
+    from daimon.core.stores import agent_backends, mux_state
 
-        async with asyncio.timeout(
-            remaining_s(request.deadline, now=request.now(), refuse_expired=True)
-        ):
-            async with request.deps.sessionmaker() as session:
-                with session.no_autoflush:
-                    setting = await mux_state.get_config_agent_revision(
-                        session,
-                        revision,
-                        agent_id=agent_id,
-                    )
-                    provisional = request.admission.backend_agent_revision
-                    if provisional is not None:
-                        if (
-                            await mux_state.get_config_revision(
-                                session, revision.channel, revision.local
-                            )
-                            is None
-                        ):
-                            setting = await agent_backends.current(
-                                session, request.tenant_id, agent_id, persisted=True
-                            )
-                        if (
-                            setting != provisional
-                            or setting is None
-                            or setting.drop_consent is None
-                        ):
-                            raise AgentBackendRefused("re_confirm")
+    async with asyncio.timeout(
+        remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+    ):
+        async with request.deps.sessionmaker() as session:
+            with session.no_autoflush:
+                setting = await mux_state.get_config_agent_revision(
+                    session,
+                    revision,
+                    agent_id=agent_id,
+                )
+                provisional = request.admission.backend_agent_revision
+                if provisional is not None:
+                    if (
+                        await mux_state.get_config_revision(
+                            session, revision.channel, revision.local
+                        )
+                        is None
+                    ):
+                        setting = await agent_backends.current(
+                            session, request.tenant_id, agent_id, persisted=True
+                        )
+                    if setting != provisional or setting is None or setting.drop_consent is None:
+                        raise AgentBackendRefused("re_confirm")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
     source = await asyncio.wait_for(
         capture_preparation_source(request, fresh=True)
@@ -3053,36 +1493,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
     spec = source.effective_spec
     if spec is None:
         raise UnsupportedCapability(("source_definition",), revision.profile)
-    worker = request.worker
-    if worker is not None:
-        fleet = worker.permissions.fleet
-        if (
-            fleet.scope != request.scope
-            or not fleet.enabled
-            or not fleet.active
-            or fleet.depth != 1
-            or fleet.account_id != request.admission.account_id
-            or fleet.root.channel != revision.channel
-            or (worker.source_agent is None and worker.permissions.agent_id != source.agent_id)
-            or worker.backend.profile != revision.profile
-            or worker.backend.backend != revision.backend
-            or worker.backend.model != revision.model
-            or dict(worker.backend.requires) != dict(revision.requires)
-            or worker.backend.thread_mode != revision.thread_mode
-            or worker.permissions.spec != worker.spec
-            or worker.permissions.resources != worker.resources
-            or worker.permissions.environment != worker.environment
-            or worker.permissions.limits != worker.limits
-            or worker.permissions.subject.is_admin
-            or (request.admission.memory_read_only and not worker.permissions.memory_read_only)
-            or not request.admission.origin_seal_ids <= worker.permissions.seal_ids
-            or (
-                worker.source_agent is not None
-                and worker.source_agent != (source.source.ref, source.source.revision)
-            )
-        ):
-            raise UnsupportedCapability(("worker_context",), revision.profile)
-    target = worker.spec if worker is not None else None
+    target = None
     if setting is not None:
         consent = setting.drop_consent
         if consent is None or setting.backend != revision.backend:
@@ -3097,8 +1508,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         if not _consented(target, consent) and not _consented_before(target, spec.system, consent):
             raise AgentBackendRefused("re_confirm")
     retain_native = (
-        worker is None
-        and setting is not None
+        (setting is not None)
         and not setting.declared_drops
         and revision.profile == backend_selection(spec.model.provider).profile
     )
@@ -3108,18 +1518,11 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         retained_agent=source.source.ref if retain_native else None,
         environment=source.environment.spec
         if retain_native and source.environment
-        else worker.environment
-        if worker
         else represented.environment
         if (represented := represented_source(source, target)) is not None
         else None,
-        resources=source.resource_requirements
-        if retain_native
-        else worker.resources
-        if worker
-        else (),
+        resources=source.resource_requirements if retain_native else (),
         asks_before_publishing=request.admission.asks_before_publishing,
-        worker_ceiling=worker is not None,
     )
     if missing:
         raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)
@@ -3136,11 +1539,7 @@ async def read_preparation_counterpart(
     try:
         selected = await prepare_source(request)
         request = replace(request, deadline=selected.deadline)
-        source, revision, worker = (
-            selected.source,
-            selected.admission.backend_revision,
-            selected.worker,
-        )
+        source, revision = selected.source, selected.admission.backend_revision
         if source is None or revision is None:
             raise AdmissionDenied(reason="backend_unsupported")
         target = selected.target_spec
@@ -3155,31 +1554,7 @@ async def read_preparation_counterpart(
         runtime = selected.deps.turn_runtimes.get(revision.profile)
         if runtime is None or runtime.read_agent_counterpart is None:
             raise UnsupportedCapability(("native_counterpart",), revision.profile)
-        if (
-            worker is not None
-            and runtime.materialize_worker is not None
-            and selected.before_native is not None
-        ):
-            from daimon.core.turn.persistence import current_persistence
-
-            persistence = current_persistence.get()
-            if (
-                persistence is None
-                or persistence.store is not selected.deps.state_store
-                or persistence.slot.thread.channel != revision.channel
-                or persistence.slot.thread.thread_id != selected.thread_id
-                or persistence.slot.account_id != selected.scope.account_id
-            ):
-                raise UnsupportedCapability(("worker_materialization",), revision.profile)
-            persistence.check_session(selected.scope, None)
-            timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
-            await asyncio.wait_for(selected.before_native(), timeout=timeout)
-            timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
-            allocated = await asyncio.wait_for(
-                runtime.materialize_worker(selected), timeout=timeout
-            )
-            selected = replace(selected, counterpart=allocated)
-        elif worker is None and runtime.materialize_root is not None:
+        if runtime.materialize_root is not None:
             timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
             allocated = await asyncio.wait_for(runtime.materialize_root(selected), timeout=timeout)
             selected = replace(selected, counterpart=allocated)
@@ -3188,16 +1563,16 @@ async def read_preparation_counterpart(
             runtime.read_agent_counterpart(selected), timeout=timeout
         )
         if selected.counterpart is not None and counterpart != selected.counterpart:
-            raise UnsupportedCapability(("worker_acknowledgement",), revision.profile)
+            raise UnsupportedCapability(("native_counterpart",), revision.profile)
         timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         current_source = await asyncio.wait_for(
             capture_preparation_source(request, fresh=True)
-            if worker is None and target is not None
+            if (target is not None)
             else capture_preparation_source(request),
             timeout=timeout,
         )
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
-        if worker is None and target is not None and current_source != source:
+        if (target is not None) and current_source != source:
             raise AgentBackendRefused("re_confirm")
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
@@ -3233,7 +1608,6 @@ async def read_preparation_counterpart(
                 if request.admission.backend_revision is not None
                 else None
             ),
-            worker=request.worker is not None,
         )
         raise AdmissionDenied(
             reason="backend_unsupported",
@@ -3246,8 +1620,6 @@ class CounterpartPlan(Protocol):
 
     @property
     def profile(self) -> str: ...
-    @property
-    def worker_materialization(self) -> bool: ...
     @property
     def tenant_id(self) -> str: ...
     @property
@@ -3276,48 +1648,21 @@ class CounterpartPlan(Protocol):
     def model_validate(cls, obj: object) -> Self: ...
 
 
-def template_source(data: object) -> object:
-    """Map a worker template's `"*"` source pins to "no pin"; refuse them on any other row."""
-    if not isinstance(data, dict):
-        return data
-    row = cast(dict[str, object], data)
-    fields = [name for name in ("source_agent_id", "source_agent_version") if row.get(name) == "*"]
-    if not fields:
-        return row
-    if row.get("worker_materialization") is not True:
-        raise ValueError("only a worker template row may name any source agent")
-    return {**row, **dict.fromkeys(fields)}
-
-
 def validate_counterpart_pins(
-    plan: CounterpartPlan, *, worker_materialization: bool = False
+    plan: CounterpartPlan,
 ) -> None:
     """Legacy rows have no counterpart; partial source/catalog pins never authorize one."""
     if plan.root_materialization:
         # A tenant-wide agent template: identity comes from the admitted agent,
         # never from the row, so the row may pin none of it.
         if (
-            worker_materialization
-            or plan.source_agent_id is not None
+            (plan.source_agent_id is not None)
             or plan.source_agent_version is not None
             or plan.counterpart_catalog_id is not None
             or plan.counterpart_catalog_revision is not None
             or plan.agent_id is not None
         ):
             raise ValueError("root materialization takes its identity from the admitted agent")
-        return
-    if worker_materialization:
-        # A worker template names no source (both pins absent): it serves any
-        # granted agent of its tenant, at that agent's live version.
-        if (
-            (plan.source_agent_id is None) != (plan.source_agent_version is None)
-            or plan.counterpart_catalog_id is not None
-            or plan.counterpart_catalog_revision is not None
-            or plan.agent_id is not None
-        ):
-            raise ValueError(
-                "worker materialization requires source pins without fixed target pins"
-            )
         return
     pins = (
         plan.source_agent_id,
@@ -3348,7 +1693,7 @@ def _matching_rows(
         source_agent_id, source_agent_version = None, None
     else:
         agent = request.admission.agent
-        kind = "worker" if request.worker is not None else "root"
+        kind = "root"
         source_agent_id = str(derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=agent.id))
         source_agent_version = agent.version
     return _rows_for(
@@ -3363,7 +1708,7 @@ def _matching_rows(
     )
 
 
-type TurnKind = Literal["channel", "root", "worker"]
+type TurnKind = Literal["channel", "root"]
 
 
 def _same_agent(pinned: object, actual: str | None) -> bool:
@@ -3397,15 +1742,12 @@ def _rows_for(
         return allow_wildcard and value == _WILDCARD
 
     def origin_eligible(row: dict[str, JsonValue]) -> bool:
-        # A channel's turn runs a fixed plan with no source. An agent's root turn
-        # runs a root template or a row pinned to its source; a worker runs a
-        # worker row or a fixed counterpart pinned to its source. Root and worker
-        # templates never compete, so both coexist in one tenant.
+        # A channel turn uses a fixed plan; an agent turn uses a template or
+        # a counterpart pinned to its source.
         root = row.get("root_materialization") is True
-        worker = row.get("worker_materialization") is True
         pinned = _pinned_source(row)
         if kind == "channel":
-            return not (root or worker or pinned)
+            return not (root or pinned)
         if pinned and (
             not _same_agent(row.get("source_agent_id"), source_agent_id)
             or (
@@ -3415,9 +1757,7 @@ def _rows_for(
         ):
             # Another agent's (or version's) pinned row: fall through to the template.
             return False
-        if kind == "root":
-            return root or (pinned and not worker)
-        return worker or (pinned and not root)
+        return root or pinned
 
     return [
         row
@@ -3430,61 +1770,6 @@ def _rows_for(
         and field_matches(row, "account_id", account_id)
         and manifest_configuration_matches(row, revision)
     ]
-
-
-def manifest_hold_usd(
-    revision: ConfigRevision,
-    *,
-    tenant_id: str,
-    account_id: str,
-    source_agent_id: str | None = None,
-    source_agent_version: int | None = None,
-) -> Decimal | None:
-    """The per-turn hold of the row `select_runtime_manifest` would select, if any.
-
-    Exact rows first, then the most specific wildcard row, as selection does: a
-    channel's own row wins over a tenant-wide "*" row. None when no manifest is
-    installed or readable, no single row is selected, or it names no valid hold.
-    """
-    from daimon.core.turn.runtime_defaults import default_rows
-
-    try:
-        rows = _configured_rows()
-    except AdmissionDenied:
-        return None
-    try:
-        # The rows a fleet worker's selection would see; without its source agent,
-        # only rows that pin none.
-        def worker_rows(
-            allow_wildcard: bool, rows: list[dict[str, JsonValue]] = rows
-        ) -> list[dict[str, JsonValue]]:
-            return _rows_for(
-                rows,
-                revision,
-                tenant_id=tenant_id,
-                account_id=account_id,
-                allow_wildcard=allow_wildcard,
-                kind="worker",
-                source_agent_id=source_agent_id,
-                source_agent_version=source_agent_version,
-            )
-
-        selected = (
-            worker_rows(False)
-            or _most_specific(worker_rows(True))
-            # Selection's code-default fallback; the hold agrees with the row it picks.
-            or (
-                []
-                if _operator_configured(rows, tenant_id, revision)
-                else _most_specific(worker_rows(True, default_rows(tenant_id)))
-            )
-        )
-        if len(selected) != 1:
-            return None
-        hold = Decimal(str(selected[0]["hold_usd"]))
-    except (OSError, ValidationError, KeyError, ArithmeticError, ValueError):
-        return None
-    return hold if hold.is_finite() and hold > 0 else None
 
 
 def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
@@ -3618,11 +1903,6 @@ def manifest_has_row(request: ProviderPreparationRequest) -> bool:
     return _operator_configured(rows, request.scope.tenant_id, revision)
 
 
-def _worker_template(plan: CounterpartPlan) -> bool:
-    """A worker row that names no source: identity comes from the request's admitted agent."""
-    return plan.worker_materialization and plan.source_agent_id is None
-
-
 def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
     """The one catalog entry a template row's counterpart lives at for this agent version.
 
@@ -3650,22 +1930,20 @@ def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
 def validate_counterpart_request(
     plan: CounterpartPlan,
     request: ProviderPreparationRequest,
-    *,
-    worker_materialization: bool = False,
 ) -> ConfigRevision:
     """Validate the same immutable source/configuration pins before native allocation."""
     from daimon.core.ma_identity import derive_agent_uuid
 
     try:
-        validate_counterpart_pins(plan, worker_materialization=worker_materialization)
+        validate_counterpart_pins(
+            plan,
+        )
     except ValueError:
         raise AdmissionDenied(reason="backend_unsupported") from None
     revision, scope = request.admission.backend_revision, request.scope
     if plan.root_materialization:
         if (
-            worker_materialization
-            or request.worker is not None
-            or request.admission.backend_revision_origin != "agent"
+            request.admission.backend_revision_origin != "agent"
             or revision is None
             or not request.deps.channel_backends
             or not request.deps.agent_backends
@@ -3697,24 +1975,16 @@ def validate_counterpart_request(
         or request.platform != plan.platform
         or revision.profile != plan.profile
         or (
-            not _worker_template(plan)
-            and (
-                plan.source_agent_id
-                != derive_agent_uuid(
-                    tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
-                )
-                or plan.source_agent_version != request.admission.agent.version
+            plan.source_agent_id
+            != derive_agent_uuid(
+                tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
             )
+            or plan.source_agent_version != request.admission.agent.version
         )
-        or (worker_materialization and (request.worker is None or request.before_native is None))
-        or (
-            not worker_materialization
-            and (
-                plan.counterpart_catalog_id is None
-                or plan.counterpart_catalog_revision is None
-                or plan.agent_id is None
-            )
-        )
+    ) or (
+        plan.counterpart_catalog_id is None
+        or plan.counterpart_catalog_revision is None
+        or plan.agent_id is None
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     if select_runtime_manifest(request, type(plan)) != plan:
@@ -3743,8 +2013,7 @@ async def materialize_root_counterpart(
     validate_counterpart_request(plan, request)
     source, target = request.source, request.target_spec
     if (
-        not plan.root_materialization
-        or request.worker is not None
+        (not plan.root_materialization)
         or target is None
         or source is None
         or source.source is None
@@ -3783,49 +2052,6 @@ async def materialize_root_counterpart(
             return await resources.entry(catalog_id)
 
 
-async def materialize_counterpart(
-    plan: CounterpartPlan,
-    request: ProviderPreparationRequest,
-    original: ProviderPreparationRequest,
-    *,
-    resources: Callable[[TurnPersistence, ResolvedWorkerSpec], Awaitable[NeutralResourceHost]],
-) -> AgentRevision:
-    """Publish through the held preparation owner after validating its original grant."""
-    from daimon.core.turn.errors import AdmissionDenied
-    from daimon.core.turn.persistence import current_persistence
-
-    validate_counterpart_request(plan, request, worker_materialization=True)
-    worker, source, guard = request.worker, request.source, request.before_native
-    active = current_persistence.get()
-    if (
-        not plan.worker_materialization
-        or (request.scope, request.admission.backend_revision, worker)
-        != (original.scope, original.admission.backend_revision, original.worker)
-        or worker is None
-        or source is None
-        or source.source is None
-        or guard is None
-        or active is None
-        or active.scope != request.scope
-        or active.store is not request.deps.state_store
-        or request.deps.state_store is not original.deps.state_store
-    ):
-        raise AdmissionDenied(reason="backend_unsupported")
-    active.check_session(request.scope, None)
-    host = await resources(active, worker)
-    catalog_id = active.operation_key + ":agent"
-    return await host.publish(
-        catalog_id,
-        worker.spec,
-        expected_revision=0,
-        key=catalog_id,
-        persistence=active,
-        guard=guard,
-        worker=worker,
-        source=source.source,
-    )
-
-
 async def read_counterpart(
     plan: CounterpartPlan,
     request: ProviderPreparationRequest,
@@ -3833,7 +2059,6 @@ async def read_counterpart(
     source: BackendAgent,
     resources: NeutralResourceHost,
     verify_native: Callable[[AgentRevision], Awaitable[None]],
-    worker_materialization: bool = False,
 ) -> AgentRevision:
     """Verify an installed native catalog component, without authorizing execution.
 
@@ -3846,44 +2071,21 @@ async def read_counterpart(
     from mux.profiles import get_profile
 
     revision = validate_counterpart_request(
-        plan, request, worker_materialization=worker_materialization
+        plan,
+        request,
     )
     scope = request.scope
-    from daimon.core.turn.persistence import current_persistence
 
-    persistence = current_persistence.get() if worker_materialization else None
-    acknowledged = request.counterpart if worker_materialization else None
-    if worker_materialization and (
-        persistence is None
-        or persistence.store is not request.deps.state_store
-        or acknowledged is None
-        or source.source is None
-        or source.resource_scope != scope
-        or request.worker is None
-        or request.worker.permissions.fleet.scope != scope
-        or persistence.slot.thread.channel != revision.channel
-        or persistence.slot.thread.thread_id != request.thread_id
-        or persistence.slot.account_id != scope.account_id
-        or acknowledged.catalog_id != persistence.operation_key + ":agent"
-    ):
-        raise AdmissionDenied(reason="backend_unsupported")
-    if persistence is not None:
-        persistence.check_session(scope, None)
     root = plan.root_materialization
     catalog_id = (
-        acknowledged.catalog_id
-        if acknowledged
-        else root_counterpart_catalog_id(request)
-        if root
-        else cast(str, plan.counterpart_catalog_id)
+        root_counterpart_catalog_id(request) if root else cast(str, plan.counterpart_catalog_id)
     )
     from daimon.core.ma_identity import derive_agent_uuid
 
-    # Templates (root or worker) bind to the request's own admitted source agent:
-    # the agent this turn runs AS, which for a worker need not be the root.
+    # Templates bind to this turn's admitted source agent.
     expected_source = (
         derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
-        if root or _worker_template(plan)
+        if root
         else plan.source_agent_id
     )
     if (
@@ -3897,10 +2099,8 @@ async def read_counterpart(
     try:
         row = await resources.entry(catalog_id)
         if (
-            (acknowledged is not None and row != acknowledged)
-            or (
-                not worker_materialization
-                and not root
+            (
+                (not root)
                 and (
                     row.local_revision != plan.counterpart_catalog_revision
                     or row.agent.ref.id != plan.agent_id
@@ -3915,17 +2115,7 @@ async def read_counterpart(
             or tuple(pin.id for pin in row.agent.spec.skills or ()) != plan.skill_ids
         ):
             raise AdmissionDenied(reason="backend_unsupported")
-        checked = (
-            await resources.read(
-                catalog_id,
-                store=persistence.store,
-                key=persistence.operation_key + ":agent_create:0",
-                worker=request.worker,
-                source=source.source,
-            )
-            if persistence is not None
-            else await resources.read(catalog_id)
-        )
+        checked = await resources.read(catalog_id)
         await verify_native(checked)
         if (
             checked != row

@@ -31,21 +31,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import replace
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 import structlog
-from daimon.core.continuity.continuation import (
-    MAX_REQUESTED_WORK,
-    ContinuationDecision,
-    ContinuationRequest,
-    require_writable_reason,
-)
-from daimon.core.errors import DaimonError
-from daimon.core.fleet import FleetConflict, FleetRun, FleetWorker, run_settled
-from daimon.core.stores import accounts, fleet, mux_state, task_continuations, thread_sessions
+from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import (
     abandon_interrupted_wake_rows,
@@ -60,9 +51,7 @@ from daimon.core.stores.task_continuations import (
     start_wake_row,
 )
 from daimon.core.turn.ceiling import TURN_CEILING_S
-from mux.contracts.ids import ChannelRef, ThreadRef
-from mux.state.lease import Slot
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -74,20 +63,14 @@ __all__ = [
     "WAKE_RETRY_DELAY",
     "WAKE_RUN_LEASE",
     "WAKE_UNAVAILABLE_DELAY",
-    "FrozenWorkerBatch",
-    "WorkerFinishedRootChanged",
     "WakeClaim",
     "WakeOpener",
     "WakeThread",
     "abandon_interrupted_wakes",
-    "arm_worker_finished",
     "busy_retry_at",
     "cancel_wake",
     "claim_wake",
-    "decide_worker_finished",
-    "require_worker_finished_root",
     "enqueue_wake",
-    "enqueue_worker_finished",
     "list_dispatchable_wakes",
     "list_due_wake_threads",
     "poll_wakes_once",
@@ -96,7 +79,6 @@ __all__ = [
     "settle_wake",
     "skip_thread_wakes",
     "start_wake",
-    "worker_finished_key",
 ]
 
 #: How long a claim may sit before its turn starts. Covers the decision reads
@@ -193,7 +175,6 @@ async def enqueue_wake(
     hold a transaction: its owning state transition commits or rolls back both
     that transition and the wake, with no commit inside this function.
     """
-    require_writable_reason(request.reason)
     if isinstance(sessionmaker, AsyncSession):
         if not sessionmaker.in_transaction():
             raise ValueError("Enqueuing with a session requires an active transaction")
@@ -205,359 +186,6 @@ async def enqueue_wake(
 
 # A finite timestamp avoids asyncpg's special infinity/datetime.max conversion.
 _UNREADY_AT: Final = datetime(9999, 1, 1, tzinfo=UTC)
-
-
-def worker_finished_key(
-    run_id: uuid.UUID, worker_ids: Sequence[uuid.UUID] | None = None
-) -> uuid.UUID:
-    """A retry-stable identity for one exact batch; None retains the legacy key."""
-    suffix = ""
-    if worker_ids is not None:
-        if not worker_ids or len(set(worker_ids)) != len(worker_ids):
-            raise ValueError("A worker batch must be nonempty and unique")
-        suffix = ":" + ",".join(str(key) for key in sorted(worker_ids, key=str))
-    return uuid.uuid5(run_id, "worker_finished" + suffix)
-
-
-class FrozenWorkerBatch(BaseModel):
-    """Immutable wait facts; readiness does not certify successful results."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    run_id: uuid.UUID
-    worker_ids: tuple[uuid.UUID, ...]
-    quorum: int
-    binding_id: str
-    session_id: str
-
-
-def _batch(run: FleetRun, workers: Sequence[FleetWorker], ids: Sequence[uuid.UUID]):
-    selected = {worker.id: worker for worker in workers}
-    if not ids or len(set(ids)) != len(ids) or not set(ids) <= selected.keys():
-        raise ValueError("Batch workers must be unique members of this run")
-    reviews = {selected[key].reviewer_of is not None for key in ids}
-    if len(reviews) != 1:
-        raise ValueError("Initial and review workers require separate batches")
-    return FrozenWorkerBatch(
-        run_id=run.id,
-        worker_ids=tuple(sorted(ids, key=str)),
-        quorum=len(ids) if True in reviews else min(run.quorum or len(ids), len(ids)),
-        binding_id=run.orchestrator_binding_id,
-        session_id=run.orchestrator_session_id,
-    )
-
-
-def _address_matches(run: FleetRun, request: ContinuationRequest | TaskContinuationRow) -> bool:
-    return (
-        request.reason == "worker_finished"
-        and request.tenant_id == run.tenant_id
-        and request.requester_account_id == run.orchestrator_account_id
-        and request.platform == run.platform
-        and request.parent_channel_id == run.channel_id
-        and request.thread_id == run.thread_id
-    )
-
-
-def _retained_batch(run: FleetRun, workers: Sequence[FleetWorker], row: TaskContinuationRow):
-    batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
-    if (
-        batch.run_id != run.id
-        or not _address_matches(run, row)
-        or batch != _batch(run, workers, batch.worker_ids)
-        or row.requested_work != batch.model_dump_json()
-        or row.idempotency_key != worker_finished_key(run.id, batch.worker_ids)
-    ):
-        raise ValueError("Frozen batch intent differs from its original run")
-    return batch
-
-
-class WorkerFinishedRootChanged(DaimonError):
-    """The completion turn cannot send to its exact original root."""
-
-
-async def decide_worker_finished(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    row: TaskContinuationRow,
-    now: datetime,
-) -> ContinuationDecision | None:
-    """Re-read the frozen root before normal runner admission; this grants no send."""
-    return await _decide_worker_finished(sessionmaker, row, now)
-
-
-async def require_worker_finished_root(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    row: TaskContinuationRow,
-    *,
-    session_id: str,
-    account_id: uuid.UUID,
-    agent_id: str,
-    now: datetime,
-) -> None:
-    """Fence a started completion before preparation and the normal runner's send.
-
-    Its own active marker and slot lease are expected after binding. All original
-    root/intent checks remain the decision owner's; this is not authorization.
-    """
-    decision = await _decide_worker_finished(sessionmaker, row, now, started=True)
-    if decision is not None:
-        batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
-        if (session_id, account_id, agent_id) == (
-            batch.session_id,
-            row.requester_account_id,
-            row.target_ma_agent_id,
-        ):
-            return
-    raise WorkerFinishedRootChanged("Original fleet root is unavailable")
-
-
-async def _decide_worker_finished(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    row: TaskContinuationRow,
-    now: datetime,
-    *,
-    started: bool = False,
-) -> ContinuationDecision | None:
-    decision, reason = await _worker_finished_verdict(sessionmaker, row, now, started=started)
-    if decision is None or decision.action != "dispatch":
-        # A deferred wake retries silently otherwise; name why it did not dispatch.
-        log.info(
-            "fleet.worker_finished_deferred",
-            continuation_id=str(row.id),
-            started=started,
-            action=None if decision is None else decision.action,
-            reason=reason,
-        )
-    return decision
-
-
-async def _worker_finished_verdict(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    row: TaskContinuationRow,
-    now: datetime,
-    *,
-    started: bool = False,
-) -> tuple[ContinuationDecision | None, str]:
-    """Re-read the frozen root before normal runner admission; this grants no send.
-
-    Missing or stale durable facts defer. The adapter retains its per-thread
-    guard and repeats current authorization/binding checks before any effect.
-    """
-    try:
-        async with sessionmaker.begin() as db:
-            retained = await task_continuations.get_continuation(
-                db, idempotency_key=row.idempotency_key
-            )
-            if retained is None or any(
-                getattr(retained, key) != getattr(row, key)
-                for key in (*ContinuationRequest.model_fields, "id")
-            ):
-                return None, "row_changed"
-            if retained.status not in {"pending", "claimed"}:
-                return None, "row_not_open"
-            if (retained.started_at is not None) != started:
-                return None, "start_state_differs"
-            if started and (
-                retained.status != "claimed"
-                or not row.lease_owner
-                or retained.lease_owner != row.lease_owner
-                or retained.attempts != row.attempts
-                or retained.started_at != row.started_at
-                or retained.lease_expires_at is None
-                or retained.lease_expires_at <= now
-            ):
-                return None, "start_lease_differs"
-            if retained.available_at is None or retained.available_at > now:
-                return None, "not_available"
-            parsed = FrozenWorkerBatch.model_validate_json(retained.requested_work or "")
-            run, workers = await fleet.run_status(
-                db, tenant_id=row.tenant_id, run_id=parsed.run_id, for_update=True
-            )
-            batch = _retained_batch(run, workers, retained)
-            members = [worker for worker in workers if worker.id in batch.worker_ids]
-            if run.status != "running" or now >= run.deadline_at:
-                return None, "run_not_running"
-            if not run_settled(replace(run, quorum=batch.quorum), members):
-                return None, "batch_not_settled"
-            identity = await accounts.get_account_with_tenant(
-                db, account_id=run.orchestrator_account_id
-            )
-            if (
-                identity is None
-                or identity.tenant_id != run.tenant_id
-                or identity.platform != run.platform
-                or identity.platform_user_id != row.requester_external_user_id
-            ):
-                return None, "requester_changed"
-            slot = Slot(
-                thread=ThreadRef(
-                    channel=ChannelRef(
-                        tenant_id=str(run.tenant_id),
-                        platform=run.platform,
-                        channel_id=run.channel_id,
-                    ),
-                    thread_id=run.thread_id,
-                ),
-                account_id=str(run.orchestrator_account_id),
-            )
-            binding = await mux_state.get_binding(db, slot)
-            if (
-                binding is None
-                or binding.id != batch.binding_id
-                or binding.thread != slot.thread
-                or binding.legacy_account_id != slot.account_id
-                or binding.native_refs.get("session") != batch.session_id
-            ):
-                return None, "binding_changed"
-            projection = await mux_state.projection(db, batch.session_id)
-            if (
-                projection is None
-                or projection.session.id != batch.session_id
-                or projection.session.kind != "session"
-                or projection.session.provider != binding.provider
-                or projection.session.tenant_id not in {None, str(run.tenant_id)}
-                or projection.session.account_id not in {None, slot.account_id}
-                or projection.gaps
-                or projection.state == "terminated"
-            ):
-                return None, "projection_unusable"
-            lease = await mux_state.active_lease(db, slot)
-            live = await thread_sessions.get_live_thread_session(
-                db,
-                tenant_id=run.tenant_id,
-                platform=run.platform,
-                thread_id=run.thread_id,
-                account_id=run.orchestrator_account_id,
-            )
-            if live is not None and (
-                live.ma_session_id != batch.session_id
-                or live.channel_id != run.channel_id
-                or live.ma_agent_id != row.target_ma_agent_id
-            ):
-                return None, "live_session_changed"
-            if not started and live is not None and live.active_turn_message_id is not None:
-                return ContinuationDecision(action="skip_turn_running"), "live_turn_marker"
-            if not started and (
-                projection.state != "idle" or projection.active_root_turn is not None or lease
-            ):
-                return ContinuationDecision(action="skip_turn_running"), (
-                    f"projection_busy state={projection.state} "
-                    f"active_root_turn={projection.active_root_turn is not None} "
-                    f"lease={lease is not None}"
-                )
-    except (FleetConflict, ValidationError, ValueError) as error:
-        return None, "invalid_state:" + type(error).__name__
-    summary = ", ".join(f"{worker.id}:{worker.status}" for worker in members[:5])
-    seed = (
-        f"Resume fleet run {run.id}; frozen batch {row.idempotency_key} is ready "
-        f"at threshold {batch.quorum}/{len(members)}. Worker state excerpt: {summary}. "
-        "Re-read fleet_status and validate fleet_collect; readiness does not certify success."
-    )[:MAX_REQUESTED_WORK]
-    return ContinuationDecision(action="dispatch", seed_user_message=seed), "dispatch"
-
-
-async def arm_worker_finished(
-    session: AsyncSession,
-    request: ContinuationRequest,
-    *,
-    run_id: uuid.UUID,
-    worker_ids: Sequence[uuid.UUID],
-    now: datetime,
-) -> TaskContinuationRow | None:
-    """Freeze a batch in the existing queue, then evaluate already-finished workers.
-
-    Installation requires the compatible reader/rollback floor; no caller is
-    wired by this API. The run stays running so it can admit a review cohort.
-    """
-    if not session.in_transaction():
-        raise ValueError("Arming a worker batch requires an active transaction")
-    if request.idempotency_key != worker_finished_key(run_id, worker_ids):
-        raise ValueError("Worker completion requires the batch's stable wake identity")
-    run, workers = await fleet.run_status(
-        session, tenant_id=request.tenant_id, run_id=run_id, for_update=True
-    )
-    if not _address_matches(run, request):
-        raise ValueError("Worker wait address differs from its original root")
-    batch = _batch(run, workers, worker_ids)
-    payload = batch.model_dump_json()
-    row = await task_continuations.get_continuation(
-        session, idempotency_key=request.idempotency_key
-    )
-    if row is not None:
-        expected = request.model_copy(update={"requested_work": payload})
-        if any(getattr(row, key) != value for key, value in expected.model_dump().items()):
-            raise ValueError("Worker wait exists with a different frozen intent")
-    elif run.status == "running" and now < run.deadline_at:
-        row = await task_continuations.record_continuation(
-            session,
-            **request.model_copy(update={"requested_work": payload}).model_dump(),
-            available_at=_UNREADY_AT,
-        )
-    else:
-        return None
-    await enqueue_worker_finished(session, tenant_id=run.tenant_id, run_id=run_id, now=now)
-    return await task_continuations.get_continuation(session, idempotency_key=row.idempotency_key)
-
-
-async def enqueue_worker_finished(
-    session: AsyncSession,
-    request: ContinuationRequest | None = None,
-    *,
-    tenant_id: uuid.UUID | None = None,
-    run_id: uuid.UUID,
-    now: datetime,
-) -> bool:
-    """Offer ready frozen batches with the caller's terminal move, without committing.
-
-    The writer locks the run before changing its worker, then calls here in
-    that same transaction.
-    Deadline refusal never undoes that terminal move. Missing/corrupt waits
-    authorize nothing and do not strand unrelated terminal facts.
-    """
-    if not session.in_transaction():
-        raise ValueError("Worker completion requires an active transaction")
-    if request is not None:
-        if request.reason != "worker_finished" or request.idempotency_key != worker_finished_key(
-            run_id
-        ):
-            raise ValueError("Worker completion requires the run's stable wake identity")
-        return False  # Legacy unarmed writes remain closed.
-    if tenant_id is None:
-        raise ValueError("Publishing frozen batches requires the authorized tenant")
-    run, workers = await fleet.run_status(
-        session, tenant_id=tenant_id, run_id=run_id, for_update=True
-    )
-    if run.status != "running" or now >= run.deadline_at:
-        return False
-    rows = await task_continuations.list_pending_continuations(
-        session,
-        tenant_id=tenant_id,
-        platform=run.platform,
-        thread_id=run.thread_id,
-        include_future=True,
-    )
-    published = 0
-    for row in rows:
-        if row.reason != "worker_finished" or row.available_at != _UNREADY_AT:
-            continue
-        try:
-            batch = FrozenWorkerBatch.model_validate_json(row.requested_work or "")
-            if batch.run_id != run_id:
-                continue
-            batch = _retained_batch(run, workers, row)
-        except (ValidationError, ValueError):
-            log.warning("wake.invalid_worker_batch", idempotency_key=str(row.idempotency_key))
-            continue
-        if run_settled(
-            replace(run, quorum=batch.quorum),
-            [worker for worker in workers if worker.id in batch.worker_ids],
-        ):
-            published += await task_continuations.publish_worker_finished_row(
-                session,
-                tenant_id=tenant_id,
-                idempotency_key=row.idempotency_key,
-                expected_available_at=_UNREADY_AT,
-                available_at=now,
-            )
-    return published > 0
 
 
 async def claim_wake(

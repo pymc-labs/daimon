@@ -47,7 +47,6 @@ class SessionRecord:
     native_updated: dict[str, datetime] = field(default_factory=lambda: {})
     observation_history: dict[tuple[str, int], UsageObservation] = field(default_factory=lambda: {})
     unknown_delivery: bool = False
-    max_input_tokens: int | None = None
     # Native (Gemini-safe) mcp_server name -> declared connection name.
     mcp_server_names: dict[str, str] = field(default_factory=dict[str, str])
     # Interaction id -> SHA-256 of each storage-mount header sent for it. Lets a

@@ -820,7 +820,7 @@ def _wires(chat: Chat, monkeypatch) -> Wires:
     from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
     from mux.testing.isolated_sdk import build_gemini_client
 
-    from packages.adapters.mcp.tests.tools.test_j10_fork_e2e import (
+    from packages.adapters.mcp.tests.tools.gemini_transport_support import (
         GeminiCatalog,
         GeminiTransport,
     )
