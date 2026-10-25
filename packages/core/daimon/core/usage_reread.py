@@ -185,32 +185,45 @@ def _next_revision(stored: Mapping[str, int], observation_id: str) -> int:
 
 def openai_usage_lister(api_key: str | None = None) -> ListUsage | None:
     """Lists usage on the install's OpenAI key, as the code-default deployment does
-    (no project header); None when this process has no key. Sessions of another
-    project (a manifest deployment) are refused by the driver's own scope check."""
+    (no project header); None when this process has no key.
+
+    Each read acts for the session's own tenant and account (from its stored ref),
+    authorized for reading that one session and nothing else: no platform scope.
+    Sessions of another project (a manifest deployment) fail the driver's scope check.
+    """
     key = (api_key if api_key is not None else os.environ.get(_key_env()) or "").strip()
     if not key:
         return None
-    from daimon.core.mux_backend import platform_scope
     from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
+    from mux.contracts.ids import Scope
     from mux.drivers.openai import Context, OpenAIUsage, configured_transport
 
-    context = Context(
-        configured_transport(api_key=key, project=None),
-        DEFAULT_PROJECT,
-        CONVERSATION_ONLY.profile_id,
-        None,
-    )
-    scope = platform_scope("usage-reread")
+    transport = configured_transport(api_key=key, project=None)
 
     async def list_usage(
         session: ResourceRef, revision: Callable[[str], int]
     ) -> Sequence[UsageObservation]:
+        if session.tenant_id is None or session.account_id is None:
+            raise ValueError("usage re-read requires the session's tenant and account")
+
+        def only_this_session(scope: Scope, kind: str, id_: str | None) -> bool:
+            return kind == "session" and id_ == session.id
+
         class _Next:
             async def revise(
                 self, session: ResourceRef, observation_id: str, meter: Mapping[str, JsonValue]
             ) -> int:
                 return revision(observation_id)
 
+        context = Context(
+            transport, DEFAULT_PROJECT, CONVERSATION_ONLY.profile_id, only_this_session
+        )
+        scope = Scope(
+            tenant_id=session.tenant_id,
+            account_id=session.account_id,
+            principal_id="usage-reread",
+            authorization_id="usage-reread",
+        )
         return await OpenAIUsage(context, _Next()).reconcile(scope, session)
 
     return list_usage

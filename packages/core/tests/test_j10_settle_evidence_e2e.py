@@ -288,3 +288,54 @@ async def test_a_slot_lease_still_keeps_an_answered_gemini_worker_held(sm):
         )
     await _end(sm, run, worker)
     assert await _held(sm, parent, run, prices, worker) == Decimal(1)
+
+
+async def test_the_openai_lister_reads_one_session_under_its_own_tenant(monkeypatch):
+    """No platform scope: the read acts for the session's tenant and account, and the
+    driver's own mapper builds the observation at the revision the pass asked for."""
+    import mux.drivers.openai as openai_driver
+    from daimon.core.usage_reread import openai_usage_lister
+    from mux.contracts.ids import ResourceRef
+
+    session = ResourceRef(
+        provider="openai",
+        kind="session",
+        id="conv_1",
+        tenant_id="tenant-1",
+        account_id="account-1",
+        account_scope_id="daimon-deployment",
+    )
+    requests: list[tuple[str, str]] = []
+
+    class Transport:
+        async def request(self, method, path, *, body=None, query=None, key=None):
+            requests.append((method, path))
+            return {
+                "data": [
+                    {
+                        "id": "turn_b",
+                        "session_id": "conv_1",
+                        "usage": {
+                            "input_tokens": 13351,
+                            "output_tokens": 61,
+                            "input_tokens_details": {"cached_tokens": 0},
+                        },
+                    }
+                ],
+                "has_more": False,
+                "last_id": "turn_b",
+            }
+
+    monkeypatch.setattr(openai_driver, "configured_transport", lambda **_: Transport())
+    list_usage = openai_usage_lister(api_key="test-key")
+    assert list_usage is not None
+    (observation,) = await list_usage(session, lambda observation_id: 2)
+    assert requests == [("GET", "/agents/sessions/conv_1/turns")]
+    assert (observation.id, observation.revision, observation.completeness) == (
+        "openai:turn:turn_b",
+        2,
+        "measured",
+    )
+    assert observation.input_cache_write_tokens is None  # OpenAI never counts writes
+    with pytest.raises(ValueError, match="tenant and account"):
+        await list_usage(session.model_copy(update={"account_id": None}), lambda _: 1)

@@ -20,7 +20,13 @@ from typing import Protocol
 from mux.contracts.config import ResolvedBackend
 from mux.contracts.ids import ModelRef
 from mux.contracts.usage import UsageObservation
-from mux.profiles import CONVERSATION_ONLY, INLINE_REUSE, PERSISTENT_WORKSPACE, get_profile
+from mux.profiles import (
+    CONVERSATION_ONLY,
+    INLINE_REUSE,
+    PERSISTENT_WORKSPACE,
+    get_profile,
+    meters_cache_writes_for,
+)
 
 
 class LegacyUsage(Protocol):
@@ -320,13 +326,6 @@ class ProviderPrice:
                 raise ValueError("provider rates must be finite nonnegative Decimals")
 
 
-#: Providers whose usage meter has no cache-write count although their tariff bills
-#: cache writes. OpenAI's Agents API turn usage "do[es] not expose a separate
-#: cache-write count" (developers.openai.com agents-api/observability) while GPT-5.6
-#: and later bill writes at 1.25x uncached input (guides/prompt-caching).
-_CACHE_WRITES_UNREPORTED = frozenset({"openai"})
-
-
 def unreported_cache_writes(usage: UsageObservation, price: ProviderPrice) -> bool:
     """True when the tariff bills cache writes the meter never counts.
 
@@ -337,7 +336,7 @@ def unreported_cache_writes(usage: UsageObservation, price: ProviderPrice) -> bo
     return (
         price.cache_write is not None
         and usage.input_cache_write_tokens is None
-        and usage.session.provider in _CACHE_WRITES_UNREPORTED
+        and not meters_cache_writes_for(usage.session.provider)
     )
 
 
