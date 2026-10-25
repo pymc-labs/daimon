@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
 from functools import partial
-from typing import Literal, get_args
+from typing import Literal, cast, get_args
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
@@ -55,13 +55,14 @@ from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_balance
 from daimon.core.stores.turn_usage import (
     AccountingPrefetch,
+    AccountingRevision,
     managed_session,
     prefetch_accounting,
     read_accounting_revisions,
     read_session_debits,
 )
 from daimon.core.usage_delegation import HostUsageBinding, read_delegated_usage
-from mux.contracts.ids import Scope
+from mux.contracts.ids import ModelRef, Provider, Scope
 from mux.contracts.resources import ProviderBinding
 from mux.profiles import get_profile
 from mux.state.lease import Slot
@@ -423,11 +424,21 @@ async def _fleet_worker_money(
     with localcontext() as arithmetic:
         arithmetic.prec = 80
         debit = -sum((row.delta_usd for row in rows.ledger), Decimal(0))
+        # An observation is on the ledger once its newest revision is: that one carries
+        # its whole cumulative cost, and the applier only closes the older ones it
+        # supersedes (a Gemini interaction's rev1 "unknown" waits for the drain after
+        # its rev2 is applied). Counting such a row as pending would call a final
+        # cost "still being counted" and keep a hold that has nothing left to cover.
+        newest: dict[str, AccountingRevision] = {}
+        for item in rows.outbox:
+            current = newest.get(item.row.observation_id)
+            if current is None or item.row.revision > current.row.revision:
+                newest[item.row.observation_id] = item
         state: UsageState = (
             "none"
             if not rows.revisions and not rows.outbox
             else "settled"
-            if rows.revisions and rows.outbox and all(o.settled for o in rows.outbox)
+            if rows.revisions and newest and all(o.settled for o in newest.values())
             else "pending"
         )
         if calls is not None:
@@ -1191,37 +1202,97 @@ async def read_fleet_budget_snapshot(
         )
 
 
+@dataclass(frozen=True)
+class FleetCost:
+    """A run's cost so far, and the workers' models whose usage isn't counted yet.
+
+    `pending` names, as people say them, the models of workers whose usage state is
+    "pending" (a revision recorded but not yet on the ledger, as `_fleet_worker_money`
+    computes it): their spend exists but isn't in `usd` yet, so `usd` is not final.
+    """
+
+    usd: Decimal
+    pending: tuple[str, ...] = ()
+
+
 async def read_fleet_run_cost(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     parent: WorkerPermissions,
     prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
     markup: Decimal,
-) -> Decimal | None:
+) -> FleetCost | None:
     """What this run's workers cost so far, from this run's rows alone.
 
     Each worker counts at its priced, observed usage or its ledger debit, whichever
     is larger (the producer's own money rule), so usage already seen counts before
     it is debited. Read-only, no locks, and never another run's rows. None when a
-    worker's usage can't be priced yet: then no honest figure exists.
+    worker's usage can't be priced yet: then no honest figure exists. A worker whose
+    usage is still pending is named in `pending`: the figure is a cost so far.
     """
     facts = parent.fleet
     if facts.scope.is_platform or facts.scope.is_legacy_host_authorized:
         raise FleetConflict("fleet cost requires tenant authority")
+    return await _read_run_cost(
+        sessionmaker,
+        tenant_id=uuid.UUID(facts.scope.tenant_id),
+        run_id=facts.run_id,
+        scope=facts.scope,
+        prices=prices,
+        markup=markup,
+    )
+
+
+async def read_ended_run_cost(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
+    markup: Decimal,
+) -> FleetCost | None:
+    """`read_fleet_run_cost` for a run whose root turn is over (the run-end poller).
+
+    No frozen root is read: authority is the run's own tenant and orchestrator
+    account, the scope its workers' sessions were opened under.
+    """
+    async with sessionmaker.begin() as session:
+        run, _ = await fleet_store.run_status(session, tenant_id=tenant_id, run_id=run_id)
+    scope = Scope(
+        tenant_id=str(tenant_id),
+        account_id=str(run.orchestrator_account_id),
+        principal_id="fleet-run-end",
+        authorization_id="fleet-run-end",
+    )
+    return await _read_run_cost(
+        sessionmaker, tenant_id=tenant_id, run_id=run_id, scope=scope, prices=prices, markup=markup
+    )
+
+
+async def _read_run_cost(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    scope: Scope,
+    prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
+    markup: Decimal,
+) -> FleetCost | None:
+    from daimon.core.agent_model_names import model_name
+
     async with sessionmaker.begin() as session:
         await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-        run, workers = await fleet_store.run_status(
-            session, tenant_id=uuid.UUID(facts.scope.tenant_id), run_id=facts.run_id
-        )
+        run, workers = await fleet_store.run_status(session, tenant_id=tenant_id, run_id=run_id)
         total = Decimal(0)
+        pending: list[str] = []
         with localcontext() as arithmetic:
             arithmetic.prec = 80
             for worker in workers:
-                spent, _debit, unpriced, _, _ = await _fleet_worker_money(
+                spent, _debit, unpriced, _, usage = await _fleet_worker_money(
                     session,
                     run,
                     worker,
-                    scope=facts.scope,
+                    scope=scope,
                     prices=prices,
                     markup=markup,
                     price_floor=True,
@@ -1229,7 +1300,13 @@ async def read_fleet_run_cost(
                 if unpriced:
                     return None
                 total += spent
-        return total
+                if usage == "pending":
+                    name = model_name(
+                        ModelRef(provider=cast(Provider, worker.backend), id=worker.model)
+                    )
+                    if name not in pending:
+                        pending.append(name)
+        return FleetCost(total, tuple(pending))
 
 
 async def _reserve_fleet_worker(

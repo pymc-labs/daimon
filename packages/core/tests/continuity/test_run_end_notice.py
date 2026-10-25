@@ -267,3 +267,107 @@ async def test_a_thread_s_live_run_card_is_found_until_the_run_ends(pooled):
     )
     await _end(pooled, run, status="cancelled")
     assert await live(run) is None
+
+
+async def test_a_card_shown_with_a_cost_still_being_counted_owes_a_cost_update(pooled):
+    """J10 rehearsal: the card said "Cost $0.01" while Astra's usage was still pending,
+    and nothing ever edited it. Shown so, the run owes the card its settled cost."""
+    run = await _ended(pooled)
+    await fleet.record_card(
+        pooled,
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        message_id="902",
+        terminal=True,
+        cost_owed=True,
+    )
+    row = await _row(pooled, run)
+    assert row.end_notice == "cost_owed" and row.card_message_id == "902"
+    assert row.end_notice_attempts == 0
+    await _due(pooled, run)
+    # Still being counted: the poller retries with the backoff; no line, card only.
+    post = _Post("retry")
+    assert await poll_run_end_notices_once(pooled, platform="discord", post=post) == 0
+    (notice,) = post.notices
+    assert notice.cost_only and notice.delivered and notice.card_message_id == "902"
+    assert (await _row(pooled, run)).end_notice == "cost_owed"
+    # Settled: the card is edited with it, and the update is done.
+    await _due(pooled, run)
+    post = _Post("shown")
+    assert await poll_run_end_notices_once(pooled, platform="discord", post=post) == 1
+    assert (await _row(pooled, run)).end_notice == "shown"
+    await _due(pooled, run)
+    assert await poll_run_end_notices_once(pooled, platform="discord", post=_Post()) == 0
+
+
+async def test_a_terminal_card_with_its_final_cost_settles_an_owed_cost_update(pooled):
+    run = await _ended(pooled)
+    for cost_owed, expected in ((True, "cost_owed"), (False, "shown")):
+        await fleet.record_card(
+            pooled,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            message_id="903",
+            terminal=True,
+            cost_owed=cost_owed,
+        )
+        assert (await _row(pooled, run)).end_notice == expected
+
+
+async def test_an_end_posted_while_a_cost_is_counted_owes_its_card_the_cost(pooled):
+    """The poller's own end post can find a cost still being counted too."""
+    run = await _ended(pooled)
+    post = _Post("cost_owed")
+    assert await poll_run_end_notices_once(pooled, platform="discord", post=post) == 1
+    row = await _row(pooled, run)
+    assert row.end_notice == "cost_owed" and row.end_notice_attempts == 0
+    await _due(pooled, run)
+    post = _Post("shown")
+    assert await poll_run_end_notices_once(pooled, platform="discord", post=post) == 1
+    assert post.notices[0].cost_only
+    assert (await _row(pooled, run)).end_notice == "shown"
+
+
+async def test_a_cost_never_settled_keeps_its_card_honest_and_logs_once(pooled):
+    import structlog
+
+    run = await _ended(pooled)
+    await fleet.record_card(
+        pooled,
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        message_id="904",
+        terminal=True,
+        cost_owed=True,
+    )
+    post = _Post(*(["retry"] * fleet.END_NOTICE_MAX_ATTEMPTS))
+    for _ in range(fleet.END_NOTICE_MAX_ATTEMPTS):
+        await _due(pooled, run)
+        assert await poll_run_end_notices_once(pooled, platform="discord", post=post) == 0
+    await _due(pooled, run)
+    with structlog.testing.capture_logs() as logs:
+        assert await poll_run_end_notices_once(pooled, platform="discord", post=post) == 0
+    # The card keeps "cost so far"; the run owes nothing more; said once.
+    assert (await _row(pooled, run)).end_notice == "shown"
+    assert [e["event"] for e in logs].count("fleet.cost_update_given_up") == 1
+    assert len(post.notices) == fleet.END_NOTICE_MAX_ATTEMPTS
+
+
+async def test_two_processes_never_claim_the_same_cost_update(pooled):
+    import asyncio
+
+    run = await _ended(pooled)
+    await fleet.record_card(
+        pooled,
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        message_id="905",
+        terminal=True,
+        cost_owed=True,
+    )
+    await _due(pooled, run)
+    first, second = await asyncio.gather(
+        fleet.claim_end_notices(pooled, platform="discord"),
+        fleet.claim_end_notices(pooled, platform="discord"),
+    )
+    assert sorted((len(first), len(second))) == [0, 1]

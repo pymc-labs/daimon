@@ -27,7 +27,7 @@ from daimon.core.fleet_orchestration import (
     Control,
     FleetOrchestrator,
     FleetRefused,
-    fleet_cost_words,
+    fleet_cost_line,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerPermissions, WorkerSpecRefused
@@ -40,6 +40,7 @@ import discord
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.bot import DaimonBot
+    from daimon.core.channel_budget import FleetCost
     from daimon.core.stores.fleet import EndNotice
     from daimon.core.turn.deps import TurnDeps
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -109,7 +110,8 @@ def build_fleet_view(
 ) -> discord.ui.LayoutView:
     """Render only canonical scoped rows; no specs, excerpts or native handles.
 
-    `cost` is an ended run's cost in words (`fleet_cost_words`); it leads the footer.
+    `cost` is an ended run's cost line (`fleet_cost_line`: "Cost $0.18", or "Cost so far
+    $0.01 · GPT-6 Astra's cost is still being counted"); it leads the footer.
     """
     if (
         run.platform != "discord"
@@ -168,7 +170,7 @@ def build_fleet_view(
         buttons=buttons,
         footer=(
             # Once the run is over, what it cost leads (J3: "the cost is shown").
-            f"Cost {cost} · Budget cap {_dollars(run.total_budget_usd)}"
+            f"{cost} · Budget cap {_dollars(run.total_budget_usd)}"
             if cost is not None
             else f"Budget cap {_dollars(run.total_budget_usd)} · "
             f"Deadline <t:{int(run.deadline_at.timestamp())}:f>"
@@ -191,6 +193,11 @@ def build_fleet_view(
         view.stop()
         raise FleetRefused("invalid_card")
     return view
+
+
+def _final(cost: FleetCost | None) -> bool:
+    """A cost the card may keep: read, and no worker's usage still being counted."""
+    return cost is not None and not cost.pending
 
 
 def _dollars(usd: Decimal) -> str:
@@ -391,20 +398,32 @@ def fleet_ended_text(workers: Sequence[FleetWorker]) -> str:
 
 #: Remember a run's card message; the flag says a terminal card is now showing,
 #: which settles the run's owed end notice.
-type RecordCard = Callable[[FleetRun, discord.Message, bool], Awaitable[None]]
+class RecordCard(Protocol):
+    """Store a run's card message; `terminal` settles an owed notice, `cost_owed` says
+    the card showed a cost still being counted (the run then owes a cost update)."""
+
+    def __call__(
+        self, run: FleetRun, message: discord.Message, terminal: bool, /, *, cost_owed: bool
+    ) -> Awaitable[None]: ...
 
 
 async def show_fleet_ended(
-    thread: discord.Thread, notice: EndNotice, record: RecordCard | None = None
+    thread: discord.Thread,
+    notice: EndNotice,
+    record: RecordCard | None = None,
+    *,
+    cost: str | None = None,
 ) -> None:
     """Settle the run's card to its final state, then post the run-end line.
 
     The card is the stored message, else the one whose controls name the run;
     one that is gone or can't be edited is posted again (and remembered, so a
-    retry edits it). A run a wake already answered gets only the card.
+    retry edits it). A run a wake already answered gets only the card. A cost
+    update (`notice.cost_only`) only edits the card it finds: never a new message.
+    `cost` is the card's cost line, when the caller could read one.
     """
     run = notice.run
-    view = build_fleet_view(run, notice.workers)
+    view = build_fleet_view(run, notice.workers, cost=cost)
     card: discord.Message | None = None
     if notice.card_message_id is not None and notice.card_message_id.isdigit():
         try:
@@ -413,6 +432,9 @@ async def show_fleet_ended(
             card = None
     if card is None:
         card = await history_finder(thread)(run.id)
+    if card is None and notice.cost_only:
+        view.stop()  # no card to correct: a cost update posts nothing new
+        return
     shown: discord.Message | None = None
     if card is not None:
         try:
@@ -423,11 +445,14 @@ async def show_fleet_ended(
         else:
             shown = shown or card
     if shown is None:
+        if notice.cost_only:
+            view.stop()  # the card can't be edited: a cost update posts nothing new
+            return
         shown = await thread.send(view=view, allowed_mentions=discord.AllowedMentions.none())
     view.stop()
     if record is not None:
         # The line below is still owed: the notice settles when this returns.
-        await record(run, shown, False)
+        await record(run, shown, False, cost_owed=False)
     if not notice.delivered:
         await thread.send(
             fleet_ended_text(notice.workers), allowed_mentions=discord.AllowedMentions.none()
@@ -438,13 +463,16 @@ def record_card(sessionmaker: async_sessionmaker[AsyncSession]) -> RecordCard:
     """Store a run's card message id; a terminal card settles the owed notice."""
     from daimon.core.stores import fleet
 
-    async def record(run: FleetRun, message: discord.Message, terminal: bool) -> None:
+    async def record(
+        run: FleetRun, message: discord.Message, terminal: bool, /, *, cost_owed: bool
+    ) -> None:
         await fleet.record_card(
             sessionmaker,
             tenant_id=run.tenant_id,
             run_id=run.id,
             message_id=str(message.id),
             terminal=terminal,
+            cost_owed=cost_owed,
         )
 
     return record
@@ -773,8 +801,8 @@ class DiscordFleetCard:
     ) -> None:
         self._run_id = run_id
         self._service = service
-        # An ended run's cost in words, read once (`_read`).
-        self._costs: dict[uuid.UUID, str] = {}
+        # An ended run's cost (`_read`): kept once final, read again while it isn't.
+        self._costs: dict[uuid.UUID, FleetCost | None] = {}
         self._load_parent = load_parent
         self._send = send
         self._edit = edit
@@ -828,11 +856,12 @@ class DiscordFleetCard:
 
         The stored figure trails the budget watch, so a running run shows no cost;
         an ended one says the same cost the result reply does
-        (`FleetOrchestrator.run_cost`), read once.
+        (`FleetOrchestrator.run_cost`). Once final it is kept; a cost so far (a
+        worker's usage still being counted) or none yet is read again each render.
         """
         run, workers = await self._service.read_snapshot(parent, policy, run_id)
-        if run.status not in RUN_TRANSITIONS and run.id not in self._costs:
-            self._costs[run.id] = fleet_cost_words(await self._service.run_cost(parent, run))
+        if run.status not in RUN_TRANSITIONS and not _final(self._costs.get(run.id)):
+            self._costs[run.id] = await self._service.run_cost(parent, run)
         return run, workers
 
     def _render(
@@ -851,7 +880,9 @@ class DiscordFleetCard:
             collected=collected,
             blocked=blocked,
             partial=partial,
-            cost=self._costs.get(run.id) if run.status not in RUN_TRANSITIONS else None,
+            cost=fleet_cost_line(self._costs.get(run.id))
+            if run.status not in RUN_TRANSITIONS
+            else None,
         )
 
     async def refresh(self) -> bool:
@@ -908,8 +939,15 @@ class DiscordFleetCard:
         run = self._rendered
         if self._record is not None and run is not None and self._message is not None:
             try:
-                # A terminal card on show settles the run's owed end notice.
-                await self._record(run, self._message, run.status not in RUN_TRANSITIONS)
+                # A terminal card on show settles the run's owed end notice; one whose
+                # cost is still being counted leaves a cost update owed instead.
+                terminal = run.status not in RUN_TRANSITIONS
+                await self._record(
+                    run,
+                    self._message,
+                    terminal,
+                    cost_owed=terminal and not _final(self._costs.get(run.id)),
+                )
             except Exception:
                 log.warning("fleet.card_record_failed", run_id=str(run.id), exc_info=True)
 

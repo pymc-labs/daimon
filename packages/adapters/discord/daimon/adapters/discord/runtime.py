@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, a
 if TYPE_CHECKING:
     from daimon.adapters.discord.lifecycle import EditFn, SendFn
     from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard, ParentResolver
+    from daimon.core.channel_budget import FleetCost
     from daimon.core.fleet_orchestration import FleetOrchestrator, HostFleetPorts
     from daimon.core.neutral_resources import WorkerPermissions
     from daimon.core.pricing import ModelRates, ProviderPrice
@@ -267,6 +268,8 @@ class DiscordRuntime:
     gateway_lease: GatewayLease | None = None
     # Host-built current-root service binding; ordinary construction discovers nothing.
     fleet_card_factory: FleetCardFactory | None = None
+    # An ended run's cost by (tenant, run), for its card after the root turn is over.
+    fleet_run_cost: Callable[[UUID, UUID], Awaitable[FleetCost | None]] | None = None
 
 
 @asynccontextmanager
@@ -366,6 +369,7 @@ async def build_runtime(
                     mcp_token_probe=probe_bearer_token,
                     gateway_lease=gateway_lease,
                     fleet_card_factory=fleet_factory,
+                    fleet_run_cost=None if fleet_service is None else fleet_service.ended_run_cost,
                 )
         finally:
             try:

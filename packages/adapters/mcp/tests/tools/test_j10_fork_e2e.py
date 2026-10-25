@@ -532,7 +532,15 @@ class GeminiTransport(FakeTransport):
             "steps": [
                 {"type": "model_output", "content": [{"type": "text", "text": "gemini says X"}]}
             ],
-            "usage": {"total_input_tokens": 10, "total_output_tokens": 2},
+            # Every stage, as Gemini meters it in production (staging 7aba3054: cached
+            # and thought counts reported), so the turn settles; a meter missing one
+            # stays pending, and the run's cost would rightly read as "so far".
+            "usage": {
+                "total_input_tokens": 10,
+                "total_cached_tokens": 0,
+                "total_output_tokens": 2,
+                "total_thought_tokens": 0,
+            },
         }
         self.saved[response["id"]] = response
         return json.loads(json.dumps(response))

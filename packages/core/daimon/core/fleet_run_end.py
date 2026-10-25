@@ -22,9 +22,11 @@ from daimon.core.stores.fleet import EndNotice
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: What the adapter did: "shown" (the card and notice are out), "retry" (a
-#: transient failure; the claim's backoff applies) or "give_up" (it can never be
-#: shown there: the thread is gone, locked or forbidden).
-type EndOutcome = Literal["shown", "retry", "give_up"]
+#: transient failure, or a cost still being counted; the claim's backoff applies),
+#: "give_up" (it can never be shown there: the thread is gone, locked or forbidden)
+#: or "cost_owed" (the end is out, but a worker's cost is still being counted: the
+#: card's cost is edited in once it settles).
+type EndOutcome = Literal["shown", "retry", "give_up", "cost_owed"]
 PostRunEnd = Callable[[EndNotice], Awaitable[EndOutcome]]
 _log = structlog.get_logger(__name__)
 
@@ -53,9 +55,9 @@ async def poll_run_end_notices_once(
             sessionmaker,
             tenant_id=notice.run.tenant_id,
             run_id=notice.run.id,
-            outcome="shown" if outcome == "shown" else "given_up",
+            outcome="given_up" if outcome == "give_up" else outcome,
         )
-        shown += outcome == "shown"
+        shown += outcome in ("shown", "cost_owed")
     return shown
 
 
