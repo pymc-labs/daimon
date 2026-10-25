@@ -14,6 +14,73 @@ From the **Dev lane** GitHub Actions workflow, select that branch and dispatch `
 
 Each lane uses its own environment and repository variables for deployment. The host keeps the lane's secrets in a root-owned `.env` file. Normal lane services publish no container ports; the optional preview fixture below binds a loopback port.
 
+## Preview notebook host (row 52)
+
+`preview-notebook` is a dedicated, optional standalone host, disabled by default.
+It receives only notebook settings, retains the image's root/SETUID/SETGID jail,
+and stores `/data/notebooks` in the lane-scoped `preview-notebooks` volume.
+The container is capped at 768 MiB and 0.5 CPU: use tiny QA fixtures, not sampling
+workloads. Keep ALLOW_UNJAILED_SPAWN, ALLOW_EDITABLE and ALLOW_HTTP_LINKS off.
+
+**King setup, preview only, after merge:**
+
+- Record the current `lane-preview-env` version and preserve its exact bytes for
+  rollback. Add a version preserving all existing keys, with these values:
+
+  | Key | Value / derivation |
+  | --- | --- |
+  | `DAIMON_NOTEBOOK__HOST_URL` | `https://preview-notebook.136-90-64-248.sslip.io` (client upload/admin base) |
+  | `DAIMON_NOTEBOOK__ADMIN_SECRET` | Fresh 48 random bytes, URL-safe encoded; shared by client and host |
+  | `DAIMON_NOTEBOOK__PUBLIC_HOST` | `preview-notebook.136-90-64-248.sslip.io` (hostname from HOST_URL) |
+  | `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` | Same HTTPS origin as HOST_URL (public links omit internal :8001) |
+  | `DAIMON_NOTEBOOK__TENANTS` | `449f4dc5-5990-52c0-96e0-45a4ab3bf0e4` (Preview QA tenant for guild `1435062989119295640`) |
+  | `DAIMON_NOTEBOOK__ALLOWED_ORIGINS` | Same HTTPS origin as HOST_URL (browser WebSocket origin) |
+
+  Append `preview-notebook` to existing `COMPOSE_PROFILES`, preserving all profiles.
+  Keep the bearer only in Secret Manager and the root-owned lane `.env`; never
+  print it or put it in command arguments. HOST_URL configures lane clients;
+  the host receives only the other five keys. DATA_DIR and port use image defaults.
+- Before editing ingress, back up both `/etc/daimon-lanes/Caddyfile` and instance
+  startup-script metadata into `/etc/daimon-lanes/backups/notebook-host-<UTC>/`.
+  Record exact backup paths and old/new secret version IDs. Add this route to
+  **both** the Caddyfile and startup metadata, validate Caddy, then reload using
+  the supported mechanism:
+
+  ```caddy
+  preview-notebook.136-90-64-248.sslip.io {
+      reverse_proxy preview-notebook:8001
+  }
+  ```
+
+  Confirm `lanes-caddy` is attached to Preview's default lane network, as for
+  `preview-parity-mcp`. No container ports are published. Proxy the whole tree,
+  preserving Host, Authorization, upload PUTs and WebSocket upgrades. Provision
+  DNS/TLS; update all origins if the VM IP changes. Do not add ORIGIN_BASE:
+  this shared origin admits only the controlled QA tenant above.
+- Redeploy Preview through the lane workflow. Every lane deploy builds
+  `lanes/notebook-host:<lane>-<SHA>` alongside the unchanged Daimon image.
+  `DAIMON_NOTEBOOK_IMAGE` carries its reference; the workflow renders only that
+  variable into the copied compose before `sudo lane deploy --compose ...`.
+  This persists the matching image in the host's recorded compose, including
+  reset, without adding an unsupported host CLI option or a secret image key.
+  Direct compose use must supply DAIMON_NOTEBOOK_IMAGE when enabling the profile.
+  Inspect host `limits.yml` overrides for conflicts with the new service caps.
+
+Post-deploy: verify the notebook image and OCI revision match the lane SHA,
+`/health` reports ok internally and over public HTTPS, and existing services
+remain healthy with no new restarts/OOM. Unauthenticated admin must refuse;
+authorized list must succeed. From an authorized QA fixture, mint and upload a
+tiny read-only notebook plus same-slug attachment; verify exact attachment bytes,
+rendered marker/widget and browser WebSocket. Verify single-use replay refusal,
+expiry, unlisted-tenant refusal, list/delete and absence readbacks. Check persistence
+across an authorized host restart, then delete only created fixtures. Minting alone
+does not pass row 52; keep it blocked until these checks pass.
+
+Rollback: stop only `preview-notebook`, restore Caddyfile in place and startup
+metadata from the recorded backups, validate/reload, restore the exact prior secret
+bytes as a new version, and redeploy the previous reviewed compose/images.
+Retain `preview-notebooks`; do not remove volumes during rollback.
+
 ## Preview parity MCP fixture (rows 15 and 34)
 
 `preview-parity-mcp` extends the existing QA host's bearer gate. It has no

@@ -86,6 +86,9 @@ jobs:
           image="$REGION-docker.pkg.dev/$PROJECT/lanes/daimon:$LANE-$SHA"
           echo "DAIMON_LANE_IMAGE=$image" >> "$GITHUB_ENV"
           echo "ref=$image" >> "$GITHUB_OUTPUT"
+          notebook="$REGION-docker.pkg.dev/$PROJECT/lanes/notebook-host:$LANE-$SHA"
+          echo "DAIMON_NOTEBOOK_IMAGE=$notebook" >> "$GITHUB_ENV"
+          echo "notebook=$notebook" >> "$GITHUB_OUTPUT"
           gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
       - name: Build and push lane image
         if: needs.prepare.outputs.action == 'deploy'
@@ -100,6 +103,19 @@ jobs:
           sbom: false
           cache-from: type=gha,scope=daimon-lane
           cache-to: type=gha,mode=max,scope=daimon-lane,ignore-error=true
+      - name: Build and push notebook host
+        if: needs.prepare.outputs.action == 'deploy'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/notebook-host/Dockerfile
+          push: true
+          tags: ${{ steps.image.outputs.notebook }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=notebook-host-lane
+          cache-to: type=gha,mode=max,scope=notebook-host-lane,ignore-error=true
       - name: Run lane action
         run: |
           set -euo pipefail
@@ -113,7 +129,11 @@ jobs:
           }
           lane_ssh "$refresh" >/dev/null 2>&1
           if [[ "$ACTION" == deploy ]]; then
-            gcloud compute scp deploy/lanes/compose.lane.yml "$HOST:$remote" \
+            # The host CLI owns .env and records this compose for reset/redeploy.
+            # Render only the image variable; never interpolate lane secrets here.
+            sed "s|\${DAIMON_NOTEBOOK_IMAGE:-notebook-host:unconfigured}|$DAIMON_NOTEBOOK_IMAGE|g" \
+              deploy/lanes/compose.lane.yml > "$RUNNER_TEMP/compose.lane.yml"
+            gcloud compute scp "$RUNNER_TEMP/compose.lane.yml" "$HOST:$remote" \
               --project="$PROJECT" --zone="$ZONE" --tunnel-through-iap --quiet
             printf -v command '%q ' sudo lane deploy "$LANE" --image "$DAIMON_LANE_IMAGE" \
               --sha "$SHA" --compose "$remote" --actor "$ACTOR" --run-url "$RUN_URL"

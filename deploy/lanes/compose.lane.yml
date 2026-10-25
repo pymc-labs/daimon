@@ -193,7 +193,36 @@ services:
       - preview-parity-calls:/home/daimon
     restart: unless-stopped
 
+
+  preview-notebook:
+    profiles: ["preview-notebook"]
+    # The workflow resolves this variable before handing compose to the host CLI.
+    image: ${DAIMON_NOTEBOOK_IMAGE:-notebook-host:unconfigured}
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    # Explicit allowlist: no DB, model, Discord or other lane credentials.
+    environment:
+      DAIMON_NOTEBOOK__ADMIN_SECRET: ${DAIMON_NOTEBOOK__ADMIN_SECRET:-}
+      DAIMON_NOTEBOOK__PUBLIC_HOST: ${DAIMON_NOTEBOOK__PUBLIC_HOST:-localhost}
+      DAIMON_NOTEBOOK__PUBLIC_URL_BASE: ${DAIMON_NOTEBOOK__PUBLIC_URL_BASE:-}
+      DAIMON_NOTEBOOK__TENANTS: ${DAIMON_NOTEBOOK__TENANTS:-}
+      DAIMON_NOTEBOOK__ALLOWED_ORIGINS: ${DAIMON_NOTEBOOK__ALLOWED_ORIGINS:-}
+    volumes:
+      - preview-notebooks:/data/notebooks
+    # Default lane network, also used by preview-parity-mcp and lanes-caddy.
+    # Retain image root + Docker's default SETUID/SETGID capabilities for the jail.
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    mem_limit: 768m
+    cpus: 0.5
+    restart: unless-stopped
+
 volumes:
   pgdata:
   preview-parity-calls:
   sidecar_proxy_data:
+  preview-notebooks:
