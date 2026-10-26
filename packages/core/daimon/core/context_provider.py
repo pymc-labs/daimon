@@ -108,7 +108,11 @@ class McpProvider:
         # The imported constructor isolates this owner from other transports' overrides.
         self.client = AsyncClient(
             transport=transport,
-            limits=httpx.Limits(keepalive_expiry=KEEPALIVE_EXPIRY_SECONDS),
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=KEEPALIVE_EXPIRY_SECONDS,
+            ),
             verify=_ssl_context(),
             follow_redirects=False,
             trust_env=False,

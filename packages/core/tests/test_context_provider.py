@@ -14,7 +14,6 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core.authz import Subject
 from daimon.core.context_provider import (
-    KEEPALIVE_EXPIRY_SECONDS,
     ContextProviders,
     ContextRequest,
     ContextResponse,
@@ -239,10 +238,9 @@ async def test_mcp_pool_keeps_idle_connections_between_turns() -> None:
     with mock.patch("httpcore.AsyncConnectionPool") as pool:
         pool.return_value.aclose = mock.AsyncMock()
         provider = McpProvider()
-    assert pool.call_args.kwargs["keepalive_expiry"] == KEEPALIVE_EXPIRY_SECONDS
-    defaults = httpx.Limits()
-    assert pool.call_args.kwargs["max_connections"] == defaults.max_connections
-    assert pool.call_args.kwargs["max_keepalive_connections"] == defaults.max_keepalive_connections
+    assert pool.call_args.kwargs["keepalive_expiry"] == 240
+    assert pool.call_args.kwargs["max_connections"] == 100
+    assert pool.call_args.kwargs["max_keepalive_connections"] == 20
     await provider.aclose()
 
 

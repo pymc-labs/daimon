@@ -1088,10 +1088,6 @@ minutes. `admit()` sits deliberately outside it.
 
 ### Pre-turn context providers
 
-Connections are reused and idle connections are kept for 240 s; the first call
-after a longer idle pays a fresh TLS handshake, which can exceed the 200 ms
-budget so that turn gets no context.
-
 Before the driver sends inference input, `core/context_provider.py` loads an
 optional binding through `core/stores/context_providers.py`. Bindings select one
 provider by channel and MA agent: channel+agent, channel, agent, then tenant.
@@ -1147,6 +1143,10 @@ with `system_max_tokens`). `max_tokens` can lower the turn budget. The host
 recomputes tokens as `ceil(chars / 3.5)`. A refusal, timeout, invalid response
 or exception produces a normal turn without context; failures log only tenant
 and exception class, never provider text, card IDs, sources or credentials.
+
+Connections are reused and idle connections are kept for 240 s; the first call
+after a longer idle pays a fresh TLS handshake, which can exceed the 200 ms
+budget so that turn gets no context.
 
 The turn fragment precedes user input. The once-only system fragment joins the
 system message, or precedes user input on models without system-message support.
