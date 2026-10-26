@@ -1258,7 +1258,10 @@ class DiscordTurnLifecycle(OutputGate):
             if self._fleet_card is not None:
                 from daimon.adapters.discord.posted_controls.fleet import fleet_result_seen
 
-                allowed, notice = await self._fleet_card.summary_gate(seen=fleet_result_seen(state))
+                allowed, notice = await self._fleet_card.summary_gate(
+                    seen=fleet_result_seen(state),
+                    tool_free=not any(isinstance(block, ToolUseBlock) for block in state.content),
+                )
                 if not allowed:
                     if notice is None:
                         self._terminal = True

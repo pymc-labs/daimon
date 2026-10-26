@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed Discord fleet rendering losing verified invoker roles and replacing ordinary
+  tool-free answers with a fleet-unavailable notice. Fleet results still require current authorization.
+
 - Optional tenant-scoped pre-turn MCP context providers, configured with `daimon context-provider set`, with bounded fail-open calls and session acknowledgements.
   Allow up to 400 ms until a session acknowledges its system fragment, configurable
   with `first_call_timeout_ms`; subsequent calls retain the 200 ms ceiling.
