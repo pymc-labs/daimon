@@ -279,6 +279,7 @@ class ProviderPreparationRequest:
             or grant is None
             or self.admission.shared_owner is not None
             or grant.subject != parent.subject
+            or grant.human_invocation != parent.human_invocation
             or grant.run_place != parent.fleet.place
             or self.tenant_id != grant.tenant_id
             or str(self.tenant_id) != parent.fleet.scope.tenant_id

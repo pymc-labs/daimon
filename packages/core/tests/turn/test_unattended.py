@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -32,6 +32,16 @@ _LINEAR = {
     ],
     "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
 }
+
+
+@pytest.fixture(autouse=True)
+def open_access_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    monkeypatch.setattr(
+        "daimon.core.stores.access_policy.load_access_policy",
+        AsyncMock(return_value=TenantAccessPolicy()),
+    )
 
 
 def _session() -> Any:
@@ -252,3 +262,43 @@ async def test_microsoft_write_is_protected_only_with_safety_on(
         input={"method": "PATCH"},
     )
     assert (await posture.decide(call)).allow is allowed
+
+
+@pytest.mark.parametrize(
+    "entry_point",
+    ["routine", "cli_run", "long_job", "checkpoint", "watch", "wake", None, "future_entry_point"],
+)
+async def test_nonhuman_session_gate_refuses_role_gated_agent(
+    entry_point: str,
+) -> None:
+    from typing import cast
+    from unittest.mock import AsyncMock, patch
+
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.unattended_capabilities import UnattendedEntryPoint
+
+    snapshot = _session()
+    target = ma_agent(name="restricted")
+    lookup = AsyncMock()
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=lookup)
+    factory.return_value.__aexit__ = AsyncMock(return_value=None)
+    access = TenantAccessPolicy(agent_rules={"restricted": AgentRule(invoker_role_ids=("123",))})
+    with (
+        patch(
+            "daimon.core.stores.access_policy.load_access_policy", AsyncMock(return_value=access)
+        ),
+        patch("daimon.core.mux_compat.retrieve_agent", AsyncMock(return_value=target)),
+        pytest.raises(AdmissionDenied, match="invoker_not_allowed"),
+    ):
+        await gate_session_snapshot(
+            AsyncMock(),
+            snapshot,
+            ToolSafetyPolicy(enabled=False),
+            scope=platform_scope("test unattended role gate"),
+            public_url=None,
+            session_factory=factory,
+            tenant_id=uuid.uuid4(),
+            entry_point=cast(UnattendedEntryPoint, entry_point),
+        )

@@ -286,6 +286,7 @@ def frozen_memory_parent(*, read_only=True):
         channel_id="channel",
         thread_id="thread",
         is_dm=False,
+        human_invocation=True,
     )
     parent = freeze_root_permissions(parent, captured, admission=admission, policy=POLICY, now=NOW)
     return parent, captured, binding

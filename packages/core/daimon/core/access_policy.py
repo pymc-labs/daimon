@@ -50,9 +50,18 @@ OPEN_RULE = ChannelRule()
 
 
 class AgentRule(BaseModel):
-    """Where one agent may run."""
+    """Where one agent may run and which humans may invoke it."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    invoker_role_ids: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+
+    @field_validator("invoker_role_ids")
+    @classmethod
+    def _role_snowflakes(cls, ids: tuple[str, ...]) -> tuple[str, ...]:
+        if not all(is_discord_snowflake(value) for value in ids):
+            raise ValueError("role ids must contain numeric role IDs")
+        return tuple(dict.fromkeys(ids))
 
     runs_in: tuple[str, ...] | None = None
     """The only channels (and threads under them) it runs in. None runs it
@@ -186,7 +195,24 @@ class TenantAccessPolicy(BaseModel):
     @field_validator("agent_rules")
     @classmethod
     def _drop_unset(cls, rules: dict[str, AgentRule]) -> dict[str, AgentRule]:
-        return {name: rule for name, rule in rules.items() if rule.runs_in is not None}
+        return {
+            name: rule
+            for name, rule in rules.items()
+            if rule.runs_in is not None or rule.invoker_role_ids
+        }
+
+
+def agent_invoker_roles(
+    policy: TenantAccessPolicy, names: tuple[str | None, ...]
+) -> tuple[tuple[str, ...], ...]:
+    """Every role restriction on a target's aliases; each must be satisfied."""
+    return tuple(
+        rule.invoker_role_ids
+        for name in names
+        if name is not None
+        and (rule := policy.agent_rules.get(name)) is not None
+        and rule.invoker_role_ids
+    )
 
 
 OPEN_ACCESS_POLICY = TenantAccessPolicy()

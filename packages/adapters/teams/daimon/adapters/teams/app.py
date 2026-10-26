@@ -1446,6 +1446,8 @@ class TeamsApp:
                 tenant_id=tenant_id,
                 platform="teams",
                 external_user_id=inbound.user_id,
+                origin="chat" if continuation is None else continuation.reason,
+                attended=None if continuation is None else continuation_attended(continuation),
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
                 role=role,

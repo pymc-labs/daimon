@@ -183,6 +183,7 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     # --- Stage one: admit() ---
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform=platform,

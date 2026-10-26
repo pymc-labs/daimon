@@ -493,6 +493,15 @@ async def run_turn_impl(
                 )
             )
         )
+        if session_factory is not None and tenant_id is not None:
+            from daimon.core.access_policy import agent_invoker_roles
+            from daimon.core.authz import build_agent_ref
+            from daimon.core.turn.errors import AdmissionDenied
+
+            async with session_factory() as db:
+                access = await policy_store.load_access_policy(db, tenant_id=tenant_id)
+            if agent_invoker_roles(access, build_agent_ref(agent.name, agent.metadata).names):
+                raise AdmissionDenied(reason="invoker_not_allowed")
         environment = sdk_environment(
             await legacy_call(
                 backend.environments.retrieve(
@@ -936,6 +945,7 @@ async def run_worker(
         or admission.grant is None
         or admission.grant.tenant_id != request.tenant_id
         or admission.grant.subject != parent.subject
+        or admission.grant.human_invocation != parent.human_invocation
         or admission.grant.agent != parent.agent
         or request.tenant_id != worker.tenant_id
         or parent.fleet.run_id != worker.run_id
@@ -998,6 +1008,39 @@ async def run_worker(
                 # an AgentPatch keys them by namespace, so the spec's list form is left out
                 # exactly as admission and preparation do (a raw validate fails on them).
                 overrides = clone_overrides(AgentSpec.model_validate(worker.spec))
+            from daimon.core.access_policy import agent_invoker_roles
+            from daimon.core.authz import build_agent_ref
+
+            worker_spec = definition.spec if isinstance(definition, Agent) else definition
+            worker_names = (
+                *build_agent_ref(worker_spec.name, worker_spec.metadata or {}).names,
+                *build_agent_ref(
+                    resolved_worker.spec.name, resolved_worker.spec.metadata or {}
+                ).names,
+            )
+            if agent_invoker_roles(
+                policy,
+                (*(parent.root_agent or parent.agent).names, *parent.agent.names, *worker_names),
+            ):
+                from daimon.core.membership_subject import resolve_subject
+
+                if parent.subject.platform_user_id is not None:
+                    live = await resolve_subject(
+                        deps.sessionmaker,
+                        deps.membership_resolver,
+                        tenant_id=request.tenant_id,
+                        user_id=parent.subject.platform_user_id,
+                        require_fresh=True,
+                    )
+                    parent = replace(
+                        parent,
+                        subject=replace(
+                            live,
+                            client=parent.subject.client,
+                            via_agent_key=parent.subject.via_agent_key,
+                            is_admin=live.is_admin and parent.subject.is_admin,
+                        ),
+                    )
             normalize = functools.partial(
                 resolve_worker_spec,
                 parent,

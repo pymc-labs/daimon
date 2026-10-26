@@ -8,7 +8,12 @@ from enum import StrEnum
 from typing import Literal, cast
 from uuid import UUID
 
-from daimon.core.access_policy import DM_SCOPE_PREFIX, TenantAccessPolicy, is_invoker_allowed
+from daimon.core.access_policy import (
+    DM_SCOPE_PREFIX,
+    TenantAccessPolicy,
+    agent_invoker_roles,
+    is_invoker_allowed,
+)
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_READER_OF,
@@ -606,6 +611,21 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.RUN_AGENT:
+        roles = agent_invoker_roles(policy, agent.names)
+        if roles and (
+            req.surface is Surface.ROUTINE
+            or subject.platform_user_id is None
+            or subject.verified_membership is not True
+            or not all(set(subject.role_ids).intersection(required) for required in roles)
+            or not is_invoker_allowed(
+                policy,
+                external_user_id=subject.platform_user_id,
+                is_admin=subject.is_admin,
+                role_ids=subject.role_ids,
+                verified_membership=subject.verified_membership,
+            )
+        ):
+            return _deny("invoker_not_allowed")
         if (
             subject.is_admin
             and admin_only_surface
@@ -623,6 +643,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if refusal is None else _deny(refusal)
 
     if req.action is Action.SAVE_ROUTINE:
+        if agent_invoker_roles(policy, agent.names):
+            return _deny("invoker_not_allowed")
         here = place.permissions.home
         if here is not None and agent.permissions.home != here:
             return _deny("own_agents_only")

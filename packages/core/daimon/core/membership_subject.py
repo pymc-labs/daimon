@@ -63,7 +63,7 @@ async def resolve_subject_authority(
     return build_subject(
         is_admin=admin,
         platform_user_id=user_id,
-        role_ids=facts.role_ids if facts.is_member is True else (),
+        role_ids=facts.role_ids if facts.is_member is True and not facts.is_bot else (),
         verified_membership=facts.is_member,
     ), facts.is_member is True and facts.is_admin
 

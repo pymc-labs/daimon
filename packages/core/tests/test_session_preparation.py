@@ -2624,6 +2624,7 @@ async def test_admission_origin_controls_the_actual_memory_mount(
     )
     admission = await admit(
         admission_deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -2975,6 +2976,7 @@ async def _changed_channel_agent(
     admission_deps = replace(deps, anthropic=build_fake_anthropic(router.dispatch))
     first_admission = await admit(
         admission_deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -3012,6 +3014,7 @@ async def _admit_next(admission_deps: TurnDeps, tenant: TenantRow) -> Admission:
 
     return await admit(
         admission_deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",

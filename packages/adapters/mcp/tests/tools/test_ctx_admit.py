@@ -464,3 +464,99 @@ async def test_discord_human_without_membership_credentials_is_refused_before_bi
             billing_config=None,
             tool_name="ask",
         )
+
+
+@pytest.mark.parametrize("pin_exempt", [False, True])
+@pytest.mark.parametrize("human", [False, True])
+async def test_agent_chat_role_gate_cannot_be_bypassed_by_hub_admin_or_internal_key(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    pin_exempt: bool,
+    human: bool,
+) -> None:
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    auth = await _member(
+        db_session,
+        role=Role.ADMIN,
+        policy=TenantAccessPolicy(agent_rules={"restricted": AgentRule(invoker_role_ids=("123",))}),
+    )
+    auth = dataclasses.replace(auth, platform="discord", platform_user_id="u1" if human else None)
+    fetch = AsyncMock(return_value=Membership(is_member=True, is_admin=True))
+    names = AsyncMock(return_value=("restricted",))
+    with pytest.raises(ToolError, match="You aren't on"):
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            membership_resolver=CachedMembershipResolver(fetch),
+            billing_config=None,
+            tool_name="ask",
+            agent_names=names,
+            pin_exempt=pin_exempt,
+        )
+    names.assert_awaited_once()
+
+
+async def test_agent_chat_role_revoked_before_message_send_denied_without_invalidation(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    auth = dataclasses.replace(
+        await _member(
+            db_session,
+            policy=TenantAccessPolicy(
+                agent_rules={"restricted": AgentRule(invoker_role_ids=("123",))}
+            ),
+        ),
+        platform="discord",
+    )
+    fetch = AsyncMock(return_value=Membership(is_member=True, role_ids=("123",)))
+    resolver = CachedMembershipResolver(fetch)
+    names = AsyncMock(return_value=("restricted",))
+    with _BALANCE_OK:
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            membership_resolver=resolver,
+            billing_config=None,
+            tool_name="ask",
+            agent_names=names,
+        )
+    fetch.return_value = Membership(is_member=True)
+    with pytest.raises(ToolError, match="You aren't on"):
+        await _admission_recheck(
+            auth,
+            sessionmaker=db_session_factory,
+            membership_resolver=resolver,
+            tool_name="ask",
+            agent_names=names,
+        )()
+
+
+async def test_ungated_hub_admin_keeps_lookup_exemption(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    auth = dataclasses.replace(
+        await _member(db_session, policy=_PINNED, role=Role.ADMIN),
+        platform="discord",
+    )
+    names = AsyncMock(side_effect=AssertionError("ungated hub admin must not need MA lookup"))
+    with _BALANCE_OK:
+        assert (
+            await _admit(
+                auth,
+                sessionmaker=db_session_factory,
+                membership_resolver=_current_member(is_admin=True),
+                billing_config=None,
+                tool_name="ask",
+                agent_names=names,
+                pin_exempt=True,
+            )
+            is auth
+        )
+    names.assert_not_awaited()

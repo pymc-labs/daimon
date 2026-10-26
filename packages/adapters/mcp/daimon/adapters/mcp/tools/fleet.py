@@ -383,7 +383,12 @@ class HostFleetToolService:
                 if obstacle is not None:
                     raise ToolError(fleet_root_obstacle_text(obstacle)) from None
                 raise ToolError("Fleet orchestration refused: root_unavailable.") from None
-            parent = replace(parent, subject=mcp_subject(caller, is_admin=caller.is_platform_admin))
+            parent = replace(
+                parent,
+                subject=mcp_subject(
+                    caller, is_admin=parent.subject.is_admin and caller.is_platform_admin
+                ),
+            )
         else:
             parent, policy = (
                 await self._parent_loader(caller)
@@ -412,7 +417,46 @@ class HostFleetToolService:
             or caller.agent_id is not None
         ):
             raise ToolError("Fleet orchestration refused: caller_root_mismatch.")
+        parent = await self._refresh_role_subject(parent, policy, parent.agent.names)
         return parent, policy
+
+    async def _refresh_role_subject(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        names: tuple[str | None, ...],
+    ) -> WorkerPermissions:
+        from daimon.core.access_policy import agent_invoker_roles
+
+        if agent_invoker_roles(policy, (*(parent.root_agent or parent.agent).names, *names)):
+            from daimon.core.membership_subject import resolve_subject
+
+            runtime = self._runtime
+            deps = self._deps
+            if runtime is not None:
+                sessions, resolver = runtime.session_factory, runtime.membership_resolver
+            elif deps is not None:
+                sessions, resolver = deps.sessionmaker, deps.membership_resolver
+            else:
+                return parent
+            if parent.subject.platform_user_id is not None:
+                live = await resolve_subject(
+                    sessions,
+                    resolver,
+                    tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
+                    user_id=parent.subject.platform_user_id,
+                    require_fresh=True,
+                )
+                parent = replace(
+                    parent,
+                    subject=replace(
+                        live,
+                        client=parent.subject.client,
+                        via_agent_key=parent.subject.via_agent_key,
+                        is_admin=live.is_admin and parent.subject.is_admin,
+                    ),
+                )
+        return parent
 
     async def spawn(
         self,
@@ -455,6 +499,41 @@ class HostFleetToolService:
         as_agent = agent if isinstance(agent, str) else None
         spec = agent if not isinstance(agent, str) else None
         worker_parent: WorkerPermissions | None = None
+        if any(rule.invoker_role_ids for rule in policy.agent_rules.values()):
+            from daimon.core.authz import build_agent_ref
+
+            names: tuple[str | None, ...] = ()
+            if isinstance(spec, AgentSpec):
+                names = build_agent_ref(spec.name, spec.metadata or {}).names
+            if as_agent is not None:
+                names = (as_agent,)
+                client = (
+                    self._runtime.client
+                    if self._runtime
+                    else (self._deps.anthropic if self._deps else None)
+                )
+                if client is not None:
+                    from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+
+                    target = await find_agent_by_daimon_tag(
+                        client,
+                        tenant_id=caller.tenant_id,
+                        name=as_agent,
+                    )
+                    if target is not None:
+                        names = build_agent_ref(target.name, target.metadata, as_agent).names
+            if clone is not None and clone_revision is not None:
+                names = (
+                    *names,
+                    *await self._orchestrator.clone_agent_names(
+                        parent,
+                        clone,
+                        clone_revision,
+                    ),
+                )
+            if overrides is not None and overrides.name is not None:
+                names = (*names, overrides.name)
+            parent = await self._refresh_role_subject(parent, policy, names)
         if as_agent is not None:
             # The worker runs AS that on-server agent; its own model sets the defaults.
             worker_parent = await self._orchestrator.agent_worker(

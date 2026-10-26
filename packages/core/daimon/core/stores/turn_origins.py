@@ -158,6 +158,7 @@ async def bind_origin_session(
     *,
     origin_id: uuid.UUID,
     chat_session_id: str | None,
+    human_invocation: bool | None = None,
     attended: bool | None = None,
     lease: Lease | None = None,
 ) -> None:
@@ -178,8 +179,9 @@ async def bind_origin_session(
         )
     values: dict[str, Any] = {"chat_session_id": chat_session_id}
     if attended is not None:
-        # Binding can narrow trusted dispatch provenance, never upgrade it.
         values["attended"] = TurnOrigin.attended & attended
+    if human_invocation is not None:
+        values["human_invocation"] = human_invocation
     await session.execute(update(TurnOrigin).where(TurnOrigin.id == origin_id).values(**values))
 
 

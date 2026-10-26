@@ -111,6 +111,7 @@ class HandOverButton(
             thread_id=str(thread.id),
             ma_agent_id=self.agent_id,
             caller=admin_caller(interaction.user),
+            membership_resolver=runtime.turn_deps.membership_resolver,
             default=runtime.turn_deps.deployment_default,
             channel=f"<#{thread.parent_id}>",
             now=datetime.now(UTC),

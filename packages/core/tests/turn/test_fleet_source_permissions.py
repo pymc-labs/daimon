@@ -199,6 +199,7 @@ async def captured(owned, request):
         channel_id="channel",
         thread_id="thread",
         is_dm=False,
+        human_invocation=True,
     )
     fleet = FleetFacts(
         scope=scope,

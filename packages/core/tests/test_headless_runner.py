@@ -1723,3 +1723,38 @@ async def test_a_held_routine_fire_reads_only_its_channels_store_read_only(
         if r["type"] == "memory_store"
     }
     assert mounts == {"memstore_channel": "read_only"}
+
+
+async def test_headless_role_gated_target_is_refused_before_session_creation(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    run_turn: RunTurn,
+    headless_identity: HeadlessIdentity,
+) -> None:
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.turn.errors import AdmissionDenied
+
+    await set_access_policy(
+        db_session,
+        tenant_id=headless_identity.tenant_id,
+        policy=TenantAccessPolicy(agent_rules={"test-agent": AgentRule(invoker_role_ids=("123",))}),
+    )
+    await db_session.commit()
+    created: list[dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
+    client = _build_client([], session_create_capture=created, send_capture=sent)
+    try:
+        with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+            await run_turn(
+                anthropic=client,
+                agent_id="agent_x",
+                environment_id="env_x",
+                trigger_message="work",
+                tenant_id=headless_identity.tenant_id,
+                session_factory=db_session_factory,
+            )
+    finally:
+        await client.close()
+    assert created == []
+    assert sent == []

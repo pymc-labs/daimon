@@ -717,6 +717,7 @@ async def test_access_policy_and_protection_refuse_before_a_shared_thread_is_con
     with pytest.raises(AdmissionDenied) as raised:
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",

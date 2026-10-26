@@ -775,14 +775,17 @@ async def test_live_native_defaults_drop_gated_tools_and_preserve_siblings(full_
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(full_openai):
     """Capture the real creation bearer, then use it through registered MCP in the driver."""
+    from typing import cast
+
     import jwt
     from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
     from daimon.adapters.mcp.server import create_mcp_app
     from daimon.core._models import Account, Tenant
     from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
-    from daimon.core.stores.domain import Role
+    from daimon.core.stores.domain import AccountRow, Role, TenantRow
     from daimon.core.stores.task_continuations import list_pending_continuations
     from daimon.core.stores.turn_origins import create_origin, delete_origin, get_active_origin
+    from daimon.core.turn.prepare import ProviderPreparationRequest
     from daimon.core.turn_origin import execution_origin, turn_origin
     from daimon.testing.asgi import call_mcp_tool
     from daimon.testing.factories import make_platform_principal
@@ -791,16 +794,19 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
     from pydantic import SecretStr
 
     request, _, _, wire, source_token, *rest = full_openai
+    request = cast(ProviderPreparationRequest, request)
     router = rest[4]
     sessions = request.deps.sessionmaker
     account_id = request.session_account_id
     async with sessions.begin() as db:
         tenant = await db.get(Tenant, request.tenant_id)
+        account = await db.get(Account, account_id)
+        assert tenant is not None and account is not None
         tenant.platform = request.platform
         await make_platform_principal(
             db,
-            tenant=tenant,
-            account=await db.get(Account, account_id),
+            tenant=TenantRow.model_validate(tenant),
+            account=AccountRow.model_validate(account),
             platform=request.platform,
             external_id="caller",
         )
@@ -830,6 +836,8 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
         ),
     )
     router.routes.insert(0, router.routes.pop())
+    secret = request.deps.mcp.jwt_secret
+    assert secret is not None
     app = create_mcp_app(
         settings=Settings(
             database=DatabaseSettings(url="postgresql+asyncpg://offline/db"),
@@ -838,10 +846,10 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
         ),
         sessionmaker=sessions,
         anthropic=request.deps.anthropic,
-        auth=DaimonJWTVerifier(
-            secret=request.deps.mcp.jwt_secret.get_secret_value().encode(), sessionmaker=sessions
-        ),
+        auth=DaimonJWTVerifier(secret=secret.get_secret_value().encode(), sessionmaker=sessions),
     )
+    from .test_run_prepared_turn import with_invocation
+
     previous_grant = None
     for index, kind in enumerate(("human", "human", "timer", "worker")):
         worker = kind == "worker"
@@ -850,6 +858,14 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             wire.turns.clear()
             wire.items.clear()
         thread_id = "child-thread" if worker else request.thread_id
+        admitted = with_invocation(
+            request.admission,
+            request.tenant_id,
+            human=kind == "human",
+            external_user_id="caller",
+            channel_id="channel",
+            thread_id=thread_id,
+        )
         async with turn_origin(
             sessions,
             tenant_id=request.tenant_id,
@@ -891,7 +907,7 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             with execution_origin(parent.id if parent is not None else None):
                 prepared = await bind_session_impl(
                     request.deps,
-                    request.admission,
+                    admitted,
                     tenant_id=request.tenant_id,
                     platform=request.platform,
                     external_user_id="caller",
@@ -974,7 +990,11 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
                 if not worker:
                     async with sessions.begin() as db:
                         await bind_origin_session(
-                            db, origin_id=origin.id, chat_session_id=grant, attended=False
+                            db,
+                            origin_id=origin.id,
+                            chat_session_id=grant,
+                            attended=False,
+                            human_invocation=False,
                         )
                 await before_send()
                 async with sessions.begin() as db:

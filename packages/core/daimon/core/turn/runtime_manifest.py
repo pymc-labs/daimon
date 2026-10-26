@@ -1178,6 +1178,17 @@ async def _read_frozen_root(
         or run.deadline_at != parent.limits.deadline
     ):
         raise WorkerSpecRefused("origin", "stale")
+    if resumed is not None:
+        from daimon.core.turn.invocation import human_invocation
+
+        # A completion can reuse the finite run, but not its human principal.
+        root = root.model_copy(
+            update={
+                "permissions": replace(
+                    parent, human_invocation=human_invocation("worker_finished", False)
+                )
+            }
+        )
     return root, policy
 
 
@@ -1243,6 +1254,27 @@ async def read_frozen_root(
     return root.permissions, policy
 
 
+def _same_root_with_live_membership(
+    recorded: WorkerPermissions, current: WorkerPermissions
+) -> bool:
+    """Membership may change; the principal and every frozen grant must match."""
+    if (current.subject.is_admin and not recorded.subject.is_admin) or (
+        current.human_invocation and not recorded.human_invocation
+    ):
+        return False
+    subject = replace(
+        recorded.subject,
+        is_admin=current.subject.is_admin,
+        role_ids=current.subject.role_ids,
+        verified_membership=current.subject.verified_membership,
+    )
+    return (
+        subject == current.subject
+        and replace(recorded, subject=current.subject, human_invocation=current.human_invocation)
+        == current
+    )
+
+
 async def read_frozen_preparation(
     deps: TurnDeps,
     parent: WorkerPermissions,
@@ -1262,14 +1294,16 @@ async def read_frozen_preparation(
     from mux.contracts.resources import Agent, Environment
     from mux.state.operations import request_digest
 
-    root, _ = await _read_frozen_root(
+    root, policy = await _read_frozen_root(
         deps,
         parent.fleet.scope,
         origin_id=parent.fleet.origin_id,
         run_id=parent.fleet.run_id,
         now=now(),
     )
-    if root.permissions != parent or root.preparation is None:
+    live_membership = any(rule.invoker_role_ids for rule in policy.agent_rules.values())
+    matches = _same_root_with_live_membership(root.permissions, parent)
+    if not matches or root.preparation is None:
         raise WorkerSpecRefused("origin", "unbound")
     bound = min(deadline, parent.limits.deadline)
     async with asyncio.timeout(remaining_s(bound, now=now(), refuse_expired=True)):
@@ -1300,6 +1334,18 @@ async def read_frozen_preparation(
                     for name, adapter in _ADMISSION_FACTS.items()
                     if name in admission_facts
                 },
+            )
+            grant = admission.grant
+            if grant is None or grant.subject != root.permissions.subject:
+                raise WorkerSpecRefused("origin", "unbound")
+            # Current membership and provenance may only narrow frozen authority.
+            admission = replace(
+                admission,
+                grant=replace(
+                    grant,
+                    subject=parent.subject if live_membership else grant.subject,
+                    human_invocation=parent.human_invocation,
+                ),
             )
             request = ProviderPreparationRequest(
                 deps,

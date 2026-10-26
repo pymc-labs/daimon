@@ -1419,7 +1419,7 @@ async def test_a_channel_ask_beats_an_agent_wide_allow_for_routines(
         assert [c["result"] for c in fake.confirmations] == [expected]
 
 
-@pytest.mark.parametrize("revocation", ["membership", "allowlist"])
+@pytest.mark.parametrize("revocation", ["membership", "allowlist", "agent_role"])
 async def test_revocation_between_confirmations_leaves_the_second_unanswered(
     factory: async_sessionmaker[AsyncSession], revocation: str
 ) -> None:
@@ -1428,11 +1428,23 @@ async def test_revocation_between_confirmations_leaves_the_second_unanswered(
         await set_access_policy(
             db, tenant_id=_TENANT_ID, policy=TenantAccessPolicy(invoker_user_ids=("u1",))
         )
+    from daimon.core.access_policy import AgentRule
+
+    if revocation == "agent_role":
+        async with factory.begin() as db:
+            await set_access_policy(
+                db,
+                tenant_id=_TENANT_ID,
+                policy=TenantAccessPolicy(
+                    agent_rules={ma_agent().name: AgentRule(invoker_role_ids=("123",))}
+                ),
+            )
     fake = FakeSession(script=[[("linear", "get_issue", {})], [("linear", "get_issue", {})]])
     member = True
+    roles = ("123",)
 
     async def fetch(tenant_id: uuid.UUID, guild_id: str, user_id: str) -> Membership:
-        return Membership(is_member=member)
+        return Membership(is_member=member, role_ids=roles)
 
     runtime = replace(
         _runtime(fake, factory, _ENABLED), membership_resolver=CachedMembershipResolver(fetch)
@@ -1444,10 +1456,12 @@ async def test_revocation_between_confirmations_leaves_the_second_unanswered(
     original = safety._answer  # pyright: ignore[reportPrivateUsage]
 
     async def answer(*args: Any, **kwargs: Any) -> None:
-        nonlocal member
+        nonlocal member, roles
         await original(*args, **kwargs)
         if revocation == "membership":
             member = False
+        elif revocation == "agent_role":
+            roles = ()
         else:
             async with factory.begin() as db:
                 await set_access_policy(
@@ -1456,7 +1470,12 @@ async def test_revocation_between_confirmations_leaves_the_second_unanswered(
                     policy=TenantAccessPolicy(invoker_user_ids=("someone-else",)),
                 )
 
-    with patch.object(safety, "_answer", answer):
+    with (
+        patch.object(safety, "_answer", answer),
+        patch.object(
+            agent_chat, "_resolve_ma_agent", AsyncMock(return_value=ma_agent(id=_MA_AGENT_ID))
+        ),
+    ):
         worker = safety.watch_turn(
             runtime, auth, _SESSION, turn_event_id=boundary, rules_channel_id=None
         )

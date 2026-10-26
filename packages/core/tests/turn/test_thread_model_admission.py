@@ -28,6 +28,7 @@ async def _admit_in(
     )
     return await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         platform="discord",
         external_user_id="member-1",

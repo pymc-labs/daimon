@@ -34,6 +34,7 @@ from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
 from daimon.core.access_policy import (
     TenantAccessPolicy,
+    agent_invoker_roles,
 )
 from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate
 from daimon.core.authz import (
@@ -175,6 +176,7 @@ class AdmissionGrant:
     is_dm: bool
     cold_dm: bool = False
     act_for_creator: bool = False
+    human_invocation: bool = False
     # Set by the DM path: the conversation's source, whose seal is re-checked.
     dm_source: DmSource | None = None
     # The channel the turn is held to; every question asked again carries it, so
@@ -413,6 +415,8 @@ async def admit(
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    origin: str,
+    attended: bool | None = None,
 ) -> Admission:
     """Admit a turn, or raise the typed reason it is refused.
 
@@ -450,6 +454,8 @@ async def admit(
                 requester_org=requester_org,
                 requester_home_id=requester_home_id,
                 channel_shared=channel_shared,
+                origin=origin,
+                attended=attended,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -517,6 +523,8 @@ async def admit_impl(
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    origin: str,
+    attended: bool | None = None,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool."""
     started = last_stage = perf_counter()
@@ -970,9 +978,12 @@ async def admit_impl(
     # only in a DM, where the reply reaches no one else; in a channel or
     # thread other members would see it, so the pin holds for them too. The
     # role is the adapter's live one, never a stored role. ---
+    from daimon.core.turn.invocation import human_invocation
+
     grant = AdmissionGrant(
         tenant_id=tenant_id,
         subject=subject,
+        human_invocation=human_invocation(origin, attended),
         surface=Surface.DM if is_dm else Surface.CHANNEL,
         turn_place=turn_place,
         agent=build_agent_ref(agent.name, agent.metadata, config.agent_name),
@@ -989,6 +1000,19 @@ async def admit_impl(
         cold_dm=cold_dm or dm_agent_name is not None,
         hold=hold,
     )
+    if agent_invoker_roles(policy, grant.agent.names):
+        # Role gates always use fresh registered Discord membership, including
+        # bound threads and routing/default changes discovered after selection.
+        subject = await resolve_subject(
+            deps.sessionmaker,
+            deps.membership_resolver,
+            tenant_id=tenant_id,
+            user_id=external_user_id,
+            require_fresh=True,
+        )
+        if hold is not None:
+            subject = replace(subject, is_admin=False, client=hold.client)
+        grant = replace(grant, subject=subject)
     _require_run_agent(policy, grant)
     mark("agent_policy")
 
@@ -1411,6 +1435,10 @@ def _require_turn_start(
 
 def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> None:
     """The agent pin, then channel isolation; any denial refuses the turn."""
+    if (grant.act_for_creator or not grant.human_invocation) and agent_invoker_roles(
+        policy, grant.agent.names
+    ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
     subject = replace(grant.subject, is_admin=False) if grant.cold_dm else grant.subject
     if grant.cold_dm and not authorize(
         policy,
@@ -1431,7 +1459,9 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
     )
     if not decision:
         raise AdmissionDenied(
-            reason="own_agents_only" if decision.reason == "own_agents_only" else "runs_elsewhere"
+            reason=decision.reason
+            if decision.reason in ("own_agents_only", "invoker_not_allowed")
+            else "runs_elsewhere"
         )
 
 
@@ -1571,6 +1601,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         grant, shared_channel = await _tightened_hold(session, admission, grant)
     if grant.subject.platform_user_id is not None and (
         policy.invoker_role_ids
+        or agent_invoker_roles(policy, grant.agent.names)
         or (deps.membership_resolver is not None and grant.subject.verified_membership is not None)
     ):
         subject = await resolve_subject(
@@ -1578,7 +1609,8 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
             deps.membership_resolver,
             tenant_id=grant.tenant_id,
             user_id=grant.subject.platform_user_id,
-            require_fresh=grant.act_for_creator,
+            require_fresh=grant.act_for_creator
+            or bool(agent_invoker_roles(policy, grant.agent.names)),
         )
         if subject.verified_membership is not True:
             raise AdmissionDenied(reason="invoker_not_allowed")
@@ -2017,8 +2049,12 @@ async def prepare_worker_agent(
     ):
         raise channel_backend.AgentBackendRefused("source_unavailable")
     actual = await retrieve_agent(deps.anthropic, source.source.ref.id, scope=root.scope)
+    from daimon.core.turn.invocation import human_invocation
+
     worker_grant = replace(
-        grant, agent=build_agent_ref(actual.name, actual.metadata or {}, source.name)
+        grant,
+        agent=build_agent_ref(actual.name, actual.metadata or {}, source.name),
+        human_invocation=human_invocation("worker", False, grant),
     )
     async with deps.sessionmaker() as db:
         policy = await load_access_policy(db, tenant_id=root.tenant_id)

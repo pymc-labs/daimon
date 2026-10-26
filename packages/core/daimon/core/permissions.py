@@ -128,7 +128,7 @@ def with_agent_rule(
 ) -> TenantAccessPolicy:
     """The policy with `rule` on one agent name; other names keep theirs, in order."""
     rules = dict(policy.agent_rules)
-    if rule.runs_in is None:
+    if rule.runs_in is None and not rule.invoker_role_ids:
         rules.pop(agent_name, None)
     else:
         rules[agent_name] = rule
@@ -398,7 +398,9 @@ def agent_permissions(
     rules = tuple(
         frozenset(policy.agent_rules[name].runs_in or ())
         for name in agent_names
-        if name is not None and name in policy.agent_rules
+        if name is not None
+        and name in policy.agent_rules
+        and policy.agent_rules[name].runs_in is not None
     )
     channels = {channel for rule in rules for channel in rule}
     home = None

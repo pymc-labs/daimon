@@ -95,6 +95,37 @@ def _admission(
     )
 
 
+def with_invocation(
+    admission: Admission,
+    tenant_id: uuid.UUID,
+    *,
+    human: bool,
+    external_user_id: str,
+    channel_id: str = "C1",
+    thread_id: str = "thread-1",
+) -> Admission:
+    """A host-admitted principal for tests of signed execution binding."""
+    from daimon.core.authz import AgentRef, Place, Subject, Surface
+    from daimon.core.turn.admission import AdmissionGrant
+
+    place = Place(channel_id=thread_id, parent_channel_id=channel_id)
+    return dataclasses.replace(
+        admission,
+        grant=AdmissionGrant(
+            tenant_id=tenant_id,
+            subject=Subject(platform_user_id=external_user_id),
+            surface=Surface.CHANNEL,
+            turn_place=place,
+            run_place=place,
+            agent=AgentRef.of(admission.agent.name),
+            channel_id=channel_id,
+            thread_id=thread_id,
+            is_dm=False,
+            human_invocation=human,
+        ),
+    )
+
+
 def _deps(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -4066,7 +4097,14 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
 @pytest.mark.parametrize("cancel_during_cleanup", [False, True])
 @pytest.mark.parametrize(
     "kind,origin_attended,caller_attended",
-    [("chat", True, True), ("chat", True, False), ("chat", False, True), ("worker", True, False)],
+    [
+        ("chat", True, True),
+        ("chat", True, False),
+        ("chat", False, True),
+        ("worker", True, False),
+        ("github_access_ready", True, True),
+        ("private_input_applied", True, True),
+    ],
 )
 @pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
@@ -4149,7 +4187,12 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router), turn_path=path
     )
-    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
+    admission = with_invocation(
+        _admission(account_id=account.id, agent=agent, env=ma_environment()),
+        tenant.id,
+        human=kind == "chat" and caller_attended,
+        external_user_id="user-1",
+    )
     prepared = _prepared_turn(
         deps=deps,
         admission=admission,
@@ -4203,6 +4246,9 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
             assert bound.attended is (
                 origin_attended if kind == "worker" else origin_attended and caller_attended
             )
+            if kind in ("github_access_ready", "private_input_applied"):
+                assert bound.attended is True
+                assert bound.human_invocation is False
             assert current_execution_origin_id.get() == (None if kind == "worker" else origin.id)
             async with db_session_factory() as db:
                 previous = await get_active_origin(
@@ -4233,7 +4279,8 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
             attended=caller_attended,
-            origin=kind,
+            # Continuation reasons decide the grant; their rendering context stays chat.
+            origin="worker" if kind == "worker" else "chat",
             render_interval_s=0.001,
             before_send=before_send,
         )
@@ -4744,9 +4791,12 @@ async def test_queued_attended_turn_cannot_borrow_or_revoke_unattended_holders_g
                 running[name].set()
                 await finish[name].wait()
 
+            admitted = with_invocation(
+                prepared.admission, tenant.id, human=name == "waiter", external_user_id="user-1"
+            )
             return await run_prepared_turn(
                 deps,
-                prepared,
+                dataclasses.replace(prepared, admission=admitted),
                 tenant_id=tenant.id,
                 platform="discord",
                 thread_id="thread-1",

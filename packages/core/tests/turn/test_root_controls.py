@@ -444,7 +444,7 @@ async def test_two_completion_inputs_use_the_original_root_hold_and_fourth_refus
             carried, _ = await read_frozen_root(
                 deps, scope, origin_id=origin.id, now=datetime.now(UTC)
             )
-            assert carried == parent
+            assert carried == replace(parent, human_invocation=False)
         previous = worker.id
     after = await root_record(value)
     assert after.operation.key == original.operation.key

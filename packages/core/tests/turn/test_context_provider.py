@@ -221,6 +221,7 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
             channel_id="dm-alice" if dm else "staff",
             thread_id="thread-1" if thread else None,
             is_dm=dm,
+            human_invocation=True,
         ),
     )
     prepared = _prepared_turn(

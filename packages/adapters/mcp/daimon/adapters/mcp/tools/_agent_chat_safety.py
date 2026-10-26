@@ -352,12 +352,22 @@ async def _answer(
     decisions = [
         (call.tool_use_id, await posture.decide(call)) for call in tool_calls_for(turn.state, ids)
     ]
+
+    async def names() -> tuple[str | None, ...]:
+        from daimon.adapters.mcp.tools.agent_chat import (
+            _resolve_ma_agent,  # pyright: ignore[reportPrivateUsage]
+            agent_pin_names,
+        )
+
+        target = await _resolve_ma_agent(runtime, auth)
+        return (*agent_pin_names(target), session.agent.name)
+
     await _policy_gate(
         auth,
         sessionmaker=runtime.session_factory,
         membership_resolver=runtime.membership_resolver,
         tool_name="continue_turn",
-        agent_names=None,
+        agent_names=names,
         pin_exempt=False,
         require_fresh=True,
     )

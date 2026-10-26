@@ -466,6 +466,10 @@ def _check_agent_pin(
     )
     if not decision:
         record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
+    if decision.reason == "invoker_not_allowed":
+        raise ToolError(
+            "This agent requires a human invocation, so it cannot run routines. Nothing was saved."
+        )
     if decision.reason == "own_agents_only":
         if origin is not None and home_of(policy, origin.channel_id, origin.parent_channel_id):
             raise ToolError(

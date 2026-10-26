@@ -185,6 +185,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 )
             admission = await admit(
                 runtime.turn_deps,
+                origin="chat",
                 tenant_id=tenant_id,
                 requester_org=RequesterOrg.HOST,
                 platform="slack",

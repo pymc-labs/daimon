@@ -1278,6 +1278,8 @@ async def run_prepared_turn_impl(
                             origin_id=origin_id,
                             chat_session_id=grant,
                             attended=not unattended,
+                            human_invocation=admission.grant is not None
+                            and admission.grant.human_invocation,
                             lease=lease,
                         )
                     yield

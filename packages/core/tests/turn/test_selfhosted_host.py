@@ -1085,6 +1085,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     assert ensure_channel_runtime(PROFILE)
     admitted = await admit(
         request.deps,
+        origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
         platform="slack",

@@ -24,6 +24,7 @@ class Membership:
     is_member: bool | None = None
     role_ids: tuple[str, ...] = ()
     is_admin: bool = False
+    is_bot: bool = False
 
 
 class MembershipResolver(Protocol):

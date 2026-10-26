@@ -822,6 +822,27 @@ class FleetOrchestrator:
         _authorize(parent, policy)
         return await self._owner().worker_agents(parent, policy)
 
+    async def clone_agent_names(
+        self,
+        parent: WorkerPermissions,
+        clone: ResourceRef,
+        revision: Revision,
+    ) -> tuple[str | None, ...]:
+        """Resolve a pinned, root-scoped clone's aliases before human authorization."""
+        from daimon.core.authz import build_agent_ref
+
+        if clone.kind != "agent":
+            raise FleetRefused("pinned_clone_required")
+        if clone.tenant_id != parent.fleet.scope.tenant_id or (
+            clone.account_id != parent.fleet.scope.account_id
+            and (clone, revision) not in parent.source_revisions
+        ):
+            raise FleetRefused("foreign_clone")
+        source = await self._owner().read_clone(parent, clone, revision)
+        if source.ref != clone or source.revision != revision:
+            raise FleetRefused("stale_clone")
+        return build_agent_ref(source.spec.name, source.spec.metadata or {}).names
+
     async def agent_worker(
         self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, agent_name: str
     ) -> WorkerPermissions:

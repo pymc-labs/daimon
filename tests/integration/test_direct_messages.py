@@ -210,6 +210,7 @@ async def _setup(
     )
     admission = await admit(
         deps,
+        origin="chat",
         requester_org=RequesterOrg.HOST,
         tenant_id=tenant.id,
         platform=platform,
@@ -1160,6 +1161,7 @@ async def test_dm_from_a_sealed_source_is_refused_before_any_dm_exists(
         )
     admission = await admit(
         deps,
+        origin="chat",
         requester_org=RequesterOrg.HOST,
         tenant_id=tenant.id,
         platform="discord",

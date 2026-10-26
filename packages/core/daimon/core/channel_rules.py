@@ -338,7 +338,13 @@ def keep_to_own(
 ) -> TenantAccessPolicy:
     """`policy` with `rule` (readers own) on the channel and `agent_name` its own agent. Pure."""
     policy = with_channel_rule(policy, channel_id, rule)
-    return with_agent_rule(policy, agent_name, AgentRule(runs_in=(channel_id,)))
+    return with_agent_rule(
+        policy,
+        agent_name,
+        policy.agent_rules.get(agent_name, AgentRule()).model_copy(
+            update={"runs_in": (channel_id,)}
+        ),
+    )
 
 
 def release_agents_of(
@@ -347,7 +353,9 @@ def release_agents_of(
     """`policy` without the rule of every agent it runs in `channel_id` alone, and their names."""
     names = runs_only_in(policy, channel_id)
     for name in names:
-        policy = with_agent_rule(policy, name, AgentRule())
+        policy = with_agent_rule(
+            policy, name, policy.agent_rules[name].model_copy(update={"runs_in": None})
+        )
     return policy, names
 
 
@@ -881,8 +889,16 @@ async def set_agent_rule(
                 raise ChannelRuleRefused(refusal, agent_name=agent_name)
         updated = policy
         for name in names:
-            updated = with_agent_rule(updated, name, AgentRule())
-        updated = with_agent_rule(updated, agent_name, AgentRule(runs_in=target))
+            updated = with_agent_rule(
+                updated,
+                name,
+                policy.agent_rules.get(name, AgentRule()).model_copy(update={"runs_in": None}),
+            )
+        updated = with_agent_rule(
+            updated,
+            agent_name,
+            updated.agent_rules.get(agent_name, AgentRule()).model_copy(update={"runs_in": target}),
+        )
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)
         answers_outside = False
@@ -897,6 +913,43 @@ async def set_agent_rule(
             )
             answers_outside = not reach.stays_inside(target)
     return AgentRuleChange(agent_name, target, updated != policy, answers_outside)
+
+
+async def set_agent_invoker_roles(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    agent_name: str,
+    role_ids: Sequence[str],
+    subject: Subject,
+) -> TenantAccessPolicy:
+    """Set the human invoker roles, preserving spatial rules on every alias."""
+    if platform != "discord":
+        raise RuleRefused("agent invoker roles are not supported on this platform")
+    if not authorize(TenantAccessPolicy(), subject=subject, action=Action.SET_AGENT_RULE):
+        raise ChannelRuleRefused("admin_required")
+    roles = AgentRule(invoker_role_ids=tuple(role_ids)).invoker_role_ids
+    agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
+    if agent is None:
+        raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
+    names = tuple(dict.fromkeys((agent_name, *agent_pin_names(agent.name, agent.metadata))))
+    async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
+        await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
+        await lock_access_policy(session, tenant_id=tenant_id)
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        for name in names:
+            if name:
+                policy = with_agent_rule(
+                    policy,
+                    name,
+                    policy.agent_rules.get(name, AgentRule()).model_copy(
+                        update={"invoker_role_ids": roles if name == agent_name else ()}
+                    ),
+                )
+        await set_access_policy(session, tenant_id=tenant_id, policy=policy)
+    return policy
 
 
 __all__ = [
@@ -917,6 +970,7 @@ __all__ = [
     "render_rule_refusal",
     "resolve_rule",
     "set_agent_rule",
+    "set_agent_invoker_roles",
     "set_category_rule",
     "set_channel_rule",
 ]

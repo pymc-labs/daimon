@@ -80,7 +80,7 @@ LONG_JOBS_HEAD = "0147_long_jobs"
 ADMINS_HEAD = "0148_daimon_admins"
 
 
-HEAD = "0149_context_provider_bindings"
+HEAD = "0150_origin_human_invocation"
 
 
 CHAIN = [
@@ -101,6 +101,7 @@ CHAIN = [
     REMOVAL_HEAD,
     LONG_JOBS_HEAD,
     ADMINS_HEAD,
+    "0149_context_provider_bindings",
     HEAD,
 ]
 
@@ -218,6 +219,13 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if reflected and kind == "column" and name == "is_external":
             return getattr(getattr(obj, "table", None), "name", None) != "turn_origins"
+        if (
+            kind == "column"
+            and name == "human_invocation"
+            and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
+            and expected != HEAD
+        ):
+            return False
         if kind == "column" and expected not in (
             SANDBOX_HEAD,
             RECRUITMENT_HEAD,
@@ -385,6 +393,13 @@ async def test_deployed_upgrade_and_downgrade_paths(
             _assert_head(sync, LONG_JOBS_HEAD)
             command.upgrade(config, "head")
             _assert_head(sync)
+            principal = next(
+                col
+                for col in inspect(sync).get_columns("turn_origins")
+                if col["name"] == "human_invocation"
+            )
+            assert principal["nullable"] is True
+            assert principal["default"] is None
             command.downgrade(config, ADMINS_HEAD)
             _assert_head(sync, ADMINS_HEAD)
             assert not inspect(sync).has_table("context_provider_bindings")

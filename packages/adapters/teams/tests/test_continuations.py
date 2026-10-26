@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -203,7 +203,26 @@ async def test_a_refused_turn_tells_only_a_live_person_then_raises(
     denied = AsyncMock(side_effect=AdmissionDenied(reason=reason))
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
         await teams._run_turn(make_inbound("w"), TENANT, reraise=True)
-    queued = cast(TaskContinuationRow, object())
+    queued = TaskContinuationRow(
+        id=uuid.uuid4(),
+        tenant_id=TENANT,
+        platform="teams",
+        thread_id=CONVERSATION_ID,
+        parent_channel_id=CONVERSATION_ID,
+        requester_account_id=uuid.uuid4(),
+        requester_external_user_id=AAD_OBJECT_ID,
+        target_ma_agent_id="agent",
+        target_name="agent",
+        requested_work="queued request",
+        reason="task_handoff",
+        attended=True,
+        status="pending",
+        skip_reason=None,
+        idempotency_key=uuid.uuid4(),
+        created_at=datetime.now(UTC),
+        claimed_at=None,
+        delivered_at=None,
+    )
     with patch.object(app_module, "admit", denied), pytest.raises(AdmissionDenied):
         await teams._run_turn(make_inbound("w"), TENANT, reraise=True, continuation=queued)
     assert [a.text for a in sender.activities] == [copy], "queued work settles silently"

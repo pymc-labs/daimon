@@ -671,6 +671,7 @@ async def claimed_openai_worker(
         channel_id=root.fleet.root.channel.channel_id,
         thread_id=root.fleet.root.thread_id,
         is_dm=False,
+        human_invocation=True,
     )
     selected = replace(
         selected,

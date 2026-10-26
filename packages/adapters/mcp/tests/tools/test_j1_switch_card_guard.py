@@ -436,6 +436,7 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
     )
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=chat.auth.tenant_id,
         requester_org=RequesterOrg.HOST,
         platform="discord",

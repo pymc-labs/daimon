@@ -264,6 +264,7 @@ async def _run_batch(
         try:
             await admit(
                 deps,
+                origin="chat",
                 requester_org=RequesterOrg.HOST,
                 tenant_id=tenant_id,
                 platform="discord",

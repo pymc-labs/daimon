@@ -511,6 +511,7 @@ class DirectMessageCog(commands.Cog):
             source_channel_id = str(parent_id or channel.id)
             admission = await admit(
                 runtime.turn_deps,
+                origin="chat",
                 tenant_id=tenant_id,
                 requester_org=RequesterOrg.HOST,
                 platform="discord",

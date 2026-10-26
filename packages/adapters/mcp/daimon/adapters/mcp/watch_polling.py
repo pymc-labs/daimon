@@ -205,7 +205,8 @@ async def authorize_poll(
             policy,
             subject=subject,
             action=action,
-            surface=Surface.AGENT_CHAT,
+            # Polls have a recorded owner but no human invoking the agent.
+            surface=Surface.ROUTINE,
             agent=ref,
             place=place,
         ):

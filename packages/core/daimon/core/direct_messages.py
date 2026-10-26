@@ -428,6 +428,7 @@ async def admit_cold_dm(
         raise AdmissionDenied(reason="invoker_not_allowed")
     return await admit(
         deps,
+        origin="chat",
         tenant_id=tenant_id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -721,6 +722,7 @@ async def reply_to_dm_result(
                 requester_org=RequesterOrg.HOST,
                 platform=platform,
                 external_user_id=external_user_id,
+                origin="chat",
                 channel_id=conversation.channel_id,
                 thread_id=conversation.scope_id,
                 role=role,
@@ -882,6 +884,8 @@ async def run_dm_routine(
                 requester_org=RequesterOrg.HOST,
                 platform="discord",
                 external_user_id=owner_user_id,
+                origin="routine",
+                attended=False,
                 channel_id=scope_id,
                 now=now,
                 is_dm=True,

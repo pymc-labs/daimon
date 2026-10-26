@@ -46,6 +46,7 @@ _DiscordId = Annotated[str, StringConstraints(pattern=r"^[0-9]{15,21}$")]
 class _DiscordUser(BaseModel):
     model_config = ConfigDict(strict=True)
     id: _DiscordId
+    bot: bool = False
 
 
 class _DiscordGuild(_DiscordUser):
@@ -117,6 +118,7 @@ async def attest_discord_membership(
             permissions |= by_id[role]
         return Membership(
             is_member=True,
+            is_bot=member.user.bot,
             role_ids=tuple(r for r in member.roles if r != guild_id),
             is_admin=is_guild_admin_by_permissions(
                 user_id=int(platform_user_id),

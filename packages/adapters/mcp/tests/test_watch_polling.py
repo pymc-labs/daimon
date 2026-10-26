@@ -403,16 +403,25 @@ async def test_live_agent_tool_rule_stops_polling(runtime_watch, rule_kind):
         source.assert_not_called()
 
 
-async def test_current_agent_policy_denial_prevents_source_read(runtime_watch):
+@pytest.mark.parametrize("restriction", ["runs_in", "invoker_roles"])
+async def test_current_agent_policy_denial_prevents_source_read(runtime_watch, restriction: str):
     from daimon.core.access_policy import AgentRule, TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
 
     runtime, watch, _ = runtime_watch
+    runtime.membership_resolver.resolve.return_value = Membership(
+        is_member=True,
+        role_ids=("123",),
+        is_admin=True,
+    )
+    rule = (
+        AgentRule(runs_in=()) if restriction == "runs_in" else AgentRule(invoker_role_ids=("123",))
+    )
     async with runtime.session_factory.begin() as db:
         await set_access_policy(
             db,
             tenant_id=watch.tenant_id,
-            policy=TenantAccessPolicy(agent_rules={"analyst": AgentRule(runs_in=())}),
+            policy=TenantAccessPolicy(agent_rules={"analyst": rule}),
         )
     with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", AsyncMock()) as source:
         assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
