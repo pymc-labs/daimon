@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from ssl import SSLContext
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 import structlog
@@ -25,6 +25,8 @@ log = structlog.get_logger(__name__)
 MAX_RESPONSE_BYTES = 65_536
 # Expire idle connections before the provider's 300-second keep-alive.
 KEEPALIVE_EXPIRY_SECONDS = 240
+DETACHED_CALL_TIMEOUT_SECONDS = 5.0
+MAX_DETACHED_CALLS = 8
 
 
 class ProviderConfig(BaseModel):
@@ -143,7 +145,11 @@ class McpProvider:
             },
         }
         async with self.client.stream(
-            "POST", config.endpoint, headers=headers, json=body, timeout=config.timeout_ms / 1000
+            "POST",
+            config.endpoint,
+            headers=headers,
+            json=body,
+            timeout=DETACHED_CALL_TIMEOUT_SECONDS,
         ) as reply:
             reply.raise_for_status()
             raw = bytearray()
@@ -212,17 +218,26 @@ class LoadedProvider:
 ConfigLoader = Callable[[ContextRequest], Awaitable[LoadedProvider | None]]
 
 
-async def _bounded[T](call: Awaitable[T], seconds: float) -> T:
-    task = asyncio.ensure_future(call)
+async def _bounded[T](call: Awaitable[T], seconds: float, detached: set[asyncio.Future[Any]]) -> T:
+    async def _capped() -> T:
+        # Bound config reads and the whole provider call, including late work.
+        async with asyncio.timeout(DETACHED_CALL_TIMEOUT_SECONDS):
+            return await call
+
+    task = asyncio.ensure_future(_capped())
     try:
         done, _ = await asyncio.wait({task}, timeout=max(0, seconds))
         if not done:
+            if len(detached) < MAX_DETACHED_CALLS:
+                detached.add(task)
+                task.add_done_callback(detached.discard)
+                task.add_done_callback(_consume_task)
             raise TimeoutError
         if task.cancelled():
             raise RuntimeError("context operation cancelled itself")
         return task.result()
     finally:
-        if not task.done():
+        if not task.done() and task not in detached:
             task.cancel()
             task.add_done_callback(_consume_task)
 
@@ -237,6 +252,7 @@ class ContextProviders:
 
     def __init__(self, *, provider: Provider | None = None, max_sessions: int = 1024) -> None:
         self.provider = provider or McpProvider()
+        self._detached: set[asyncio.Future[Any]] = set()
         self.max_sessions = max_sessions
         self.sessions: OrderedDict[tuple[uuid.UUID, str, str, str], SessionContext] = OrderedDict()
 
@@ -252,7 +268,7 @@ class ContextProviders:
         injection = ContextInput()
         try:
             # Config reads have the same 200ms host ceiling, including pool waits.
-            loaded = await _bounded(load(request), 0.2)
+            loaded = await _bounded(load(request), 0.2, self._detached)
             if loaded is not None and loaded.config.enabled:
                 config = loaded.config
                 expires = started + min(config.timeout_ms / 1000, 0.2)
@@ -300,7 +316,7 @@ class ContextProviders:
                         "system_max_tokens": config.system_max_tokens,
                     }
                 )
-                result = await _bounded(self.provider(config, effective), remaining)
+                result = await _bounded(self.provider(config, effective), remaining, self._detached)
                 if (
                     len(result.model_dump_json().encode()) > MAX_RESPONSE_BYTES
                     or estimate_tokens(result.turn_fragment) > config.max_tokens

@@ -14,6 +14,8 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core.authz import Subject
 from daimon.core.context_provider import (
+    DETACHED_CALL_TIMEOUT_SECONDS,
+    MAX_DETACHED_CALLS,
     ContextProviders,
     ContextRequest,
     ContextResponse,
@@ -199,13 +201,280 @@ async def test_hard_deadline_includes_cancellation_resistant_provider_and_config
     assert not next(iter(owner.sessions.values())).hashes
 
     async def slow_load(request: ContextRequest) -> LoadedProvider:
-        await asyncio.Event().wait()
+        await release.wait()
         return await loaded(request)
 
+    release.clear()
     started = time.monotonic()
     async with owner.turn(REQUEST, slow_load) as result:
         assert not result.response.turn_fragment
         assert time.monotonic() - started < 0.35
+    release.set()
+    await asyncio.gather(*owner._detached)
+
+
+async def test_late_provider_warms_next_turn_without_acknowledging() -> None:
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    cancelled = False
+    fixture = FixtureProvider(FIXTURE, tenant_id=str(TENANT))
+
+    async def provider(config, request):
+        nonlocal cancelled
+        if not finished.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finished.set()
+        return await fixture(config, request)
+
+    async def short(request):
+        return LoadedProvider(CONFIG.model_copy(update={"timeout_ms": 20}), "fixture-server")
+
+    owner = ContextProviders(provider=provider)
+    started = time.monotonic()
+    async with owner.turn(REQUEST, short) as result:
+        assert time.monotonic() - started < 0.2
+        assert result.response == ContextResponse()
+        result.accepted()
+    pending = tuple(owner._detached)
+    assert len(pending) == 1
+    release.set()
+    await asyncio.gather(*pending)
+    assert finished.is_set() and not cancelled
+    state = next(iter(owner.sessions.values()))
+    assert not state.hashes and not state.system_received
+    assert not owner._detached
+    async with owner.turn(REQUEST, short) as warm:
+        assert warm.response.cards and warm.response.system_fragment
+        assert not fixture.requests[-1].sent_hashes
+        assert not fixture.requests[-1].system_fragment_received
+        warm.accepted()
+    assert state.hashes and state.system_received
+
+
+async def test_late_completion_during_next_turn_lock_does_not_acknowledge() -> None:
+    release = asyncio.Event()
+    fixture = FixtureProvider(FIXTURE, tenant_id=str(TENANT))
+    calls = 0
+
+    async def provider(config, request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await release.wait()
+        return await fixture(config, request)
+
+    async def short(request):
+        return LoadedProvider(CONFIG.model_copy(update={"timeout_ms": 20}), "fixture-server")
+
+    owner = ContextProviders(provider=provider)
+    async with owner.turn(REQUEST, short) as late:
+        assert late.response == ContextResponse()
+    pending = tuple(owner._detached)
+    assert len(pending) == 1
+    state = next(iter(owner.sessions.values()))
+    async with owner.turn(REQUEST, short) as current:
+        assert state.lock.locked()
+        assert current.response.cards and current.response.system_fragment
+        release.set()
+        await asyncio.gather(*pending)
+        assert state.lock.locked()
+        assert not state.hashes and not state.system_received
+        late.accepted()
+        assert not state.hashes and not state.system_received
+        current.accepted()
+        assert state.hashes == {card.id: card.hash for card in current.response.cards}
+        assert state.system_received
+    assert not state.lock.locked() and not owner._detached
+
+
+async def test_detached_hung_config_read_expires_and_frees_slot(monkeypatch) -> None:
+    from daimon.core import context_provider as context_module
+
+    monkeypatch.setattr(context_module, "DETACHED_CALL_TIMEOUT_SECONDS", 0.05)
+    cancelled = asyncio.Event()
+
+    async def hung_loader(request):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    owner = ContextProviders(provider=lambda *_: None)
+    with pytest.raises(TimeoutError):
+        await context_module._bounded(hung_loader(REQUEST), 0.01, owner._detached)
+    assert len(owner._detached) == 1
+    results = await asyncio.wait_for(asyncio.gather(*owner._detached, return_exceptions=True), 1)
+    assert len(results) == 1 and isinstance(results[0], TimeoutError)
+    assert cancelled.is_set() and not owner._detached
+
+
+async def test_detached_cap_cancels_extra_late_provider() -> None:
+    release = asyncio.Event()
+    cancelled = []
+    cancellation = asyncio.Event()
+    started_calls = []
+
+    async def provider(config, request):
+        started_calls.append(request.session_id)
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancellation.set()
+            cancelled.append(request.session_id)
+            raise
+        return ContextResponse()
+
+    async def short(request):
+        return LoadedProvider(CONFIG.model_copy(update={"timeout_ms": 100}), "fixture-server")
+
+    owner = ContextProviders(provider=provider)
+
+    async def turn(index):
+        async with owner.turn(REQUEST.model_copy(update={"session_id": str(index)}), short):
+            pass
+
+    try:
+        for index in range(MAX_DETACHED_CALLS + 1):
+            await turn(index)
+        await asyncio.wait_for(cancellation.wait(), 1)
+        assert len(started_calls) == MAX_DETACHED_CALLS + 1
+        assert len(owner._detached) == MAX_DETACHED_CALLS
+        assert cancelled == [str(MAX_DETACHED_CALLS)]
+    finally:
+        release.set()
+        await asyncio.gather(*owner._detached)
+    assert not owner._detached
+
+
+@pytest.mark.parametrize("operation", ["provider", "config"])
+async def test_parent_cancellation_cancels_own_pending_work(operation) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def slow(*args):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    owner = ContextProviders(provider=slow)
+
+    async def turn():
+        async with owner.turn(REQUEST, slow if operation == "config" else loaded):
+            pytest.fail("cancelled turn must not yield input")
+
+    task = asyncio.create_task(turn())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(cancelled.wait(), 1)
+    assert not owner._detached
+    assert all(not state.lock.locked() for state in owner.sessions.values())
+
+
+async def test_late_config_read_finishes_and_closes_session_cleanly(db_nullpool_engine) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    factory = async_sessionmaker(db_nullpool_engine)
+    finished = asyncio.Event()
+    cancelled = False
+
+    async def slow_load(request):
+        nonlocal cancelled
+        try:
+            async with factory() as session:
+                await session.execute(text("SELECT pg_sleep(0.3)"))
+                assert (await session.execute(text("SELECT 1"))).scalar_one() == 1
+            finished.set()
+            return await loaded(request)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async def forbidden(config, request):
+        pytest.fail("late config must not start a provider call")
+
+    owner = ContextProviders(provider=forbidden)
+    started = time.monotonic()
+    async with owner.turn(REQUEST, slow_load) as result:
+        assert time.monotonic() - started < 0.3
+        assert result.response == ContextResponse()
+        result.accepted()
+    assert len(owner._detached) == 1
+    await asyncio.gather(*owner._detached)
+    assert finished.is_set() and not cancelled
+    assert not owner.sessions and not owner._detached
+
+
+async def test_provider_http_has_a_wall_clock_cap(monkeypatch) -> None:
+    from daimon.core import context_provider as context_module
+
+    cancelled = asyncio.Event()
+
+    class SlowStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            try:
+                while True:
+                    await asyncio.sleep(0.01)
+                    yield b" "
+            finally:
+                cancelled.set()
+
+    def handle(request):
+        return httpx.Response(200, stream=SlowStream())
+
+    monkeypatch.setattr(context_module, "DETACHED_CALL_TIMEOUT_SECONDS", 0.05)
+    provider = McpProvider(httpx.MockTransport(handle))
+    owner = ContextProviders(provider=provider)
+
+    async def short(request):
+        return LoadedProvider(
+            CONFIG.model_copy(
+                update={"endpoint": "https://provider.invalid/mcp", "timeout_ms": 10}
+            ),
+            "fixture-server",
+        )
+
+    try:
+        async with owner.turn(REQUEST, short) as result:
+            assert result.response == ContextResponse()
+        assert len(owner._detached) == 1
+        results = await asyncio.wait_for(
+            asyncio.gather(*owner._detached, return_exceptions=True), 1
+        )
+        assert len(results) == 1 and isinstance(results[0], TimeoutError)
+        assert cancelled.is_set()
+        assert not owner._detached
+    finally:
+        await provider.aclose()
+
+
+async def test_late_exception_is_consumed_without_logging_provider_text() -> None:
+    release = asyncio.Event()
+
+    async def slow_load(request):
+        await release.wait()
+        raise ValueError("private provider text")
+
+    owner = ContextProviders(provider=lambda *_: None)
+    with mock.patch("daimon.core.context_provider.log.warning") as warning:
+        async with owner.turn(REQUEST, slow_load):
+            pass
+        pending = tuple(owner._detached)
+        release.set()
+        await asyncio.wait(pending)
+        await asyncio.sleep(0)
+    warning.assert_called_once_with(
+        "context_provider.dropped", tenant_id=str(TENANT), error_class="TimeoutError"
+    )
+    assert not owner._detached
+    assert all(not task._log_traceback for task in pending)
 
 
 async def test_concurrent_turns_serialize_hash_acceptance() -> None:
@@ -612,7 +881,7 @@ async def test_lock_wait_is_bounded_and_never_calls_provider_twice() -> None:
     assert not next(iter(owner.sessions.values())).lock.locked()
 
 
-async def test_mcp_reuses_one_client_and_passes_each_call_timeout(monkeypatch) -> None:
+async def test_mcp_reuses_one_client_and_passes_independent_http_timeout(monkeypatch) -> None:
     requests = []
 
     def handle(request):
@@ -645,7 +914,7 @@ async def test_mcp_reuses_one_client_and_passes_each_call_timeout(monkeypatch) -
                 REQUEST,
             )
             assert provider.client is client
-            assert requests[-1].extensions["timeout"]["read"] == timeout_ms / 1000
+            assert requests[-1].extensions["timeout"]["read"] == DETACHED_CALL_TIMEOUT_SECONDS
         assert len(requests) == 2
         assert not client.follow_redirects
     finally:

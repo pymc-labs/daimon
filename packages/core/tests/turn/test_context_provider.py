@@ -161,7 +161,7 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
 
     # This test verifies DB-backed assembly, not wall-clock performance. Keep
     # host scheduling out of its budget; dedicated fake tests exercise deadlines.
-    async def complete_fixture_io(call, seconds):
+    async def complete_fixture_io(call, seconds, detached):
         return await call
 
     monkeypatch.setattr(context_module, "_bounded", complete_fixture_io)
