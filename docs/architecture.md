@@ -1099,6 +1099,27 @@ field, a Slack context block, a Teams monospace block), so the icons of both
 look the same. Off, nothing is added and the call is an
 ordinary tool line.
 
+Per-turn context (`DAIMON_MCP_CONTEXT__ENABLED`, `daimon.core.turn.mcp_context`)
+also rides in front of the user message. The chat adapters pass the person's
+own words as `request_text` (`None` for an unprompted reply). Inside
+`persisted`, just before the send, `run_prepared_turn` sends them, without
+mentions and with a keyed per-server id for the thread, to each of the agent's
+MCP servers that has a shared token in `agent_mcp_credentials`, offers a
+`context` tool (a string `prompt` and `session`), and would be allowed the call
+unasked: on and not `always_ask` in the agent's toolset, an allow from
+`decide_tool_call` with agent rules, and an admission unchanged since the turn
+was prepared. Each non-empty answer goes in an untrusted `<mcp_context>` block.
+The setting is on by default, so a server is first looked up in a background
+task no turn waits on, which only lists its tools. Before any read, one without
+the tool is then skipped for six hours, one whose lookup failed for ten minutes
+(doubling up to six hours), and one without a shared token or that the turn may
+not call for a minute. Each server
+that offers it gets at most `timeout_s`, and the turn's cancel ends the wait;
+its MCP session and tool list are reused for ten minutes, so a typical turn is
+one `tools/call`, and one that failed is skipped for a minute. Routines, hand-offs, held, shared and sealed turns ask nothing.
+A recovery re-run asks inside its own lease; on the same admission it re-sends
+the same answers.
+
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
 immediate idle acknowledgement is observed. The interrupt and acknowledgement
 wait are bounded by the same 120-second timeout; the subscription closes when

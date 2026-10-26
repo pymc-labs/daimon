@@ -544,6 +544,56 @@ class ProgressPlansSettings(BaseModel):
     )
 
 
+class McpContextSettings(BaseModel):
+    """Per-turn context: each chat message is first shown to the agent's MCP servers
+    that offer a context tool, and what they answer goes in front of it."""
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Before each chat turn, send the person's message to every MCP server the "
+            "agent was connected to with a shared token that offers the context tool, "
+            "and put each non-empty answer in front of the message as quoted data. A "
+            "server without the tool is unaffected: it is looked up once in the "
+            "background, never waited on, then left alone for six hours (one whose "
+            "lookup fails is tried again after ten minutes, then ever less often). The servers "
+            "receive the message text, without mentions, and an opaque id for the "
+            "thread (rotating the first crypto key changes it). The call follows the "
+            "agent's toolset and tool safety: with tool safety on, mark the tool a read "
+            "in DAIMON_TOOL_SAFETY__EFFECTS (`<server>/context`). Unprompted replies, "
+            "held turns, channels shared with another organisation and sealed channels "
+            "ask nothing."
+        ),
+    )
+    tenants: list[uuid.UUID] = Field(
+        default_factory=list[uuid.UUID],
+        description=(
+            "Limit per-turn context to these tenants, by tenant UUID. Empty: every "
+            "tenant. Configure DAIMON_MCP_CONTEXT__TENANTS as a JSON array."
+        ),
+    )
+    tool: str = Field(
+        default="context",
+        min_length=1,
+        description=(
+            "Name of the tool to call. A server offers it when the tool's input takes a "
+            "string `prompt` and a string `session` (the thread's id) and requires "
+            "nothing else."
+        ),
+    )
+    timeout_s: float = Field(
+        default=2.0,
+        gt=0,
+        le=10,
+        description=(
+            "Seconds a turn waits for each server's answer. A server that fails or is slower "
+            "adds nothing, and one that failed is not asked again for a minute. A "
+            "server's MCP session is reused for ten minutes, so most turns cost one "
+            "request per server that offers the tool."
+        ),
+    )
+
+
 class ThreadParticipationSettings(BaseModel):
     """Organic thread participation: replying in a thread unprompted.
 
@@ -2139,6 +2189,10 @@ class Settings(BaseSettings):
     progress_plans: ProgressPlansSettings = Field(
         default_factory=ProgressPlansSettings,
         description="The agent's plan on the working card. See ProgressPlansSettings.",
+    )
+    mcp_context: McpContextSettings = Field(
+        default_factory=McpContextSettings,
+        description="Context from connected MCP servers on each chat turn. See McpContextSettings.",
     )
     slack: SlackSettings | None = None
     teams: TeamsSettings | None = None

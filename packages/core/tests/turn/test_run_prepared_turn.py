@@ -2278,6 +2278,78 @@ async def test_an_ordinary_turn_sends_exactly_the_user_message(
     assert outcome.continuity.state == "continued"
 
 
+async def test_a_chat_turn_sends_mcp_context_in_front_of_the_message(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The agent's MCP servers are asked about the person's own words, and what
+    they answer goes in front of the full message the adapter built."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-context",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    asked: list[str] = []
+
+    async def fetch(*, prompt: str, **_: object) -> str:
+        asked.append(prompt)
+        return "<mcp_context>Acme renewed in May.</mcp_context>\n\n"
+
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(session_bodies=[], dead_session_ids=set(), sent_batches=sent)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router), turn_context=fetch
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-context",
+        external_user_id="user-1",
+        user_message="<turn_controls>{}</turn_controls>\nwhat about acme?",
+        request_text="what about acme?",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert asked == ["what about acme?"], "only the person's words are sent to the servers"
+    _, batch = sent[0]
+    text = "".join(
+        block["text"]
+        for block in batch[0]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert text == (
+        "<mcp_context>Acme renewed in May.</mcp_context>\n\n\n"
+        "<turn_controls>{}</turn_controls>\nwhat about acme?"
+    ), "the answer leads the message the adapter built"
+
+
 async def test_recovery_reports_a_replacement_after_loss_and_keeps_the_framing_prefix(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

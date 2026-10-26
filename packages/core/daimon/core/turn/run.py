@@ -74,6 +74,7 @@ from daimon.core.turn.lifecycle import (
     TurnLifecycle,
     acknowledge,
 )
+from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
 from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
@@ -911,6 +912,7 @@ async def run_prepared_turn(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
+    request_text: str | None = None,
 ) -> RunOutcome:
     observation = (
         prepared.admission.observation
@@ -967,6 +969,7 @@ async def run_prepared_turn(
                 active_turn_message_id=active_turn_message_id,
                 before_send=before_send,
                 turn_card_intent_id=turn_card_intent_id,
+                request_text=request_text,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -1026,6 +1029,7 @@ async def run_prepared_turn_impl(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
+    request_text: str | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -1066,6 +1070,10 @@ async def run_prepared_turn_impl(
     replacement mapping before the re-run is sent, so a restart mid-recovery
     leaves the marker on the session that is actually running.
 
+    `request_text` is the person's own words, without the origin block or thread
+    history the adapter puts around them. Only a chat turn that passes it can get
+    context from the agent's MCP servers (`daimon.core.turn.mcp_context`).
+
     `deadline`/`now` bound the WHOLE body -- first attempt, recovery setup,
     and the recovery re-run -- against the per-turn ceiling.
     `deadline=None` is fail-safe, not off: it computes
@@ -1095,6 +1103,23 @@ async def run_prepared_turn_impl(
             and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
         ):
             confirmed_tools = frozenset()
+    rules_for = (
+        agent_rule_lookup(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=str(prepared.admission.agent.id),
+            server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+            also_urls=daimon_endpoint(deps.public_url),
+            channel_id=channel_for_tool_rules(
+                platform=platform,
+                channel_id=prepared.admission.origin_channel_id,
+                private_dm_id=prepared.admission.private_dm_id,
+            ),
+        )
+        if getattr(deps.tool_safety, "enabled", False)
+        and getattr(deps.tool_safety, "agent_rules", False)
+        else None
+    )
     tool_confirmation = chat_tool_confirmation(
         deps.tool_safety,
         provider_permissions=(
@@ -1108,23 +1133,7 @@ async def run_prepared_turn_impl(
         asks_before_publishing=prepared.admission.asks_before_publishing,
         confirmed_tools=confirmed_tools,
         daimon_rules=bool(prepared.admission.daimon_rule_tools),
-        rules_for=(
-            agent_rule_lookup(
-                deps.sessionmaker,
-                tenant_id=tenant_id,
-                agent_id=str(prepared.admission.agent.id),
-                server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
-                also_urls=daimon_endpoint(deps.public_url),
-                channel_id=channel_for_tool_rules(
-                    platform=platform,
-                    channel_id=prepared.admission.origin_channel_id,
-                    private_dm_id=prepared.admission.private_dm_id,
-                ),
-            )
-            if getattr(deps.tool_safety, "enabled", False)
-            and getattr(deps.tool_safety, "agent_rules", False)
-            else None
-        ),
+        rules_for=rules_for,
         rule_card_for=(
             lambda call: (
                 (
@@ -1192,6 +1201,32 @@ async def run_prepared_turn_impl(
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
     prefix = context + plans + prepared.continuity.user_prefix
+    briefing_cell: list[tuple[Admission, str]] = []
+
+    async def briefing(admission: Admission, attempt_cancel: asyncio.Event) -> str:
+        # Asked just before a send, past its lease wait and under the ceiling; a
+        # recovery on the same admission re-sends the same answer.
+        if briefing_cell and briefing_cell[0][0] is admission:
+            return briefing_cell[0][1]
+        text = await mcp_context_prefix(
+            deps.turn_context,
+            admission,
+            origin=origin,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            request_text=request_text,
+            permitted=tool_permission(
+                admission.agent,
+                policy=deps.tool_safety,
+                trusted_servers=trusted_servers_for(deps.public_url),
+                rules=rules_for,
+                recheck=lambda: decide_before_send(deps, admission)(),
+            ),
+            cancel=attempt_cancel,
+        )
+        briefing_cell[:] = [(admission, text)]
+        return text
 
     @contextlib.asynccontextmanager
     async def persisted(
@@ -1253,6 +1288,9 @@ async def run_prepared_turn_impl(
             async with persisted(
                 prepared.admission, ma_session_id, mapping_id, prepared.session_ref
             ):
+                message = _with_prefix(
+                    prefix + await briefing(prepared.admission, cancel), user_message
+                )
                 state = await run_turn(
                     **_turn_port_kwargs(
                         deps,
@@ -1266,7 +1304,7 @@ async def run_prepared_turn_impl(
                     ),
                     anthropic=deps.anthropic,
                     session_id=ma_session_id,
-                    user_message=_with_prefix(prefix, user_message),
+                    user_message=message,
                     lifecycle=first_attempt,
                     cancel=cancel,
                     render_interval_s=render_interval_s,
@@ -1407,7 +1445,7 @@ async def run_prepared_turn_impl(
             # died. What goes instead is this loss's own framing -- daimon's
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
-            reseeded_message = _with_prefix(plans + loss_user_prefix, await reseed_user_message())
+            reseed = await reseed_user_message()
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
             # Mirror a LATE cancel on the ORIGINAL event into
@@ -1423,6 +1461,12 @@ async def run_prepared_turn_impl(
                     new_mapping_id,
                     attempt_cancel=fresh_cancel,
                 ):
+                    reseeded_message = _with_prefix(
+                        plans
+                        + loss_user_prefix
+                        + await briefing(recovery.admission or prepared.admission, fresh_cancel),
+                        reseed,
+                    )
                     recovered_state = await run_turn(
                         **_turn_port_kwargs(
                             deps,

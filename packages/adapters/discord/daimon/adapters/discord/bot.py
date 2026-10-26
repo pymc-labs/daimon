@@ -5631,6 +5631,14 @@ class DaimonBot(commands.Bot):
                         + "\n"
                         + user_message
                     ),
+                    # A reply nobody asked for has no request to look up.
+                    request_text=(
+                        None
+                        if unprompted
+                        else content_override
+                        if content_override is not None
+                        else message.content
+                    ),
                     lifecycle=lifecycle,
                     turn_card_intent_id=turn_card_intent.id,
                     cancel=cancel,

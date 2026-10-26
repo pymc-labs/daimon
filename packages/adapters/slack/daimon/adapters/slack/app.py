@@ -3095,6 +3095,7 @@ class SlackApp:
                             + "\n"
                             + user_message
                         ),
+                        request_text=user_text,
                         lifecycle=lifecycle,
                         cancel=cancel_event,
                         reseed_user_message=_reseed_user_message,

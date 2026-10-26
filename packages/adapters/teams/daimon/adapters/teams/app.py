@@ -1798,6 +1798,7 @@ class TeamsApp:
                 external_user_id=inbound.user_id,
                 origin="handoff" if notice is not None else "chat",
                 user_message=message,
+                request_text=None if inbound.unprompted else inbound.text,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,

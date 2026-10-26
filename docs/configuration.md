@@ -31,6 +31,7 @@ typo is silent — check the spelling here.
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Progress Plans](#progress-plans)
+- [Mcp Context](#mcp-context)
 - [Slack](#slack)
 - [Teams](#teams)
 - [GitHub](#github)
@@ -720,6 +721,52 @@ Teams). On, the agent keeps a short checklist of a longer task's steps on the ca
 may add one-line updates on what it found and does next. off: shown only where a
 workspace, channel or thread is turned on. disabled: never shown, and cannot be turned
 on. on: shown everywhere unless turned off below.
+
+## Mcp Context
+
+Read from `daimon.core.config.McpContextSettings`. Prefix `DAIMON_MCP_CONTEXT__`.
+
+Per-turn context: each chat message is first shown to the agent's MCP servers that offer
+a context tool, and what they answer goes in front of it.
+
+Context from connected MCP servers on each chat turn. See McpContextSettings.
+
+### `DAIMON_MCP_CONTEXT__ENABLED`
+
+`bool` · optional · default `True`
+
+Before each chat turn, send the person's message to every MCP server the agent was
+connected to with a shared token that offers the context tool, and put each non-empty
+answer in front of the message as quoted data. A server without the tool is unaffected:
+it is looked up once in the background, never waited on, then left alone for six hours
+(one whose lookup fails is tried again after ten minutes, then ever less often). The
+servers receive the message text, without mentions, and an opaque id for the thread
+(rotating the first crypto key changes it). The call follows the agent's toolset and
+tool safety: with tool safety on, mark the tool a read in DAIMON_TOOL_SAFETY__EFFECTS
+(`&lt;server&gt;/context`). Unprompted replies, held turns, channels shared with another
+organisation and sealed channels ask nothing.
+
+### `DAIMON_MCP_CONTEXT__TENANTS`
+
+`list[UUID]` · optional · default unset
+
+Limit per-turn context to these tenants, by tenant UUID. Empty: every tenant. Configure
+DAIMON_MCP_CONTEXT__TENANTS as a JSON array.
+
+### `DAIMON_MCP_CONTEXT__TOOL`
+
+`str` · optional · default `context`
+
+Name of the tool to call. A server offers it when the tool's input takes a string
+`prompt` and a string `session` (the thread's id) and requires nothing else.
+
+### `DAIMON_MCP_CONTEXT__TIMEOUT_S`
+
+`float` · optional · default `2.0`
+
+Seconds a turn waits for each server's answer. A server that fails or is slower adds
+nothing, and one that failed is not asked again for a minute. A server's MCP session is
+reused for ten minutes, so most turns cost one request per server that offers the tool.
 
 ## Slack
 
