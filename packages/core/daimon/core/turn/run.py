@@ -74,6 +74,7 @@ from daimon.core.turn.lifecycle import (
     TurnLifecycle,
     acknowledge,
 )
+from daimon.core.turn.mcp_context import mcp_context_prefix
 from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
@@ -911,6 +912,7 @@ async def run_prepared_turn(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
+    request_text: str | None = None,
 ) -> RunOutcome:
     observation = (
         prepared.admission.observation
@@ -967,6 +969,7 @@ async def run_prepared_turn(
                 active_turn_message_id=active_turn_message_id,
                 before_send=before_send,
                 turn_card_intent_id=turn_card_intent_id,
+                request_text=request_text,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -1026,6 +1029,7 @@ async def run_prepared_turn_impl(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
+    request_text: str | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -1065,6 +1069,10 @@ async def run_prepared_turn_impl(
     `prepared.mapping_id` for this turn, if any. A recovery moves it onto the
     replacement mapping before the re-run is sent, so a restart mid-recovery
     leaves the marker on the session that is actually running.
+
+    `request_text` is the person's own words, without the origin block or thread
+    history the adapter puts around them. Only a chat turn that passes it can get
+    context from the agent's MCP servers (`daimon.core.turn.mcp_context`).
 
     `deadline`/`now` bound the WHOLE body -- first attempt, recovery setup,
     and the recovery re-run -- against the per-turn ceiling.
@@ -1191,7 +1199,16 @@ async def run_prepared_turn_impl(
         thread_id=thread_id,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
-    prefix = context + plans + prepared.continuity.user_prefix
+    briefing = await mcp_context_prefix(
+        deps.turn_context,
+        prepared.admission,
+        origin=origin,
+        tenant_id=tenant_id,
+        platform=platform,
+        thread_id=thread_id,
+        request_text=request_text,
+    )
+    prefix = context + plans + prepared.continuity.user_prefix + briefing
 
     @contextlib.asynccontextmanager
     async def persisted(
@@ -1407,7 +1424,9 @@ async def run_prepared_turn_impl(
             # died. What goes instead is this loss's own framing -- daimon's
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
-            reseeded_message = _with_prefix(plans + loss_user_prefix, await reseed_user_message())
+            reseeded_message = _with_prefix(
+                plans + loss_user_prefix + briefing, await reseed_user_message()
+            )
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
             # Mirror a LATE cancel on the ORIGINAL event into

@@ -31,6 +31,7 @@ typo is silent — check the spelling here.
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Progress Plans](#progress-plans)
+- [Mcp Context](#mcp-context)
 - [Slack](#slack)
 - [Teams](#teams)
 - [GitHub](#github)
@@ -720,6 +721,47 @@ Teams). On, the agent keeps a short checklist of a longer task's steps on the ca
 may add one-line updates on what it found and does next. off: shown only where a
 workspace, channel or thread is turned on. disabled: never shown, and cannot be turned
 on. on: shown everywhere unless turned off below.
+
+## Mcp Context
+
+Read from `daimon.core.config.McpContextSettings`. Prefix `DAIMON_MCP_CONTEXT__`.
+
+Per-turn context: each chat message is first shown to the agent's MCP servers that offer
+a context tool, and what they answer goes in front of it.
+
+Context from connected MCP servers on every turn. See McpContextSettings.
+
+### `DAIMON_MCP_CONTEXT__ENABLED`
+
+`bool` · optional · default `False`
+
+Before each chat turn, send the person's message to every MCP server the agent was
+connected to with a shared token that offers the context tool, and put each non-empty
+answer in front of the message as quoted data. The servers receive the message text and
+an opaque id for the thread. Turns held to a channel shared with another organisation,
+and sealed channels, ask nothing.
+
+### `DAIMON_MCP_CONTEXT__TENANTS`
+
+`list[UUID]` · optional · default unset
+
+Limit per-turn context to these tenants, by tenant UUID. Empty: every tenant. Configure
+DAIMON_MCP_CONTEXT__TENANTS as a JSON array.
+
+### `DAIMON_MCP_CONTEXT__TOOL`
+
+`str` · optional · default `context`
+
+Name of the tool to call. A server offers it when the tool's input takes a string
+`prompt` and requires nothing but `prompt` and an optional string `session`, the
+thread's id.
+
+### `DAIMON_MCP_CONTEXT__TIMEOUT_S`
+
+`float` · optional · default `2.0`
+
+Seconds a turn waits for each server. A server that fails or is slower adds nothing, and
+one that failed is not asked again for a minute.
 
 ## Slack
 

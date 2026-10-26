@@ -544,6 +544,48 @@ class ProgressPlansSettings(BaseModel):
     )
 
 
+class McpContextSettings(BaseModel):
+    """Per-turn context: each chat message is first shown to the agent's MCP servers
+    that offer a context tool, and what they answer goes in front of it."""
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Before each chat turn, send the person's message to every MCP server the "
+            "agent was connected to with a shared token that offers the context tool, "
+            "and put each non-empty answer in front of the message as quoted data. The "
+            "servers receive the message text and an opaque id for the thread. Turns "
+            "held to a channel shared with another organisation, and sealed channels, "
+            "ask nothing."
+        ),
+    )
+    tenants: list[uuid.UUID] = Field(
+        default_factory=list[uuid.UUID],
+        description=(
+            "Limit per-turn context to these tenants, by tenant UUID. Empty: every "
+            "tenant. Configure DAIMON_MCP_CONTEXT__TENANTS as a JSON array."
+        ),
+    )
+    tool: str = Field(
+        default="context",
+        min_length=1,
+        description=(
+            "Name of the tool to call. A server offers it when the tool's input takes a "
+            "string `prompt` and requires nothing but `prompt` and an optional string "
+            "`session`, the thread's id."
+        ),
+    )
+    timeout_s: float = Field(
+        default=2.0,
+        gt=0,
+        le=10,
+        description=(
+            "Seconds a turn waits for each server. A server that fails or is slower "
+            "adds nothing, and one that failed is not asked again for a minute."
+        ),
+    )
+
+
 class ThreadParticipationSettings(BaseModel):
     """Organic thread participation: replying in a thread unprompted.
 
@@ -2139,6 +2181,10 @@ class Settings(BaseSettings):
     progress_plans: ProgressPlansSettings = Field(
         default_factory=ProgressPlansSettings,
         description="The agent's plan on the working card. See ProgressPlansSettings.",
+    )
+    mcp_context: McpContextSettings = Field(
+        default_factory=McpContextSettings,
+        description="Context from connected MCP servers on every turn. See McpContextSettings.",
     )
     slack: SlackSettings | None = None
     teams: TeamsSettings | None = None

@@ -11,6 +11,7 @@ No I/O in this module; `build_turn_deps` derives the bundle from settings.
 
 from __future__ import annotations
 
+import functools
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -20,11 +21,13 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
+from daimon.core.agent_mcp_credentials import resolve_agent_mcp_credentials
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget_notice import BudgetNotifier
 from daimon.core.channel_skills import PlatformSkillMemory
 from daimon.core.config import (
     GithubAppSettings,
+    McpContextSettings,
     McpSettings,
     ProgressPlansSettings,
     Settings,
@@ -41,6 +44,7 @@ from daimon.core.scope_cascade import CascadeMode
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.specs import SkillRef
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn.mcp_context import TurnContextFetch, build_turn_context_fetch
 from daimon.core.turn.running import RunningTurns
 from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
 from mux.contracts.ids import ResourceRef, Scope
@@ -115,6 +119,9 @@ class TurnDeps:
     # `DAIMON_PROGRESS_PLANS__MODE`: the deployment tier of the progress-plans cascade.
     # Disabled unless built from settings, so a bundle assembled by hand never reads it.
     progress_plans: CascadeMode = CascadeMode.DISABLED
+    # `DAIMON_MCP_CONTEXT__ENABLED`: asks the agent's MCP servers about each chat
+    # message (`daimon.core.turn.mcp_context`). None asks nothing.
+    turn_context: TurnContextFetch | None = None
     # Each default agent's platform-limited skills, read from `defaults_root`
     # once (`load_platform_skills`); admission adds them on their platforms.
     platform_skills: Mapping[str, tuple[SkillRef, ...]] = field(
@@ -172,6 +179,7 @@ def build_turn_deps(
     """Derive `TurnDeps` from `settings`, once per adapter runtime."""
     turn_settings = cast(object, settings.turn)
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
+    fernet = build_multifernet(crypto_keys) if crypto_keys else None
     return TurnDeps(
         anthropic=anthropic,
         messages=anthropic,
@@ -193,7 +201,7 @@ def build_turn_deps(
         mcp=settings.mcp,
         billing_config=billing_config,
         markup=settings.billing.markup,
-        fernet=build_multifernet(crypto_keys) if crypto_keys else None,
+        fernet=fernet,
         github_fallback_pat=None,
         github_app_id=settings.github_app.app_id,
         github_app_private_key=_reveal(settings.github_app.private_key),
@@ -209,6 +217,17 @@ def build_turn_deps(
             plans.mode
             if isinstance(plans := cast(object, settings.progress_plans), ProgressPlansSettings)
             else CascadeMode.DISABLED
+        ),
+        turn_context=(
+            build_turn_context_fetch(
+                context,
+                credentials=functools.partial(
+                    resolve_agent_mcp_credentials, sessionmaker=sessionmaker, fernet=fernet
+                ),
+            )
+            if fernet is not None
+            and isinstance(context := cast(object, settings.mcp_context), McpContextSettings)
+            else None
         ),
         platform_skills=load_platform_skills(
             settings.defaults_root, features=settings.configured_features
