@@ -34,11 +34,13 @@ from daimon.core.confirmation import (
     confirmed_tools_for_tenant,
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
+from daimon.core.context_provider import ContextHook, ContextRequest, LoadedProvider
 from daimon.core.errors import TurnError
 from daimon.core.handoff_context import (
     render_lost_workspace_framing,
     render_previous_session,
     select_recent_turns,
+    supports_system_message,
 )
 from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
@@ -919,6 +921,8 @@ async def run_prepared_turn(
     reseed_user_message: Callable[[], Awaitable[str]],
     recovery_lifecycle: Callable[[asyncio.Event], TurnLifecycle],
     origin: TurnContext = "chat",
+    context_mention_ids: tuple[str, ...] = (),
+    context_message_text: str | None = None,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     render_interval_s: float = 2.0,
     deadline: datetime | None = None,
@@ -970,6 +974,8 @@ async def run_prepared_turn(
                 reseed_user_message=reseed_user_message,
                 recovery_lifecycle=recovery_lifecycle,
                 origin=origin,
+                context_mention_ids=context_mention_ids if platform == "discord" else (),
+                context_message_text=context_message_text,
                 image_blocks=image_blocks,
                 render_interval_s=render_interval_s,
                 deadline=deadline,
@@ -1023,6 +1029,8 @@ async def run_prepared_turn_impl(
     reseed_user_message: Callable[[], Awaitable[str]],
     recovery_lifecycle: Callable[[asyncio.Event], TurnLifecycle],
     origin: TurnContext = "chat",
+    context_mention_ids: tuple[str, ...] = (),
+    context_message_text: str | None = None,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     render_interval_s: float = 2.0,
     deadline: datetime | None = None,
@@ -1143,6 +1151,62 @@ async def run_prepared_turn_impl(
     prefix = context + plans + prepared.continuity.user_prefix
     if prepared.admission.model_fell_back:
         prefix += MODEL_FALLBACK_NOTICE
+
+    async def load_context_config(request: ContextRequest) -> LoadedProvider | None:
+        from daimon.core.stores import context_providers
+        from daimon.core.stores.tenants import get_tenant
+
+        async with deps.sessionmaker.begin() as session:
+            config = await context_providers.load(
+                session,
+                tenant_id=request.tenant_id,
+                channel_id=request.parent_channel_id or request.channel_id,
+                agent_id=request.agent_id,
+            )
+            if config is None or not config.enabled:
+                return None
+            tenant = await get_tenant(session, request.tenant_id)
+            if tenant is None or tenant.archived_at is not None:
+                return None
+            return LoadedProvider(config, tenant.external_id)
+
+    def context_hook_for(admission: Admission) -> ContextHook | None:
+        revision = admission.backend_revision
+        if revision is not None and revision.profile != "anthropic.managed_agents":
+            return None
+        grant = admission.grant
+        # No fabricated placement from message text or budget attribution.
+        if grant is None or grant.tenant_id != tenant_id:
+            return None
+        place = grant.run_place
+        return ContextHook(
+            deps.context_providers,
+            ContextRequest(
+                tenant_id=tenant_id,
+                server_id="",
+                platform=platform,
+                channel_id=(admission.private_dm_id or grant.channel_id)
+                if grant.is_dm
+                else place.channel_id,
+                parent_channel_id=place.parent_channel_id,
+                thread_id=admission.origin_thread_id,
+                place_type=(
+                    "unknown"
+                    if place.parent_unresolved or (place.channel_id is None and not grant.is_dm)
+                    else "dm"
+                    if grant.is_dm
+                    else "thread"
+                    if place.parent_channel_id
+                    else "channel"
+                ),
+                requester_platform_user_id=external_user_id,
+                agent_id=admission.agent.id,
+                mention_ids=context_mention_ids if platform == "discord" else (),
+                message_text=(context_message_text or "") if platform == "discord" else "",
+            ),
+            load_context_config,
+            system_message_supported=supports_system_message(admission.agent.model.id),
+        )
 
     async def authorize_watch(admission: Admission, session_id: str) -> None:
         assert watch_row is not None
@@ -1655,6 +1719,7 @@ async def run_prepared_turn_impl(
                             **action_kwargs,
                             image_blocks=image_blocks,
                             system_blocks=prepared.continuity.system_blocks,
+                            context_hook=context_hook_for(prepared.admission),
                             before_send=checked_send
                             if before_send is not None
                             or root_intent is not None
@@ -1832,6 +1897,7 @@ async def run_prepared_turn_impl(
                         tool_confirmation=recovery_confirmation,
                         image_blocks=image_blocks,
                         system_blocks=loss_system_blocks,
+                        context_hook=context_hook_for(recovery.admission or prepared.admission),
                         # Reseeding and opening the stream await platform and MA
                         # calls after recovery's last decision.
                         before_send=decide_before_send(

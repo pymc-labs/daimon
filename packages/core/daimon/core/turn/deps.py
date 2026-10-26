@@ -33,6 +33,7 @@ from daimon.core.config import (
     TurnSettings,
     load_turn_settings,
 )
+from daimon.core.context_provider import ContextProviders
 from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_credentials import build_multifernet
@@ -139,6 +140,7 @@ class TurnDeps:
     # What admission learned about those skills in this process: the last ids
     # read, and the ones the provider refused (`create_ma_session`).
     platform_skill_memory: PlatformSkillMemory = field(default_factory=PlatformSkillMemory)
+    context_providers: ContextProviders = field(default_factory=ContextProviders)
 
     @property
     def backend_selection_enabled(self) -> bool:

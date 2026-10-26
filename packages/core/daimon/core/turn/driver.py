@@ -70,6 +70,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsUserToolConfirmationEventParams,
 )
 from daimon.core.config import load_turn_settings
+from daimon.core.context_provider import ContextHook, ContextInput
 from daimon.core.errors import TurnError
 from daimon.core.ma import SessionEvent, terminal_stop_reason
 from daimon.core.mux_backend import TurnBackendRequest
@@ -666,6 +667,7 @@ async def run_turn(
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     system_blocks: Sequence[BetaManagedAgentsSystemContentBlockParam] = (),
+    context_hook: ContextHook | None = None,
     deadline: datetime | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     send_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
@@ -759,23 +761,35 @@ async def run_turn(
     # before opening a stream, so `_pump` finalizes it as an upstream error.
     unwedge_failure: list[BaseException | None] = [None]
 
+    context_input = ContextInput()
+
     async def _send_initial() -> None:
+        provider_system = context_input.response.system_fragment
+        privileged = context_hook is not None and context_hook.system_message_supported
+        # Older MA models reject mid-session system events. Follow continuity
+        # framing: deliver the once-only fragment in user input on those models.
+        context_prefix = context_input.response.turn_fragment
+        if provider_system and not privileged:
+            context_prefix = provider_system + "\n\n" + context_prefix
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
             *(image_blocks or []),
-            BetaManagedAgentsTextBlockParam(type="text", text=user_message),
+            BetaManagedAgentsTextBlockParam(type="text", text=context_prefix + user_message),
         ]
         event: BetaManagedAgentsUserMessageEventParams = {
             "type": "user.message",
             "content": content,
         }
         batch: list[BetaManagedAgentsEventParams] = [event]
-        if system_blocks:
+        combined_system = list(system_blocks)
+        if provider_system and privileged:
+            combined_system.append({"type": "text", "text": provider_system})
+        if combined_system:
             # LAST, and immediately after the user.message: the live API
             # rejects the whole request otherwise (at most one per request,
             # must be final, must follow a user.message / tool result).
             system_event: BetaManagedAgentsSystemMessageEventParams = {
                 "type": "system.message",
-                "content": list(system_blocks),
+                "content": combined_system,
             }
             batch.append(system_event)
         async with send_guard() if send_guard is not None else contextlib.nullcontext():
@@ -787,6 +801,7 @@ async def run_turn(
             send_check_token = initial_send_check.set(before_send)
             try:
                 await io.send(batch)
+                context_input.accepted()
             except _anthropic.BadRequestError as err:
                 if _AWAITING_CONFIRMATIONS in str(err) and unwedge_attempts[0] == 0:
                     unwedge_attempts[0] += 1
@@ -918,10 +933,18 @@ async def run_turn(
             await abandon_native()
         return state
 
+    async def contextual_pump() -> TurnState:
+        nonlocal context_input
+        if context_hook is None:
+            return await pump()
+        async with context_hook.turn(session_id) as injection:
+            context_input = injection
+            return await pump()
+
     async def _run_leased() -> TurnState:
         assert persistence is not None
         try:
-            return await persistence.run(pump)
+            return await persistence.run(contextual_pump)
         except LeaseWaitCancelled:
             # Stopped while queued behind another turn: nothing was sent, so
             # this ends as an interrupt, like a Stop before the stream opens.
@@ -931,7 +954,7 @@ async def run_turn(
             await lifecycle.on_terminal_failure(queued_state, err)
             return queued_state
 
-    pump_coro = pump() if persistence is None else _run_leased()
+    pump_coro = contextual_pump() if persistence is None else _run_leased()
     if deadline is None:
         return await pump_coro
 
