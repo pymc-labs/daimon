@@ -379,6 +379,9 @@ next to their wake poller (Teams for its one organisation). Each poll claims `pe
   a server error or connection reset, including an uncertain response.
 - **The newest result only.** A new fire replaces whatever is still in the
   outbox, so a backlog never posts a run of stale results.
+- **Agent invoker roles.** An agent with `invoker_role_ids` cannot run routines,
+  including DM routines, even when the creator currently holds one of those
+  roles or is a server admin. These agents require a human invocation.
 - **Creator first.** Before resolving or sending anything, the poster reads
   the tenant access policy and checks the creator: if the policy cannot be
   read (`skipped/access_policy_unreadable`) or the creator may no longer

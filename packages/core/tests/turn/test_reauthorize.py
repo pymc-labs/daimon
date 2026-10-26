@@ -9,6 +9,7 @@ way an operator would in between, and asks `reauthorize` -- the check
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from daimon.core.access_policy import TenantAccessPolicy
@@ -368,3 +369,109 @@ async def test_admin_bypass_disabled_after_admission(
     await _set_policy(db_session, tenant, policy.model_copy(update={"invoker_admin_bypass": False}))
     with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
         await reauthorize(deps, admission)
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+@pytest.mark.parametrize("checkpoint", ["continuation", "queued_send", "tool_recheck"])
+async def test_agent_role_revoked_without_cache_invalidation_denies_every_recheck(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    is_admin: bool,
+    checkpoint: str,
+) -> None:
+    from dataclasses import replace
+
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.turn.admission import decide_before_send
+
+    tenant = await _seed_admittable_tenant(
+        db_session,
+        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+    )
+    facts = [Membership(is_member=True, role_ids=("123",), is_admin=is_admin)]
+    fresh: list[bool] = []
+
+    class Resolver(CachedMembershipResolver):
+        async def resolve(
+            self,
+            tenant_id: UUID,
+            guild_id: str,
+            user_id: str,
+            *,
+            require_fresh: bool = False,
+        ) -> Membership:
+            fresh.append(require_fresh)
+            return await super().resolve(tenant_id, guild_id, user_id, require_fresh=require_fresh)
+
+    async def fetch(*_args: object) -> Membership:
+        return facts[0]
+
+    deps = replace(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        membership_resolver=Resolver(fetch),
+    )
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="member-1",
+        channel_id="chan-1",
+        thread_id="thr-1",
+        now=_NOW,
+        requester_org=RequesterOrg.HOST,
+    )
+    assert admission.grant is not None
+    assert admission.grant.subject.role_ids == ("123",)
+    facts[0] = Membership(is_member=True, is_admin=is_admin)
+    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        if checkpoint == "queued_send":
+            await decide_before_send(deps, admission)()
+        elif checkpoint == "continuation":
+            await admit(
+                deps,
+                tenant_id=tenant.id,
+                platform="discord",
+                external_user_id="member-1",
+                channel_id="chan-1",
+                thread_id="thr-1",
+                now=_NOW,
+                requester_org=RequesterOrg.HOST,
+            )
+        else:
+            await reauthorize(deps, admission)
+    assert fresh[-1] is True
+
+
+async def test_agent_role_gate_denies_missing_resolver_on_new_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    from daimon.core.access_policy import AgentRule
+
+    tenant = await _seed_admittable_tenant(
+        db_session,
+        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+    )
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="member-1",
+            channel_id="chan-1",
+            now=_NOW,
+            requester_org=RequesterOrg.HOST,
+            role=Role.ADMIN,
+            role_ids=("123",),
+            verified_membership=True,
+        )

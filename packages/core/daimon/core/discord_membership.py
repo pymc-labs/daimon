@@ -106,6 +106,7 @@ class DiscordRestMembershipResolver(CachedMembershipResolver):
             return Membership(
                 is_member=True,
                 role_ids=roles,
+                is_bot=cast("dict[str, object]", user).get("bot", False) is not False,
                 is_admin=guild_data.get("owner_id") == user_id or bool(permissions & (8 | 32)),
             )
 

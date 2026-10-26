@@ -13,6 +13,7 @@ import discord
 def member_facts(member: discord.Member) -> Membership:
     return Membership(
         is_member=True,
+        is_bot=member.bot,
         role_ids=tuple(member_role_ids(member)),
         is_admin=is_member_guild_admin(member, guild_owner_id=member.guild.owner_id),
     )

@@ -623,6 +623,7 @@ class PermissionRuleRow(BaseModel):
     readers: ChannelReaders | None
     writers: ChannelWriters | None
     runs_in: list[str] | None
+    invoker_role_ids: list[str] = Field(default_factory=list, exclude_if=lambda value: not value)
     home: str | None
     """For an agent: the channel kept to its own agents it is one of."""
 
@@ -653,6 +654,7 @@ def permission_rule_rows(policy: TenantAccessPolicy) -> list[PermissionRuleRow]:
             writers=None,
             runs_in=None if rule.runs_in is None else list(rule.runs_in),
             home=agent_permissions(policy, (name,)).home,
+            invoker_role_ids=list(rule.invoker_role_ids),
         )
         for name, rule in sorted(policy.agent_rules.items())
     ]
@@ -665,7 +667,15 @@ def _print_rule_rows(console: Console, rows: list[PermissionRuleRow]) -> None:
         table.add_column(column)
     for row in rows:
         runs_in = "-" if row.runs_in is None else ", ".join(row.runs_in) or "nowhere"
-        cells = (row.kind, row.id, row.readers, row.writers, runs_in, row.home)
+        cells = (
+            row.kind,
+            row.id,
+            row.readers,
+            row.writers,
+            runs_in,
+            ", ".join(row.invoker_role_ids),
+            row.home,
+        )
         table.add_row(*(escape(cell or "-") for cell in cells))
     console.print(table)
 

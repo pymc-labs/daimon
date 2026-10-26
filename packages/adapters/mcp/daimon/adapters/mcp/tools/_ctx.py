@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import structlog
@@ -10,8 +11,9 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.adapters.mcp.tools._words import admin_noun, space_noun
+from daimon.core.access_policy import agent_invoker_roles
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
+from daimon.core.authz import Action, AgentRef, Surface, authorize
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.membership import MembershipResolver
@@ -140,7 +142,7 @@ async def _policy_gate(
     gated = any_agent_rules(policy) or any_own_readers(policy)
     # An isolated channel's own agent is charged to that channel, so the
     # names are read for a hub admin too while anything is isolated.
-    if agent_names is not None and gated and (not hub_admin or any_own_readers(policy)):
+    if agent_names is not None and gated:
         # Resolving the agent's names may await the network (an MA lookup);
         # read the policy again after it, so the pin is decided on the policy
         # as it is once every await is done, not as it was before the lookup.
@@ -161,7 +163,8 @@ async def _policy_gate(
         if live_subject is not None:
             hub_admin = pin_exempt and live_subject.is_admin
         gated = any_agent_rules(policy) or any_own_readers(policy)
-    is_discord = auth.platform == "discord" or bool(policy.invoker_role_ids)
+    role_gated = bool(agent_invoker_roles(policy, names))
+    is_discord = auth.platform == "discord" or bool(policy.invoker_role_ids) or role_gated
     is_admin = admin_now and not is_discord
     subject = mcp_subject(auth, is_admin=is_admin)
     if auth.platform_user_id is not None and is_discord:
@@ -173,31 +176,28 @@ async def _policy_gate(
                 membership_resolver,
                 tenant_id=auth.tenant_id,
                 user_id=auth.platform_user_id,
-                require_fresh=require_fresh,
+                require_fresh=require_fresh or role_gated,
                 action=DelegatedAction.HUB_PIN_EXEMPTION,
             )
         )
+    subject = replace(
+        subject,
+        client=auth.client,
+        via_agent_key=auth.is_external_agent,
+        is_admin=subject.is_admin and not auth.client,
+    )
     if live_subject is not None:
         hub_admin = pin_exempt and subject.is_admin
     decision = (
         authorize(
             policy,
-            subject=(
-                # The hub mounts a person's own agent identity, never an
-                # agent key; a demoted hub admin is held like any member.
-                build_subject(
-                    is_admin=False,
-                    platform_user_id=auth.platform_user_id,
-                )
-                if pin_exempt
-                else mcp_subject(auth, is_admin=subject.is_admin)
-            ),
+            subject=subject,
             action=Action.RUN_AGENT,
             surface=Surface.HUB if pin_exempt else Surface.AGENT_CHAT,
             agent=AgentRef.of(*names),
             place=mcp_place(auth),
         )
-        if agent_names is not None and gated and not hub_admin
+        if agent_names is not None and gated and (not hub_admin or role_gated)
         else None
     )
     if decision is not None and not decision:
@@ -210,6 +210,11 @@ async def _policy_gate(
             gate="channel_rule" if decision.reason == "own_agents_only" else "agent_rule",
         )
         refused(denial_termination_reason(decision.reason))
+        if decision.reason == "invoker_not_allowed":
+            raise ToolError(
+                f"TERMINAL ERROR: You aren't on this {space_noun(auth.platform)}'s list of "
+                f"people who can use daimon. {admin_noun(auth.platform).capitalize()} can add you."
+            )
         if decision.reason == "own_agents_only":
             raise ToolError(
                 "TERMINAL ERROR: This agent's key is bound to a channel kept to its own "

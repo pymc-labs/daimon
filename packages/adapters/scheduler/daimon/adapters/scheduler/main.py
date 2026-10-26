@@ -584,19 +584,17 @@ async def _build_fire(
                 # its pinned channels; `_check_agent_pin` refuses anything else
                 # at save time, and this holds for a pin added since. Isolation
                 # needs every name, so it waits for the resolved agent below.
-                if (
-                    policy_error is None
-                    and authorize(
+                if policy_error is None:
+                    initial = authorize(
                         policy,
                         subject=Subject(),
                         action=Action.RUN_AGENT,
                         surface=Surface.ROUTINE,
                         agent=AgentRef.of(row.agent_name),
                         place=Place(channel_id=target.channel_id if target is not None else None),
-                    ).reason
-                    == "runs_elsewhere"
-                ):
-                    policy_error = "runs_elsewhere"
+                    )
+                    if initial.reason in ("runs_elsewhere", "invoker_not_allowed"):
+                        policy_error = initial.reason
             if policy_error is not None:
                 log.info(
                     "routine.skipped.invoker_policy",

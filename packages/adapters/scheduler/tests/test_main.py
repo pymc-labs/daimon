@@ -3686,3 +3686,27 @@ async def test_thread_routine_checks_parent_and_retained_backend_before_anthropi
     )
     assert after.last_error == expected
     assert after.last_result_tail is None
+
+
+async def test_routine_cannot_fire_role_gated_agent_even_for_live_creator(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=True, role_ids=("123",), is_admin=True)
+
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=None,
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+        membership_resolver=CachedMembershipResolver(fetch),
+    )
+    assert not seen
+    assert after.last_error == "invoker_not_allowed"

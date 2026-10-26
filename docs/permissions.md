@@ -1,5 +1,33 @@
 # Permissions
 
+## Per-agent invoker roles
+
+An operator can restrict an individual agent to humans who currently hold at
+least one specified Discord role. The human must also pass the tenant's
+invoker policy. Server admins must hold a matching role too; the tenant's
+`invoker_admin_bypass` does not exempt them from an agent's role requirement.
+
+```sh
+daimon agents rule invoker-roles discord GUILD_ID AGENT_NAME --role ROLE_ID --role OTHER_ROLE_ID
+daimon agents rule invoker-roles discord GUILD_ID AGENT_NAME --clear
+daimon tenants access-policy rules discord GUILD_ID
+```
+
+The policy stores these roles as `agent_rules.AGENT_NAME.invoker_role_ids`.
+Role requirements are independent of `runs_in`; changing where an agent runs
+preserves its invoker roles. Each restriction on any of the agent's names must
+be satisfied. Empty roles leave the agent's existing admission behavior intact.
+Role IDs must be Discord snowflakes and cannot name `@everyone` (the guild ID).
+
+Membership is checked live when the target agent is selected, on continuations
+and queued sends, and at execution reauthorization. A revoked role or unavailable
+membership lookup refuses further work through the usual invoker refusal.
+Handoffs check the person requesting the switch against the destination agent;
+worker delegation and API/MCP chat also enforce the destination's requirement.
+Routines, scheduler jobs, bots and other non-human invocations cannot use an
+agent with this requirement. Roles are Discord-only: writers refuse setting
+this rule on Slack, Teams or CLI tenants, and unsupported membership fails closed.
+
 ## Approval gate overrides
 
 Approval gate overrides require live platform-admin authority. Delegated admins

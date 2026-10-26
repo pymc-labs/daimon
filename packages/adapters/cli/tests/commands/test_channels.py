@@ -719,3 +719,76 @@ async def test_rule_set_waits_for_the_copys_face(
     )
 
     assert awaited == [(tenant_id, "team-alpha", channels_mod.FACE_WAIT_S)]
+
+
+async def test_agent_invoker_roles_set_clear_and_spatial_edit_preserves_roles(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.cli.commands.channels import agents_rule_invoker_roles
+
+    tenant_id = await _isolatable(db_session_factory, "discord", GUILD)
+    rt = build_cli_runtime(
+        db_session_factory, anthropic=_ma(tenant_id, "shared"), settings=_isolate_settings()
+    )
+    await agents_rule_invoker_roles(
+        rt=rt,
+        console=_console(),
+        platform="discord",
+        workspace_id=GUILD,
+        agent_name="shared",
+        roles=["123"],
+    )
+    await agents_rule_set(
+        rt=rt,
+        console=_console(),
+        platform="discord",
+        workspace_id=GUILD,
+        agent_name="shared",
+        runs_in=[CHANNEL],
+    )
+    async with db_session_factory() as session:
+        rule = (await load_access_policy(session, tenant_id=tenant_id)).agent_rules["shared"]
+    assert rule == AgentRule(runs_in=(CHANNEL,), invoker_role_ids=("123",))
+    await agents_rule_set(
+        rt=rt,
+        console=_console(),
+        platform="discord",
+        workspace_id=GUILD,
+        agent_name="shared",
+        anywhere=True,
+    )
+    async with db_session_factory() as session:
+        rule = (await load_access_policy(session, tenant_id=tenant_id)).agent_rules["shared"]
+    assert rule == AgentRule(invoker_role_ids=("123",))
+    await agents_rule_invoker_roles(
+        rt=rt,
+        console=_console(),
+        platform="discord",
+        workspace_id=GUILD,
+        agent_name="shared",
+        clear=True,
+    )
+    async with db_session_factory() as session:
+        assert not (await load_access_policy(session, tenant_id=tenant_id)).agent_rules
+
+
+@pytest.mark.parametrize(
+    "platform,role", [("slack", "123"), ("teams", "123"), ("cli", "123"), ("discord", GUILD)]
+)
+async def test_agent_invoker_roles_cli_refuses_unsupported_platform_or_everyone(
+    platform: str,
+    role: str,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from daimon.adapters.cli.commands.channels import agents_rule_invoker_roles
+
+    with pytest.raises(typer.BadParameter):
+        await agents_rule_invoker_roles(
+            rt=MagicMock(),
+            console=_console(),
+            platform=platform,
+            workspace_id=GUILD,
+            agent_name="shared",
+            roles=[role],
+        )

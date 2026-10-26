@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve Discord request message and channel IDs in turn context, including every
   source of a merged queued request, so agents can cite the original messages.
 
+- Add optional per-agent Discord invoker roles, requiring current human role
+  membership even for server admins across chat, handoffs, MCP and workers.
+  Operators can set or clear them with `daimon agents rule invoker-roles`.
+
 - Let newly recognized platform admins connect GitHub repos without first sending
   a chat message to refresh their stored role. Delegated admins remain excluded.
 

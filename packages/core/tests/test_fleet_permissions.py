@@ -2210,3 +2210,19 @@ def test_a_worker_keeps_its_description_wherever_the_provider_has_one(backend, k
     spec = root.spec.model_copy(update={"description": "A saved agent people pick by name."})
     resolved = resolve_worker_spec(root, spec, policy=POLICY, now=NOW)
     assert resolved.spec.description == (spec.description if kept else None)
+
+
+@pytest.mark.parametrize("admin", [False, True])
+def test_worker_delegation_into_role_gated_target_requires_human_role(admin: bool) -> None:
+    root = parent()
+    root = replace(
+        root, subject=Subject(platform_user_id="user", is_admin=admin, verified_membership=True)
+    )
+    policy = TenantAccessPolicy(agent_rules={"target": AgentRule(invoker_role_ids=("123",))})
+    target = root.spec.model_copy(update={"name": "target"})
+    with pytest.raises(WorkerSpecRefused, match="invoker_not_allowed"):
+        resolve(root, target, policy=policy)
+    allowed = replace(
+        root, subject=Subject(platform_user_id="user", verified_membership=True, role_ids=("123",))
+    )
+    assert resolve(allowed, target, policy=policy).spec.name == "target"

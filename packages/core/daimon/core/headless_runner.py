@@ -493,6 +493,15 @@ async def run_turn_impl(
                 )
             )
         )
+        if session_factory is not None and tenant_id is not None:
+            from daimon.core.access_policy import agent_invoker_roles
+            from daimon.core.authz import build_agent_ref
+            from daimon.core.turn.errors import AdmissionDenied
+
+            async with session_factory() as db:
+                access = await policy_store.load_access_policy(db, tenant_id=tenant_id)
+            if agent_invoker_roles(access, build_agent_ref(agent.name, agent.metadata).names):
+                raise AdmissionDenied(reason="invoker_not_allowed")
         environment = sdk_environment(
             await legacy_call(
                 backend.environments.retrieve(
@@ -979,6 +988,18 @@ async def run_worker(
                 deps.sessionmaker() as db,
             ):
                 policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
+            if any(rule.invoker_role_ids for rule in policy.agent_rules.values()):
+                from daimon.core.membership_subject import resolve_subject
+
+                if parent.subject.platform_user_id is not None:
+                    live = await resolve_subject(
+                        deps.sessionmaker,
+                        deps.membership_resolver,
+                        tenant_id=request.tenant_id,
+                        user_id=parent.subject.platform_user_id,
+                        require_fresh=True,
+                    )
+                    parent = replace(parent, subject=live)
             source_request = replace(request, scope=parent.fleet.scope, source=None, worker=None)
             async with _worker_stage(worker, "source", setup_at=setup_at):
                 source = await capture_preparation_source(source_request)

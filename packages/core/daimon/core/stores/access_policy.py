@@ -143,7 +143,11 @@ async def _roles_supported(
     session: AsyncSession, tenant_id: uuid.UUID, policy: TenantAccessPolicy
 ) -> bool:
     """Role access needs a Discord tenant and never names @everyone (the guild id)."""
-    role_ids = (*policy.invoker_role_ids, *policy.internal_role_ids)
+    role_ids = (
+        *policy.invoker_role_ids,
+        *policy.internal_role_ids,
+        *(role for rule in policy.agent_rules.values() for role in rule.invoker_role_ids),
+    )
     if not role_ids:
         return True
     tenant = await session.get(Tenant, tenant_id)

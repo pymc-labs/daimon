@@ -335,6 +335,7 @@ async def _hand_off_task_impl(
                 default=runtime.deployment_default,
                 now=datetime.now(UTC),
                 recorded=recorded,
+                membership_resolver=runtime.membership_resolver,
             )
             if switch != "commit":
                 # After the decision, so authorization speaks first; raising rolls it

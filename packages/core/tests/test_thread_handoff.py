@@ -630,3 +630,53 @@ async def test_racing_button_clickers_switch_once_and_queue_no_continuation(
             )
             == []
         )
+
+
+async def test_handoff_role_gate_fetches_target_invoker_membership_before_binding(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="111")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            agent_rules={"research-bot": AgentRule(invoker_role_ids=("123",))}
+        ),
+    )
+    await db_session.commit()
+    facts = [Membership(is_member=True, is_admin=True)]
+
+    async def fetch(*_args: object) -> Membership:
+        return facts[0]
+
+    resolver = CachedMembershipResolver(fetch)
+    async with db_session_factory() as session:
+        with pytest.raises(ThreadHandoffRefused) as exc:
+            await hand_over_thread(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C1",
+                thread_id="T1",
+                caller=_caller(admin=True),
+                destination=_RESEARCH,
+                current_responder_ma_agent_id="agt_daimon",
+                default=_DEFAULT,
+                now=_NOW,
+                membership_resolver=resolver,
+            )
+        assert exc.value.refusal.reason == "invoker_not_allowed"
+        assert (
+            await get_binding(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C1",
+                thread_id="T1",
+            )
+            is None
+        )

@@ -45,13 +45,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 import anthropic as anthropic_pkg
 import structlog
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import (
@@ -73,6 +73,8 @@ from daimon.core.continuity.handoff import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
+from daimon.core.membership import MembershipResolver
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.scope import DeploymentDefault, ScopeContext
@@ -291,6 +293,7 @@ async def hand_over_thread(
     default: DeploymentDefault,
     now: datetime,
     recorded: Sequence[RecordedSession] | None = None,
+    membership_resolver: MembershipResolver | None = None,
 ) -> ThreadAgentBindingRow:
     """Decide the switch on the policy as it is now, then bind the thread to `destination`.
 
@@ -326,6 +329,20 @@ async def hand_over_thread(
         session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
     )
     subject = await _subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
+    if (
+        agent_invoker_roles(policy, destination.agent.names)
+        and subject.platform_user_id is not None
+    ):
+        subject = await resolve_subject(
+            async_sessionmaker(bind=session.bind),
+            membership_resolver,
+            tenant_id=tenant_id,
+            user_id=subject.platform_user_id,
+            require_fresh=True,
+            session=session,
+            action=DelegatedAction.ROUTING,
+        )
+        subject = replace(subject, via_agent_key=caller.via_agent_key)
     reachable = await is_agent_reachable_in_tenant(
         session, tenant_id=tenant_id, agent_name=destination.name, default=default
     )
@@ -464,6 +481,7 @@ async def switch_thread_on_request(
     default: DeploymentDefault,
     channel: str,
     now: datetime,
+    membership_resolver: MembershipResolver | None = None,
 ) -> SwitchOutcome:
     """The hand-over button: switch this thread to `ma_agent_id` for the person who clicked.
 
@@ -537,6 +555,7 @@ async def switch_thread_on_request(
                 default=default,
                 now=now,
                 recorded=recorded,
+                membership_resolver=membership_resolver,
             )
     except ThreadHandoffRefused as refused:
         if refused.refusal.authz_reason is not None:

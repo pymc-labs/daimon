@@ -156,3 +156,28 @@ async def test_admin_bypass_old_row_and_durable_switch(db_session: AsyncSession)
     await set_access_policy(db_session, tenant_id=tenant.id, policy=updated)
     db_session.expire_all()
     assert await load_access_policy(db_session, tenant_id=tenant.id) == updated
+
+
+async def test_agent_invoker_roles_roundtrip(db_session: AsyncSession) -> None:
+    from daimon.core.access_policy import AgentRule
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="111")
+    policy = TenantAccessPolicy(agent_rules={"restricted": AgentRule(invoker_role_ids=("123",))})
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+    assert await load_access_policy(db_session, tenant_id=tenant.id) == policy
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams", "cli", "discord"])
+async def test_agent_invoker_roles_writer_rejects_platform_and_everyone(
+    db_session: AsyncSession,
+    platform: str,
+) -> None:
+    from typing import cast
+
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.stores.domain import Platform
+
+    tenant = await make_tenant(db_session, platform=cast(Platform, platform), workspace_id="111")
+    policy = TenantAccessPolicy(agent_rules={"restricted": AgentRule(invoker_role_ids=("111",))})
+    with pytest.raises(ValueError, match="Discord"):
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)

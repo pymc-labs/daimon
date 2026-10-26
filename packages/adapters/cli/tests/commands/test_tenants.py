@@ -1044,3 +1044,12 @@ def test_access_policy_help_states_operator_boundary_for_all_role_mutations(flag
     )
     assert isinstance(option, Option)
     assert "Operator-only" in (option.help or "")
+
+
+def test_policy_rule_display_includes_agent_invoker_roles() -> None:
+    from daimon.adapters.cli.commands.tenants import permission_rule_rows
+
+    policy = TenantAccessPolicy(agent_rules={"restricted": AgentRule(invoker_role_ids=("123",))})
+    [row] = permission_rule_rows(policy)
+    assert row.model_dump()["invoker_role_ids"] == ["123"]
+    assert row.runs_in is None

@@ -161,6 +161,24 @@ async def gate_session_snapshot(
     off. A refusal or a failed update raises, so the send never happens on an
     ungated session. An `entry_point` of None gets no built-ins and no skills.
     """
+    if (
+        entry_point in ("routine", "cli_run", "long_job")
+        and session_factory is not None
+        and tenant_id is not None
+    ):
+        from daimon.core.access_policy import agent_invoker_roles
+        from daimon.core.authz import build_agent_ref
+        from daimon.core.mux_compat import retrieve_agent
+        from daimon.core.stores.access_policy import load_access_policy
+        from daimon.core.turn.errors import AdmissionDenied
+
+        async with session_factory() as db:
+            access = await load_access_policy(db, tenant_id=tenant_id)
+        if any(rule.invoker_role_ids for rule in access.agent_rules.values()):
+            target = await retrieve_agent(client, session.agent.id, scope=scope)
+            ref = build_agent_ref(target.name, target.metadata, session.agent.name)
+            if agent_invoker_roles(access, ref.names):
+                raise AdmissionDenied(reason="invoker_not_allowed")
     allowed = capability_policy(entry_point, routine_sandbox_tools=routine_sandbox_tools)
     constrained = await constrain_capabilities(
         session,

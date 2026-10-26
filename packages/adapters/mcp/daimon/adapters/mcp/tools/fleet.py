@@ -412,6 +412,26 @@ class HostFleetToolService:
             or caller.agent_id is not None
         ):
             raise ToolError("Fleet orchestration refused: caller_root_mismatch.")
+        if any(rule.invoker_role_ids for rule in policy.agent_rules.values()):
+            from daimon.core.membership_subject import resolve_subject
+
+            runtime = self._runtime
+            deps = self._deps
+            if runtime is not None:
+                sessions, resolver = runtime.session_factory, runtime.membership_resolver
+            elif deps is not None:
+                sessions, resolver = deps.sessionmaker, deps.membership_resolver
+            else:
+                return parent, policy
+            if caller.platform_user_id is not None:
+                live = await resolve_subject(
+                    sessions,
+                    resolver,
+                    tenant_id=caller.tenant_id,
+                    user_id=caller.platform_user_id,
+                    require_fresh=True,
+                )
+                parent = replace(parent, subject=live)
         return parent, policy
 
     async def spawn(

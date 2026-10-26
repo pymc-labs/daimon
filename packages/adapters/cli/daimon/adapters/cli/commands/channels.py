@@ -41,6 +41,7 @@ from daimon.core.channel_rules import (
     ChannelRuleRefused,
     as_readers,
     as_writers,
+    set_agent_invoker_roles,
     set_agent_rule,
     set_category_rule,
     set_channel_rule,
@@ -1051,3 +1052,65 @@ async def agents_rule_set(
         console.print(f"[red]{escape(str(exc))} Nothing was changed.[/red]")
         raise typer.Exit(1) from exc
     console.print(f"{platform}:{workspace_id} {escape(' '.join(change.notes))}")
+
+
+@agent_rule_app.command("invoker-roles")
+def agents_rule_invoker_roles_command(
+    platform: str,
+    workspace_id: str,
+    agent_name: str,
+    role: Annotated[
+        list[str] | None, typer.Option("--role", help="Allowed Discord role (repeatable).")
+    ] = None,
+    clear: Annotated[
+        bool, typer.Option("--clear", help="Clear the agent invoker role requirement.")
+    ] = False,
+) -> None:
+    """Require live human Discord roles to invoke an agent, including for server admins."""
+    console = Console(highlight=False)
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            await agents_rule_invoker_roles(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace_id=workspace_id,
+                agent_name=agent_name,
+                roles=role,
+                clear=clear,
+            )
+
+    run_cli(run(), console=console)
+
+
+async def agents_rule_invoker_roles(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    workspace_id: str,
+    agent_name: str,
+    roles: list[str] | None = None,
+    clear: bool = False,
+) -> None:
+    from daimon.core.access_policy import is_discord_snowflake
+
+    if platform != "discord":
+        raise typer.BadParameter("agent invoker roles are supported only for Discord")
+    if (roles is not None) == clear or roles == []:
+        raise typer.BadParameter("pass --role or --clear")
+    cleaned = tuple(value.strip() for value in roles or ())
+    if any(not is_discord_snowflake(value) or value == workspace_id for value in cleaned):
+        raise typer.BadParameter("expected Discord role snowflakes excluding @everyone (guild id)")
+    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
+    await set_agent_invoker_roles(
+        rt.anthropic,
+        rt.sessionmaker,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent_name=agent_name.strip(),
+        role_ids=cleaned,
+        subject=Subject(is_admin=True),
+    )
+    console.print(f"{platform}:{workspace_id} {escape(agent_name)} invoker roles updated.")
