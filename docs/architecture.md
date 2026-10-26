@@ -1149,9 +1149,10 @@ Connections are reused and idle connections are kept for 240 s. A late provider
 call or configuration read finishes in the background and its result is discarded,
 letting the connection warm for later turns. The first turn after a cold start or
 long idle usually gets no context. Each owner retains at most eight late calls;
-additional late calls are cancelled. HTTP calls have a five-second wall-clock cap;
-configuration reads use the database session's own timeout. Cancelling the parent
-turn still cancels its pending work.
+additional late calls are cancelled. These eight slots are shared across tenants
+on an owner in the process. Provider calls and configuration reads have the same
+five-second wall-clock cap. Cancelling the parent turn still cancels its pending
+work.
 
 The turn fragment precedes user input. The once-only system fragment joins the
 system message, or precedes user input on models without system-message support.

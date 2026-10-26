@@ -14,8 +14,8 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core.authz import Subject
 from daimon.core.context_provider import (
+    DETACHED_CALL_TIMEOUT_SECONDS,
     MAX_DETACHED_CALLS,
-    PROVIDER_REQUEST_TIMEOUT_SECONDS,
     ContextProviders,
     ContextRequest,
     ContextResponse,
@@ -255,6 +255,63 @@ async def test_late_provider_warms_next_turn_without_acknowledging() -> None:
     assert state.hashes and state.system_received
 
 
+async def test_late_completion_during_next_turn_lock_does_not_acknowledge() -> None:
+    release = asyncio.Event()
+    fixture = FixtureProvider(FIXTURE, tenant_id=str(TENANT))
+    calls = 0
+
+    async def provider(config, request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await release.wait()
+        return await fixture(config, request)
+
+    async def short(request):
+        return LoadedProvider(CONFIG.model_copy(update={"timeout_ms": 20}), "fixture-server")
+
+    owner = ContextProviders(provider=provider)
+    async with owner.turn(REQUEST, short) as late:
+        assert late.response == ContextResponse()
+    pending = tuple(owner._detached)
+    assert len(pending) == 1
+    state = next(iter(owner.sessions.values()))
+    async with owner.turn(REQUEST, short) as current:
+        assert state.lock.locked()
+        assert current.response.cards and current.response.system_fragment
+        release.set()
+        await asyncio.gather(*pending)
+        assert state.lock.locked()
+        assert not state.hashes and not state.system_received
+        late.accepted()
+        assert not state.hashes and not state.system_received
+        current.accepted()
+        assert state.hashes == {card.id: card.hash for card in current.response.cards}
+        assert state.system_received
+    assert not state.lock.locked() and not owner._detached
+
+
+async def test_detached_hung_config_read_expires_and_frees_slot(monkeypatch) -> None:
+    from daimon.core import context_provider as context_module
+
+    monkeypatch.setattr(context_module, "DETACHED_CALL_TIMEOUT_SECONDS", 0.05)
+    cancelled = asyncio.Event()
+
+    async def hung_loader(request):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    owner = ContextProviders(provider=lambda *_: None)
+    with pytest.raises(TimeoutError):
+        await context_module._bounded(hung_loader(REQUEST), 0.01, owner._detached)
+    assert len(owner._detached) == 1
+    results = await asyncio.wait_for(asyncio.gather(*owner._detached, return_exceptions=True), 1)
+    assert len(results) == 1 and isinstance(results[0], TimeoutError)
+    assert cancelled.is_set() and not owner._detached
+
+
 async def test_detached_cap_cancels_extra_late_provider() -> None:
     release = asyncio.Event()
     cancelled = []
@@ -372,18 +429,28 @@ async def test_provider_http_has_a_wall_clock_cap(monkeypatch) -> None:
     def handle(request):
         return httpx.Response(200, stream=SlowStream())
 
-    monkeypatch.setattr(context_module, "PROVIDER_REQUEST_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(context_module, "DETACHED_CALL_TIMEOUT_SECONDS", 0.05)
     provider = McpProvider(httpx.MockTransport(handle))
+    owner = ContextProviders(provider=provider)
+
+    async def short(request):
+        return LoadedProvider(
+            CONFIG.model_copy(
+                update={"endpoint": "https://provider.invalid/mcp", "timeout_ms": 10}
+            ),
+            "fixture-server",
+        )
+
     try:
-        outer = asyncio.timeout(1)
-        async with outer:
-            with pytest.raises(TimeoutError):
-                await provider(
-                    CONFIG.model_copy(update={"endpoint": "https://provider.invalid/mcp"}),
-                    REQUEST,
-                )
-        assert not outer.expired()
+        async with owner.turn(REQUEST, short) as result:
+            assert result.response == ContextResponse()
+        assert len(owner._detached) == 1
+        results = await asyncio.wait_for(
+            asyncio.gather(*owner._detached, return_exceptions=True), 1
+        )
+        assert len(results) == 1 and isinstance(results[0], TimeoutError)
         assert cancelled.is_set()
+        assert not owner._detached
     finally:
         await provider.aclose()
 
@@ -847,7 +914,7 @@ async def test_mcp_reuses_one_client_and_passes_independent_http_timeout(monkeyp
                 REQUEST,
             )
             assert provider.client is client
-            assert requests[-1].extensions["timeout"]["read"] == PROVIDER_REQUEST_TIMEOUT_SECONDS
+            assert requests[-1].extensions["timeout"]["read"] == DETACHED_CALL_TIMEOUT_SECONDS
         assert len(requests) == 2
         assert not client.follow_redirects
     finally:

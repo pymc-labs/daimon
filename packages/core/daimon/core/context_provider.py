@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from ssl import SSLContext
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol
 
 import httpx
 import structlog
@@ -25,7 +25,7 @@ log = structlog.get_logger(__name__)
 MAX_RESPONSE_BYTES = 65_536
 # Expire idle connections before the provider's 300-second keep-alive.
 KEEPALIVE_EXPIRY_SECONDS = 240
-PROVIDER_REQUEST_TIMEOUT_SECONDS = 5.0
+DETACHED_CALL_TIMEOUT_SECONDS = 5.0
 MAX_DETACHED_CALLS = 8
 
 
@@ -144,17 +144,13 @@ class McpProvider:
                 "arguments": request.model_dump(mode="json"),
             },
         }
-        # Bound the entire stream as well as individual HTTP phases.
-        async with (
-            asyncio.timeout(PROVIDER_REQUEST_TIMEOUT_SECONDS),
-            self.client.stream(
-                "POST",
-                config.endpoint,
-                headers=headers,
-                json=body,
-                timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS,
-            ) as reply,
-        ):
+        async with self.client.stream(
+            "POST",
+            config.endpoint,
+            headers=headers,
+            json=body,
+            timeout=DETACHED_CALL_TIMEOUT_SECONDS,
+        ) as reply:
             reply.raise_for_status()
             raw = bytearray()
             async for chunk in reply.aiter_bytes():
@@ -222,18 +218,19 @@ class LoadedProvider:
 ConfigLoader = Callable[[ContextRequest], Awaitable[LoadedProvider | None]]
 
 
-async def _bounded[T](
-    call: Awaitable[T], seconds: float, detached: set[asyncio.Future[object]]
-) -> T:
-    task = asyncio.ensure_future(call)
+async def _bounded[T](call: Awaitable[T], seconds: float, detached: set[asyncio.Future[Any]]) -> T:
+    async def _capped() -> T:
+        # Bound config reads and the whole provider call, including late work.
+        async with asyncio.timeout(DETACHED_CALL_TIMEOUT_SECONDS):
+            return await call
+
+    task = asyncio.ensure_future(_capped())
     try:
         done, _ = await asyncio.wait({task}, timeout=max(0, seconds))
         if not done:
             if len(detached) < MAX_DETACHED_CALLS:
-                # Retained only for lifetime tracking; its result is never changed.
-                retained = cast(asyncio.Future[object], task)
-                detached.add(retained)
-                retained.add_done_callback(detached.discard)
+                detached.add(task)
+                task.add_done_callback(detached.discard)
                 task.add_done_callback(_consume_task)
             raise TimeoutError
         if task.cancelled():
@@ -255,7 +252,7 @@ class ContextProviders:
 
     def __init__(self, *, provider: Provider | None = None, max_sessions: int = 1024) -> None:
         self.provider = provider or McpProvider()
-        self._detached: set[asyncio.Future[object]] = set()
+        self._detached: set[asyncio.Future[Any]] = set()
         self.max_sessions = max_sessions
         self.sessions: OrderedDict[tuple[uuid.UUID, str, str, str], SessionContext] = OrderedDict()
 
