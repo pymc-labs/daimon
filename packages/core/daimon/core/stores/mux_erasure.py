@@ -33,17 +33,25 @@ The fence
 ---------
 Every writer of an account's private mux state calls `fence_writers` first. It takes the
 account's advisory lock *shared* (`lock_account` is the exclusive side, held by purge for
-its whole transaction), then refuses an account found in `erased_account`. A write that
-began before the erasure therefore finishes first and is erased with the rest; one that
-begins after it is refused. Lock order, in every transaction that uses it:
+its whole transaction), then refuses an account found in `erased_account`; an operation's
+principal is fenced the same way against `erased_principal`. A write that began before
+the erasure therefore finishes first and is erased with the rest; one that begins after
+it is refused. Lock order, in every transaction that uses it:
 
 1. the account advisory lock (shared for writers, exclusive for purge and the
    self-hosted resource writers);
-2. tenant-level locks (self-hosted resources);
-3. row locks (slot, lease, operation, journal head, observation advisory lock).
+2. the principal advisory locks, in id order;
+3. tenant-level locks (self-hosted resources);
+4. row locks (slot, lease, operation, journal head, observation advisory lock).
 
-Purge takes (1) first and deletes children before parents, so it never waits on a row
-lock held by a writer that has not yet taken (1).
+Purge takes (1) and (2) first and deletes children before parents, so it never waits on a
+row lock held by a writer that has not yet taken them. A caller therefore takes the
+fence before it locks any row it later hands to a store, and does its reads and writes
+in the one transaction that holds it (see `thread_release.apply_thread_release`):
+a second transaction asking for the fence queues behind a waiting purge.
+
+Writers that predate the fence are held to the same rule by database triggers
+(`daimon.core._erasure_guards`, installed by migration 0142).
 
 A shared lease, shared slot or tenant-owned operation names no account, so it is never
 fenced; neither is an account id that is not a UUID (synthetic and operator identities).
@@ -60,6 +68,7 @@ from daimon.core._models import (
     AccountingBindingContext,
     AccountingOutbox,
     ErasedAccount,
+    ErasedPrincipal,
     Journal,
     JournalSession,
     MuxOperation,
@@ -100,13 +109,13 @@ JSON_OWNERSHIP_FIELDS: dict[str, str] = {
     "operation.record['slot']['account_id']": (
         "NULL means the operation ran against a shared slot, which is kept"
     ),
-    "journal_session.projection['session']['account_id']": "erased with the journal session",
-    "journal.event": "no participant field; erased with the journal session of a private slot",
+    "journal_session.projection['session']['account_id']": "erased with the conversation head",
+    "journal.event": "no participant field; erased with the head of a private conversation",
     "usage_observation.applied['observation']['session']['account_id']": (
-        "financial evidence, retained; settlement compares whole session refs"
+        "financial evidence, retained; settlement compares whole resource refs"
     ),
     "accounting_outbox.row['observation']['session']['account_id']": (
-        "financial evidence, retained; settlement compares whole session refs"
+        "financial evidence, retained; settlement compares whole resource refs"
     ),
 }
 """Every JSON path that can name an account, and why none of them is searched.
@@ -117,7 +126,7 @@ TABLE_DISPOSITIONS: dict[str, str] = {
     "provider_binding_slot": "erased when account_id is the account; shared (NULL) kept",
     "provider_binding": "erased with a private slot (every generation)",
     "journal_session": "erased with a private slot, with its projection",
-    "journal": "erased with a private slot's journal sessions",
+    "journal": "erased with the heads of a private slot's conversations",
     "thread_lease": "erased by account_id",
     "thread_provider_release": "erased by account_id",
     "operation": (
@@ -128,6 +137,7 @@ TABLE_DISPOSITIONS: dict[str, str] = {
     "accounting_outbox": "retained financial evidence, detached from the slot",
     "accounting_binding_context": "the profile and channel settlement reads; no personal data",
     "erased_account": "the fence; a bare account id",
+    "erased_principal": "the fence for operations keyed by principal; bare ids",
     "channel_config_revision": "tenant-owned channel configuration, not a person's data",
 }
 """Disposition of every mux table, checked against the schema by the privacy tests."""
@@ -335,6 +345,12 @@ async def erase(
     """
     key = _account_key(account_id)
     principals = {str(principal) for principal in principal_ids}
+    # Writers that act for a principal lock it after the account; so does purge.
+    for principal in sorted(principals):
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:principal, 0))"),
+            {"principal": principal},
+        )
     await _detach_accounting(session, key)
     events = await _delete(
         session, delete(Journal).where(Journal.session_id.in_(_private_session_ids(key)))
@@ -369,14 +385,19 @@ async def erase(
     )
 
 
-async def mark_erased(session: AsyncSession, *, account_id: uuid.UUID) -> None:
-    """Record the account as erased, so a stale writer is refused from now on."""
+async def mark_erased(
+    session: AsyncSession, *, account_id: uuid.UUID, principal_ids: Iterable[uuid.UUID]
+) -> None:
+    """Record the account and its principals as erased, so a stale writer is refused."""
     await session.execute(
         insert(ErasedAccount).values(account_id=account_id).on_conflict_do_nothing()
     )
+    rows = [{"principal_id": principal, "account_id": account_id} for principal in principal_ids]
+    if rows:
+        await session.execute(insert(ErasedPrincipal).values(rows).on_conflict_do_nothing())
 
 
-def _account_uuid(value: str | None) -> uuid.UUID | None:
+def _uuid_or_none(value: str | None) -> uuid.UUID | None:
     if value is None:
         return None
     try:
@@ -385,20 +406,37 @@ def _account_uuid(value: str | None) -> uuid.UUID | None:
         return None
 
 
-async def fence_writers(session: AsyncSession, *account_ids: str | None) -> None:
-    """Refuse a write for an erased account; otherwise hold off any erasure until commit.
+async def _lock_shared(session: AsyncSession, subject: uuid.UUID) -> None:
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:subject, 0))"),
+        {"subject": str(subject)},
+    )
+
+
+async def fence_writers(
+    session: AsyncSession,
+    *account_ids: str | None,
+    principal_ids: Iterable[str | None] = (),
+) -> None:
+    """Refuse a write for an erased account or principal; else hold off erasure until commit.
 
     Call it before the write takes any other lock. Pass every account the write acts
-    for: the owner of a private slot, the scope's caller. Ids that are not UUIDs, and
-    None (a shared slot), are skipped.
+    for (the owner of a private slot, the scope's caller) and, for an operation, its
+    principal. Ids that are not UUIDs (the operator, `selfhosted-billing:` identities,
+    `host:` principals) and None (a shared slot) are skipped. Accounts are locked before
+    principals, each in id order, which is the order purge takes them.
     """
-    accounts = sorted({account for value in account_ids if (account := _account_uuid(value))})
+    accounts = sorted({found for value in account_ids if (found := _uuid_or_none(value))})
     for account in accounts:
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:account_id, 0))"),
-            {"account_id": str(account)},
-        )
+        await _lock_shared(session, account)
         if await session.scalar(
             select(ErasedAccount.account_id).where(ErasedAccount.account_id == account)
         ):
             raise ScopeViolation(str(account), "the account was erased")
+    principals = sorted({found for value in principal_ids if (found := _uuid_or_none(value))})
+    for principal in principals:
+        await _lock_shared(session, principal)
+        if await session.scalar(
+            select(ErasedPrincipal.principal_id).where(ErasedPrincipal.principal_id == principal)
+        ):
+            raise ScopeViolation(str(principal), "the account was erased")

@@ -615,7 +615,9 @@ async def purge_account(
             else 0
         )
         if account_count or mux_erased.total or mux_retained.total:
-            await mux_erasure_store.mark_erased(session, account_id=account_id)
+            await mux_erasure_store.mark_erased(
+                session, account_id=account_id, principal_ids=principal_ids
+            )
         db_report = report.merge(
             PurgeReport(
                 mux_slots=mux_erased.slots,

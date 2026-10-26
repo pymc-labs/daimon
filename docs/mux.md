@@ -674,11 +674,26 @@ imports), usage recording and release requests call `mux_erasure.fence_writers`
 first. It takes the account's advisory lock shared; purge holds the same lock
 exclusive for its whole transaction, so a write either finishes before the purge and
 is erased with the rest, or starts after it and is refused (`ScopeViolation`, "the
-account was erased") because the account is in `erased_account`. Lock order in a
-transaction: the account lock, then tenant-level locks, then row locks. Shared slots,
-other accounts, ids that are not account UUIDs (operator and billing identities) and
-the in-memory store are never fenced. A turn still running when its account is erased
-fails at its next write; its usage after that point is not recorded.
+account was erased") because the account is in `erased_account`. An operation is also
+fenced by its principal (`erased_principal`, with the purge locking each principal after
+the account), and usage and journal writes by the account named on the session they
+write to, so an erased caller cannot write into a shared conversation either.
+Lock order in a transaction: the account lock, then the principal locks, then
+tenant-level locks, then row locks. A caller that holds a row it later hands to a store
+must take the fence first and do its work in one transaction, as
+`thread_release.apply_thread_release` does against the Postgres store; a second
+transaction asking for the fence queues behind a waiting purge.
+
+Migration 0142 also installs triggers on the slot, lease, release-request, operation and
+usage-observation tables that apply the same rule in the database: an old process that
+is still running while the migration is applied cannot recreate an erased account's slot,
+lease, operation or usage row either, and its writes wait for a running purge the same
+way. Account and principal ids are random and never reused, so a returning person is
+unaffected. A write into a shared conversation's journal names no account in its row,
+so that one rule is enforced only by the application. Shared slots, other accounts, ids
+that are not UUIDs (operator and billing identities, `host:` principals) and the
+in-memory store are never fenced. A turn still running when its account is erased fails
+at its next write; its usage after that point is not recorded.
 
 `thread_sessions`, the legacy mapping, is outside this inventory.
 

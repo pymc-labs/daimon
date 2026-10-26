@@ -92,6 +92,9 @@ _ALLOWED_TEXT: dict[tuple[str, str], str] = {
     ("packages/core/daimon/core/anthropic_spend.py", "You have reached your specified"): (
         "the provider's own error text, matched as it is"
     ),
+    ("packages/core/daimon/core/_erasure_guards.py", "mux_account_erased(NEW.applied"): (
+        "SQL naming a JSON key of a stored usage record; never shown"
+    ),
     ("packages/core/daimon/core/ma.py", "Refusing to empty"): (
         "an operator's refusal about a Managed Agents workspace"
     ),

@@ -516,7 +516,12 @@ async def begin_operation(
             slot=slot,
         )
 
-    await mux_erasure.fence_writers(session, scope.account_id, slot.account_id if slot else None)
+    await mux_erasure.fence_writers(
+        session,
+        scope.account_id,
+        slot.account_id if slot else None,
+        principal_ids=(scope.principal_id,),
+    )
     begun = decide(await _operation(session, scope, key, lock=True))
     if not begun.fresh:
         return begun
@@ -564,7 +569,7 @@ async def claim_send(
     clock: Clock,
     fence: Lease | None,
 ) -> OperationRecord:
-    await mux_erasure.fence_writers(session, scope.account_id)
+    await mux_erasure.fence_writers(session, scope.account_id, principal_ids=(scope.principal_id,))
     record = await _owned(session, scope, key)
     await _check_fence(session, record.slot, fence, clock)
     claimed = operations.claim(record, now=now)
@@ -586,7 +591,7 @@ async def advance_operation(
     expected_status: OperationStatus | None = None,
     expected_updated_at: datetime | None = None,
 ) -> OperationRecord:
-    await mux_erasure.fence_writers(session, scope.account_id)
+    await mux_erasure.fence_writers(session, scope.account_id, principal_ids=(scope.principal_id,))
     record = await _owned(session, scope, key)
     await _check_fence(session, record.slot, fence, clock)
     # Under the row lock `_owned` took, so the expected-state check is atomic.
@@ -741,7 +746,8 @@ async def record_usage(
     owner = await _session_owner(session, observation.session.id)
     if owner is None or owner[0] != binding_id:
         raise ScopeViolation(binding_id, "binding does not own the observed session")
-    await mux_erasure.fence_writers(session, owner[1].account_id)
+    # A shared slot names no owner: the observed session's account is who wrote.
+    await mux_erasure.fence_writers(session, owner[1].account_id, observation.session.account_id)
     tenant_id = _tenant(owner[1].tenant_id)
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),

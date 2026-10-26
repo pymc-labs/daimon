@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 DETACHED = ("usage_observation", "accounting_outbox")
-NEW_TABLES = ("accounting_binding_context", "erased_account")
+NEW_TABLES = ("accounting_binding_context", "erased_account", "erased_principal")
 
 
 def migration() -> ModuleType:

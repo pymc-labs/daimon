@@ -12,7 +12,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from daimon.core import _erasure_guards
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -29,6 +31,7 @@ from sqlalchemy import (
     SmallInteger,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -3835,6 +3838,23 @@ class AccountingBindingContext(Base):
     profiles: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
 
 
+class ErasedPrincipal(Base):
+    """A principal of an erased account: the fence for operations keyed by principal.
+
+    An operation is found by account but owned by a principal, and erasure removes the
+    ones owned by the account's principals, so a stale scope naming such a principal is
+    refused as well (see `ErasedAccount`).
+    """
+
+    __tablename__ = "erased_principal"
+
+    principal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    erased_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ErasedAccount(Base):
     """An account that was erased: the durable half of the mux writer fence.
 
@@ -4125,3 +4145,18 @@ class SelfHostedResourceOperation(Base):
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now() + interval '7 days'")
     )
+
+
+def _install_erased_account_guards() -> None:
+    """Create the guards (`_erasure_guards`) wherever the schema is built from the models.
+
+    Production gets the same statements from migration 0142; this keeps a schema built
+    by `create_all` (the test schemas) behaving the same.
+    """
+    for table_name in _erasure_guards.GUARDED_TABLES:
+        table = Base.metadata.tables[table_name]
+        for statement in (*_erasure_guards.FUNCTIONS, _erasure_guards.create_trigger(table_name)):
+            event.listen(table, "after_create", DDL(statement))
+
+
+_install_erased_account_guards()

@@ -963,6 +963,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # FK; the scheduler then retires the orphaned session and vault
             # instead of renewing its tokens as a headless requester.
             "github_app_session_vaults",
+            # The erasure fence's tombstone of a principal: a bare id with no content,
+            # kept on purpose so a stale writer naming an erased principal is refused.
+            "erased_principal",
             # A pending chat grant lives 15 minutes and both account references
             # are ON DELETE CASCADE, so erasing the account removes it.
             "github_grant_proposals",
