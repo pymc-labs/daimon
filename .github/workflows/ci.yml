@@ -248,6 +248,7 @@ jobs:
       matrix:
         include:
           - { configuration: enabled, path: mux, channel_backends: "true", agent_backends: "true" }
+          - { configuration: mux-only, path: mux, channel_backends: "false", agent_backends: "false" }
           - { configuration: legacy-off, path: legacy, channel_backends: "false", agent_backends: "false" }
     services:
       postgres:
