@@ -1172,7 +1172,7 @@ async def run_prepared_turn_impl(
 
     def context_hook_for(admission: Admission, model_id: str | None) -> ContextHook | None:
         revision = admission.backend_revision
-        if revision is not None and revision.profile != "anthropic.managed_agents":
+        if revision is not None and revision.profile != MANAGED_AGENTS.profile_id:
             return None
         grant = admission.grant
         # No fabricated placement from message text or budget attribution.
