@@ -661,8 +661,8 @@ The scheduler removes expired connection flows, including their encrypted
 tokens. Run it alongside the MCP service.
 
 Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack.
-A server admin gets a private link bound to that agent; the selected repos are for that agent
-only and activate for it when confirmed. The migration retires any saved
+A server admin, or an owner of that agent, gets a private link bound to that agent; the selected repos are for that agent
+only and activate for it when confirmed. An owner is not made an admin and may connect repos to their own agent only. The migration retires any saved
 GitHub key. An
 operator can issue an agent-bound link with `daimon github connect-link --tenant <workspace-uuid>
 --requester <platform-user-id> --agent <agent-uuid> --agent-name <agent-name>`.
@@ -681,7 +681,7 @@ A repository the App installation doesn't cover needs a GitHub org owner to add
 it to the installation first.
 
 In Discord or Slack, open `/github` to see the server connection, your personal
-GitHub link, and waiting requests. An admin can also open GitHub from
+GitHub link, and waiting requests. An admin or an owner of the agent can also open GitHub from
 `/agent-setup` to see an agent's repos. The browser page searches repos and
 keeps Save changes visible until confirmation. Admins can review requests and
 disconnect the server connection.

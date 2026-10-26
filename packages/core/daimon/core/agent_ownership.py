@@ -3,7 +3,9 @@
 The owner may edit the agent (`daimon.core.channel_backend.AgentBackendService`,
 `daimon.core.operation_policy`) without being a server admin. An agent with
 no owner is edited by server admins only. Callers authorize: a creator is
-recorded by the tool that created the agent; only an admin assigns or clears.
+recorded by the tool that created the agent; only an admin assigns or clears, or
+adds and removes co-owners. An agent has one primary owner (`agent_owner`) and any
+number of co-owners (`agent_co_owners`); both own it in every check.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from contextlib import asynccontextmanager
 import structlog
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import agent_owners, security_audit
+from daimon.core.stores.agent_owners import ForeignOwnerError as ForeignOwnerError
 from daimon.core.stores.identity import find_platform_principal
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,6 +119,60 @@ async def clear_agent_owner(
     return cleared
 
 
+async def add_agent_co_owner(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+    by_account_id: uuid.UUID | None,
+) -> bool:
+    """An admin's addition of a co-owner; false when the person already owns the agent.
+
+    Raises LookupError for an account outside the tenant and `ForeignOwnerError`
+    for a person from another organisation.
+    """
+    async with sessionmaker.begin() as session:
+        added = await agent_owners.add_co_owner(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account_id,
+            added_by_account_id=by_account_id,
+        )
+        if added:
+            await _audit(
+                session, tenant_id, agent_id, by_account_id, "add_co_owner", subject=account_id
+            )
+    return added
+
+
+async def remove_agent_co_owner(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+    by_account_id: uuid.UUID | None,
+) -> bool:
+    async with sessionmaker.begin() as session:
+        removed = await agent_owners.remove_co_owner(
+            session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+        )
+        if removed:
+            await _audit(
+                session, tenant_id, agent_id, by_account_id, "remove_co_owner", subject=account_id
+            )
+    return removed
+
+
+async def agent_co_owners(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> list[uuid.UUID]:
+    async with sessionmaker() as session:
+        return await agent_owners.co_owners_of(session, tenant_id, agent_id)
+
+
 async def owns_agent(
     session: AsyncSession,
     *,
@@ -127,7 +184,8 @@ async def owns_agent(
 ) -> bool:
     """Whether the person (by account, or by platform user) owns the agent.
 
-    A platform user with no principal yet owns nothing; this never creates one.
+    The primary owner and every co-owner own it. A platform user with no principal
+    yet owns nothing; this never creates one.
     A person from another organisation (`foreign_home_id`) is never an owner,
     whichever way they are named.
     """
@@ -140,12 +198,10 @@ async def owns_agent(
         if principal is None or principal.foreign_home_id is not None:
             return False
         account_id = principal.account_id
-    if account_id is None or await agent_owners.has_foreign_principal(
-        session, tenant_id, account_id
-    ):
+    if account_id is None:
         return False
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
-    return await agent_owners.owner_of(session, tenant_id, agent_id) == account_id
+    return await agent_owners.is_owner(session, tenant_id, agent_id, account_id)
 
 
 async def agent_owner(
@@ -161,6 +217,8 @@ async def _audit(
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
     operation: str,
+    *,
+    subject: uuid.UUID | None = None,
 ) -> None:
     await security_audit.append_event(
         session,
@@ -173,5 +231,5 @@ async def _audit(
         operation=operation,
         outcome="allowed",
         reason="completed",
-        scope=f"agent_owner:{agent_id}",
+        scope=f"agent_owner:{agent_id}" + (f":{subject}" if subject is not None else ""),
     )

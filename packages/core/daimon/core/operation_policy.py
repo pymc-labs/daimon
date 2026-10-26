@@ -9,9 +9,9 @@ callers cannot make these shared-agent changes.
 New MCP connections are attachment writes: a private token or OAuth grant
 still adds servers and tools to the shared agent spec. Only key_add and
 keys_import retain the posted-token exception, which does not change the
-agent's spec. GitHub grants, and a GitHub Connect for one agent, require an
-admin. A server-wide Connect has
-no agent target, so its facts are all False and only an admin passes.
+agent's spec. GitHub grants, and a GitHub Connect for one agent, are allowed to
+an admin and to the agent's owner. A server-wide Connect has no agent target,
+so its facts are all False and only an admin passes.
 
 The I/O shells read TargetFacts and retain their own refusal wording.
 """
@@ -62,11 +62,8 @@ _ATTACHMENT_OPERATIONS: frozenset[OperationKind] = frozenset(
 
 _POSTED_TOKEN_OPERATIONS: frozenset[OperationKind] = frozenset({"key_add", "keys_import"})
 
-#: Operations that bind the workspace's GitHub installation, not the owner's own
-#: credential: an agent's owner may not make them, only an admin.
-_OWNER_INELIGIBLE: frozenset[OperationKind] = frozenset(
-    {"repo_bind", "skill_repo_connect", "github_connect", "github_grant"}
-)
+#: The retired pasted-token repo forms: an agent's owner may not make them, only an admin.
+_OWNER_INELIGIBLE: frozenset[OperationKind] = frozenset({"repo_bind", "skill_repo_connect"})
 
 
 class TargetFacts(BaseModel):
@@ -81,8 +78,8 @@ class TargetFacts(BaseModel):
 
     is_daimon_managed: bool
     is_reachable_in_tenant: bool
-    # The caller is the agent's recorded owner. Never counts for an operation
-    # that spends someone else's credential (`_OWNER_INELIGIBLE`).
+    # The caller is one of the agent's owners. Never counts for the retired
+    # pasted-token repo forms (`_OWNER_INELIGIBLE`).
     owned_by_caller: bool = False
 
 
@@ -110,7 +107,11 @@ def _decide_operation(
     fixed order (`Action.CHANGE_SHARED_AGENT`).
     """
     if operation in ("github_connect", "github_grant"):
-        return "allow" if is_admin else "needs_admin"
+        # The owner's allowance covers the agent's own repos only; a server-wide
+        # repo has no target agent, so its facts never show an owner.
+        if is_admin or (target.owned_by_caller and not target.is_daimon_managed):
+            return "allow"
+        return "needs_admin"
     decision = authorize(
         _NO_POLICY,
         subject=Subject(is_admin=is_admin),

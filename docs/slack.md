@@ -188,11 +188,12 @@ Trust model notes for operators:
 
 `/agent-setup` opens the Agents roster, which pushes into either an agent's Details view or Who answers where. Setup conversations can be opened with **⚙️ Set up agents** from the Agents roster or from Details; creating a new agent lands on its Details view rather than a separate confirmation screen, and for an admin Details also offers **🧰 Use from your coding tools** to connect that agent over MCP and **➕ Add skill** (members see neither, since both are admin changes). The channel gets a short launcher with a **Reply to Daimon** button; Daimon's welcome appears inside the shared thread. The panel also provides the reply button immediately after opening setup. Follow it, reply in that thread, and mention the bot. Daimon answers while the named agent is configured. Opening setup does not run a billed turn or change channel defaults. Each participant keeps a separate session.
 
-`/github connect` shows a workspace admin an ephemeral **Connect GitHub** button
-in the channel or thread where they asked. Use `/github connect AgentName` to
-choose another agent. The button opens the repo picker, then activates the
+`/github connect` shows a workspace admin, or an owner of the agent, an ephemeral
+**Connect GitHub** button in the channel or thread where they asked. An owner
+gets it only for an agent they own, and is not made an admin. Use
+`/github connect AgentName` to choose another agent. The button opens the repo picker, then activates the
 selected repos for that agent. If the
-agent still has a saved GitHub key, `/github connect` asks the admin to contact
+agent still has a saved GitHub key, `/github connect` asks the person to contact
 the Daimon operator to switch it. Existing Slack installations need the
 `/github` command added from `docs/slack-app-manifest.yaml` and reinstallation.
 

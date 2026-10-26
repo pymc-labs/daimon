@@ -12,15 +12,12 @@ from daimon.adapters.discord.agent_setup.github_embed_panel import (
     GitHubEmbedPanel as PanelViewBase,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import admin_card
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
-from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.stores.github_access import AuthorizedRepo, list_authorized_repos
 from daimon.core.stores.github_access_requests import (
     AccessRequest,
@@ -47,30 +44,14 @@ async def _may_manage_request(
     member: discord.Member,
     is_admin: bool,
 ) -> bool:
+    # The waiting list is admin-only: an agent's owner connects repos for their own
+    # agent from its repos panel, not from requests other people made.
+    if not is_admin:
+        return False
     live_agent = await find_agent_by_derived_uuid(
         runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
     )
-    if live_agent is None or live_agent.id != row.ma_agent_id:
-        return False
-    managed = live_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    async with runtime.sessionmaker() as session:
-        facts = (
-            TargetFacts(is_daimon_managed=managed, is_reachable_in_tenant=False)
-            if is_admin
-            else await load_target_facts(
-                session,
-                "github_grant",
-                tenant_id=row.tenant_id,
-                platform="discord",
-                agent_names=(row.agent_name, live_agent.name),
-                ma_agent_id=str(live_agent.id),
-                default=runtime.deployment_default,
-                caller=admin_caller(member),
-                is_daimon_managed=managed,
-                caller_platform_user_id=str(member.id),
-            )
-        )
-    return decide_operation("github_grant", is_admin=is_admin, target=facts) == "allow"
+    return live_agent is not None and live_agent.id == row.ma_agent_id
 
 
 class GitHubWaitingView(PanelViewBase):

@@ -195,18 +195,39 @@ allow.
 ## Changing agent setup
 
 Server or workspace admins may change an agent's setup, and so may the
-agent's **owner**. The owner is the person who created the agent, from chat
-or the setup panel's New agent button, or who copied it with `fork_agent`; a
-channel's own copy of an agent keeps that agent's owner. An admin can also
-name one with `daimon agents owner set`. An agent has at most one owner.
-Agents created before owners existed have none and stay admin-only.
+agent's **owners**. The first owner is the person who created the agent, from
+chat or the setup panel's New agent button, or who copied it with `fork_agent`;
+a channel's own copy of an agent keeps that agent's owner. An admin can name
+the primary owner with `daimon agents owner set`, and add or remove further
+owners (co-owners) with `daimon agents owner add` and `daimon agents owner
+remove`; `daimon agents owner show` lists them all. A co-owner can do
+everything the primary owner can. Nobody from another organisation can be an
+owner. Agents created before owners existed have none and stay admin-only.
+
+An owner may also manage GitHub repos for their own agent only:
+
+| | Admin | Owner of the agent | Anyone else |
+| --- | --- | --- | --- |
+| Connect repos to the agent (any repo their GitHub account shows them on the installation; the agent gets write access) | yes | yes | asks an admin |
+| Remove any repo from the agent, including one an admin connected | yes | yes | no |
+| Choose the agent's working repo | yes | yes | no |
+| Connect a repo for every agent on the server | yes | no | no |
+| Installation notices, the GitHub home, new-repo cards, the waiting list and request approvals | yes | no | no |
+| Add or remove owners | yes | no | no |
+
+Removing a repo from one agent leaves a repo connected for the whole server
+connected for the other agents. An owner's Connect GitHub link is checked
+again when the repos are saved: if the person has stopped owning the agent by
+then, nothing is saved. A Connect GitHub button on a card in a thread shows
+its link only to the person who asked, to an admin or to an owner of that
+agent; anyone else is told whom to ask.
 
 The owner may not change what the whole workspace shares: the provider
-allowlist, channel budgets, GitHub access (repo and skill-repo binds, grants),
-deleting a skill from the workspace, archiving or copying the agent, and its
-tool rules stay with admins. A channel default alone does not grant
-permission to edit setup. Defaults-managed specs retain their existing
-protections, including for admins.
+allowlist, channel budgets, server-wide GitHub repos, the retired pasted-token
+repo and skill-repo binds, deleting a skill from the workspace, archiving or
+copying the agent, and its tool rules stay with admins. A channel default
+alone does not grant permission to edit setup. Defaults-managed specs retain
+their existing protections, including for admins.
 
 When approval cards are off, a skill add needs a preview followed by the
 requester's next message of `yes` in that thread. Only one preview is active

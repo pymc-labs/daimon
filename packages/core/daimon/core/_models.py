@@ -4053,6 +4053,39 @@ class AgentOwner(Base):
     )
 
 
+class AgentCoOwner(Base):
+    """An additional account that may edit an agent, beside its one primary owner.
+
+    Added and removed by an admin only. The primary owner stays in `agent_owner`;
+    a person in both places is simply an owner. Deleting the account deletes the
+    row.
+    """
+
+    __tablename__ = "agent_co_owners"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "account_id", name="pk_agent_co_owners"),
+        Index("ix_agent_co_owners_account", "account_id"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_co_owners_tenants"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_co_owners_accounts"),
+        nullable=False,
+    )
+    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="SET NULL", name="fk_agent_co_owners_added_by"),
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class GeminiRuntimeState(Base):
     """Driver records and conservative attempt holds on the host state database."""
 

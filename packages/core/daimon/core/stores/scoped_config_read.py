@@ -77,14 +77,15 @@ async def resolve(
             from daimon.core.ma_identity import derive_agent_uuid
             from daimon.core.stores import agent_owners
 
-            owner = await agent_owners.owner_of(
+            still_owner = await agent_owners.is_owner(
                 session,
                 context.tenant_id,
                 derive_agent_uuid(
                     tenant_id=context.tenant_id, ma_agent_id=binding.responder_ma_agent_id
                 ),
+                context.account_id,
             )
-            if owner is None or owner != binding.creator_account_id:
+            if not still_owner:
                 # Ownership moved (or was cleared) since the hand-off: the copy is no
                 # longer this person's to talk to here.
                 raise UserFacingError(

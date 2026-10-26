@@ -22,6 +22,7 @@ from daimon.core.github_connect_cards import (
 )
 from daimon.core.github_panel import (
     GrantsPanel,
+    can_manage_agent_github,
     connect_link,
     sync_connect_admin,
 )
@@ -150,11 +151,36 @@ async def mint_agent_connect_url(
     state: PanelState,
     agent: RosterAgent,
 ) -> str:
-    """Mint a private browser link after live manager authorization."""
+    """Mint a private browser link after live manager authorization.
+
+    An admin's link promotes nobody. A person who is not an admin gets one only while
+    they own the agent, read now; otherwise no link is minted (`ValueError`).
+    """
     admin = is_guild_admin(interaction)  # pyright: ignore[reportArgumentType]
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.ma_agent_id)
+    live_agent = (
+        None
+        if admin
+        else await find_agent_by_derived_uuid(
+            runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+        )
+    )
     async with runtime.sessionmaker.begin() as session:
+        manages = admin or (
+            live_agent is not None
+            and live_agent.id == agent.ma_agent_id
+            and await can_manage_agent_github(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                caller=admin_caller(interaction.user),
+                agent_names=(agent.name, live_agent.name),
+                ma_agent_id=agent.ma_agent_id,
+                is_daimon_managed=live_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+                default=runtime.deployment_default,
+            )
+        )
         if admin:
             await sync_connect_admin(
                 session,
@@ -170,7 +196,7 @@ async def mint_agent_connect_url(
             platform="discord",
             platform_user_id=str(interaction.user.id),
             verified_tenant_admin=admin,
-            verified_agent_manager=True,
+            verified_agent_manager=manages,
             workspace_label=interaction.guild.name if interaction.guild else None,
             requester_label=interaction.user.display_name,
             agent_id=agent_id,

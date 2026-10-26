@@ -6,12 +6,16 @@ import uuid
 from collections.abc import Collection
 from typing import Literal
 
-from daimon.core._models import Account, AgentOwner, PlatformPrincipal
+from daimon.core._models import Account, AgentCoOwner, AgentOwner, PlatformPrincipal
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 type OwnerSource = Literal["created", "admin_assigned"]
+
+
+class ForeignOwnerError(ValueError):
+    """The account belongs to a person from another organisation, who can never own an agent."""
 
 
 async def owner_of(
@@ -100,13 +104,119 @@ async def clear_owner(session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: 
 async def owned_by(
     session: AsyncSession, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> frozenset[uuid.UUID]:
-    """Every agent id the account owns in this tenant."""
-    rows = await session.scalars(
+    """Every agent id the account owns in this tenant, as primary owner or co-owner."""
+    primary = await session.scalars(
         select(AgentOwner.agent_id).where(
             AgentOwner.tenant_id == tenant_id, AgentOwner.owner_account_id == account_id
         )
     )
-    return frozenset(rows)
+    co_owned = await session.scalars(
+        select(AgentCoOwner.agent_id).where(
+            AgentCoOwner.tenant_id == tenant_id, AgentCoOwner.account_id == account_id
+        )
+    )
+    return frozenset(primary) | frozenset(co_owned)
+
+
+async def is_owner(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+    *,
+    lock: bool = False,
+) -> bool:
+    """Whether the account is the agent's primary owner or one of its co-owners.
+
+    A person from another organisation (`foreign_home_id`) is never an owner,
+    whichever row names them. `lock` holds the owner rows read until the
+    transaction ends, as for `owner_of`.
+    """
+    if await has_foreign_principal(session, tenant_id, account_id):
+        return False
+    if await owner_of(session, tenant_id, agent_id, lock=lock) == account_id:
+        return True
+    query = (
+        select(AgentCoOwner.account_id)
+        .join(Account, Account.id == AgentCoOwner.account_id)
+        .where(
+            AgentCoOwner.tenant_id == tenant_id,
+            AgentCoOwner.agent_id == agent_id,
+            AgentCoOwner.account_id == account_id,
+            Account.tenant_id == tenant_id,
+        )
+    )
+    if lock:
+        query = query.with_for_update(of=AgentCoOwner, read=True)
+    return await session.scalar(query) is not None
+
+
+async def co_owners_of(
+    session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> list[uuid.UUID]:
+    """The agent's co-owner accounts in this tenant, oldest addition first."""
+    rows = await session.scalars(
+        select(AgentCoOwner.account_id)
+        .join(Account, Account.id == AgentCoOwner.account_id)
+        .where(
+            AgentCoOwner.tenant_id == tenant_id,
+            AgentCoOwner.agent_id == agent_id,
+            Account.tenant_id == tenant_id,
+        )
+        .order_by(AgentCoOwner.added_at, AgentCoOwner.account_id)
+    )
+    return list(rows)
+
+
+async def add_co_owner(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+    added_by_account_id: uuid.UUID | None,
+) -> bool:
+    """Make the account a co-owner; false when it already owns the agent in either role.
+
+    The account must belong to the tenant (`LookupError`) and must not be a
+    person from another organisation (`ForeignOwnerError`).
+    """
+    belongs = await session.scalar(
+        select(Account.id).where(Account.id == account_id, Account.tenant_id == tenant_id)
+    )
+    if belongs is None:
+        raise LookupError("owner account is not in this tenant")
+    if await has_foreign_principal(session, tenant_id, account_id):
+        raise ForeignOwnerError("a person from another organisation cannot own an agent")
+    if await owner_of(session, tenant_id, agent_id) == account_id:
+        return False
+    result = await session.execute(
+        insert(AgentCoOwner)
+        .values(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account_id,
+            added_by_account_id=added_by_account_id,
+        )
+        .on_conflict_do_nothing(constraint="pk_agent_co_owners")
+        .returning(AgentCoOwner.agent_id)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def remove_co_owner(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, account_id: uuid.UUID
+) -> bool:
+    result = await session.execute(
+        delete(AgentCoOwner)
+        .where(
+            AgentCoOwner.tenant_id == tenant_id,
+            AgentCoOwner.agent_id == agent_id,
+            AgentCoOwner.account_id == account_id,
+        )
+        .returning(AgentCoOwner.agent_id)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 async def owner_identities(
