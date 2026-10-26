@@ -181,6 +181,7 @@ async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_re
         async def prepare(thread: str) -> PreparedTurn:
             current = await admit(
                 deps,
+                origin="chat",
                 tenant_id=TENANT,
                 requester_org=RequesterOrg.HOST,
                 platform="slack",

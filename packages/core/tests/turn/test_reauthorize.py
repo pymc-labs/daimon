@@ -46,6 +46,7 @@ async def _admit(db_session_factory, tmp_path: Path, tenant, *, role=Role.USER, 
     deps = replace(deps, membership_resolver=CachedMembershipResolver(member))
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -289,6 +290,7 @@ async def test_role_removed_after_admission_refuses_reauthorization(
     )
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         platform="discord",
         external_user_id="member-1",
@@ -332,6 +334,7 @@ async def test_concurrent_role_admissions_do_not_need_nested_pool_connections(
             *(
                 admit(
                     deps,
+                    origin="chat",
                     tenant_id=tenant.id,
                     platform="discord",
                     external_user_id=user,
@@ -418,6 +421,7 @@ async def test_agent_role_revoked_without_cache_invalidation_denies_every_rechec
     )
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         platform="discord",
         external_user_id="member-1",
@@ -435,6 +439,7 @@ async def test_agent_role_revoked_without_cache_invalidation_denies_every_rechec
         elif checkpoint == "continuation":
             await admit(
                 deps,
+                origin="chat",
                 tenant_id=tenant.id,
                 platform="discord",
                 external_user_id="member-1",
@@ -465,6 +470,7 @@ async def test_agent_role_gate_denies_missing_resolver_on_new_turn(
     with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             platform="discord",
             external_user_id="member-1",
@@ -489,6 +495,8 @@ async def test_agent_role_gate_denies_missing_resolver_on_new_turn(
         ("cli", True),
         ("headless", True),
         ("new_wake_reason", True),
+        ("github_access_ready", True),
+        ("private_input_applied", True),
     ],
 )
 async def test_nonhuman_origins_refuse_gated_agent_at_admission(

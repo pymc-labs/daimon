@@ -234,6 +234,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
         async def admit_thread(thread, **options):
             current = await admit_impl(
                 deps,
+                origin="chat",
                 tenant_id=TENANT,
                 requester_org=RequesterOrg.HOST,
                 platform="slack",
@@ -641,6 +642,7 @@ async def test_legacy_or_unconfigured_admission_does_not_read_native_bindings(
     monkeypatch.setattr(channel_backend, "resolve_turn_backend", forbidden)
     current = await admit_impl(
         replace(host.deps, turn_path=path, channel_backends=enabled),
+        origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
         platform="slack",
@@ -669,6 +671,7 @@ async def test_another_caller_never_selects_the_private_native_binding(selector_
     before = len(host.wire.requests)
     current = await admit_impl(
         host.deps,
+        origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
         platform="slack",

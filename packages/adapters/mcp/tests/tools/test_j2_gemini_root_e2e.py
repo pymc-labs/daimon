@@ -398,6 +398,7 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
     )
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=chat.auth.tenant_id,
         requester_org=RequesterOrg.HOST,
         platform="discord",

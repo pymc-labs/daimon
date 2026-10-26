@@ -1,47 +1,5 @@
 # Permissions
 
-## Per-agent invoker roles
-
-An operator can restrict an individual agent to humans who currently hold at
-least one specified Discord role. The human must also pass the tenant's
-invoker policy. Server admins must hold a matching role too; the tenant's
-`invoker_admin_bypass` does not exempt them from an agent's role requirement.
-
-```sh
-daimon agents rule invoker-roles discord GUILD_ID AGENT_NAME --role ROLE_ID --role OTHER_ROLE_ID
-daimon agents rule invoker-roles discord GUILD_ID AGENT_NAME --clear
-daimon tenants access-policy rules discord GUILD_ID
-```
-
-The policy stores these roles as `agent_rules.AGENT_NAME.invoker_role_ids`.
-Role requirements are independent of `runs_in`; changing where an agent runs
-preserves its invoker roles. Each restriction on any of the agent's names must
-be satisfied. Empty roles leave the agent's existing admission behavior intact.
-Role IDs must be Discord snowflakes and cannot name `@everyone` (the guild ID).
-
-Membership is checked live when the target agent is selected, on continuations
-and queued sends, and before model sends and tool confirmations. Revocation
-refuses work at the next such check; it does not interrupt a step already in
-progress. An unavailable membership lookup also refuses further work through
-the usual invoker refusal.
-Handoffs check the person requesting the switch against the destination agent;
-Workers spawned by a human-requested turn inherit its human principal, even
-though workers have no confirmation cards. Both the root agent's and worker
-target's role requirements are checked against fresh membership at dispatch.
-API/MCP chat also enforces the destination's requirement.
-Routines, scheduler jobs, bots and other non-human invocations cannot use an
-agent with this requirement. Saving a routine for a role-gated agent is refused.
-Watches, timers, long jobs and fleet completion wakes are unattended and cannot
-invoke these agents. A handoff from an unattended turn cannot switch to one,
-even when its recorded owner currently holds a matching role. Unknown origins
-also carry no human principal and are refused.
-
-Archiving an agent drops its role rule. Setting invoker roles on one of an
-agent's aliases replaces the invoker roles on its other aliases, preserving
-spatial rules on every alias.
-
-Roles are Discord-only: writers refuse setting this rule on Slack, Teams or CLI tenants, and unsupported membership fails closed.
-
 ## Approval gate overrides
 
 Approval gate overrides require live platform-admin authority. Delegated admins
@@ -774,6 +732,56 @@ immediately. Without member events, role revocation can take up to 30 seconds
 to affect an ordinary cached check. Lookup failures never extend a grant;
 expired evidence fails closed. Private result delivery requires a live lookup, including Discord MCP replies
 and transcript reads.
+
+
+### Per-agent invoker roles
+
+An operator can restrict an individual agent to humans who currently hold at
+least one specified Discord role. The human must also pass the tenant's
+invoker policy. Server admins must hold a matching role too; the tenant's
+`invoker_admin_bypass` does not exempt them from an agent's role requirement.
+
+```sh
+daimon agents rule invoker-roles discord GUILD_ID AGENT_NAME --role ROLE_ID --role OTHER_ROLE_ID
+daimon agents rule invoker-roles discord GUILD_ID AGENT_NAME --clear
+daimon tenants access-policy rules discord GUILD_ID
+```
+
+The policy stores these roles as `agent_rules.AGENT_NAME.invoker_role_ids`.
+Role requirements are independent of `runs_in`; changing where an agent runs
+preserves its invoker roles. Each restriction on any of the agent's names must
+be satisfied. Empty roles leave the agent's existing admission behavior intact.
+Role IDs must be Discord snowflakes and cannot name `@everyone` (the guild ID).
+
+Membership is checked live when the target agent is selected, on continuations
+and queued sends, and before model sends and tool confirmations. Revocation
+refuses work at the next such check; it does not interrupt a step already in
+progress. An unavailable membership lookup also refuses further work through
+the usual invoker refusal.
+Handoffs check the person requesting the switch against the destination agent.
+Workers spawned by a human-requested turn inherit its human principal, even
+though workers have no confirmation cards. Both the root agent's and worker
+target's role requirements are checked against fresh membership at dispatch.
+API/MCP chat also enforces the destination's requirement.
+Routines, scheduler jobs, bots and other non-human invocations cannot use an
+agent with this requirement. Saving a routine for a role-gated agent is refused.
+Watches, timers, long jobs and fleet completion wakes are unattended and cannot
+invoke these agents. A handoff from an unattended turn cannot switch to one,
+even when its recorded owner currently holds a matching role. Unknown origins
+also carry no human principal and are refused. GitHub-access-ready and
+private-input-applied continuations are refused too, even though their clicks
+retain attended tool controls for ungated agents. Role-gated agents do not
+receive their own `worker_finished` completion wakes.
+
+Handing a thread away from a role-gated agent skips the old agent's workspace
+checkpoint. The conversation transcript crosses with an explicit gap for the
+working files; the predecessor receives no checkpoint send.
+
+Archiving an agent drops its role rule. Setting invoker roles on one of an
+agent's aliases replaces the invoker roles on its other aliases, preserving
+spatial rules on every alias.
+
+Roles are Discord-only: writers refuse setting this rule on Slack, Teams or CLI tenants, and unsupported membership fails closed.
 
 
 ### Discord cold direct messages

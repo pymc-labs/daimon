@@ -331,7 +331,7 @@ async def test_stale_holder_cannot_bind_or_clear_successors_origin_grant(
 
 
 @pytest.mark.parametrize("human", [False, True])
-async def test_signed_origin_projects_calling_grant_and_cannot_promote(
+async def test_signed_origin_keeps_attendance_separate_from_calling_grant(
     db_session: AsyncSession, human: bool
 ) -> None:
     from daimon.core.stores.turn_origins import bind_origin_session
@@ -357,23 +357,17 @@ async def test_signed_origin_projects_calling_grant_and_cannot_promote(
         now=now,
         expires_at=now + timedelta(minutes=10),
     )
-    assert not origin.human_invocation, "unbound controls carry no calling grant"
+    assert origin.human_invocation is None, "legacy/unbound controls carry no calling grant"
     await bind_origin_session(
         db_session, origin_id=origin.id, chat_session_id="signed-session", human_invocation=human
     )
-    for requested in (human, True):
-        await bind_origin_session(
-            db_session,
-            origin_id=origin.id,
-            chat_session_id="signed-session",
-            human_invocation=requested,
-        )
-        current = await get_active_origin(
-            db_session,
-            origin_id=origin.id,
-            tenant_id=tenant.id,
-            account_id=account.id,
-            platform="discord",
-            now=now,
-        )
-        assert current is not None and current.human_invocation is human
+    current = await get_active_origin(
+        db_session,
+        origin_id=origin.id,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        now=now,
+    )
+    assert current is not None and current.human_invocation is human
+    assert current.attended is True

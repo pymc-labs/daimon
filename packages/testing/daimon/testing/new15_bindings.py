@@ -151,6 +151,7 @@ class New15Bindings:
         try:
             admitted = await admit(
                 self.deps,
+                origin="chat",
                 tenant_id=uuid.UUID(self.scope.tenant_id),
                 requester_org=RequesterOrg.HOST,
                 platform=self.admin.platform,

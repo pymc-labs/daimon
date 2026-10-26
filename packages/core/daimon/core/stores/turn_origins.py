@@ -159,6 +159,7 @@ async def bind_origin_session(
     origin_id: uuid.UUID,
     chat_session_id: str | None,
     human_invocation: bool | None = None,
+    attended: bool | None = None,
     lease: Lease | None = None,
 ) -> None:
     """Bind the live execution to its server-prepared session's signed grant."""
@@ -177,10 +178,10 @@ async def bind_origin_session(
             .values(chat_session_id=None)
         )
     values: dict[str, Any] = {"chat_session_id": chat_session_id}
+    if attended is not None:
+        values["attended"] = TurnOrigin.attended & attended
     if human_invocation is not None:
-        # Non-worker origins project the calling admission grant in the existing
-        # attended bit. Binding narrows initial controls and never adds authority.
-        values["attended"] = TurnOrigin.attended & human_invocation
+        values["human_invocation"] = human_invocation
     await session.execute(update(TurnOrigin).where(TurnOrigin.id == origin_id).values(**values))
 
 

@@ -990,7 +990,11 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
                 if not worker:
                     async with sessions.begin() as db:
                         await bind_origin_session(
-                            db, origin_id=origin.id, chat_session_id=grant, human_invocation=False
+                            db,
+                            origin_id=origin.id,
+                            chat_session_id=grant,
+                            attended=False,
+                            human_invocation=False,
                         )
                 await before_send()
                 async with sessions.begin() as db:

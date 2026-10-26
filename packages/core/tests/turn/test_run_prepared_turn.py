@@ -4097,7 +4097,14 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
 @pytest.mark.parametrize("cancel_during_cleanup", [False, True])
 @pytest.mark.parametrize(
     "kind,origin_attended,caller_attended",
-    [("chat", True, True), ("chat", True, False), ("chat", False, True), ("worker", True, False)],
+    [
+        ("chat", True, True),
+        ("chat", True, False),
+        ("chat", False, True),
+        ("worker", True, False),
+        ("github_access_ready", True, True),
+        ("private_input_applied", True, True),
+    ],
 )
 @pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
@@ -4239,6 +4246,9 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
             assert bound.attended is (
                 origin_attended if kind == "worker" else origin_attended and caller_attended
             )
+            if kind in ("github_access_ready", "private_input_applied"):
+                assert bound.attended is True
+                assert bound.human_invocation is False
             assert current_execution_origin_id.get() == (None if kind == "worker" else origin.id)
             async with db_session_factory() as db:
                 previous = await get_active_origin(

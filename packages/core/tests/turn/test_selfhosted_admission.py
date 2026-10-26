@@ -78,6 +78,7 @@ async def test_admits_without_anthropic_key_or_calls(
     )
     result = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",
@@ -107,6 +108,7 @@ async def test_admits_without_anthropic_key_or_calls(
     with pytest.raises(AdmissionDenied, match="runs_elsewhere"):
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -118,6 +120,7 @@ async def test_admits_without_anthropic_key_or_calls(
     with pytest.raises(MAResolverMissError):
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -148,6 +151,7 @@ async def test_admits_without_anthropic_key_or_calls(
     with pytest.raises(MAResolverMissError):
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -227,6 +231,7 @@ async def test_agent_selected_selfhosted_is_refused_before_anthropic(
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await admit(
             deps,
+            origin="chat",
             tenant_id=tenant.id,
             requester_org=RequesterOrg.HOST,
             platform="discord",

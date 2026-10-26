@@ -2354,6 +2354,7 @@ class SlackApp:
         try:
             admission = await admit(
                 self.runtime.turn_deps,
+                origin="chat",
                 tenant_id=tenant_id,
                 requester_org=standing.org,
                 requester_home_id=standing.home_id,

@@ -486,6 +486,7 @@ async def run_wizard_submit_turn_observed(
         try:
             admission = await admit(
                 bot.runtime.turn_deps,
+                origin="chat",
                 tenant_id=row.tenant_id,
                 requester_org=RequesterOrg.HOST,
                 platform="discord",

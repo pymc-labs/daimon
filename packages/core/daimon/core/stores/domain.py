@@ -1161,6 +1161,7 @@ class TurnOriginRow(BaseModel):
     tenant_id: uuid.UUID
     account_id: uuid.UUID
     chat_session_id: str | None = None
+    human_invocation: bool | None = None
     attended: bool = False
     platform: str
     parent_channel_id: str
@@ -1175,16 +1176,6 @@ class TurnOriginRow(BaseModel):
     expires_at: datetime
     sender_foreign: bool = False
     shared_channel: bool = False
-
-    @property
-    def human_invocation(self) -> bool:
-        """The calling grant's principal projection, bound with its session.
-
-        Only non-worker executions have origins. At execution binding the host
-        copies AdmissionGrant.human_invocation into the existing attended bit;
-        a worker has no origin and cannot claim its parent's handoff controls.
-        """
-        return self.chat_session_id is not None and self.attended
 
 
 class _Facts(BaseModel):

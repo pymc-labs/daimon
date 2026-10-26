@@ -238,6 +238,7 @@ def _deps(
 async def _admit(deps: TurnDeps, tenant: TenantRow, channel_id: str = "chan-1") -> Admission:
     return await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
         platform="discord",

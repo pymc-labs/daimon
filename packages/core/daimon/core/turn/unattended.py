@@ -161,8 +161,11 @@ async def gate_session_snapshot(
     off. A refusal or a failed update raises, so the send never happens on an
     ungated session. An `entry_point` of None gets no built-ins and no skills.
     """
+    # Attended turns are admitted and reauthorized by the turn driver. Of the
+    # unattended entry points, only workers and MCP chat have proved a principal.
+    # New entry points must fail closed until their own admission is reviewed.
     if (
-        entry_point in ("routine", "cli_run", "long_job")
+        entry_point not in ("fleet_worker", "mcp_chat")
         and session_factory is not None
         and tenant_id is not None
     ):

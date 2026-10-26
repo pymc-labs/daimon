@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -32,6 +32,16 @@ _LINEAR = {
     ],
     "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
 }
+
+
+@pytest.fixture(autouse=True)
+def open_access_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    monkeypatch.setattr(
+        "daimon.core.stores.access_policy.load_access_policy",
+        AsyncMock(return_value=TenantAccessPolicy()),
+    )
 
 
 def _session() -> Any:
@@ -254,7 +264,10 @@ async def test_microsoft_write_is_protected_only_with_safety_on(
     assert (await posture.decide(call)).allow is allowed
 
 
-@pytest.mark.parametrize("entry_point", ["routine", "cli_run", "long_job"])
+@pytest.mark.parametrize(
+    "entry_point",
+    ["routine", "cli_run", "long_job", "checkpoint", "watch", "wake", None, "future_entry_point"],
+)
 async def test_nonhuman_session_gate_refuses_role_gated_agent(
     entry_point: str,
 ) -> None:

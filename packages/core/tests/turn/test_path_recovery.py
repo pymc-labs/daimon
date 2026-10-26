@@ -124,6 +124,7 @@ async def test_private_anthropic_session_survives_mux_legacy_mux(
             path_deps = replace(deps, turn_path=path)
             admission = await admit(
                 path_deps,
+                origin="chat",
                 tenant_id=tenant.id,
                 requester_org=RequesterOrg.HOST,
                 platform="slack",

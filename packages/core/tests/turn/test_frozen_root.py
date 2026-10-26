@@ -1887,6 +1887,7 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
         )
         admission = await admit(
             deps,
+            origin="chat",
             tenant_id=tenant_id,
             requester_org=RequesterOrg.HOST,
             platform="discord",
@@ -2380,6 +2381,7 @@ async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesi
         )
         admission = await admit(
             deps,
+            origin="chat",
             tenant_id=tenant_id,
             requester_org=RequesterOrg.HOST,
             platform=channel.platform,

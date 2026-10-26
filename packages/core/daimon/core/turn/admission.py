@@ -415,7 +415,7 @@ async def admit(
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
-    origin: str = "chat",
+    origin: str,
     attended: bool | None = None,
 ) -> Admission:
     """Admit a turn, or raise the typed reason it is refused.
@@ -523,7 +523,7 @@ async def admit_impl(
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
-    origin: str = "chat",
+    origin: str,
     attended: bool | None = None,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool."""

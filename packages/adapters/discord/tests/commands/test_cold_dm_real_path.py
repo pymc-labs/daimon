@@ -311,6 +311,7 @@ async def test_moved_source_sealed_during_turn_is_quarantined_without_private_de
     deps = real_dm.cog.bot.runtime.turn_deps
     admission = await admit(
         deps,
+        origin="chat",
         tenant_id=tenant.id,
         platform="discord",
         external_user_id="999",

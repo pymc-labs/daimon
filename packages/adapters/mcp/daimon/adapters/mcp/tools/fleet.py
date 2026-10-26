@@ -417,10 +417,6 @@ class HostFleetToolService:
             or caller.agent_id is not None
         ):
             raise ToolError("Fleet orchestration refused: caller_root_mismatch.")
-        if origin is not None:
-            parent = replace(
-                parent, human_invocation=parent.human_invocation and origin.human_invocation
-            )
         parent = await self._refresh_role_subject(parent, policy, parent.agent.names)
         return parent, policy
 

@@ -163,6 +163,7 @@ GapReason = Literal[
     "upload_failed",
     "not_worth_checkpointing",
     "archive_missing",
+    "invoker_not_allowed",
 ]
 
 TransferKind = Literal["full", "transcript", "history"]
@@ -210,6 +211,8 @@ _GAP_PHRASING: dict[GapReason | Literal["events_unavailable"], str] = {
     "archive_missing": "the previous working files, because the saved archive was gone "
     "before it could be read",
     "events_unavailable": "the previous working files and the previous conversation",
+    "invoker_not_allowed": "the previous working files, because the previous agent "
+    "requires a human role-holder",
 }
 
 _COMMITTED_DURING_CHECKPOINT = "the agent committed to the repository during checkpoint"
@@ -505,6 +508,20 @@ async def transfer_workspace(
 
     turns = select_recent_turns(events)
     transcript = render_previous_session(turns, from_agent_name=from_agent_name) if turns else None
+
+    from daimon.core.access_policy import agent_invoker_roles
+    from daimon.core.authz import build_agent_ref
+    from daimon.core.mux_compat import retrieve_agent
+    from daimon.core.stores.access_policy import load_access_policy
+
+    async with sessionmaker() as db:
+        access = await load_access_policy(db, tenant_id=tenant_id)
+    if any(rule.invoker_role_ids for rule in access.agent_rules.values()):
+        predecessor = await retrieve_agent(client, old_snapshot.ma_agent_id, scope=scope)
+        ref = build_agent_ref(predecessor.name, predecessor.metadata, old_snapshot.agent_name)
+        if agent_invoker_roles(access, ref.names):
+            log.info("workspace_transfer.skipped_checkpoint", session_id=old_session_id)
+            return TranscriptOnly(transcript=transcript or "", gap_reason="invoker_not_allowed")
 
     if not is_worth_checkpointing(events):
         log.info("workspace_transfer.skipped_checkpoint", session_id=old_session_id)

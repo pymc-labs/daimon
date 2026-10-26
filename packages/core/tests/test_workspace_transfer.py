@@ -1857,3 +1857,54 @@ async def test_every_mcp_call_of_a_checkpoint_pauses_for_the_decider(
         assert tool.type == "mcp_toolset"
         assert tool.default_config.permission_policy.type == "always_ask"
         assert all(c.permission_policy.type == "always_ask" for c in tool.configs)
+
+
+async def test_handoff_away_from_gated_agent_skips_checkpoint_after_revocation(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The destination's human grant never authorizes a send to the predecessor."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.testing.ma_models import ma_agent
+
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    monkeypatch.setattr(
+        "daimon.core.stores.access_policy.load_access_policy",
+        AsyncMock(
+            return_value=TenantAccessPolicy(
+                agent_rules={"analysis-bot": AgentRule(invoker_role_ids=("123",))},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "daimon.core.mux_compat.retrieve_agent",
+        AsyncMock(return_value=ma_agent(name="analysis-bot")),
+    )
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="revoked-user",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        reason=CHECKPOINT_REASON_HANDOFF,
+        sleep=_no_sleep,
+        now=_now,
+        tool_safety=ToolSafetyPolicy(enabled=True),
+        public_url=None,
+        platform="discord",
+        account_id=ACCOUNT_ID,
+    )
+    assert isinstance(outcome, TranscriptOnly)
+    assert outcome.gap_reason == "invoker_not_allowed"
+    assert "Fitted it" in outcome.transcript
+    assert state.sent_batches == []

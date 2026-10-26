@@ -64,7 +64,9 @@ async def _stored(
         )
 
 
+@pytest.mark.parametrize("origin_reason", ["chat", "github_access_ready", "private_input_applied"])
 async def test_a_persons_turn_switches_its_own_conversation_only(
+    origin_reason: str,
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -87,6 +89,30 @@ async def test_a_persons_turn_switches_its_own_conversation_only(
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
+        from datetime import UTC, datetime
+
+        from daimon.core.stores.turn_origins import bind_origin_session, get_active_origin
+        from daimon.core.turn.invocation import human_invocation
+
+        async with committing_sessionmaker() as db:
+            await bind_origin_session(
+                db,
+                origin_id=origin.id,
+                chat_session_id=_CHAT_SESSION,
+                attended=True,
+                human_invocation=human_invocation(origin_reason, True),
+            )
+            current = await get_active_origin(
+                db,
+                origin_id=origin.id,
+                tenant_id=tenant.id,
+                account_id=caller.id,
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+            assert current is not None and current.attended is True
+            assert bool(current.human_invocation) is (origin_reason == "chat")
+            await db.commit()
         result = await _set_thread_model_impl(
             runtime, _auth(tenant.id, caller.id), origin_context_id=str(origin.id), model="opus"
         )

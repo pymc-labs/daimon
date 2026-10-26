@@ -168,6 +168,7 @@ async def _run_channel_turn(host, deps, thread_id: str):
     """Admit, bind and run one Slack turn on `deps`, as a platform adapter does."""
     admission = await admit_impl(
         deps,
+        origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
         platform="slack",
@@ -253,6 +254,7 @@ async def test_ci_selected_channel_backend_execution_path(selector_host, turn_io
     enabled = replace(deps, turn_path="mux", channel_backends=True)
     on = await admit_impl(
         enabled,
+        origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
         platform="slack",

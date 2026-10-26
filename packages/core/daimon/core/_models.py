@@ -2607,6 +2607,7 @@ class TurnOrigin(Base):
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
     chat_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    human_invocation: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     attended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)

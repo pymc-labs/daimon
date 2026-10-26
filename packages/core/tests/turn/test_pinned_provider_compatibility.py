@@ -78,6 +78,7 @@ def _legacy_deps(host):
 async def _admit(host, thread_id: str):
     return await admit_impl(
         _legacy_deps(host),
+        origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
         platform="slack",

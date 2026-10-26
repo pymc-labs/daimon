@@ -92,7 +92,7 @@ async def test_real_admission_refuses_even_a_reader_accepting_the_native_compone
         capture_logs() as logs,
         pytest.raises(AdmissionDenied, match="backend_unsupported") as refused,
     ):
-        await admit_impl(deps, **kwargs)
+        await admit_impl(deps, origin="chat", **kwargs)
     diagnostics = [row for row in logs if row["event"] == "turn.backend_unsupported"]
     assert diagnostics[-1]["stage"] == "preparation_counterpart"
     first = diagnostics[-1]["causes"][0]
@@ -150,6 +150,7 @@ async def test_prewrite_source_projection_receives_effective_seal_and_memory_pol
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await admit_impl(
             deps,
+            origin="chat",
             tenant_id=TENANT,
             requester_org=RequesterOrg.HOST,
             platform="slack",

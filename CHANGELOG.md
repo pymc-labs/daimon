@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   membership even for server admins across chat, handoffs, MCP and workers.
   Human-requested fleet workers inherit their root principal; automated wakes
   and unknown origins cannot acquire one from a recorded owner. Operators can
-  set or clear roles with `daimon agents rule invoker-roles`.
+  set or clear roles with `daimon agents rule invoker-roles`. Workspace transfers
+  away from role-gated agents carry transcripts without running a checkpoint.
+  Human provenance is stored separately from attended tool controls.
 
 - Let newly recognized platform admins connect GitHub repos without first sending
   a chat message to refresh their stored role. Delegated admins remain excluded.

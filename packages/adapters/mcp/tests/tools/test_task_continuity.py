@@ -1657,9 +1657,11 @@ async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
     assert (handed is not None) == (pinned == "unpinned"), "a refusal rolls the hand-off back"
 
 
-@pytest.mark.parametrize("human", [False, True], ids=["wake-refused", "human-allowed"])
+@pytest.mark.parametrize(
+    "human", [None, False, True], ids=["legacy-null-refused", "wake-refused", "human-allowed"]
+)
 async def test_handoff_uses_calling_principal_before_binding_or_queueing(
-    human: bool,
+    human: bool | None,
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1708,11 +1710,18 @@ async def test_handoff_uses_calling_principal_before_binding_or_queueing(
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
-        attended=human,
+        attended=True,
         chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
+        from daimon.core.stores.turn_origins import bind_origin_session
+
+        async with committing_sessionmaker() as db:
+            await bind_origin_session(
+                db, origin_id=origin.id, chat_session_id="test-session", human_invocation=human
+            )
+            await db.commit()
         call = _hand_off_task_impl(
             runtime,
             auth,
@@ -1733,11 +1742,11 @@ async def test_handoff_uses_calling_principal_before_binding_or_queueing(
             parent_channel_id="C_PARENT",
             thread_id="T_THREAD",
         )
-        assert (binding is not None) is human
+        assert (binding is not None) is bool(human)
         queued = await list_pending_continuations(
             session,
             tenant_id=tenant.id,
             platform="discord",
             thread_id="T_THREAD",
         )
-        assert bool(queued) is human
+        assert bool(queued) is bool(human)

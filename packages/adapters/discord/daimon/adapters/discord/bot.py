@@ -5196,6 +5196,7 @@ class DaimonBot(commands.Bot):
         try:
             admission = await admit(
                 self.runtime.turn_deps,
+                origin="chat",
                 tenant_id=tenant_id,
                 requester_org=RequesterOrg.HOST,
                 platform="discord",
