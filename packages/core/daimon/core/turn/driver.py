@@ -106,7 +106,7 @@ from daimon.core.turn.posture import (
 )
 from daimon.core.turn.provider_actions import ProviderActionApproval
 from daimon.core.turn.reducers import apply, apply_usage_observation
-from daimon.core.turn.state import TurnState
+from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import (
     ProviderTerminalFailure,
     TerminationReason,
@@ -1892,6 +1892,14 @@ async def _consume_with_reconnect(
 # --- Finalizers ----------------------------------------------------------
 
 
+def _ended_with_end_turn(state: TurnState) -> bool:
+    return state.stop_reason is not None and state.stop_reason.type == "end_turn"
+
+
+def _has_text_answer(state: TurnState) -> bool:
+    return any(isinstance(block, TextBlock) and block.text.strip() for block in state.content)
+
+
 async def _finalize_success_or_error(
     *,
     normalized_reason: TerminationReason | None = None,
@@ -1928,11 +1936,28 @@ async def _finalize_success_or_error(
         # instead of surfacing a blank success. A `retrying` error that was
         # never settled is surfaced when nothing was produced, or when MA's
         # own stop reason says the retries ran out behind a partial answer.
+        # An `exhausted` package-installation failure is judged first, as it
+        # was the turn's error before it was kept aside.
         retries_exhausted = (
             final_state.stop_reason is not None
             and final_state.stop_reason.type == "retries_exhausted"
         )
-        if not final_state.content and final_state.mcp_failures:
+        if final_state.package_install_error is not None:
+            # MA kept the session running without the sandbox packages. A turn
+            # that answered and ended cleanly is complete; anything less is the
+            # package error, as when it was the turn's error from the start.
+            if _has_text_answer(final_state) and _ended_with_end_turn(final_state):
+                log.warning(
+                    "turn.environment_degraded",
+                    session_id=session_id,
+                    message=final_state.package_install_error.message,
+                )
+            else:
+                final_state = dataclasses.replace(
+                    final_state, error=final_state.package_install_error
+                )
+                state_cell[0] = final_state
+        elif not final_state.content and final_state.mcp_failures:
             err = TurnError(
                 kind="upstream",
                 message=degraded_failure_message(final_state.mcp_failures),
