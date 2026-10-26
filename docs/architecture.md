@@ -1145,9 +1145,13 @@ recomputes tokens as `ceil(chars / 3.5)`. A refusal, timeout, invalid response
 or exception produces a normal turn without context; failures log only tenant
 and exception class, never provider text, card IDs, sources or credentials.
 
-Connections are reused and idle connections are kept for 240 s; the first call
-after a longer idle pays a fresh TLS handshake, which can exceed the 200 ms
-budget so that turn gets no context.
+Connections are reused and idle connections are kept for 240 s. A late provider
+call or configuration read finishes in the background and its result is discarded,
+letting the connection warm for later turns. The first turn after a cold start or
+long idle usually gets no context. Each owner retains at most eight late calls;
+additional late calls are cancelled. HTTP calls have a five-second wall-clock cap;
+configuration reads use the database session's own timeout. Cancelling the parent
+turn still cancels its pending work.
 
 The turn fragment precedes user input. The once-only system fragment joins the
 system message, or precedes user input on models without system-message support.
