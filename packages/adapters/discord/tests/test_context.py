@@ -42,6 +42,7 @@ class _AsyncIter:
 def _make_message(
     *,
     msg_id: int = 1,
+    channel_id: int = 900,
     content: str = "hello",
     author_name: str = "Alice",
     author_id: int = 100,
@@ -58,6 +59,8 @@ def _make_message(
     """
     msg = MagicMock(spec=discord.Message)
     msg.id = msg_id
+    msg.channel = MagicMock()
+    msg.channel.id = channel_id
     msg.content = content
     msg.author = MagicMock()
     msg.author.display_name = author_name
@@ -1905,3 +1908,73 @@ async def test_hand_over_input_renders_the_clicker_without_mutating_the_notice()
     assert trigger.jump_url == notice.jump_url
     await trigger.add_reaction("⌛")
     notice.add_reaction.assert_awaited_once_with("⌛")
+
+
+@pytest.mark.parametrize("builder", ["initial", "delta", "channel"])
+@pytest.mark.parametrize(
+    "request_channel_id", [800, 900], ids=["parent-reply", "card-thread-reply"]
+)
+async def test_request_identity_is_independent_of_response_thread(
+    builder: str, request_channel_id: int
+) -> None:
+    card = _make_message(msg_id=5, channel_id=request_channel_id, content="suggestion card")
+    trigger = _make_message(
+        msg_id=31, channel_id=request_channel_id, content="remember this", reply_to=card
+    )
+    response_thread = _make_thread([], thread_id=900, parent_id=800)
+    if builder == "delta":
+        result, _ = await build_delta_xml(response_thread, trigger, after_message_id=10)
+    elif builder == "channel":
+        result, _ = await build_channel_context_xml(
+            _make_text_channel([]), trigger, thread=response_thread
+        )
+    else:
+        result, _ = await build_context_xml(response_thread, trigger)
+
+    query = _user_query(result)
+    assert query.attrib["message_id"] == "31"
+    assert query.attrib["channel_id"] == str(request_channel_id)
+    assert query.attrib["reply_to"] == "5"
+    if request_channel_id != response_thread.id:
+        location = ET.fromstring(f"<root>{result}</root>").find(".//thread")
+        assert location is not None
+        assert location.attrib["id"] == "900"
+        assert query.attrib["channel_id"] != location.attrib["id"]
+
+
+@pytest.mark.parametrize("builder", ["initial-or-reseed", "delta", "channel"])
+@pytest.mark.parametrize("same_text", [False, True], ids=["distinct-text", "identical-text"])
+async def test_composite_sources_keep_each_request_identity(builder: str, same_text: bool) -> None:
+    from daimon.adapters.discord.bot import _compose_queued_content
+
+    first = _make_message(msg_id=31, channel_id=800, content="remember this", reply_to=5)
+    # Include a non-reply: reply_targets alone cannot identify every merged source.
+    second = _make_message(
+        msg_id=32, channel_id=900, content="remember this" if same_text else "also this"
+    )
+    messages = [first, second]
+    thread = _make_thread(messages)
+    kwargs = dict(
+        query_text=_compose_queued_content(messages),
+        query_message_ids=tuple(m.id for m in messages),
+        query_messages=tuple(messages),
+    )
+    if builder == "delta":
+        result, _ = await build_delta_xml(thread, first, after_message_id=10, **kwargs)
+    elif builder == "channel":
+        result, _ = await build_channel_context_xml(
+            _make_text_channel(messages), first, thread=thread, **kwargs
+        )
+    else:
+        result, _ = await build_context_xml(thread, first, **kwargs)
+
+    query = _user_query(result)
+    assert query.attrib["message_id"] == "31"
+    assert query.attrib["channel_id"] == "800"
+    assert "reply_to" not in query.attrib
+    sources = query.findall("query_sources/message")
+    assert [source.attrib for source in sources] == [
+        {"message_id": "31", "channel_id": "800", "reply_to": "5"},
+        {"message_id": "32", "channel_id": "900"},
+    ]
+    assert [source.text for source in sources] == [first.content, second.content]

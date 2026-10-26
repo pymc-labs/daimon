@@ -5945,9 +5945,7 @@ class DaimonBot(commands.Bot):
                     excluded_message_ids=own_card_ids,
                 )
         else:
-            if content_override is not None:
-                user_message = content_override
-            elif isinstance(message.channel, discord.TextChannel):
+            if isinstance(message.channel, discord.TextChannel):
                 user_message, _ = await build_channel_context_xml(
                     message.channel,
                     trigger=message,
@@ -5956,10 +5954,13 @@ class DaimonBot(commands.Bot):
                     bot_display_name=discord_settings.bot_display_name,
                     is_admin=is_admin,
                     key_names=key_names,
+                    query_text=content_override,
+                    query_message_ids=tuple(int(i) for i in admitted_message_ids),
+                    query_messages=query_messages,
                 )
             else:
                 # Forum/voice channels: fall back to raw message content
-                user_message = message.content
+                user_message = content_override if content_override is not None else message.content
 
         # Inline only the trigger message's images as base64 vision blocks.
         # Images we can't inline (too large, too many, unsupported, fetch error)

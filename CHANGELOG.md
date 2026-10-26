@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Optional tenant-scoped pre-turn MCP context providers, configured with `daimon context-provider set`, with bounded fail-open calls and session acknowledgements.
 
+- Preserve Discord request message and channel IDs in turn context, including every
+  source of a merged queued request, so agents can cite the original messages.
+
 - Let newly recognized platform admins connect GitHub repos without first sending
   a chat message to refresh their stored role. Delegated admins remain excluded.
 

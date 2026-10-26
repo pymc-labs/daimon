@@ -1607,7 +1607,13 @@ the marker means. Only the `<user_query>` is the request.
 
 Discord turns say which message a reply points at. Each replayed message carries
 its `id`, plus `reply_to` when it is a reply, and the `<user_query>` carries
-`reply_to` when its single trigger is one. When the target is not among the
+`reply_to` when its single trigger is one. Its `message_id` and `channel_id`
+identify the human's request message and the channel or thread where they posted
+it, even when Daimon opens a different response thread. `reply_to` identifies the
+message they replied to, not the request. A merged query includes `query_sources`
+inside `user_query`, with each original message's `message_id`, `channel_id`,
+text and optional `reply_to`; identical text still has distinct source entries.
+When the target is not among the
 replayed messages (before the delta's watermark, a delivered answer chunk the
 delta leaves out, or an older channel post), an untrusted `reply_targets` block
 holds it, cut at 2,000 characters. A merged queued query lists one entry per reply, each
