@@ -1088,6 +1088,16 @@ field, a Slack context block, a Teams monospace block), so the icons of both
 look the same. Off, nothing is added and the call is an
 ordinary tool line.
 
+Per-turn context (`DAIMON_MCP_CONTEXT__ENABLED`, `daimon.core.turn.mcp_context`)
+also rides in front of the user message. The chat adapters pass the person's
+own words as `request_text`; `run_prepared_turn` sends them, with an opaque
+per-server id for the thread, to each of the agent's MCP servers that has a
+shared token in `agent_mcp_credentials` and offers a `context` tool, and puts
+each non-empty answer in an untrusted `<mcp_context>` block. Each server gets
+at most `timeout_s`; its tool list is remembered for ten minutes, and one that
+failed is skipped for a minute. Routines, hand-offs, held, shared and sealed
+turns ask nothing. The recovery re-run reuses the same answers.
+
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
 immediate idle acknowledgement is observed. The interrupt and acknowledgement
 wait are bounded by the same 120-second timeout; the subscription closes when
