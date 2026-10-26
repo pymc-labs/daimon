@@ -3,7 +3,8 @@
 Streamable HTTP only: one JSON-RPC request per POST, answered as JSON or as
 the protocol's SSE form. Callers own the `httpx.AsyncClient` (no redirects:
 the configured URL is the only authority) and check the URL first. Anything
-but a well-formed result raises `ValueError`.
+but a well-formed result raises `ValueError`; a refused request raises its
+subclass `McpStatusError`, which carries the HTTP status.
 """
 
 from __future__ import annotations
@@ -29,6 +30,14 @@ INITIALIZE_BODY = {
 MAX_RESPONSE_BYTES = 1024 * 1024
 
 
+class McpStatusError(ValueError):
+    """The server answered a request with something other than a bounded 200."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("MCP request refused")
+        self.status_code = status_code
+
+
 def mcp_headers(bearer_token: str) -> dict[str, str]:
     """Headers for every request in one exchange; `mcp_request` adds the session id."""
     return {
@@ -50,7 +59,7 @@ async def mcp_request(
     """
     response = await http.post(url, json=body, headers=headers)
     if response.status_code != 200 or len(response.content) > MAX_RESPONSE_BYTES:
-        raise ValueError("MCP request refused")
+        raise McpStatusError(response.status_code)
     session = response.headers.get("mcp-session-id")
     if session:
         headers["Mcp-Session-Id"] = session

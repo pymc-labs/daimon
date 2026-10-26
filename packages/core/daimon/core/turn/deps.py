@@ -12,6 +12,8 @@ No I/O in this module; `build_turn_deps` derives the bundle from settings.
 from __future__ import annotations
 
 import functools
+import hashlib
+import hmac
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -19,6 +21,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import resolve_agent_mcp_credentials
@@ -55,6 +58,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     pass
+
+log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -180,6 +185,9 @@ def build_turn_deps(
     turn_settings = cast(object, settings.turn)
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     fernet = build_multifernet(crypto_keys) if crypto_keys else None
+    context = cast(object, settings.mcp_context)
+    if isinstance(context, McpContextSettings) and context.enabled and fernet is None:
+        log.warning("mcp_context.off", reason="DAIMON_CRYPTO__KEYS is not set")
     return TurnDeps(
         anthropic=anthropic,
         messages=anthropic,
@@ -224,9 +232,11 @@ def build_turn_deps(
                 credentials=functools.partial(
                     resolve_agent_mcp_credentials, sessionmaker=sessionmaker, fernet=fernet
                 ),
+                id_key=hmac.new(
+                    crypto_keys[0].encode(), b"daimon mcp context thread ids", hashlib.sha256
+                ).digest(),
             )
-            if fernet is not None
-            and isinstance(context := cast(object, settings.mcp_context), McpContextSettings)
+            if fernet is not None and isinstance(context, McpContextSettings)
             else None
         ),
         platform_skills=load_platform_skills(
