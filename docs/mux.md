@@ -638,6 +638,95 @@ check. Tenantless established creation uses a named legacy host capability.
 Workspace export/restore remain unsupported lifecycle methods and fail explicitly. The driver keeps no operation cache
 and makes no request during construction.
 
+## Account erasure
+
+Account deletion (`purge_account`) erases an account's private mux state in the same
+transaction as the account itself, and the privacy preview counts the same inventory
+(`daimon.core.stores.mux_erasure`). The mux tables carry the owner as plain text with
+no foreign key to `accounts`, so the inventory selects by those columns, in every
+tenant, and never by searching JSON:
+
+| Erased | Selected by |
+| --- | --- |
+| private slots, their binding generations, journal sessions, projections and events | `provider_binding_slot.account_id` is the account |
+| leases, pending provider-release requests | `thread_lease.account_id`, `thread_provider_release.account_id` |
+| operations | `operation.account_id` is the account, or `operation.principal_id` is one of its principals, unless the operation ran against a shared slot |
+
+Kept: shared slots (`account_id` NULL) and everything under them, other accounts' rows,
+the operations the person ran against a shared slot (the preview counts them as
+retained shared conversations), and synthetic billing operations
+(`selfhosted-billing:<binding id>`), which no account or principal matches. A private
+slot's `account_id` is never cleared: NULL means shared.
+
+`usage_observation` and `accounting_outbox` are financial evidence and survive. They no
+longer cascade from the slot (migration `0142_mux_account_erasure` drops those two
+foreign keys; the tenant foreign key still removes them with the tenant). For each
+erased slot that has usage rows, `accounting_binding_context` keeps the binding id,
+tenant, platform, channel and profiles, which is all settlement reads from the binding,
+so the pending-usage drain, `apply_usage_outbox` and replays behave as before and a
+revision is still debited once. The usage rows, and the billing-context operations that
+settle them, keep the session reference they were recorded with, which includes the
+erased account's id.
+
+After the purge the account is fenced. Binding publication, lease acquire and renew,
+operation begin, claim and result, journal append (which also carries recovery
+imports), usage recording and release requests call `mux_erasure.fence_writers`
+first. It takes the account's erasure lock shared (an advisory lock keyed
+`mux-erasure:<id>`); purge takes the same lock exclusive after `lock_account` and holds
+it for its whole transaction, so a write either finishes before the purge and is erased
+with the rest, or starts after it and is refused (`ScopeViolation`, "the account was
+erased") because the account is in `erased_account`. The erasure lock is a key of its own:
+the self-hosted resource writers hold the account lock exclusively for ordinary writes,
+and that must not read as an erasure. An operation is also fenced by its principal
+(`erased_principal`, the erasure lock of each principal taken after the account's), and
+usage and journal writes by the account named on the session they write to, so an erased
+caller cannot write into a shared conversation either.
+Lock order in a transaction: the account lock (purge and the self-hosted writers only),
+then the erasure locks (account, then principals in id order), then tenant-level locks,
+then row locks. Only purge takes an erasure lock exclusively. A caller that holds a row it
+later hands to a store must take the fence first and do its work in one transaction, as
+`thread_release.apply_thread_release` does against the Postgres store; a second
+transaction asking for the fence queues behind a waiting purge.
+
+Migration 0142 also installs triggers on the slot, lease, release-request, operation and
+usage-observation tables that apply the same rule in the database: an old process that
+is still running while the migration is applied cannot recreate an erased account's slot,
+lease, operation or usage row either. A trigger never waits. It tries the erasure lock
+shared; if an erasure holds or queues for it, the write is refused ("the account is being
+erased") instead of waiting, because a trigger runs after its writer already holds row
+locks and a purge that needs those rows would otherwise be in a cycle Postgres cannot
+always see. A writer that took the fence in the same transaction already holds the lock,
+so the try succeeds, and an ordinary self-hosted write, which holds only the account lock,
+never trips it. Account and principal ids are random and never reused, so a returning
+person is unaffected. A write into a shared conversation's journal names no account in its
+row, so that one rule is enforced only by the application. Shared slots, other accounts,
+ids that are not UUIDs (operator and billing identities, `host:` principals) and the
+in-memory store are never fenced. A turn still running when its account is erased fails
+at its next write; its usage after that point is not recorded.
+
+The purge transaction runs with a lock timeout of five seconds. If it loses a deadlock or
+cannot get the account lock in time it rolls back whole and starts again, up to five
+attempts with a short jittered pause, then fails with `AccountPurgeFailed`, a message the
+Discord and Slack panels show ("nothing was deleted, try again"). Teams shows its generic
+failure card. A failed purge never reports success.
+
+Migration 0142 also installs triggers on the slot, lease, release-request, operation and
+usage-observation tables that apply the same rule in the database: an old process that
+is still running while the migration is applied cannot recreate an erased account's slot,
+lease, operation or usage row either. A trigger never waits. It tries the account lock
+shared; if an erasure holds or queues for it, the write is refused ("the account is being
+erased") instead of waiting, because a trigger runs after its writer already holds row
+locks and a purge that needs those rows would otherwise be in a cycle Postgres cannot
+always see. A writer that took the fence in the same transaction already holds the lock,
+so the try succeeds. Account and principal ids are random and never reused, so a
+returning person is unaffected. A write into a shared conversation's journal names no
+account in its row, so that one rule is enforced only by the application. Shared slots, other accounts, ids
+that are not UUIDs (operator and billing identities, `host:` principals) and the
+in-memory store are never fenced. A turn still running when its account is erased fails
+at its next write; its usage after that point is not recorded.
+
+`thread_sessions`, the legacy mapping, is outside this inventory.
+
 ## Accounting observations
 
 The Anthropic usage driver converts each model-request end event into one

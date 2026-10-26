@@ -52,6 +52,12 @@ principal UUID. The orchestrator dispatches manually rather than via a unified
 Protocol.
 
 Deliberate carve-outs:
+- Provider-neutral (mux) state: a person's private slots, with their binding generations,
+  journal, leases, operations and release requests, are erased with the account, and the
+  account is fenced so no retained scope or lease writes again (`stores.mux_erasure`).
+  Shared slots and the operations a person ran against them stay, as do the usage
+  observations and accounting outbox rows of the erased slots: the tenant still settles
+  from them. Purge reports them as retained rather than removing them.
 - Shared setup conversations retain their binding and other participants' work;
   account deletion removes creator attribution through ON DELETE SET NULL.
   Short-lived turn origins are removed through the account's ON DELETE CASCADE,
@@ -103,13 +109,17 @@ Deliberate carve-outs:
 
 from __future__ import annotations
 
+import asyncio
+import random
 import uuid
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import Literal
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core import platform_names
+from daimon.core.errors import UserFacingError
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.memory_resource import (
     delete_personal_memory_stores_for_account,
@@ -128,6 +138,7 @@ from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
+from daimon.core.stores import mux_erasure as mux_erasure_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import privacy_session_deletes as privacy_deletes_store
 from daimon.core.stores import routines as routines_store
@@ -142,6 +153,8 @@ from daimon.core.stores import user_skills as user_skills_store
 from daimon.core.stores import wizard_session as wizard_session_store
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -179,6 +192,14 @@ class PurgeReport(BaseModel):
     platform_user_names: int = 0
     teams_messages: int = 0
     microsoft_user_tokens: int = 0
+    # The account's private provider slots and what hangs off them (stores.mux_erasure).
+    mux_slots: int = 0
+    mux_binding_generations: int = 0
+    mux_journal_sessions: int = 0
+    mux_journal_events: int = 0
+    mux_leases: int = 0
+    mux_release_requests: int = 0
+    mux_operations: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -211,6 +232,13 @@ class PurgeReport(BaseModel):
             platform_user_names=self.platform_user_names + other.platform_user_names,
             teams_messages=self.teams_messages + other.teams_messages,
             microsoft_user_tokens=self.microsoft_user_tokens + other.microsoft_user_tokens,
+            mux_slots=self.mux_slots + other.mux_slots,
+            mux_binding_generations=self.mux_binding_generations + other.mux_binding_generations,
+            mux_journal_sessions=self.mux_journal_sessions + other.mux_journal_sessions,
+            mux_journal_events=self.mux_journal_events + other.mux_journal_events,
+            mux_leases=self.mux_leases + other.mux_leases,
+            mux_release_requests=self.mux_release_requests + other.mux_release_requests,
+            mux_operations=self.mux_operations + other.mux_operations,
         )
 
 
@@ -221,6 +249,11 @@ class AccountPurgeResult(BaseModel):
 
     db: PurgeReport
     sessions: SessionDeletionReport = Field(default_factory=SessionDeletionReport)
+    # What the account's erasure left in the mux tables: shared conversations and
+    # settlement evidence (see `daimon.core.stores.mux_erasure`).
+    mux_retained: mux_erasure_store.MuxRetained = Field(
+        default_factory=mux_erasure_store.MuxRetained
+    )
 
 
 # FK-safe order: routines -> principal_links -> principal row. Append new
@@ -365,10 +398,10 @@ async def _purge_principal_in_session(
         # fallback), keyed by (tenant, platform, platform user) like the grants
         # above. Deleted AFTER the principal row: a name write locks that row,
         # so one racing this purge has either committed (and is deleted here)
-        # or will find no principal and store nothing. The in-process queue is
-        # dropped too, so a queued write cannot follow.
-        user_key = (principal.tenant_id, principal.platform, principal.external_id)
-        platform_names.forget_users([user_key])
+        # or will find no principal and store nothing. The caller drops the
+        # in-process queue once the transaction has committed (`_forget_queued_names`):
+        # a rolled-back or retried purge must not discard names for a person it did
+        # not delete.
         platform_user_names_count = await platform_names_store.delete_user_names_for_platform_user(
             session,
             tenant_id=principal.tenant_id,
@@ -438,6 +471,8 @@ async def purge_principal(
         # Capture before the `async with` block closes the session.
         tenant_id = principal.tenant_id
         account_id = principal.account_id
+        queued_names = _queued_name_keys([principal])
+    platform_names.forget_users(queued_names)
 
     # DB transaction committed. Upstream deletion is best-effort — a single
     # call, since one principal belongs to exactly one tenant/account.
@@ -464,6 +499,198 @@ async def purge_principal(
     return PrincipalPurgeResult(db=db_report)
 
 
+def _queued_name_keys(principals: Iterable[Principal]) -> list[platform_names.UserKey]:
+    """The (tenant, platform, user) keys whose queued display names a purge drops."""
+    return [
+        (principal.tenant_id, principal.platform, principal.external_id)
+        for principal in principals
+        if isinstance(principal, PlatformPrincipalRow)
+    ]
+
+
+async def _purge_account_transaction(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> tuple[PurgeReport, mux_erasure_store.MuxRetained, list[platform_names.UserKey]]:
+    """Everything `purge_account` deletes locally, in the caller's transaction.
+
+    Takes the account lock, then the erasure locks (see `stores.mux_erasure` for the lock
+    order).
+    """
+    await privacy_deletes_store.lock_account(session, account_id=account_id)
+    await security_audit_store.erase_account_for_privacy(session, account_id=account_id)
+    cli_list = await identity_store.list_cli_principals_for_account(session, account_id=account_id)
+    pp_list = await identity_store.list_platform_principals_for_account(
+        session, account_id=account_id
+    )
+    # The erasure locks, after the account lock above: from here no mux writer of this
+    # account or its principals can start, and those already running have finished.
+    await mux_erasure_store.lock_for_erasure(
+        session,
+        account_id=account_id,
+        principal_ids=[principal.id for principal in (*cli_list, *pp_list)],
+    )
+    # Capture every distinct tenant before the session closes — each
+    # tenant's agents must be enumerated for upstream session deletion.
+    tenant_ids: set[uuid.UUID] = {principal.tenant_id for principal in (*cli_list, *pp_list)}
+    if tenant_ids:
+        await privacy_deletes_store.ensure_work(
+            session, account_id=account_id, tenant_ids=tenant_ids
+        )
+
+    report = PurgeReport()
+    github_account_link = await github_links_store.get_account_link(session, account_id=account_id)
+    for principal in (*cli_list, *pp_list):
+        sub = await _purge_principal_in_session(session, principal=principal)
+        report = report.merge(sub)
+
+    # Conversation/artifact records are purged. Conservative holds contain
+    # financial attempt metadata, not conversation payload; retain them as
+    # audit evidence rather than replenishing a cap when an account is erased.
+    # The account's private provider slots, journal, leases, operations and release
+    # requests. Shared conversations and settlement evidence stay (the retained
+    # counts say so). Before the account row goes: operations are also matched by
+    # the principals gathered above.
+    principal_ids = [principal.id for principal in (*cli_list, *pp_list)]
+    mux_retained = (
+        await mux_erasure_store.inventory(
+            session, account_id=account_id, principal_ids=principal_ids
+        )
+    ).retained
+    mux_erased = await mux_erasure_store.erase(
+        session, account_id=account_id, principal_ids=principal_ids
+    )
+    gemini_records_count = await gemini_state_store.delete_records_for_account(
+        session, account_id=account_id
+    )
+    selfhosted_operations_count = await selfhosted_store.delete_operations_for_account(
+        session, account_id=account_id
+    )
+    # Account-scoped (keyed by account_id, not principal): delete the
+    # per-agent MCP token rows BEFORE delete_account — they reference
+    # accounts.id, so leaving them trips the FK and rolls back the purge.
+    mcp_tokens_count = await mcp_tokens_store.delete_tokens_for_account(
+        session, account_id=account_id
+    )
+    github_connect_requests_count = await github_connect_store.delete_requests_for_account(
+        session, account_id=account_id
+    )
+    github_connect_click_intents_count = (
+        await github_connect_store.delete_click_intents_for_account(session, account_id=account_id)
+    )
+    # message_feedback: account-id-keyed OR'd with the account's
+    # (tenant, platform-user) keys — a vote cast before the person had an
+    # accounts row carries a null account_id and is only reachable via the
+    # platform-user key. CLI principals contribute no keys: reactions only
+    # ever come from a platform user, so cli_list is not walked here.
+    platform_user_keys = [(pp.tenant_id, pp.external_id) for pp in pp_list]
+    message_feedback_count = await message_feedback_store.delete_message_feedback_for_account(
+        session, account_id=account_id, platform_user_keys=platform_user_keys
+    )
+    # Same account_id = NULL hazard, same obligation: the note is
+    # unsolicited personal text, so an account erasure that missed these
+    # rows would leave it behind.
+    support_escalations_count = (
+        await support_escalation_store.delete_support_escalations_for_account(
+            session, account_id=account_id, platform_user_keys=platform_user_keys
+        )
+    )
+
+    # slack_turn_contexts: keyed by (tenant_id, account_id), not
+    # principal_id. Loop every tenant the account's principals belong to —
+    # mirrors the upstream session-deletion loop below.
+    slack_turn_contexts_count = 0
+    for tenant_id in tenant_ids:
+        slack_turn_contexts_count += (
+            await slack_turn_contexts_store.delete_turn_contexts_for_account(
+                session, tenant_id=tenant_id, account_id=account_id
+            )
+        )
+    user_cfg_count = await accounts_store.delete_user_config_for_account(
+        session, account_id=account_id
+    )
+    direct_message_count = await direct_messages_store.delete_conversations_for_account(
+        session, account_id=account_id
+    )
+    await github_issued_tokens_store.erase_requester_identity(session, account_id=account_id)
+    account_count = await accounts_store.delete_account(session, account_id=account_id)
+    github_user_links_count = (
+        await github_links_store.delete_unlinked_user(
+            session, github_user_id=github_account_link.github_user_id
+        )
+        if github_account_link is not None and account_count
+        else 0
+    )
+    if account_count or mux_erased.total or mux_retained.total:
+        await mux_erasure_store.mark_erased(
+            session, account_id=account_id, principal_ids=principal_ids
+        )
+    db_report = report.merge(
+        PurgeReport(
+            mux_slots=mux_erased.slots,
+            mux_binding_generations=mux_erased.binding_generations,
+            mux_journal_sessions=mux_erased.journal_sessions,
+            mux_journal_events=mux_erased.journal_events,
+            mux_leases=mux_erased.leases,
+            mux_release_requests=mux_erased.release_requests,
+            mux_operations=mux_erased.operations,
+            mcp_tokens=mcp_tokens_count,
+            gemini_records=gemini_records_count,
+            selfhosted_operations=selfhosted_operations_count,
+            github_connect_requests=github_connect_requests_count,
+            github_connect_click_intents=github_connect_click_intents_count,
+            message_feedback=message_feedback_count,
+            support_escalations=support_escalations_count,
+            user_configs=user_cfg_count,
+            accounts=account_count,
+            github_user_links=github_user_links_count,
+            slack_turn_contexts=slack_turn_contexts_count,
+            direct_message_conversations=direct_message_count,
+        )
+    )
+    return db_report, mux_retained, _queued_name_keys((*cli_list, *pp_list))
+
+
+#: A purge that cannot get the account lock, or loses a deadlock, rolls back whole and
+#: starts again. Writers hold the account lock for one short transaction, so waiting longer
+#: than this means something is stuck, and the person is told the deletion did not happen.
+PURGE_LOCK_TIMEOUT = "5s"
+PURGE_ATTEMPTS = 5
+_RETRYABLE_SQLSTATES = frozenset({"40P01", "55P03"})  # deadlock_detected, lock_not_available
+
+
+class AccountPurgeFailed(UserFacingError):
+    """The purge could not finish and rolled back: nothing was deleted."""
+
+
+def _retryable(error: DBAPIError) -> bool:
+    cause: object = error.orig
+    state = getattr(cause, "sqlstate", None) or getattr(cause, "pgcode", None)
+    return state in _RETRYABLE_SQLSTATES
+
+
+async def _purge_account_with_retries(
+    sm: async_sessionmaker[AsyncSession], *, account_id: uuid.UUID
+) -> tuple[PurgeReport, mux_erasure_store.MuxRetained, list[platform_names.UserKey]]:
+    for attempt in range(1, PURGE_ATTEMPTS + 1):
+        try:
+            async with sm() as session, session.begin():
+                await session.execute(text(f"SET LOCAL lock_timeout = '{PURGE_LOCK_TIMEOUT}'"))
+                return await _purge_account_transaction(session, account_id=account_id)
+        except DBAPIError as error:
+            if not _retryable(error):
+                raise
+            log.warning(
+                "purge.account_retry", account_id=str(account_id), attempt=attempt, error=str(error)
+            )
+            if attempt == PURGE_ATTEMPTS:
+                raise AccountPurgeFailed(
+                    "Deleting your account didn't finish, so nothing was deleted. "
+                    "Try again in a minute."
+                ) from error
+            await asyncio.sleep(random.uniform(0.1, 0.4) * attempt)
+    raise AssertionError("unreachable")
+
+
 async def purge_account(
     *,
     sm: async_sessionmaker[AsyncSession],
@@ -483,113 +710,10 @@ async def purge_account(
     Sessions are enumerated across EVERY linked-principal tenant —
     `principal_links` permits an account to span tenants.
     """
-    async with sm() as session, session.begin():
-        await privacy_deletes_store.lock_account(session, account_id=account_id)
-        await security_audit_store.erase_account_for_privacy(session, account_id=account_id)
-        cli_list = await identity_store.list_cli_principals_for_account(
-            session, account_id=account_id
-        )
-        pp_list = await identity_store.list_platform_principals_for_account(
-            session, account_id=account_id
-        )
-        # Capture every distinct tenant before the session closes — each
-        # tenant's agents must be enumerated for upstream session deletion.
-        tenant_ids: set[uuid.UUID] = {principal.tenant_id for principal in (*cli_list, *pp_list)}
-        if tenant_ids:
-            await privacy_deletes_store.ensure_work(
-                session, account_id=account_id, tenant_ids=tenant_ids
-            )
-
-        report = PurgeReport()
-        github_account_link = await github_links_store.get_account_link(
-            session, account_id=account_id
-        )
-        for principal in (*cli_list, *pp_list):
-            sub = await _purge_principal_in_session(session, principal=principal)
-            report = report.merge(sub)
-
-        # Conversation/artifact records are purged. Conservative holds contain
-        # financial attempt metadata, not conversation payload; retain them as
-        # audit evidence rather than replenishing a cap when an account is erased.
-        gemini_records_count = await gemini_state_store.delete_records_for_account(
-            session, account_id=account_id
-        )
-        selfhosted_operations_count = await selfhosted_store.delete_operations_for_account(
-            session, account_id=account_id
-        )
-        # Account-scoped (keyed by account_id, not principal): delete the
-        # per-agent MCP token rows BEFORE delete_account — they reference
-        # accounts.id, so leaving them trips the FK and rolls back the purge.
-        mcp_tokens_count = await mcp_tokens_store.delete_tokens_for_account(
-            session, account_id=account_id
-        )
-        github_connect_requests_count = await github_connect_store.delete_requests_for_account(
-            session, account_id=account_id
-        )
-        github_connect_click_intents_count = (
-            await github_connect_store.delete_click_intents_for_account(
-                session, account_id=account_id
-            )
-        )
-        # message_feedback: account-id-keyed OR'd with the account's
-        # (tenant, platform-user) keys — a vote cast before the person had an
-        # accounts row carries a null account_id and is only reachable via the
-        # platform-user key. CLI principals contribute no keys: reactions only
-        # ever come from a platform user, so cli_list is not walked here.
-        platform_user_keys = [(pp.tenant_id, pp.external_id) for pp in pp_list]
-        message_feedback_count = await message_feedback_store.delete_message_feedback_for_account(
-            session, account_id=account_id, platform_user_keys=platform_user_keys
-        )
-        # Same account_id = NULL hazard, same obligation: the note is
-        # unsolicited personal text, so an account erasure that missed these
-        # rows would leave it behind.
-        support_escalations_count = (
-            await support_escalation_store.delete_support_escalations_for_account(
-                session, account_id=account_id, platform_user_keys=platform_user_keys
-            )
-        )
-
-        # slack_turn_contexts: keyed by (tenant_id, account_id), not
-        # principal_id. Loop every tenant the account's principals belong to —
-        # mirrors the upstream session-deletion loop below.
-        slack_turn_contexts_count = 0
-        for tenant_id in tenant_ids:
-            slack_turn_contexts_count += (
-                await slack_turn_contexts_store.delete_turn_contexts_for_account(
-                    session, tenant_id=tenant_id, account_id=account_id
-                )
-            )
-        user_cfg_count = await accounts_store.delete_user_config_for_account(
-            session, account_id=account_id
-        )
-        direct_message_count = await direct_messages_store.delete_conversations_for_account(
-            session, account_id=account_id
-        )
-        await github_issued_tokens_store.erase_requester_identity(session, account_id=account_id)
-        account_count = await accounts_store.delete_account(session, account_id=account_id)
-        github_user_links_count = (
-            await github_links_store.delete_unlinked_user(
-                session, github_user_id=github_account_link.github_user_id
-            )
-            if github_account_link is not None and account_count
-            else 0
-        )
-        db_report = report.merge(
-            PurgeReport(
-                mcp_tokens=mcp_tokens_count,
-                gemini_records=gemini_records_count,
-                selfhosted_operations=selfhosted_operations_count,
-                github_connect_requests=github_connect_requests_count,
-                github_connect_click_intents=github_connect_click_intents_count,
-                message_feedback=message_feedback_count,
-                support_escalations=support_escalations_count,
-                user_configs=user_cfg_count,
-                accounts=account_count,
-                github_user_links=github_user_links_count,
-                slack_turn_contexts=slack_turn_contexts_count,
-                direct_message_conversations=direct_message_count,
-            )
-        )
+    db_report, mux_retained, queued_names = await _purge_account_with_retries(
+        sm, account_id=account_id
+    )
+    platform_names.forget_users(queued_names)
 
     # DB transaction committed. Upstream deletion is best-effort,
     # looped over every tenant the account's principals belonged to.
@@ -609,9 +733,9 @@ async def purge_account(
             anthropic, sm, account_id=account_id
         ):
             sessions = replace(sessions, upstream_error=True)
-        return AccountPurgeResult(db=db_report, sessions=sessions)
+        return AccountPurgeResult(db=db_report, sessions=sessions, mux_retained=mux_retained)
 
-    return AccountPurgeResult(db=db_report)
+    return AccountPurgeResult(db=db_report, mux_retained=mux_retained)
 
 
 async def retry_account_session_delete(

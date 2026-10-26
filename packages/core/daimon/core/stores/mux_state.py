@@ -31,10 +31,12 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from daimon.core._models import (
+    AccountingBindingContext,
     AccountingOutbox,
     ChannelConfigRevision,
     Journal,
@@ -46,7 +48,7 @@ from daimon.core._models import (
     ThreadSession,
     UsageObservation,
 )
-from daimon.core.stores import agent_backends, read_persisted_columns
+from daimon.core.stores import agent_backends, mux_erasure, read_persisted_columns
 from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
@@ -71,7 +73,7 @@ from mux.state.store import (
 )
 from mux.state.usage_ledger import AppliedUsage, OutboxRow
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter
-from sqlalchemy import ColumnElement, func, literal, select, text, tuple_, update
+from sqlalchemy import ColumnElement, and_, func, literal, or_, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -327,6 +329,7 @@ async def put_binding(
     session: AsyncSession, binding: BindingContract, *, expected_generation: int
 ) -> BindingContract:
     slot = binding_slot(binding)
+    await mux_erasure.fence_writers(session, slot.account_id)
     values = _slot_values(slot)
     current_slot = (
         await session.execute(
@@ -436,6 +439,7 @@ async def acquire_lease(
     clock: Clock,
     ttl: timedelta,
 ) -> Lease:
+    await mux_erasure.fence_writers(session, slot.account_id)
     state = await _locked_lease_state(session, slot)
     new_state, acquired = leases.acquire(
         state, slot, holder=holder, turn_id=turn_id, now=await clock(session), ttl=ttl
@@ -447,6 +451,7 @@ async def acquire_lease(
 async def renew_lease(
     session: AsyncSession, lease: Lease, *, clock: Clock, ttl: timedelta
 ) -> Lease:
+    await mux_erasure.fence_writers(session, lease.slot.account_id)
     state = await _lease_state(session, lease.slot, lock="update")
     new_state, renewed = leases.renew(state, lease, now=await clock(session), ttl=ttl)
     await _save_lease(session, new_state)
@@ -454,6 +459,7 @@ async def renew_lease(
 
 
 async def release_lease(session: AsyncSession, lease: Lease) -> None:
+    await mux_erasure.fence_writers(session, lease.slot.account_id)
     state = await _lease_state(session, lease.slot, lock="update")
     await _save_lease(session, leases.release(state, lease))
 
@@ -511,6 +517,12 @@ async def begin_operation(
             slot=slot,
         )
 
+    await mux_erasure.fence_writers(
+        session,
+        scope.account_id,
+        slot.account_id if slot else None,
+        principal_ids=(scope.principal_id,),
+    )
     begun = decide(await _operation(session, scope, key, lock=True))
     if not begun.fresh:
         return begun
@@ -558,6 +570,7 @@ async def claim_send(
     clock: Clock,
     fence: Lease | None,
 ) -> OperationRecord:
+    await mux_erasure.fence_writers(session, scope.account_id, principal_ids=(scope.principal_id,))
     record = await _owned(session, scope, key)
     await _check_fence(session, record.slot, fence, clock)
     claimed = operations.claim(record, now=now)
@@ -579,6 +592,7 @@ async def advance_operation(
     expected_status: OperationStatus | None = None,
     expected_updated_at: datetime | None = None,
 ) -> OperationRecord:
+    await mux_erasure.fence_writers(session, scope.account_id, principal_ids=(scope.principal_id,))
     record = await _owned(session, scope, key)
     await _check_fence(session, record.slot, fence, clock)
     # Under the row lock `_owned` took, so the expected-state check is atomic.
@@ -627,6 +641,13 @@ async def append_events(
     now: datetime,
     clock: Clock,
 ) -> JournalAppend:
+    # The writer's account is fenced before the journal head is locked: a private
+    # slot's owner, and the account the write is made for (which may be an erased
+    # caller writing into a shared conversation).
+    owner = await _session_owner(session, target.id)
+    if owner is None:
+        raise ScopeViolation(target.id, "no binding names this session")
+    await mux_erasure.fence_writers(session, owner[1].account_id, target.account_id)
     head = (
         await session.execute(
             select(
@@ -636,8 +657,7 @@ async def append_events(
             .with_for_update()
         )
     ).one_or_none()
-    owner = await _session_owner(session, target.id) if head else None
-    if head is None or owner is None:
+    if head is None:
         raise ScopeViolation(target.id, "no binding names this session")
     await _check_fence(session, owner[1], fence, clock)
     incoming = [JournalEntry.model_validate(_json(entry)) for entry in entries]
@@ -727,6 +747,8 @@ async def record_usage(
     owner = await _session_owner(session, observation.session.id)
     if owner is None or owner[0] != binding_id:
         raise ScopeViolation(binding_id, "binding does not own the observed session")
+    # A shared slot names no owner: the observed session's account is who wrote.
+    await mux_erasure.fence_writers(session, owner[1].account_id, observation.session.account_id)
     tenant_id = _tenant(owner[1].tenant_id)
     await session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
@@ -785,20 +807,31 @@ async def pending_outbox(session: AsyncSession, *, limit: int = 100) -> list[Out
     return [OutboxRow.model_validate(body) for body in bodies]
 
 
+@dataclass(frozen=True)
+class PendingSettlement:
+    """An unapplied outbox row with what the host reads from its binding to settle it."""
+
+    row: OutboxRow
+    tenant_id: uuid.UUID
+    profile: str
+    channel_id: str
+
+
 async def pending_outbox_for_profiles(
     session: AsyncSession,
     profiles: Collection[str],
     *,
     limit: int,
     after: tuple[str, str, int] | None = None,
-) -> list[tuple[OutboxRow, uuid.UUID, BindingContract]]:
+) -> list[PendingSettlement]:
     """Unapplied outbox rows of bindings that only ever had one of `profiles`.
 
     Every generation of the binding must be one of them: a binding id survives a
     rebind to another profile, and a row of that other profile must not be read as
     this one. Keyed by (binding, observation, newest revision first), from just after
     `after`, so a caller can page past rows it could not settle. Each comes with its
-    tenant and the binding's current generation.
+    tenant, the binding's current profile and its channel. A binding whose slot account
+    erasure removed is read from its `AccountingBindingContext`, which records the same.
     """
     generation = aliased(ProviderBinding)
     other = (
@@ -810,20 +843,28 @@ async def pending_outbox_for_profiles(
         .correlate(AccountingOutbox)
         .exists()
     )
-    latest = (
-        select(ProviderBinding.binding_id, func.max(ProviderBinding.generation).label("generation"))
-        .group_by(ProviderBinding.binding_id)
-        .subquery()
+    profile = func.coalesce(ProviderBinding.profile, AccountingBindingContext.profile)
+    channel_id = func.coalesce(ProviderBindingSlot.channel_id, AccountingBindingContext.channel_id)
+    live = and_(ProviderBindingSlot.binding_id.is_not(None), ~other)
+    erased = and_(
+        ProviderBindingSlot.binding_id.is_(None),
+        AccountingBindingContext.profiles.contained_by(list(profiles)),
     )
     statement = (
-        select(AccountingOutbox.row, AccountingOutbox.tenant_id, ProviderBinding.binding)
-        .join(latest, latest.c.binding_id == AccountingOutbox.binding_id)
-        .join(
-            ProviderBinding,
-            (ProviderBinding.binding_id == latest.c.binding_id)
-            & (ProviderBinding.generation == latest.c.generation),
+        select(AccountingOutbox.row, AccountingOutbox.tenant_id, profile, channel_id)
+        .outerjoin(
+            ProviderBindingSlot, ProviderBindingSlot.binding_id == AccountingOutbox.binding_id
         )
-        .where(AccountingOutbox.applied_at.is_(None), ~other)
+        .outerjoin(
+            ProviderBinding,
+            (ProviderBinding.binding_id == ProviderBindingSlot.binding_id)
+            & (ProviderBinding.generation == ProviderBindingSlot.generation),
+        )
+        .outerjoin(
+            AccountingBindingContext,
+            AccountingBindingContext.binding_id == AccountingOutbox.binding_id,
+        )
+        .where(AccountingOutbox.applied_at.is_(None), profile.is_not(None), or_(live, erased))
         .order_by(
             AccountingOutbox.binding_id,
             AccountingOutbox.observation_id,
@@ -846,8 +887,13 @@ async def pending_outbox_for_profiles(
         )
     rows = (await session.execute(statement)).all()
     return [
-        (OutboxRow.model_validate(row), tenant_id, BindingContract.model_validate(binding))
-        for row, tenant_id, binding in rows
+        PendingSettlement(
+            row=OutboxRow.model_validate(row),
+            tenant_id=tenant_id,
+            profile=profile_name,
+            channel_id=channel,
+        )
+        for row, tenant_id, profile_name, channel in rows
     ]
 
 

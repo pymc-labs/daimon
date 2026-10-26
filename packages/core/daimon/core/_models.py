@@ -12,7 +12,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from daimon.core import _erasure_guards
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -29,6 +31,7 @@ from sqlalchemy import (
     SmallInteger,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -3774,9 +3777,9 @@ class UsageObservation(Base):
         Index("ix_usage_observation_tenant_id", "tenant_id"),
     )
 
-    binding_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
-    )
+    # No foreign key to the slot: erasing a private slot must leave these rows
+    # (see `AccountingBindingContext`).
+    binding_id: Mapped[str] = mapped_column(Text, nullable=False)
     observation_id: Mapped[str] = mapped_column(Text, nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
@@ -3797,9 +3800,9 @@ class AccountingOutbox(Base):
         ),
     )
 
-    binding_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
-    )
+    # No foreign key to the slot: erasing a private slot must leave these rows
+    # (see `AccountingBindingContext`).
+    binding_id: Mapped[str] = mapped_column(Text, nullable=False)
     observation_id: Mapped[str] = mapped_column(Text, nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     prior_applied_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -3810,6 +3813,62 @@ class AccountingOutbox(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AccountingBindingContext(Base):
+    """What settling a binding's usage rows needs once its slot has been erased.
+
+    Account erasure deletes a private slot, its binding generations and its journal,
+    but the slot's `usage_observation` and `accounting_outbox` rows are financial
+    evidence the tenant still settles from (pending rows) and replays against (applied
+    rows). Those rows no longer hang off the slot, so the erasure copies the two facts
+    the host reads from the binding when it settles them: the profile (to price) and the
+    channel (to attribute the debit). It holds no thread, account, session or content.
+    """
+
+    __tablename__ = "accounting_binding_context"
+
+    binding_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The newest generation's profile, and every profile the binding ever had: the
+    # pending-usage drain settles only bindings that never left its profiles.
+    profile: Mapped[str] = mapped_column(Text, nullable=False)
+    profiles: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+
+
+class ErasedPrincipal(Base):
+    """A principal of an erased account: the fence for operations keyed by principal.
+
+    An operation is found by account but owned by a principal, and erasure removes the
+    ones owned by the account's principals, so a stale scope naming such a principal is
+    refused as well (see `ErasedAccount`).
+    """
+
+    __tablename__ = "erased_principal"
+
+    principal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    erased_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ErasedAccount(Base):
+    """An account that was erased: the durable half of the mux writer fence.
+
+    A mux writer holds a shared lock on its account while it writes, and purge holds the
+    exclusive one, so a write either finishes before the erasure or finds this row after
+    it. The account id is a bare identifier; nothing else about the account is kept.
+    """
+
+    __tablename__ = "erased_account"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    erased_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class NeutralAgentRevision(Base):
@@ -4086,3 +4145,18 @@ class SelfHostedResourceOperation(Base):
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now() + interval '7 days'")
     )
+
+
+def _install_erased_account_guards() -> None:
+    """Create the guards (`_erasure_guards`) wherever the schema is built from the models.
+
+    Production gets the same statements from migration 0142; this keeps a schema built
+    by `create_all` (the test schemas) behaving the same.
+    """
+    for table_name in _erasure_guards.GUARDED_TABLES:
+        table = Base.metadata.tables[table_name]
+        for statement in (*_erasure_guards.FUNCTIONS, _erasure_guards.create_trigger(table_name)):
+            event.listen(table, "after_create", DDL(statement))
+
+
+_install_erased_account_guards()

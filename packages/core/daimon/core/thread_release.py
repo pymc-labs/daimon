@@ -68,17 +68,34 @@ async def apply_thread_release(
     account_id: uuid.UUID,
     now: datetime,
 ) -> bool:
-    """Apply `slot`'s pending release, if any and still current. True when released."""
+    """Apply `slot`'s pending release, if any and still current. True when released.
+
+    Against the Postgres store the request, the binding and the fresh start are one
+    transaction that takes the account's erasure fence first, so an account erasure
+    waits for it whole (or finds it done) and never meets the request row half-held.
+    Another store keeps the request and the binding write in separate transactions.
+    """
+    from daimon.core.stores import mux_erasure, mux_state
+
     if slot.account_id is None:
         return False
+    in_one_transaction = isinstance(store, mux_state.PostgresStateStore) and store.owns_sessions(
+        sessionmaker
+    )
     async with sessionmaker.begin() as session:
+        if in_one_transaction:
+            await mux_erasure.fence_writers(session, slot.account_id)
         requested = await thread_provider_releases.take_request(session, slot)
         if requested is None:
             return False
-        current = await store.get_binding(slot, include_released=True)
+        if in_one_transaction:
+            current = await mux_state.get_binding(session, slot, include_released=True)
+        else:
+            current = await store.get_binding(slot, include_released=True)
         generation = current.generation if current is not None else 0
-        # The binding write commits on its own; if this transaction then failed, the
-        # request is still here with the slot one generation on: finish it, don't redo it.
+        # A binding written by a separate transaction may have committed before this one
+        # failed: the request is still here with the slot one generation on. Finish it,
+        # don't redo it.
         finishing = is_released(current) and generation == requested + 1
         if generation != requested and not finishing:
             log.info("thread_release_stale", requested=requested, current=generation)
@@ -86,7 +103,9 @@ async def apply_thread_release(
         if (
             not finishing
             and not is_released(current)
-            and not await _write_release(store, slot, current)
+            and not await _write_release(
+                store, slot, current, session if in_one_transaction else None
+            )
         ):
             return False
         await _fresh_start(session, slot, tenant_id=tenant_id, account_id=account_id, now=now)
@@ -123,8 +142,16 @@ async def release_now(
     return True
 
 
-async def _write_release(store: StateStore, slot: Slot, current: ProviderBinding | None) -> bool:
-    """Mark `slot` released at its next generation; False when another write won."""
+async def _write_release(
+    store: StateStore,
+    slot: Slot,
+    current: ProviderBinding | None,
+    session: AsyncSession | None = None,
+) -> bool:
+    """Mark `slot` released at its next generation; False when another write won.
+
+    With a `session`, the write joins that transaction (Postgres store only).
+    """
     if current is None:
         # Pinned only by an older Managed Agents session: a released first generation.
         released = ProviderBinding(
@@ -141,7 +168,12 @@ async def _write_release(store: StateStore, slot: Slot, current: ProviderBinding
     else:
         released, expected = released_successor(current), current.generation
     try:
-        await store.put_binding(released, expected_generation=expected)
+        if session is not None:
+            from daimon.core.stores import mux_state
+
+            await mux_state.put_binding(session, released, expected_generation=expected)
+        else:
+            await store.put_binding(released, expected_generation=expected)
     except BindingConflict:
         log.info("thread_release_lost_race", generation=expected)
         return False

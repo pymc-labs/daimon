@@ -69,6 +69,15 @@ linked to your account from Anthropic. The shared agents and their memory stay.
 Chat transcript deletion at Anthropic can fail. If Daimon reports a failure,
 ask the person who runs it to check and help remove the remaining transcripts.
 
+Account deletion also removes Daimon's own copy of your private conversations
+(Daimon keeps these on its provider-neutral turn path, which runs agents on other
+providers, and on Claude when an operator turns that path on): the stored messages, tool results and conversation state, and the
+routing and retry records behind them. A conversation shared with other people in
+a thread, and the requests you made in it, stay for the people still using it, so
+messages you wrote there may remain. The privacy panel says how many shared
+conversations that is before you confirm. After deletion nothing can write to
+your account again.
+
 Deletion does not remove usage and billing records. These records can still
 contain your chat platform user ID and conversation ID. Uploaded skill files at
 Anthropic stay. Daimon deletes skill records owned by your account. Records
