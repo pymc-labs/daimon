@@ -359,7 +359,10 @@ class SetupPanel:
                 token_jti=jti,
             )
             return await self._operator_tokens(
-                actor, "Key revoked. It stops working now." if revoked else "That key was already revoked."
+                actor,
+                "Key revoked. It stops working now."
+                if revoked
+                else "That key was already revoked.",
             )
         scopes = [part for part in str(data.get("scopes") or "").split(",") if part]
         try:
