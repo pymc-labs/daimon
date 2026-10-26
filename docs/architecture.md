@@ -1095,6 +1095,10 @@ An explicitly disabled override stops fallback. With no binding the input is
 unchanged. Discord supplies raw message text and ordered non-bot mentions;
 other surfaces supply no mentions or raw text. The hook currently serves
 Managed Agents sessions, including replacement sessions during recovery.
+For DMs, `channel_id` carries `private_dm_id` when known, otherwise the admitted
+`dm:` scope ID. `thread_id` carries the adapter's DM conversation identity,
+which is likewise the private DM ID when known or the `dm:` scope ID. These
+values identify the destination; the provider must still verify the requester.
 
 A deployment operator can bind a provider with:
 
@@ -1102,8 +1106,12 @@ A deployment operator can bind a provider with:
 daimon context-provider set provider.json --tenant TENANT_UUID --channel CHANNEL_ID --agent MA_AGENT_ID
 ```
 
-Omit either selector for a broader binding. The setter requires human admin
-authority; agent keys cannot change bindings. Example `provider.json`:
+Omit either selector for a broader binding. This is a deployment-operator CLI:
+shell access to the configured host is the gate. The store also rejects setters
+without human-admin authority and setters using agent keys; the CLI supplies
+operator authority. To disable a binding, set `"enabled": false` in its JSON and
+run the same command with the same selectors. There is no delete command;
+a disabled override continues to stop fallback. Example `provider.json`:
 
 ```json
 {

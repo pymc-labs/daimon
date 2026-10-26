@@ -8,7 +8,7 @@ FIRST TURN WITH CARDS
     "content": [
       {
         "type": "text",
-        "text": "<context_cards as_of=\"2026-10-23\">\n<card kind=\"person\" key=\"alice\" source=\"people/alice.md\" as_of=\"2026-10-01\">Alice: model reviewer.</card>\n<card kind=\"channel\" key=\"staff\" source=\"engagements/acme/config.md\" as_of=\"2026-10-01\">Staff: internal discussion.</card>\n<card kind=\"client\" key=\"acme\" source=\"engagements/acme/config.md\" as_of=\"2026-10-01\">Acme: active engagement.</card>\n<card kind=\"person\" key=\"bob\" source=\"people/bob.md\" as_of=\"2026-10-02\">Bob: forecasting.</card>\n<card kind=\"client\" key=\"orbit\" source=\"engagements/orbit/config.md\" as_of=\"2026-10-01\">Orbit: planning.</card>\n</context_cards>\n\nhello"
+        "text": "<context_cards as_of=\"2026-10-23\">\n<card kind=\"person\" key=\"alice\" source=\"people/alice.md\" as_of=\"2026-10-01\">Alice: model reviewer.</card>\n<card kind=\"channel\" key=\"staff\" source=\"engagements/acme/config.md\" as_of=\"2026-10-01\">Staff: internal discussion.</card>\n<card kind=\"client\" key=\"acme\" source=\"engagements/acme/config.md\" as_of=\"2026-10-01\">Acme: active engagement.</card>\n<card kind=\"person\" key=\"bob\" source=\"people/bob.md\" as_of=\"2026-10-02\">Bob: forecasting.</card>\n<card kind=\"client\" key=\"orbit\" source=\"engagements/orbit/config.md\" as_of=\"2026-10-01\">Orbit: planning.</card>\n</context_cards>\n\n\n\nhello"
       }
     ]
   },
@@ -54,7 +54,7 @@ RESET SESSION
     "content": [
       {
         "type": "text",
-        "text": "<context_cards as_of=\"2026-10-23\">\n<card kind=\"person\" key=\"alice\" source=\"people/alice.md\" as_of=\"2026-10-01\">Alice: model reviewer.</card>\n<card kind=\"channel\" key=\"staff\" source=\"engagements/acme/config.md\" as_of=\"2026-10-01\">Staff: internal discussion.</card>\n<card kind=\"client\" key=\"acme\" source=\"engagements/acme/config.md\" as_of=\"2026-10-01\">Acme: active engagement.</card>\n<card kind=\"person\" key=\"bob\" source=\"people/bob.md\" as_of=\"2026-10-02\">Bob: forecasting.</card>\n<card kind=\"client\" key=\"orbit\" source=\"engagements/orbit/config.md\" as_of=\"2026-10-01\">Orbit: planning.</card>\n</context_cards>\n\nhello"
+        "text": "<context_cards as_of=\"2026-10-23\">\n<card kind=\"person\" key=\"alice\" source=\"people/alice.md\" as_of=\"2026-10-01\">Alice: model reviewer.</card>\n<card kind=\"channel\" key=\"staff\" source=\"engagements/acme/config.md\" as_of=\"2026-10-01\">Staff: internal discussion.</card>\n<card kind=\"client\" key=\"acme\" source=\"engagements/acme/config.md\" as_of=\"2026-10-01\">Acme: active engagement.</card>\n<card kind=\"person\" key=\"bob\" source=\"people/bob.md\" as_of=\"2026-10-02\">Bob: forecasting.</card>\n<card kind=\"client\" key=\"orbit\" source=\"engagements/orbit/config.md\" as_of=\"2026-10-01\">Orbit: planning.</card>\n</context_cards>\n\n\n\nhello"
       }
     ]
   },

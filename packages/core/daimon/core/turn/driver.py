@@ -773,7 +773,10 @@ async def run_turn(
             context_prefix = provider_system + "\n\n" + context_prefix
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
             *(image_blocks or []),
-            BetaManagedAgentsTextBlockParam(type="text", text=context_prefix + user_message),
+            BetaManagedAgentsTextBlockParam(
+                type="text",
+                text=f"{context_prefix}\n\n{user_message}" if context_prefix else user_message,
+            ),
         ]
         event: BetaManagedAgentsUserMessageEventParams = {
             "type": "user.message",

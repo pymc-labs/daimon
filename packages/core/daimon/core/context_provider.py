@@ -15,7 +15,7 @@ from typing import Literal, Protocol
 
 import httpx
 import structlog
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 log = structlog.get_logger(__name__)
 MAX_RESPONSE_BYTES = 65_536
@@ -42,7 +42,7 @@ class ContextRequest(BaseModel):
     channel_id: str | None
     parent_channel_id: str | None = None
     thread_id: str | None = None
-    place_type: Literal["channel", "thread", "dm", "unknown"] = "unknown"
+    place_type: Literal["channel", "thread", "dm"] = "channel"
     requester_platform_user_id: str
     agent_id: str
     # This is host-attested origin metadata, NOT evidence of internal placement.
@@ -93,7 +93,13 @@ class McpProvider:
     """Stateless MCP tools/call with bounded JSON or SSE replies."""
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        self.transport = transport
+        # Construct outside the turn path: loading TLS roots is synchronous.
+        self.client = httpx.AsyncClient(
+            transport=transport, follow_redirects=False, trust_env=False
+        )
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
 
     async def __call__(self, config: ProviderConfig, request: ContextRequest) -> ContextResponse:
         if httpx.URL(config.endpoint).scheme != "https":
@@ -115,15 +121,9 @@ class McpProvider:
                 "arguments": request.model_dump(mode="json"),
             },
         }
-        async with (
-            httpx.AsyncClient(
-                transport=self.transport,
-                follow_redirects=False,
-                timeout=config.timeout_ms / 1000,
-                trust_env=False,
-            ) as client,
-            client.stream("POST", config.endpoint, headers=headers, json=body) as reply,
-        ):
+        async with self.client.stream(
+            "POST", config.endpoint, headers=headers, json=body, timeout=config.timeout_ms / 1000
+        ) as reply:
             reply.raise_for_status()
             raw = bytearray()
             async for chunk in reply.aiter_bytes():
@@ -149,8 +149,6 @@ class McpProvider:
             payload = messages[0]
         else:
             payload = bytes(raw)
-        from pydantic import TypeAdapter
-
         envelope = TypeAdapter(dict[str, JsonValue]).validate_json(payload)
         result = envelope.get("result")
         if (
@@ -234,7 +232,7 @@ class ContextProviders:
         try:
             # Config reads have the same 200ms host ceiling, including pool waits.
             loaded = await _bounded(load(request), 0.2)
-            if loaded is not None and loaded.config.enabled and request.place_type != "unknown":
+            if loaded is not None and loaded.config.enabled:
                 config = loaded.config
                 expires = started + min(config.timeout_ms / 1000, 0.2)
                 destination = repr(

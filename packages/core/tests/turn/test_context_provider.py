@@ -129,20 +129,20 @@ async def test_denied_before_send_does_not_acknowledge_context() -> None:
     assert "context_cards" in batch[0]["content"][0]["text"]
 
 
-@pytest.mark.parametrize("dm", [False, True])
+@pytest.mark.parametrize("place_kind", ["channel", "thread", "dm", "unknown"])
 @pytest.mark.parametrize("older_session", [False, True])
 async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
     db_session,
     db_nullpool_engine,
     monkeypatch,
-    dm: bool,
+    place_kind: str,
     older_session: bool,
 ) -> None:
     from dataclasses import replace
     from types import SimpleNamespace
 
     from daimon.core import context_provider as context_module
-    from daimon.core.authz import AgentRef, Place, Subject, Surface
+    from daimon.core.authz import AgentRef, Place, Subject, Surface, build_turn_place
     from daimon.core.stores.context_providers import set_provider
     from daimon.core.turn.admission import AdmissionGrant
     from daimon.core.turn.run import run_prepared_turn
@@ -197,11 +197,19 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
         agent=ma_agent(id="ag_1", tenant_id=tenant.id, model="claude-sonnet-5"),
         env=ma_environment(id="env_1", tenant_id=tenant.id),
     )
-    place = Place() if dm else Place(channel_id="thread-1", parent_channel_id="staff")
+    dm = place_kind == "dm"
+    thread = place_kind == "thread"
+    place = (
+        Place()
+        if dm
+        else Place(parent_unresolved=True)
+        if place_kind == "unknown"
+        else build_turn_place(channel_id="staff", thread_id="thread-1" if thread else None)
+    )
     admission = replace(
         admission,
         origin_channel_id="dm-alice" if dm else "staff",
-        origin_thread_id=None if dm else "thread-1",
+        origin_thread_id="thread-1" if thread else None,
         private_dm_id="dm-alice" if dm else None,
         grant=AdmissionGrant(
             tenant_id=tenant.id,
@@ -211,7 +219,7 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
             run_place=place,
             agent=AgentRef.of("daimon"),
             channel_id="dm-alice" if dm else "staff",
-            thread_id=None if dm else "thread-1",
+            thread_id="thread-1" if thread else None,
             is_dm=dm,
         ),
     )
@@ -245,15 +253,21 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
         render_interval_s=0.001,
     )
     assert outcome.state.error is None
+    if place_kind == "unknown":
+        assert not provider.requests
+        return
     assert len(provider.requests) == 1
     request = provider.requests[0]
     assert request.tenant_id == tenant.id and request.server_id == "fixture-server"
     if dm:
         assert request.channel_id == "dm-alice"
         assert request.parent_channel_id is None and request.place_type == "dm"
-    else:
+    elif thread:
         assert request.channel_id == request.thread_id == "thread-1"
         assert request.parent_channel_id == "staff" and request.place_type == "thread"
+    else:
+        assert request.channel_id == "staff" and request.place_type == "channel"
+        assert request.parent_channel_id is None and request.thread_id is None
     assert request.mention_ids == ("bob",) and request.message_text == "Orbit's plan"
     assert request.agent_id == "ag_1" and request.requester_platform_user_id == "alice"
     assert "context_cards" in sent[0][1][0]["content"][0]["text"]
@@ -315,3 +329,11 @@ async def test_failed_io_send_does_not_acknowledge_context(monkeypatch) -> None:
     cached = next(iter(owner.sessions.values()))
     assert not cached.hashes and not cached.system_received
     assert "context_cards" in (await drive(owner))[0]["content"][0]["text"]
+
+
+async def test_turn_fragment_is_separated_from_user_text() -> None:
+    async def provider(config, request):
+        return ContextResponse(status="ok", turn_fragment="reference text")
+
+    batch = await drive(ContextProviders(provider=provider))
+    assert batch[0]["content"][0]["text"] == "reference text\n\nhello"

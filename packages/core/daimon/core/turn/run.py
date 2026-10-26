@@ -1179,6 +1179,9 @@ async def run_prepared_turn_impl(
         if grant is None or grant.tenant_id != tenant_id:
             return None
         place = grant.run_place
+        if place.parent_unresolved or (place.channel_id is None and not grant.is_dm):
+            return None
+        is_thread = bool(place.parent_channel_id and place.parent_channel_id != place.channel_id)
         return ContextHook(
             deps.context_providers,
             ContextRequest(
@@ -1188,17 +1191,9 @@ async def run_prepared_turn_impl(
                 channel_id=(admission.private_dm_id or grant.channel_id)
                 if grant.is_dm
                 else place.channel_id,
-                parent_channel_id=place.parent_channel_id,
+                parent_channel_id=place.parent_channel_id if is_thread else None,
                 thread_id=admission.origin_thread_id,
-                place_type=(
-                    "unknown"
-                    if place.parent_unresolved or (place.channel_id is None and not grant.is_dm)
-                    else "dm"
-                    if grant.is_dm
-                    else "thread"
-                    if place.parent_channel_id
-                    else "channel"
-                ),
+                place_type="dm" if grant.is_dm else "thread" if is_thread else "channel",
                 requester_platform_user_id=external_user_id,
                 agent_id=admission.agent.id,
                 mention_ids=context_mention_ids if platform == "discord" else (),

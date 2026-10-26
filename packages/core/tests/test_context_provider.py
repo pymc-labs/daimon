@@ -88,7 +88,6 @@ async def test_cache_isolation_and_provider_gating_never_reuse_authorization() -
     for patch in (
         {"channel_id": "client-facing"},
         {"requester_platform_user_id": "outsider"},
-        {"place_type": "unknown"},
         {
             "place_type": "thread",
             "channel_id": "thread",
@@ -600,3 +599,46 @@ async def test_lock_wait_is_bounded_and_never_calls_provider_twice() -> None:
         first.accepted()
     assert len(fixture.requests) == 1
     assert not next(iter(owner.sessions.values())).lock.locked()
+
+
+async def test_mcp_reuses_one_client_and_passes_each_call_timeout(monkeypatch) -> None:
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": "context",
+                "result": {"structuredContent": {"status": "empty"}},
+            },
+        )
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    client = provider.client
+
+    def forbidden_constructor(*args, **kwargs):
+        pytest.fail("a provider turn constructed a client")
+
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden_constructor)
+    try:
+        for timeout_ms in (20, 80):
+            await provider(
+                CONFIG.model_copy(
+                    update={"endpoint": "https://provider.invalid/mcp", "timeout_ms": timeout_ms}
+                ),
+                REQUEST,
+            )
+            assert provider.client is client
+            assert requests[-1].extensions["timeout"]["read"] == timeout_ms / 1000
+        assert len(requests) == 2
+        assert not client.follow_redirects
+    finally:
+        await provider.aclose()
+    assert client.is_closed
+
+
+def test_unknown_place_is_not_a_wire_request() -> None:
+    with pytest.raises(ValueError):
+        ContextRequest.model_validate(REQUEST.model_dump() | {"place_type": "unknown"})
