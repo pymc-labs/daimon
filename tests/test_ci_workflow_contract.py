@@ -522,7 +522,7 @@ def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
     assert result.returncode == 0, result.stderr
     updates = (tmp_path / "updates").read_text()
     pins = (
-        "DAIMON_TURN__PATH=legacy",
+        "DAIMON_TURN__PATH=mux",
         "DAIMON_TURN__CHANNEL_BACKENDS=false",
         "DAIMON_TURN__AGENT_BACKENDS=false",
     )
@@ -532,8 +532,8 @@ def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
         assert "TURN__" not in updates and "FLEET__" not in updates, updates
 
 
-def test_production_worker_refresh_pins_the_old_turn_behaviour() -> None:
-    """The prod worker env gets the four stops after every env refresh, staging none."""
+def test_production_worker_refresh_pins_mux_with_backends_off() -> None:
+    """The prod worker env gets mux with both backend switches off after every refresh."""
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
     script = next(
         step["run"]
@@ -545,7 +545,7 @@ def test_production_worker_refresh_pins_the_old_turn_behaviour() -> None:
     assert pin < script.index("docker compose -f compose.worker.yml pull"), "before recreate"
     block = script[pin : script.index("fi", pin)]
     for line in (
-        "DAIMON_TURN__PATH=legacy",
+        "DAIMON_TURN__PATH=mux",
         "DAIMON_TURN__CHANNEL_BACKENDS=false",
         "DAIMON_TURN__AGENT_BACKENDS=false",
     ):
