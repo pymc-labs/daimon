@@ -13,6 +13,7 @@ from datetime import timedelta
 from xml.sax.saxutils import escape, quoteattr
 
 import structlog
+from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.vision import is_oversized_image, is_vision_image_attachment
 from daimon.core.media.vision import MAX_VISION_IMAGE_DIMENSION
 from daimon.core.turn_keys import render_keys_element
@@ -328,6 +329,15 @@ def _render_message(
     return lines
 
 
+def _request_identity_attrs(message: discord.Message) -> str:
+    """Button input IDs identify interactions, not citable Discord messages."""
+    if isinstance(message, ButtonMessage):
+        return ' kind="button"'
+    return (
+        f" message_id={quoteattr(str(message.id))} channel_id={quoteattr(str(message.channel.id))}"
+    )
+
+
 def _render_user_query(
     trigger: discord.Message,
     bot_user_id: int | None,
@@ -356,9 +366,7 @@ def _render_user_query(
     composite = len(query_messages) > 1
     reply_to = _reply_target_id(trigger) if not composite else None
     attrs = (
-        f" message_id={quoteattr(str(trigger.id))}"
-        f" channel_id={quoteattr(str(trigger.channel.id))}"
-        f" author_name={quoteattr(trigger.author.display_name)}"
+        _request_identity_attrs(trigger) + f" author_name={quoteattr(trigger.author.display_name)}"
         f" user_id={quoteattr(str(trigger.author.id))}"
         f" timestamp={quoteattr(trigger.created_at.isoformat())}"
         f" is_admin={quoteattr('true' if is_admin else 'false')}"
@@ -376,10 +384,8 @@ def _render_user_query(
         sources: list[str] = []
         for message in query_messages:
             target_id = _reply_target_id(message)
-            source_attrs = (
-                f" message_id={quoteattr(str(message.id))}"
-                f" channel_id={quoteattr(str(message.channel.id))}"
-                + (f" reply_to={quoteattr(str(target_id))}" if target_id is not None else "")
+            source_attrs = _request_identity_attrs(message) + (
+                f" reply_to={quoteattr(str(target_id))}" if target_id is not None else ""
             )
             text = escape(
                 _strip_bot_mention(message.content, bot_user_id, bot_display_name=bot_display_name)

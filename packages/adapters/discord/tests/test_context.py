@@ -1887,7 +1887,10 @@ class TestReplyTargets:
         assert "not the latest one" in result.split("<user_query")[0]
 
 
-async def test_hand_over_input_renders_the_clicker_without_mutating_the_notice() -> None:
+@pytest.mark.parametrize("composite", [False, True])
+async def test_hand_over_input_renders_the_clicker_without_mutating_the_notice(
+    composite: bool,
+) -> None:
     from daimon.adapters.discord.button_message import ButtonMessage
 
     notice = _make_message(msg_id=9, content="Switch to research-bot", is_bot=True)
@@ -1900,10 +1903,19 @@ async def test_hand_over_input_renders_the_clicker_without_mutating_the_notice()
         click_id=discord.utils.time_snowflake(datetime.now(UTC)),
         text="Please finish the analysis.",
     )
-    result, _ = await build_context_xml(thread, trigger)
-    query = result.split("<user_query", 1)[1]
-    assert 'user_id="42"' in query
-    assert "Please finish the analysis." in query
+    sources = (_make_message(msg_id=8), trigger) if composite else ()
+    result, _ = await build_context_xml(thread, trigger, query_messages=sources)
+    query = _user_query(result)
+    assert query.attrib["user_id"] == "42"
+    assert query.attrib["kind"] == "button"
+    assert "message_id" not in query.attrib
+    assert "channel_id" not in query.attrib
+    assert query.text == "Please finish the analysis."
+    if composite:
+        first, button = query.findall("query_sources/message")
+        assert first.attrib["message_id"] == "8"
+        assert first.attrib["channel_id"] == "900"
+        assert button.attrib == {"kind": "button"}
     assert notice.author.bot and notice.content == "Switch to research-bot"
     assert trigger.jump_url == notice.jump_url
     await trigger.add_reaction("⌛")

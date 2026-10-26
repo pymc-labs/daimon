@@ -1613,12 +1613,12 @@ it, even when Daimon opens a different response thread. `reply_to` identifies th
 message they replied to, not the request. A merged query includes `query_sources`
 inside `user_query`, with each original message's `message_id`, `channel_id`,
 text and optional `reply_to`; identical text still has distinct source entries.
-When the target is not among the
-replayed messages (before the delta's watermark, a delivered answer chunk the
-delta leaves out, or an older channel post), an untrusted `reply_targets` block
-holds it, cut at 2,000 characters. A merged queued query lists one entry per reply, each
-with the replying message's id, author and a short excerpt; a target shown
-elsewhere or unavailable gets an id-only entry (`shown` or `unavailable`).
+When the target is not among the replayed messages (before the delta's watermark,
+a delivered answer chunk the delta leaves out, or an older channel post), an
+untrusted `reply_targets` block holds it, cut at 2,000 characters. A merged queued
+query lists one entry per reply, each with the replying message's id, author and a
+short excerpt; a target shown elsewhere or unavailable gets an id-only entry
+(`shown` or `unavailable`).
 A message with no text shows its embed's title and description. A deleted target is
 marked `deleted="true"`, and an unavailable one leaves only the id. The turn's
 own status card, posted before the context is built, is kept out of the history.

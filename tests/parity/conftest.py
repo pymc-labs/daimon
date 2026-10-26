@@ -58,7 +58,7 @@ def driver(request: pytest.FixtureRequest) -> PlatformDriver:
 
 
 @pytest.fixture(autouse=True)
-def _discord_request_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+def _discord_request_ids(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
     """Request IDs stay unique across driver instances and stable across replays."""
     monkeypatch.setattr(DiscordDriver, "_request_ids", count(1_000_000))
 
