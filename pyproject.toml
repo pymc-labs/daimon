@@ -147,6 +147,7 @@ type = "forbidden"
 # instead; packages/core/tests/test_orm_import_contract.py fails when this list
 # drifts from the directory.
 source_modules = [
+    "daimon.core._erasure_guards",
     "daimon.adapters",
     "daimon.core.access_policy",
     "daimon.core.agent_avatar_image",
