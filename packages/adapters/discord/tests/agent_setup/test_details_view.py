@@ -927,8 +927,8 @@ async def test_coding_tools_refuses_a_live_member_with_the_explanatory_refusal(
     message = interaction.response.send_message.call_args.args[0]
     assert message == CODING_TOOLS_REFUSAL, "a member gets the refusal naming the way round it"
     assert message == (
-        "You can't create this token.\n\n"
-        'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+        "Only an admin or this agent's owner can make a coding key.\n\n"
+        'Ask one of them to open this agent\'s Details and press "Use from your coding tools".'
     ), "two lines, a blank line apart"
     assert kwargs.get("ephemeral") is True, "the refusal is ephemeral"
     assert await count_tokens_for_account(db_session, account_id=account_id) == 0, (

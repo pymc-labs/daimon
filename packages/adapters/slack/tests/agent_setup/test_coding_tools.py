@@ -151,7 +151,7 @@ def test_coding_tools_message_is_a_title_then_lines_a_blank_line_apart(
     )
     title, body = (block["text"]["text"] for block in blocks[:2])
     assert title == f"*Use {_AGENT_NAME} from your coding tools*"
-    lines = ["Copy the setup below now. The token is shown only once."]
+    lines = ["Copy this now: the key is shown only once. It acts as you."]
     if channel_id is not None:
         lines.append(f"It runs in <#{channel_id}>, with that channel's rules and budget.")
     assert body == "\n\n".join(lines), "the channel line only for a channel-bound token"

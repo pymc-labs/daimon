@@ -60,8 +60,8 @@ log = structlog.get_logger()
 
 #: What a member sees instead of a token. Minting needs Manage Server or owning the agent.
 CODING_TOOLS_REFUSAL = (
-    "You can't create this token.\n\n"
-    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+    "Only an admin or this agent's owner can make a coding key.\n\n"
+    'Ask one of them to open this agent\'s Details and press "Use from your coding tools".'
 )
 
 
@@ -305,7 +305,7 @@ def render_mcp_config(
     )
     lines = [
         f"**Use {agent_name} from your coding tools**",
-        "Copy the setup below now. The token is shown only once.",
+        "Copy this now: the key is shown only once. It acts as you.",
     ]
     if channel_id is not None:
         lines.append(f"It runs in <#{channel_id}>, with that channel's rules and budget.")
@@ -394,14 +394,14 @@ class _McpAccessView(ExpiringView, discord.ui.View):
         if row is None:
             log.info("agent_setup.mcp_access.revoke.already_revoked", jti=str(self._jti))
             await interaction.response.send_message(
-                "Token was already revoked (or not found).", ephemeral=True
+                "That key was already revoked.", ephemeral=True
             )
             await self._audit_revoke(interaction, outcome="error", reason="already_revoked")
             return
         log.info("agent_setup.mcp_access.revoke.done", jti=str(self._jti))
         await self._audit_revoke(interaction, outcome="allowed", reason="completed")
         await interaction.response.edit_message(
-            content="Token revoked. Agents using this token will get 401 on next request.",
+            content="Key revoked. It stops working now.",
             view=None,
         )
         # That edit deliberately drops the view; a still-running timer would

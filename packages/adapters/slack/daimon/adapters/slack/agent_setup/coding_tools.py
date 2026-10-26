@@ -70,17 +70,17 @@ NOT_CONFIGURED_MESSAGE: Final[str] = (
     "setup, then try again. Nothing was saved."
 )
 
-REVOKE_BUTTON_LABEL: Final[str] = "🗑 Revoke this token"
+REVOKE_BUTTON_LABEL: Final[str] = "🗑 Revoke this key"
 
-COPY_NOW_LINE: Final[str] = "Copy the setup below now. The token is shown only once."
+COPY_NOW_LINE: Final[str] = "Copy this now: the key is shown only once. It acts as you."
 
-TOKEN_REVOKED_MESSAGE: Final[str] = "Token revoked."
+TOKEN_REVOKED_MESSAGE: Final[str] = "Key revoked. It stops working now."
 
 
 #: Minting requires a workspace admin.
 NEEDS_ADMIN_MESSAGE: Final[str] = (
-    "You can't create this token.\n\n"
-    'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
+    "Only an admin or this agent's owner can make a coding key.\n\n"
+    'Ask one of them to open this agent\'s Details and press "Use from your coding tools".'
 )
 
 

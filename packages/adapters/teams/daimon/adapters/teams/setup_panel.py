@@ -109,7 +109,7 @@ GONE = "That agent is no longer available. It may have been deleted."
 NOT_CONFIGURED = "Coding-tool access isn't set up yet. Ask the operator."
 #: The panel is outside channels, so minting requires a server admin.
 NEEDS_ADMIN = (
-    "You can't create this token.\n\n"
+    "Only an admin can make a coding key here.\n\n"
     'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
 )
 NOT_MINTER = "Only the person who minted this token can revoke it."
@@ -359,7 +359,7 @@ class SetupPanel:
                 token_jti=jti,
             )
             return await self._operator_tokens(
-                actor, "Token revoked." if revoked else "That token was already revoked."
+                actor, "Key revoked. It stops working now." if revoked else "That key was already revoked."
             )
         scopes = [part for part in str(data.get("scopes") or "").split(",") if part]
         try:
@@ -945,4 +945,4 @@ class SetupPanel:
         await self._audit(
             actor, "coding_token_revoke", outcome="allowed", reason="completed", jti=jti
         )
-        return dialog_message("Token revoked.")
+        return dialog_message("Key revoked. It stops working now.")
