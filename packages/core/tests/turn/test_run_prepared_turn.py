@@ -4279,7 +4279,8 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
             attended=caller_attended,
-            origin=kind,
+            # Continuation reasons decide the grant; their rendering context stays chat.
+            origin="worker" if kind == "worker" else "chat",
             render_interval_s=0.001,
             before_send=before_send,
         )

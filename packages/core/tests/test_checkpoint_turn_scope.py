@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
 import pytest
@@ -13,6 +13,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsTextBlock,
 )
 from daimon.core import workspace_transfer
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import load_turn_settings
 from daimon.core.errors import TurnError
 from daimon.core.session_snapshot import SessionSnapshot, snapshot_from_retrieved_session
@@ -35,7 +36,7 @@ def snapshot() -> SessionSnapshot:
 
 
 def factory() -> async_sessionmaker[AsyncSession]:
-    return cast(async_sessionmaker[AsyncSession], AsyncMock())
+    return cast(async_sessionmaker[AsyncSession], MagicMock())
 
 
 def set_path(monkeypatch: pytest.MonkeyPatch, path: Literal["legacy", "mux"]) -> None:
@@ -52,6 +53,10 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     set_path(monkeypatch, path)
+    monkeypatch.setattr(
+        "daimon.core.stores.access_policy.load_access_policy",
+        AsyncMock(return_value=TenantAccessPolicy()),
+    )
     turn = AsyncMock(
         return_value=TurnState(error=TurnError(kind="upstream", message="test failure"))
     )
