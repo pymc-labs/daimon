@@ -27,8 +27,9 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from itertools import count
 from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import Any, ClassVar, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -290,6 +291,8 @@ class _ParityBotUser(SimpleNamespace):
 class DiscordDriver:
     """Drives turns through `DaimonBot.on_message`, the real Discord entry point."""
 
+    _request_ids: ClassVar[Iterator[int]] = count(1_000_000)
+
     param_id: str = "discord"
     #: Every card this driver posted or edited, oldest first.
     _cards: list[CapturedCard] = field(default_factory=list[CapturedCard])
@@ -369,7 +372,7 @@ class DiscordDriver:
     ) -> discord.Message:
         message = MagicMock(spec=discord.Message)
         # Keep request identity concrete when a reused session renders a delta.
-        message.id = int(channel_id) + 1
+        message.id = next(self._request_ids)
         message.content = f"<@999> {text}"
         message.author = MagicMock()
         message.author.bot = False
