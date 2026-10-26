@@ -16,9 +16,9 @@ Each lane uses its own environment and repository variables for deployment. The 
 
 The workflow retries the host CLI refresh, Compose SCP copy and status summary
 up to three attempts, three seconds apart. Lane actions (including deploy and reset)
-retry only an SSH public-key authentication refusal (exit 255), before the remote
-command starts. Other failures stop immediately to avoid repeating a deployment
-or reset. Full remote output stays private; only fixed-format errors are printed.
+retry only an SSH public-key authentication refusal (exit 255) with no remote-start
+sentinel in stderr. The sentinel is emitted before the lane command starts. Other
+failures stop immediately to avoid repeating a deployment or reset. Full remote output stays private; only fixed-format errors are printed.
 
 ## Preview notebook host (row 52)
 

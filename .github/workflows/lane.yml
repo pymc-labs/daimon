@@ -136,7 +136,10 @@ jobs:
               sleep 3
             done
           }
-          retry lane_ssh "$refresh" >/dev/null 2>&1
+          if ! retry lane_ssh "$refresh" >/dev/null 2>&1; then
+            echo 'Lane host CLI refresh failed after 3 attempts' >&2
+            exit 1
+          fi
           if [[ "$ACTION" == deploy ]]; then
             # The host CLI owns .env and records this compose for reset/redeploy.
             # Render only the image variable; never interpolate lane secrets here.
@@ -145,13 +148,18 @@ jobs:
             grep -qF "image: $DAIMON_NOTEBOOK_IMAGE" "$RUNNER_TEMP/compose.lane.yml" || {
               echo 'notebook image not rendered' >&2; exit 1;
             }
-            retry gcloud compute scp "$RUNNER_TEMP/compose.lane.yml" "$HOST:$remote" \
-              --project="$PROJECT" --zone="$ZONE" --tunnel-through-iap --quiet >/dev/null 2>&1
+            if ! retry gcloud compute scp "$RUNNER_TEMP/compose.lane.yml" "$HOST:$remote" \
+              --project="$PROJECT" --zone="$ZONE" --tunnel-through-iap --quiet >/dev/null 2>&1; then
+              echo 'Lane compose copy failed after 3 attempts' >&2
+              exit 1
+            fi
             printf -v command '%q ' sudo lane deploy "$LANE" --image "$DAIMON_LANE_IMAGE" \
               --sha "$SHA" --compose "$remote" --actor "$ACTOR" --run-url "$RUN_URL"
           else
             printf -v command '%q ' sudo lane "$ACTION" "$LANE"
           fi
+          # Mark remote execution before running the safely quoted lane command.
+          command="echo lane-remote-started >&2; $command"
           # The host owns full deployment logs. This public workflow prints no
           # remote output, including failure output from older host CLI versions.
           lane_action() {
@@ -162,9 +170,10 @@ jobs:
               else
                 rc=$?
               fi
-              # An authentication refusal precedes remote execution. Any other
-              # failure may follow a started deploy/reset and must not be retried.
+              # Remote stderr can mimic an authentication refusal. Once the
+              # sentinel appears, never replay a possibly started lane action.
               if (( attempt == 3 || rc != 255 )) ||
+                grep -qxF 'lane-remote-started' "$RUNNER_TEMP/lane.err" ||
                 ! grep -qE '^[^[:space:]]+@[^[:space:]]+: Permission denied \(publickey\)\.$' "$RUNNER_TEMP/lane.err"; then
                 return "$rc"
               fi

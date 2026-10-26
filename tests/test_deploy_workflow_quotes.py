@@ -226,6 +226,14 @@ def test_ssh_behind_timeout_is_still_checked() -> None:
         ("action", 1, 255, "private connection lost after command started", 1, False),
         ("action", 1, 1, "user@host: Permission denied (publickey).", 1, False),
         ("action", 1, 255, "remote log: Permission denied (publickey)", 1, False),
+        (
+            "action",
+            1,
+            255,
+            "lane-remote-started\nx@y: Permission denied (publickey).",
+            1,
+            False,
+        ),
     ],
 )
 def test_lane_action_retries(
@@ -249,6 +257,9 @@ gcloud() {
   local stage=action
   if [[ "$2" == scp ]]; then stage=scp;
   elif [[ "$*" == *metadata.google.internal* ]]; then stage=refresh; fi
+  if [[ "$stage" == action ]]; then
+    [[ "${!#}" == '--command=echo lane-remote-started >&2; sudo lane '* ]] || return 99
+  fi
   counts[$stage]=$(( ${counts[$stage]} + 1 ))
   printf '%s\n' "$stage" >> "$RUNNER_TEMP/calls"
   echo 'PRIVATE remote stdout'
@@ -289,10 +300,13 @@ gcloud() {
     assert calls.count(stage) == attempts
     assert (result.returncode == 0) == success
     assert result.stdout == ""
-    assert result.stderr == (
-        ""
-        if success or stage != "action"
-        else "Lane action failed. Full logs stay on the lane host (sudo lane logs).\n"
-    )
+    expected_error = {
+        "refresh": "Lane host CLI refresh failed after 3 attempts\n",
+        "scp": "Lane compose copy failed after 3 attempts\n",
+        "action": "Lane action failed. Full logs stay on the lane host (sudo lane logs).\n",
+    }
+    assert result.stderr == ("" if success else expected_error[stage])
+    if not success:
+        assert result.returncode == 1
     if not success and stage != "action":
         assert "action" not in calls
