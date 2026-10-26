@@ -271,12 +271,13 @@ jobs:
           fi
           echo "window=$LEGACY" >> "$GITHUB_OUTPUT"
           echo "MCP bounded non-internal legacy window=$LEGACY cutoff=$CUTOFF"
-          # Production keeps today's behaviour until Carlos approves the new
-          # defaults: the four emergency stops, pinned on every prod deploy.
-          # To flip: delete PROD_PIN (and the matching daimon-infra pins).
+          # Production runs the mux path with both backend switches off (stage 1
+          # of the SDK cutover), pinned on every prod deploy. Rollback: pin legacy
+          # again here and in the daimon-infra pins. Backends on (stage 2): delete
+          # PROD_PIN and those pins.
           PROD_PIN=""
           if [ "${DEPLOY_ENVIRONMENT:-}" = production ]; then
-            PROD_PIN=",DAIMON_TURN__PATH=legacy,DAIMON_TURN__CHANNEL_BACKENDS=false"
+            PROD_PIN=",DAIMON_TURN__PATH=mux,DAIMON_TURN__CHANNEL_BACKENDS=false"
             PROD_PIN="$PROD_PIN,DAIMON_TURN__AGENT_BACKENDS=false"
           fi
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
@@ -454,11 +455,11 @@ jobs:
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
               sudo chmod 755 /usr/local/bin/daimon-refresh-env
               sudo /usr/local/bin/daimon-refresh-env
-              # Production keeps the four emergency stops until Carlos approves
-              # the new defaults; the last env_file entry wins. To flip: delete
-              # this block (and the MCP PROD_PIN and the daimon-infra pins).
+              # Production pins the mux path with both backend switches off; the
+              # last env_file entry wins. Keep it in step with the MCP PROD_PIN and
+              # the daimon-infra pins (rollback and stage 2 notes are there).
               if [ "${{ inputs.environment }}" = production ]; then
-                printf "%s\n" DAIMON_TURN__PATH=legacy DAIMON_TURN__CHANNEL_BACKENDS=false \
+                printf "%s\n" DAIMON_TURN__PATH=mux DAIMON_TURN__CHANNEL_BACKENDS=false \
                   DAIMON_TURN__AGENT_BACKENDS=false \
                   | sudo tee -a /etc/daimon/daimon.env >/dev/null
               fi
