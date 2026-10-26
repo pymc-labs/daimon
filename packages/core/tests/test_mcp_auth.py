@@ -20,6 +20,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import AgentRef, build_subject
 from daimon.core.mcp_auth import (
     authorize_coding_token,
+    coding_key_ttl_days,
     coding_token_channel,
     mint_agent_mcp_token,
     mint_cli_mcp_token,
@@ -454,6 +455,70 @@ def test_authorize_coding_token_leaves_a_server_admin_unchanged(
     assert bound == coding_token_channel(_PINS, agent=agent, channel_id=channel_id), (
         "the binding is unchanged for a server admin"
     )
+
+
+@pytest.mark.parametrize("channel_id", ["c-acme", "c-other", "c-sealed", None])
+def test_authorize_coding_token_lets_the_agents_owner_mint_but_not_a_member(
+    channel_id: str | None,
+) -> None:
+    """An owner mints for their own agent, bound exactly as an admin's would be."""
+    agent = AgentRef.of("acme")
+    member = build_subject(is_admin=False, platform_user_id="u-member")
+
+    owner_decision, bound = authorize_coding_token(
+        _PINS, subject=member, agent=agent, channel_id=channel_id, owned_by_caller=True
+    )
+    member_decision, _ = authorize_coding_token(
+        _PINS, subject=member, agent=agent, channel_id=channel_id
+    )
+
+    assert owner_decision, "the agent's owner may mint for it"
+    assert bound == coding_token_channel(_PINS, agent=agent, channel_id=channel_id)
+    assert not member_decision, "a member who does not own the agent is refused"
+
+
+def test_authorize_coding_token_refuses_a_client_even_when_owning() -> None:
+    client = build_subject(is_admin=False, platform_user_id="u-client", client=True)
+    decision, _ = authorize_coding_token(
+        _PINS, subject=client, agent=AgentRef.of("acme"), channel_id=None, owned_by_caller=True
+    )
+    assert not decision, "a client or foreign principal never mints"
+
+
+def test_coding_key_lifetime_is_ninety_days_for_an_admin_and_thirty_for_an_owner() -> None:
+    admin = build_subject(is_admin=True, platform_user_id="u-admin")
+    owner = build_subject(is_admin=False, platform_user_id="u-owner")
+    assert coding_key_ttl_days(admin) == 90
+    assert coding_key_ttl_days(owner) == 30
+
+
+async def test_mint_agent_mcp_token_records_what_the_key_is_for(db_session: AsyncSession) -> None:
+    """A coding key is the default; chat-execution and provider-turn credentials are internal."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    secret = b"e" * 32
+    now = dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC)
+
+    async def purpose_of(**kwargs: object) -> str | None:
+        token = await mint_agent_mcp_token(
+            db_session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            label=None,
+            secret=secret,
+            now=now,
+            **kwargs,  # pyright: ignore[reportArgumentType]
+        )
+        claims = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
+        row = await get_mcp_token(db_session, jti=uuid.UUID(claims["jti"]))
+        assert row is not None
+        return row.purpose
+
+    assert await purpose_of() == "coding"
+    assert await purpose_of(purpose="report") == "report"
+    assert await purpose_of(chat_execution=True, ttl_days=600 / 86400) == "internal"
+    with pytest.raises(ValueError, match="internal"):
+        await purpose_of(chat_execution=True, ttl_days=600 / 86400, purpose="coding")
 
 
 # ---- mint_operator_mcp_token / mint_cli_mcp_token ----

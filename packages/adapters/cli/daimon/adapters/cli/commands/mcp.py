@@ -187,6 +187,7 @@ async def mint_agent_token(
             secret=rt.settings.mcp.jwt_secret.get_secret_value().encode(),
             now=dt.datetime.now(dt.UTC),
             ttl_days=ttl_days,
+            purpose="coding",
         )
     typer.echo(token)
 

@@ -1658,6 +1658,14 @@ class McpToken(Base):
         CheckConstraint(
             "skill_bytes_read >= 0 AND skill_calls >= 0", name="ck_mcp_tokens_skill_reads"
         ),
+        CheckConstraint(
+            "purpose IS NULL OR purpose IN ('coding', 'report', 'internal')",
+            name="ck_mcp_tokens_purpose",
+        ),
+        CheckConstraint(
+            "purpose IS DISTINCT FROM 'coding' OR (kind = 'agent' AND surface IS NULL)",
+            name="ck_mcp_tokens_coding_purpose",
+        ),
     )
 
     jti: Mapped[uuid.UUID] = mapped_column(
@@ -1701,6 +1709,14 @@ class McpToken(Base):
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # `provider_turn`: a chat-execution credential with no confirmation surface.
     surface: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What an agent-kind credential was made for. 'coding': a key a person made from
+    # the agent's "coding tools" button; 'report': a published report's seam token;
+    # 'internal': a short-lived in-session or provider-turn credential. Not a secret
+    # and not in the JWT: the verifier reads it from the row to hold a coding key to
+    # its holder's current role or ownership on every request. NULL for operator and
+    # CLI tokens, and for an agent row an older process wrote (read as 'coding' unless
+    # it is plainly internal; see the verifier).
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SlackBotToken(Base):

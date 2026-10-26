@@ -204,6 +204,19 @@ async def owns_agent(
     return await agent_owners.is_owner(session, tenant_id, agent_id, account_id)
 
 
+async def account_owns_agent(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, account_id: uuid.UUID
+) -> bool:
+    """Whether the account owns the agent named by its derived uuid, read now.
+
+    For a caller that holds only the derived per-agent uuid (the MCP verifier,
+    reading a key's row); `owns_agent` takes the provider id. Both use
+    `agent_owners.is_owner`: the primary owner and every co-owner own the agent, and
+    a person from another organisation (`foreign_home_id`) never does.
+    """
+    return await agent_owners.is_owner(session, tenant_id, agent_id, account_id)
+
+
 async def agent_owner(
     sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> uuid.UUID | None:

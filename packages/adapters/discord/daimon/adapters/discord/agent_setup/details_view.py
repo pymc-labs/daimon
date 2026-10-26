@@ -28,6 +28,11 @@ from daimon.adapters.discord.agent_setup.avatar import (
     reset_agent_avatar,
 )
 from daimon.adapters.discord.agent_setup.budget import LAYOUT_TEXT_BUDGET
+from daimon.adapters.discord.agent_setup.coding_keys_view import (
+    CODING_KEYS_LABEL,
+    CODING_KEYS_REFUSAL,
+    load_coding_keys_view,
+)
 from daimon.adapters.discord.agent_setup.conversations import open_setup_conversation
 from daimon.adapters.discord.agent_setup.mcp_access import send_coding_tools_access
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
@@ -450,16 +455,24 @@ class DetailsView(PanelViewBase):
             elif isinstance(child, discord.ui.Button) and child.custom_id == AVATAR_DETAILS_ID:
                 child.callback = self._on_avatar_details  # type: ignore[method-assign]
 
-        # Only the buttons that can work for this reader: a coding-tool token and a
-        # skill are admin changes, and a built-in agent takes no skill at all, so a
-        # member is never offered a button that only refuses.
+        # Only the buttons that can work for this reader: a coding-tool token is for
+        # an admin or this agent's owner, a skill is an admin change, and a built-in
+        # agent takes no skill at all, so a member is never offered a button that only
+        # refuses. Ownership here is the panel's snapshot; each click reads it again.
         action_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
-        if state.is_admin:
+        owns_agent = self.agent is not None and self.agent.ma_agent_id in state.owned_agent_ids
+        if state.is_admin or owns_agent:
             coding_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 label=CODING_TOOLS_LABEL, style=discord.ButtonStyle.secondary
             )
             coding_button.callback = self._on_coding_tools  # type: ignore[method-assign]  # per-instance callback
             action_row.add_item(coding_button)
+            if self.agent is not None:
+                keys_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                    label=CODING_KEYS_LABEL, style=discord.ButtonStyle.secondary
+                )
+                keys_button.callback = self._on_coding_keys  # type: ignore[method-assign]  # per-instance callback
+                action_row.add_item(keys_button)
         if self.agent is not None:
             github_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 label="🐙 GitHub repos", style=discord.ButtonStyle.secondary
@@ -713,6 +726,24 @@ class DetailsView(PanelViewBase):
             allowed_user_id=self.allowed_user_id,
             agent=self.agent,
         )
+
+    async def _on_coding_keys(self, interaction: discord.Interaction) -> None:
+        """Open the agent's coding keys, for an admin or its owner as read now."""
+        agent = self.agent
+        if agent is None:
+            return
+        await interaction.response.defer()
+        view = await load_coding_keys_view(
+            interaction,
+            runtime=self.runtime,
+            state=self.state,
+            allowed_user_id=self.allowed_user_id,
+            agent=agent,
+        )
+        if view is None:
+            await interaction.followup.send(CODING_KEYS_REFUSAL, ephemeral=True)
+            return
+        await self.swap_to(interaction, view)
 
     async def _on_avatar_details(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(

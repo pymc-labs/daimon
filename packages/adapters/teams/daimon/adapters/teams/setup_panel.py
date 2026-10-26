@@ -873,6 +873,7 @@ class SetupPanel:
                 now=datetime.now(UTC),
                 platform="teams" if bound_channel_id is not None else None,
                 channel_id=bound_channel_id,
+                purpose="coding",
             )
         jti = token_jti(token)
         log.info(  # never the token

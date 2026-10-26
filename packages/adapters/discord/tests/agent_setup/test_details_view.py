@@ -45,13 +45,15 @@ from daimon.core.agent_details import (
     build_agent_details,
 )
 from daimon.core.github_repo_auth import RepoAccess
+from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import AnsweringPlace, DeploymentDefault
 from daimon.core.setup_conversations import setup_target_label, shared_keys_sentence
 from daimon.core.stores.agent_avatars import AvatarRow
-from daimon.core.stores.domain import AccountRow, TenantRow
+from daimon.core.stores.agent_owners import clear_owner, set_owner
+from daimon.core.stores.domain import AccountRow, McpTokenRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -1011,3 +1013,206 @@ async def test_a_member_sees_no_buttons_that_only_refuse(
     labels = {child.label for child in view.walk_children() if isinstance(child, discord.ui.Button)}
     assert "🧰 Use from your coding tools" not in labels
     assert "➕ Add skill" not in labels
+
+
+# ---- owners: coding keys for the agent they own ----
+
+_AGENT_MA_ID = "ag_research"
+
+
+async def _owner_world(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    external_id: str,
+    owns: str | None = _AGENT_MA_ID,
+) -> MagicMock:
+    """A tenant whose clicker owns agent `owns`; returns the fake MA runtime's anthropic."""
+    await _seed_tenant_and_account(
+        db_session, tenant_id=tenant_id, account_id=account_id, external_id=external_id
+    )
+    if owns is not None:
+        await set_owner(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=owns),
+            owner_account_id=account_id,
+            source="admin_assigned",
+        )
+    router = MARouter()
+    router.add_agent(ma_agent(id=_AGENT_MA_ID, name="research-bot", tenant_id=tenant_id))
+    monkeypatch.setattr(
+        mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
+    )
+    return build_fake_anthropic(router.dispatch)  # type: ignore[return-value]
+
+
+async def _click_coding_tools(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    anthropic: Any,
+    *,
+    account_id: uuid.UUID,
+    interaction: MagicMock,
+) -> str | None:
+    """Press the button on the Details card; the minted token, or None when refused."""
+    details = _details()
+    state = _state(details, account_id=account_id, is_admin=False)
+    state.owned_agent_ids.add(_AGENT_MA_ID)  # the card shows the button; the click decides
+    runtime = _make_runtime(db_session_factory, settings=_mcp_settings(), anthropic=anthropic)
+    view = DetailsView(state, runtime=runtime, allowed_user_id=42)
+    await _find_button(view, "🧰 Use from your coding tools").callback(interaction)
+    sent = interaction.response.send_message.call_args
+    content = sent.kwargs.get("content")
+    if content is None:
+        assert sent.args[0] == CODING_TOOLS_REFUSAL
+        return None
+    return content[content.index("Bearer ") + len("Bearer ") :].split('"')[0].strip()
+
+
+async def _row_of(db_session: AsyncSession, token: str) -> McpTokenRow:
+    claims = pyjwt.decode(token, _JWT_SECRET.encode(), algorithms=["HS256"])
+    row = await get_mcp_token(db_session, jti=uuid.UUID(claims["jti"]))
+    assert row is not None
+    return row
+
+
+async def test_an_owner_mints_a_thirty_day_coding_key_that_acts_as_themselves(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    anthropic = await _owner_world(
+        db_session,
+        monkeypatch,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        external_id="guild-owner-mint",
+    )
+
+    token = await _click_coding_tools(
+        db_session_factory, anthropic, account_id=account_id, interaction=_member_interaction()
+    )
+
+    assert token is not None, "the agent's owner may mint for it, without Manage Server"
+    row = await _row_of(db_session, token)
+    assert row.account_id == account_id, "the key's subject is the owner who pressed the button"
+    assert row.purpose == "coding"
+    assert row.expires_at is not None
+    assert row.expires_at - row.created_at == dt.timedelta(days=30), "owner keys last 30 days"
+    assert row.agent_id == str(derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_MA_ID))
+
+
+async def test_an_admins_coding_key_still_lasts_ninety_days(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    anthropic = await _owner_world(
+        db_session,
+        monkeypatch,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        external_id="guild-admin-mint",
+        owns=None,
+    )
+
+    token = await _click_coding_tools(
+        db_session_factory, anthropic, account_id=account_id, interaction=_admin_interaction()
+    )
+
+    assert token is not None
+    row = await _row_of(db_session, token)
+    assert row.expires_at is not None and row.expires_at - row.created_at == dt.timedelta(days=90)
+
+
+async def test_an_owner_of_another_agent_is_refused_and_mints_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    anthropic = await _owner_world(
+        db_session,
+        monkeypatch,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        external_id="guild-other-owner",
+        owns="ag_someone_elses",
+    )
+
+    token = await _click_coding_tools(
+        db_session_factory, anthropic, account_id=account_id, interaction=_member_interaction()
+    )
+
+    assert token is None
+    assert await count_tokens_for_account(db_session, account_id=account_id) == 0
+
+
+async def test_the_card_offers_coding_tools_and_keys_to_the_agents_owner_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    await _seed_tenant_and_account(
+        db_session, tenant_id=tenant_id, account_id=account_id, external_id="guild-owner-card"
+    )
+    details = _details()
+
+    def labels(*, owns: bool) -> set[str | None]:
+        state = _state(details, account_id=account_id, is_admin=False)
+        if owns:
+            state.owned_agent_ids.add(_AGENT_MA_ID)
+        view = DetailsView(state, runtime=_make_runtime(db_session_factory), allowed_user_id=42)
+        return {c.label for c in view.walk_children() if isinstance(c, discord.ui.Button)}
+
+    owner_labels, member_labels = labels(owns=True), labels(owns=False)
+    assert {"🧰 Use from your coding tools", "🔑 Coding keys"} <= owner_labels
+    assert not {"🧰 Use from your coding tools", "🔑 Coding keys"} & member_labels
+
+
+async def test_the_details_load_records_whether_the_reader_owns_the_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id="2001")  # the panel's guild
+    await _seed_tenant_and_account(
+        db_session, tenant_id=tenant_id, account_id=account_id, external_id="2001"
+    )
+    await set_owner(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_MA_ID),
+        owner_account_id=account_id,
+        source="admin_assigned",
+    )
+    state = _state(_details(), account_id=account_id, is_admin=False)
+    state.guild_id = 2001
+    runtime = _make_runtime(db_session_factory)
+
+    async with db_session_factory() as session:
+        await hydrate_mod._record_ownership(  # pyright: ignore[reportPrivateUsage]
+            session, state=state, agent=_roster_agent()
+        )
+    assert _AGENT_MA_ID in state.owned_agent_ids
+
+    await clear_owner(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_MA_ID),
+    )
+    async with db_session_factory() as session:
+        await hydrate_mod._record_ownership(  # pyright: ignore[reportPrivateUsage]
+            session, state=state, agent=_roster_agent()
+        )
+    assert _AGENT_MA_ID not in state.owned_agent_ids
+    del runtime
