@@ -270,6 +270,7 @@ async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
     assert [row.file_id for row in due] == [outcome.transfer_file_id], (
         "the re-hosted bundle must be queued for deletion, not left forever"
     )
+    assert state.sent_batches, "a full handoff must send its checkpoint"
     turn_io_used.assert_ran(env_turn_path)
 
 
@@ -1908,3 +1909,94 @@ async def test_handoff_away_from_gated_agent_skips_checkpoint_after_revocation(
     assert outcome.gap_reason == "invoker_not_allowed"
     assert "Fitted it" in outcome.transcript
     assert state.sent_batches == []
+
+
+@pytest.mark.parametrize("status", [404, 401, 403, 429, 500])
+async def test_deleted_predecessor_degrades_without_sending_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """An unavailable role lookup cannot authorize a send, even for an ungated agent."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    import anthropic
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    monkeypatch.setattr(
+        "daimon.core.stores.access_policy.load_access_policy",
+        AsyncMock(
+            return_value=TenantAccessPolicy(
+                agent_rules={"other-agent": AgentRule(invoker_role_ids=("123",))}
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "daimon.core.mux_compat.retrieve_agent",
+        AsyncMock(
+            side_effect=anthropic.APIStatusError(
+                "Agent lookup failed",
+                response=httpx.Response(
+                    status, request=httpx.Request("GET", "https://ma/agents/old")
+                ),
+                body=None,
+            )
+        ),
+    )
+    transfer = transfer_workspace(
+        client,
+        MagicMock(),
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        tool_safety=ToolSafetyPolicy(enabled=True),
+        public_url=None,
+        platform="discord",
+        account_id=ACCOUNT_ID,
+    )
+    if status == 404:
+        outcome = await transfer
+        assert isinstance(outcome, TranscriptOnly)
+        assert outcome.gap_reason == "checkpoint_failed"
+        assert "Fitted it" in outcome.transcript
+    else:
+        with pytest.raises(anthropic.APIStatusError) as exc:
+            await transfer
+        assert exc.value.status_code == status
+    assert state.sent_batches == []
+
+
+async def test_ungated_checkpoint_is_sent_with_unrelated_role_rule(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    env_turn_path: TurnPath,
+    turn_io_used: TurnIOSpy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated role requirement still permits a complete checkpoint handoff."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.testing.ma_models import ma_agent
+
+    monkeypatch.setattr(
+        "daimon.core.stores.access_policy.load_access_policy",
+        AsyncMock(
+            return_value=TenantAccessPolicy(
+                agent_rules={"other-agent": AgentRule(invoker_role_ids=("123",))}
+            )
+        ),
+    )
+    role_lookup = AsyncMock(return_value=ma_agent(name="analysis-bot"))
+    monkeypatch.setattr("daimon.core.mux_compat.retrieve_agent", role_lookup)
+    await test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
+        db_session, db_session_factory, env_turn_path, turn_io_used
+    )
+    role_lookup.assert_awaited()

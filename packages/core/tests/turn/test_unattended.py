@@ -302,3 +302,43 @@ async def test_nonhuman_session_gate_refuses_role_gated_agent(
             tenant_id=uuid.uuid4(),
             entry_point=cast(UnattendedEntryPoint, entry_point),
         )
+
+
+async def test_unattended_wake_allows_ungated_agent_with_unrelated_role_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+
+    monkeypatch.setattr(
+        "daimon.core.stores.access_policy.load_access_policy",
+        AsyncMock(
+            return_value=TenantAccessPolicy(
+                agent_rules={"other-agent": AgentRule(invoker_role_ids=("123",))}
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "daimon.core.mux_compat.retrieve_agent",
+        AsyncMock(return_value=ma_agent(name="ungated")),
+    )
+    updates: list[dict[str, Any]] = []
+
+    def update(request: httpx.Request, _m: Any) -> httpx.Response:
+        updates.append(json_body(request)["agent"])
+        return httpx.Response(200, json=_session().model_dump(mode="json"))
+
+    router = MARouter()
+    router.add("POST", r"/v1/sessions/ses_gate$", update)
+    async with build_fake_anthropic(router.dispatch) as client:
+        await gate_session_snapshot(
+            client,
+            _session(),
+            ToolSafetyPolicy(enabled=True),
+            scope=platform_scope("test unattended wake"),
+            public_url=None,
+            session_factory=MagicMock(),
+            tenant_id=uuid.uuid4(),
+            entry_point="wake",
+        )
+    [agent] = updates
+    assert agent["tools"][0]["default_config"]["permission_policy"] == {"type": "always_ask"}
