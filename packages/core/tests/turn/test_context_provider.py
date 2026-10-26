@@ -83,6 +83,7 @@ async def test_failed_context_never_fails_or_changes_the_turn(fault: str) -> Non
             CONFIG.model_copy(
                 update={
                     "timeout_ms": 10,
+                    "first_call_timeout_ms": 10,
                     "enabled": fault != "disabled",
                 }
             ),

@@ -25,6 +25,8 @@ log = structlog.get_logger(__name__)
 MAX_RESPONSE_BYTES = 65_536
 # Expire idle connections before the provider's 300-second keep-alive.
 KEEPALIVE_EXPIRY_SECONDS = 240
+TURN_CEILING_SECONDS = 0.2
+FIRST_CALL_CEILING_SECONDS = 0.4
 DETACHED_CALL_TIMEOUT_SECONDS = 5.0
 MAX_DETACHED_CALLS = 8
 
@@ -37,6 +39,7 @@ class ProviderConfig(BaseModel):
     bearer_env: str | None = None
     enabled: bool = False
     timeout_ms: int = Field(default=200, ge=1, le=200)
+    first_call_timeout_ms: int = Field(default=400, ge=1, le=400)
     max_tokens: int = Field(default=2500, ge=1, le=2500)
     system_max_tokens: int = Field(default=1000, ge=1, le=2000)
 
@@ -268,10 +271,14 @@ class ContextProviders:
         injection = ContextInput()
         try:
             # Config reads have the same 200ms host ceiling, including pool waits.
-            loaded = await _bounded(load(request), 0.2, self._detached)
+            loaded = await _bounded(load(request), TURN_CEILING_SECONDS, self._detached)
             if loaded is not None and loaded.config.enabled:
                 config = loaded.config
-                expires = started + min(config.timeout_ms / 1000, 0.2)
+                # Until we hold the lock, allow either configured budget.
+                expires = started + max(
+                    min(config.first_call_timeout_ms / 1000, FIRST_CALL_CEILING_SECONDS),
+                    min(config.timeout_ms / 1000, TURN_CEILING_SECONDS),
+                )
                 destination = repr(
                     (
                         request.platform,
@@ -302,6 +309,14 @@ class ContextProviders:
                 async with asyncio.timeout(max(0, expires - time.monotonic())):
                     await state.lock.acquire()
                     acquired = True
+                # A concurrent send may have acknowledged the system while we waited.
+                # Both budgets include config and lock time from this hook's start.
+                if state.system_received:
+                    expires = started + min(config.timeout_ms / 1000, TURN_CEILING_SECONDS)
+                else:
+                    expires = started + min(
+                        config.first_call_timeout_ms / 1000, FIRST_CALL_CEILING_SECONDS
+                    )
                 state.touched = time.monotonic()
                 remaining = expires - time.monotonic()
                 if remaining <= 0:

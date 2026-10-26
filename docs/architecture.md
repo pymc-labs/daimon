@@ -1136,8 +1136,15 @@ The client posts MCP `tools/call` for `context_cards_for_turn` without initializ
 for FastMCP `stateless_http=True, json_response=False`; both JSON and SSE replies
 must contain one JSON-RPC result with a v1 `ContextResponse` in `structuredContent`.
 
-The host allows 200 ms total for the configuration read, session lock and
-provider call, without retries. `timeout_ms` can lower this ceiling. It drops
+The host allows 400 ms total for the configuration read, session lock and
+provider call while no system fragment has been acknowledged for that session
+(`system_fragment_received` is false). The binding field `first_call_timeout_ms`
+defaults to 400 and can lower this budget, with a maximum of 400 ms. After system
+acknowledgement, the total ceiling is 200 ms, lowered by `timeout_ms` (default
+and maximum 200). The decision is made under the session lock: if another turn
+acknowledges the fragment during the wait, the 200 ms deadline applies from
+the hook's start. The configuration read always has its own 200 ms bound.
+`deadline_ms` tells the provider how much time remains. There are no retries. It drops
 the entire response above 64 KiB (enforced while streaming), 2,500 turn tokens,
 or the independent system budget (1,000 by default, configurable up to 2,000
 with `system_max_tokens`). `max_tokens` can lower the turn budget. The host
@@ -1147,8 +1154,8 @@ and exception class, never provider text, card IDs, sources or credentials.
 
 Connections are reused and idle connections are kept for 240 s. A late provider
 call or configuration read finishes in the background and its result is discarded,
-letting the connection warm for later turns. The first turn after a cold start or
-long idle usually gets no context. Each owner retains at most eight late calls;
+letting the connection warm for later turns without advancing acknowledgements.
+Each owner retains at most eight late calls;
 additional late calls are cancelled. These eight slots are shared across tenants
 on an owner in the process. Provider calls and configuration reads have the same
 five-second wall-clock cap. Cancelling the parent turn still cancels its pending

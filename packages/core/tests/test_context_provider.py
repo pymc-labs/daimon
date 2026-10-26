@@ -174,6 +174,136 @@ async def test_bad_responses_fail_open_without_acknowledging(kind: str) -> None:
     assert calls == 2
 
 
+def test_old_binding_json_defaults_to_400_ms_first_call() -> None:
+    config = ProviderConfig.model_validate_json(
+        '{"endpoint":"fixture","enabled":true,"timeout_ms":200}'
+    )
+    assert config.first_call_timeout_ms == 400
+    assert config.timeout_ms == 200
+
+
+def test_first_call_timeout_above_400_ms_is_rejected() -> None:
+    with pytest.raises(ValueError, match="less than or equal to 400"):
+        ProviderConfig(endpoint="fixture", first_call_timeout_ms=401)
+
+
+async def test_300_ms_provider_is_injected_until_system_acknowledged() -> None:
+    requests: list[ContextRequest] = []
+
+    async def provider(config: ProviderConfig, request: ContextRequest) -> ContextResponse:
+        requests.append(request)
+        await asyncio.sleep(0.3)
+        return ContextResponse(
+            status="ok",
+            system_fragment="" if request.system_fragment_received else "system",
+            turn_fragment="cards",
+        )
+
+    owner = ContextProviders(provider=provider)
+    # An unaccepted first response must retain the first-call budget on retry.
+    for accept in (False, True):
+        async with owner.turn(REQUEST, loaded) as result:
+            assert result.response.turn_fragment == "cards"
+            assert 300 < requests[-1].deadline_ms <= 400
+            assert not requests[-1].system_fragment_received
+            if accept:
+                result.accepted()
+    started = time.monotonic()
+    async with owner.turn(REQUEST, loaded) as later:
+        assert later.response == ContextResponse()
+        assert time.monotonic() - started < 0.3
+        assert requests[-1].system_fragment_received
+        assert 0 < requests[-1].deadline_ms <= 200
+    await asyncio.gather(*owner._detached)
+
+
+async def test_first_call_budget_includes_config_read() -> None:
+    requests: list[ContextRequest] = []
+
+    async def load(request: ContextRequest) -> LoadedProvider:
+        await asyncio.sleep(0.1)
+        return await loaded(request)
+
+    async def provider(config: ProviderConfig, request: ContextRequest) -> ContextResponse:
+        requests.append(request)
+        await asyncio.sleep(0.35)
+        return ContextResponse(status="ok", system_fragment="late")
+
+    owner = ContextProviders(provider=provider)
+    started = time.monotonic()
+    async with owner.turn(REQUEST, load) as result:
+        assert result.response == ContextResponse()
+        assert time.monotonic() - started < 0.5
+    assert 0 < requests[0].deadline_ms <= 300
+    await asyncio.gather(*owner._detached)
+    assert not next(iter(owner.sessions.values())).system_received
+
+
+async def test_first_call_over_400_ms_finishes_without_acknowledging() -> None:
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    fixture = FixtureProvider(FIXTURE, tenant_id=str(TENANT))
+
+    async def provider(config: ProviderConfig, request: ContextRequest) -> ContextResponse:
+        await release.wait()
+        finished.set()
+        return await fixture(config, request)
+
+    owner = ContextProviders(provider=provider)
+    started = time.monotonic()
+    async with owner.turn(REQUEST, loaded) as result:
+        assert 0.35 < time.monotonic() - started < 0.55
+        assert result.response == ContextResponse()
+        result.accepted()
+    assert len(owner._detached) == 1
+    release.set()
+    await asyncio.gather(*owner._detached)
+    assert finished.is_set()
+    state = next(iter(owner.sessions.values()))
+    assert not state.system_received and not state.hashes
+
+
+@pytest.mark.parametrize("lock_wait", [0.1, 0.25])
+async def test_concurrent_ack_uses_200_ms_from_hook_start(lock_wait: float) -> None:
+    requests: list[ContextRequest] = []
+    second_loaded = asyncio.Event()
+    fixture = FixtureProvider(FIXTURE, tenant_id=str(TENANT))
+
+    async def provider(config: ProviderConfig, request: ContextRequest) -> ContextResponse:
+        requests.append(request)
+        if request.system_fragment_received:
+            await asyncio.sleep(0.15)
+            return ContextResponse(status="ok", turn_fragment="late")
+        return await fixture(config, request)
+
+    async def second_load(request: ContextRequest) -> LoadedProvider:
+        second_loaded.set()
+        return await loaded(request)
+
+    owner = ContextProviders(provider=provider)
+
+    async def second() -> None:
+        started = time.monotonic()
+        async with owner.turn(REQUEST, second_load) as result:
+            assert result.response == ContextResponse()
+            assert time.monotonic() - started < 0.35
+
+    async with owner.turn(REQUEST, loaded) as first:
+        task = asyncio.create_task(second())
+        await second_loaded.wait()
+        await asyncio.sleep(lock_wait)
+        first.accepted()
+    await task
+    if lock_wait < 0.2:
+        assert len(requests) == 2
+        assert requests[-1].system_fragment_received
+        assert 0 < requests[-1].deadline_ms <= 110
+    else:
+        # The fallback deadline already elapsed while waiting; do not call the provider.
+        assert len(requests) == 1
+    await asyncio.gather(*owner._detached)
+
+
 async def test_hard_deadline_includes_cancellation_resistant_provider_and_config() -> None:
     release = asyncio.Event()
     finished = asyncio.Event()
@@ -188,7 +318,10 @@ async def test_hard_deadline_includes_cancellation_resistant_provider_and_config
         return ContextResponse(status="ok", turn_fragment="late")
 
     async def short(request: ContextRequest) -> LoadedProvider:
-        return LoadedProvider(CONFIG.model_copy(update={"timeout_ms": 20}), "fixture-server")
+        return LoadedProvider(
+            CONFIG.model_copy(update={"timeout_ms": 20, "first_call_timeout_ms": 20}),
+            "fixture-server",
+        )
 
     owner = ContextProviders(provider=slow)
     started = time.monotonic()
@@ -231,7 +364,10 @@ async def test_late_provider_warms_next_turn_without_acknowledging() -> None:
         return await fixture(config, request)
 
     async def short(request):
-        return LoadedProvider(CONFIG.model_copy(update={"timeout_ms": 20}), "fixture-server")
+        return LoadedProvider(
+            CONFIG.model_copy(update={"timeout_ms": 20, "first_call_timeout_ms": 20}),
+            "fixture-server",
+        )
 
     owner = ContextProviders(provider=provider)
     started = time.monotonic()
@@ -268,7 +404,10 @@ async def test_late_completion_during_next_turn_lock_does_not_acknowledge() -> N
         return await fixture(config, request)
 
     async def short(request):
-        return LoadedProvider(CONFIG.model_copy(update={"timeout_ms": 20}), "fixture-server")
+        return LoadedProvider(
+            CONFIG.model_copy(update={"timeout_ms": 20, "first_call_timeout_ms": 20}),
+            "fixture-server",
+        )
 
     owner = ContextProviders(provider=provider)
     async with owner.turn(REQUEST, short) as late:
@@ -329,7 +468,10 @@ async def test_detached_cap_cancels_extra_late_provider() -> None:
         return ContextResponse()
 
     async def short(request):
-        return LoadedProvider(CONFIG.model_copy(update={"timeout_ms": 100}), "fixture-server")
+        return LoadedProvider(
+            CONFIG.model_copy(update={"timeout_ms": 100, "first_call_timeout_ms": 100}),
+            "fixture-server",
+        )
 
     owner = ContextProviders(provider=provider)
 
@@ -436,7 +578,11 @@ async def test_provider_http_has_a_wall_clock_cap(monkeypatch) -> None:
     async def short(request):
         return LoadedProvider(
             CONFIG.model_copy(
-                update={"endpoint": "https://provider.invalid/mcp", "timeout_ms": 10}
+                update={
+                    "endpoint": "https://provider.invalid/mcp",
+                    "timeout_ms": 10,
+                    "first_call_timeout_ms": 10,
+                }
             ),
             "fixture-server",
         )
@@ -871,7 +1017,10 @@ async def test_lock_wait_is_bounded_and_never_calls_provider_twice() -> None:
     owner = ContextProviders(provider=fixture)
 
     async def short(request):
-        return LoadedProvider(CONFIG.model_copy(update={"timeout_ms": 10}), "fixture-server")
+        return LoadedProvider(
+            CONFIG.model_copy(update={"timeout_ms": 10, "first_call_timeout_ms": 10}),
+            "fixture-server",
+        )
 
     async with owner.turn(REQUEST, short) as first:
         async with owner.turn(REQUEST, short) as blocked:

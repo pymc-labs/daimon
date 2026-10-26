@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Optional tenant-scoped pre-turn MCP context providers, configured with `daimon context-provider set`, with bounded fail-open calls and session acknowledgements.
+  Allow up to 400 ms until a session acknowledges its system fragment, configurable
+  with `first_call_timeout_ms`; subsequent calls retain the 200 ms ceiling.
   Keep idle provider connections alive for 240 seconds so turns can reuse them.
   Let bounded late provider calls and config reads finish in the background to warm
   connections for later turns, discarding late results without advancing acknowledgements.
