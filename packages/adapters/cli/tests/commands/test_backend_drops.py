@@ -1128,8 +1128,11 @@ async def test_the_operator_adds_shows_and_removes_a_co_owner(operator):
     assert await agent_co_owners(rt.sessionmaker, tenant_id=tenant.id, agent_id=agent_id) == []
     async with rt.sessionmaker() as db:
         rows = await security_audit.list_events(db, tenant_id=tenant.id, tool_name="agent_owner")
+    # Each co-owner change writes the operator's row and one keyed by the co-owner.
     assert sorted(row.operation for row in rows) == [
         "add_co_owner",
+        "add_co_owner",
         "assign",
+        "remove_co_owner",
         "remove_co_owner",
     ]

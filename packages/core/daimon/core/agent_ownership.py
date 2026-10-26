@@ -220,16 +220,26 @@ async def _audit(
     *,
     subject: uuid.UUID | None = None,
 ) -> None:
-    await security_audit.append_event(
-        session,
-        tenant_id=tenant_id,
-        account_id=account_id,
-        agent_id=agent_id,
-        platform=None,
-        platform_user_id=None,
-        tool_name="agent_owner",
-        operation=operation,
-        outcome="allowed",
-        reason="completed",
-        scope=f"agent_owner:{agent_id}" + (f":{subject}" if subject is not None else ""),
-    )
+    """Record an ownership change by `account_id`.
+
+    The person a co-owner change is about gets a row of their own, keyed by their
+    account, never an identifier inside another row: account erasure clears it with
+    the rest of their audit trail.
+    """
+    rows = [(account_id, "completed")]
+    if subject is not None:
+        rows.append((subject, "subject"))
+    for row_account, reason in rows:
+        await security_audit.append_event(
+            session,
+            tenant_id=tenant_id,
+            account_id=row_account,
+            agent_id=agent_id,
+            platform=None,
+            platform_user_id=None,
+            tool_name="agent_owner",
+            operation=operation,
+            outcome="allowed",
+            reason=reason,
+            scope=f"agent_owner:{agent_id}",
+        )

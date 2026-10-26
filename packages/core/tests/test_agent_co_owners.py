@@ -222,9 +222,24 @@ async def test_each_change_leaves_an_audit_row_naming_the_person(people) -> None
         rows = await security_audit.list_events(
             session, tenant_id=tenant.id, tool_name="agent_owner"
         )
-    assert sorted(row.operation or "" for row in rows) == ["add_co_owner", "remove_co_owner"]
-    assert {row.account_id for row in rows} == {admin.id}
-    assert all(row.scope and row.scope.endswith(str(co_owner.id)) for row in rows)
+    assert sorted((row.operation or "", row.reason) for row in rows) == [
+        ("add_co_owner", "completed"),
+        ("add_co_owner", "subject"),
+        ("remove_co_owner", "completed"),
+        ("remove_co_owner", "subject"),
+    ]
+    assert {row.account_id for row in rows if row.reason == "completed"} == {admin.id}
+    assert {row.account_id for row in rows if row.reason == "subject"} == {co_owner.id}
+    # No row carries the co-owner's id anywhere but its own account column, so
+    # erasing their account leaves nothing that names them.
+    assert all(str(co_owner.id) not in (row.scope or "") for row in rows)
+    async with sessions.begin() as session:
+        await security_audit.erase_account(session, tenant_id=tenant.id, account_id=co_owner.id)
+    async with sessions() as session:
+        after = await security_audit.list_events(
+            session, tenant_id=tenant.id, tool_name="agent_owner"
+        )
+    assert co_owner.id not in {row.account_id for row in after}
 
 
 async def test_a_co_owner_passes_the_github_policy_for_the_agent_only(people) -> None:
