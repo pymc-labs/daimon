@@ -589,6 +589,12 @@ def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> Non
             "agent_backends": "true",
         },
         {
+            "configuration": "mux-only",
+            "path": "mux",
+            "channel_backends": "false",
+            "agent_backends": "false",
+        },
+        {
             "configuration": "legacy-off",
             "path": "legacy",
             "channel_backends": "false",

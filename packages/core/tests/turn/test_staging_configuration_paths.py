@@ -33,19 +33,25 @@ if "DAIMON_CI_CONFIGURATION" not in os.environ:
     pytest.skip("the staging configuration matrix runs this module", allow_module_level=True)
 
 
-def expected_enabled() -> bool:
-    label = os.environ["DAIMON_CI_CONFIGURATION"]
-    assert label in {"enabled", "legacy-off"}, "CI must name the configuration under test"
-    return label == "enabled"
+# Each CI leg's label and the switches it must load: everything on (staging),
+# mux with both backend switches off (the first production activation step) and
+# everything off (production today).
+LEGS = {
+    "enabled": ("mux", True, True),
+    "mux-only": ("mux", False, False),
+    "legacy-off": ("legacy", False, False),
+}
 
 
 def selected_turn():
     """The turn switches the leg loaded, checked against the leg's independent label."""
-    enabled = expected_enabled()
+    label = os.environ["DAIMON_CI_CONFIGURATION"]
+    assert label in LEGS, "CI must name the configuration under test"
+    path, channel_backends, agent_backends = LEGS[label]
     turn = load_turn_settings(_env_file=None)
-    assert turn.path == ("mux" if enabled else "legacy")
-    assert turn.channel_backends is enabled
-    assert turn.agent_backends is enabled
+    assert turn.path == path
+    assert turn.channel_backends is channel_backends
+    assert turn.agent_backends is agent_backends
     return turn
 
 
@@ -130,8 +136,8 @@ async def test_ci_selected_channel_backend_execution_path(selector_host, turn_io
         assert _ma_sends(host) == 1, "Managed Agents must not receive the chosen turn"
         return
     assert admission.backend_revision is None, "the off leg must ignore the saved choice"
-    assert outcome.state.error is None, "the legacy turn should complete"
-    turn_io_used.assert_ran("legacy")
+    assert outcome.state.error is None, "the Anthropic turn should complete"
+    turn_io_used.assert_ran(turn.path)
     assert _ma_sends(host) == 2, "Managed Agents must run the turn"
     assert host.wire.requests == [], "OpenAI must receive no request"
     # Control: the same saved choice is admitted once mux and channel backends are on.
