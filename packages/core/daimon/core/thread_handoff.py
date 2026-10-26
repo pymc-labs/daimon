@@ -134,6 +134,7 @@ class HandoffCaller:
     account_id: uuid.UUID | None
     admin: AdminCaller
     via_agent_key: bool = False
+    attended: bool = True
 
 
 log = structlog.get_logger(__name__)
@@ -329,10 +330,16 @@ async def hand_over_thread(
         session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
     )
     subject = await _subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
-    if (
-        agent_invoker_roles(policy, destination.agent.names)
-        and subject.platform_user_id is not None
-    ):
+    target_roles = agent_invoker_roles(policy, destination.agent.names)
+    if target_roles and not caller.attended:
+        raise ThreadHandoffRefused(
+            HandoffRefused(
+                reason="invoker_not_allowed",
+                destination_name=destination.name,
+                authz_reason="invoker_not_allowed",
+            )
+        )
+    if target_roles and subject.platform_user_id is not None:
         subject = await resolve_subject(
             async_sessionmaker(bind=session.bind),
             membership_resolver,

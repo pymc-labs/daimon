@@ -988,18 +988,6 @@ async def run_worker(
                 deps.sessionmaker() as db,
             ):
                 policy = await policy_store.load_access_policy(db, tenant_id=request.tenant_id)
-            if any(rule.invoker_role_ids for rule in policy.agent_rules.values()):
-                from daimon.core.membership_subject import resolve_subject
-
-                if parent.subject.platform_user_id is not None:
-                    live = await resolve_subject(
-                        deps.sessionmaker,
-                        deps.membership_resolver,
-                        tenant_id=request.tenant_id,
-                        user_id=parent.subject.platform_user_id,
-                        require_fresh=True,
-                    )
-                    parent = replace(parent, subject=live)
             source_request = replace(request, scope=parent.fleet.scope, source=None, worker=None)
             async with _worker_stage(worker, "source", setup_at=setup_at):
                 source = await capture_preparation_source(source_request)
@@ -1019,6 +1007,36 @@ async def run_worker(
                 # an AgentPatch keys them by namespace, so the spec's list form is left out
                 # exactly as admission and preparation do (a raw validate fails on them).
                 overrides = clone_overrides(AgentSpec.model_validate(worker.spec))
+            from daimon.core.access_policy import agent_invoker_roles
+            from daimon.core.authz import build_agent_ref
+
+            worker_spec = definition.spec if isinstance(definition, Agent) else definition
+            worker_names = (
+                *build_agent_ref(worker_spec.name, worker_spec.metadata or {}).names,
+                *build_agent_ref(
+                    resolved_worker.spec.name, resolved_worker.spec.metadata or {}
+                ).names,
+            )
+            if agent_invoker_roles(policy, (*parent.agent.names, *worker_names)):
+                from daimon.core.membership_subject import resolve_subject
+
+                if parent.subject.platform_user_id is not None:
+                    live = await resolve_subject(
+                        deps.sessionmaker,
+                        deps.membership_resolver,
+                        tenant_id=request.tenant_id,
+                        user_id=parent.subject.platform_user_id,
+                        require_fresh=True,
+                    )
+                    parent = replace(
+                        parent,
+                        subject=replace(
+                            live,
+                            client=parent.subject.client,
+                            via_agent_key=parent.subject.via_agent_key,
+                            is_admin=live.is_admin and not parent.subject.client,
+                        ),
+                    )
             normalize = functools.partial(
                 resolve_worker_spec,
                 parent,

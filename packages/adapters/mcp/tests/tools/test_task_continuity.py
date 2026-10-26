@@ -1655,3 +1655,87 @@ async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
             thread_id="T_THREAD",
         )
     assert (handed is not None) == (pinned == "unpinned"), "a refusal rolls the hand-off back"
+
+
+async def test_unattended_handoff_refuses_role_gated_destination_and_queues_nothing(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            agent_rules={_DESTINATION_NAME: AgentRule(invoker_role_ids=("123",))},
+        ),
+    )
+    await db_session.commit()
+    runtime = replace(
+        _runtime(committing_sessionmaker, _client([_destination(tenant.id)])),
+        membership_resolver=CachedMembershipResolver(
+            AsyncMock(
+                return_value=Membership(
+                    is_member=True,
+                    role_ids=("123",),
+                    is_admin=True,
+                )
+            )
+        ),
+    )
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+        chat_session_id="test-session",
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        attended=False,
+        chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        with pytest.raises(ToolError, match="limited to certain people"):
+            await _hand_off_task_impl(
+                runtime,
+                auth,
+                origin_context_id=str(origin.id),
+                agent_id=_DESTINATION_ID,
+                continuation="run this task",
+            )
+    async with committing_sessionmaker() as session:
+        assert (
+            await get_binding(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="C_PARENT",
+                thread_id="T_THREAD",
+            )
+            is None
+        )
+        assert (
+            await list_pending_continuations(
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id="T_THREAD",
+            )
+            == []
+        )

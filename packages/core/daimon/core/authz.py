@@ -643,6 +643,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if refusal is None else _deny(refusal)
 
     if req.action is Action.SAVE_ROUTINE:
+        if agent_invoker_roles(policy, agent.names):
+            return _deny("invoker_not_allowed")
         here = place.permissions.home
         if here is not None and agent.permissions.home != here:
             return _deny("own_agents_only")

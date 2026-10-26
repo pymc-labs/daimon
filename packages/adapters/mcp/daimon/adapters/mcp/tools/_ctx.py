@@ -142,7 +142,15 @@ async def _policy_gate(
     gated = any_agent_rules(policy) or any_own_readers(policy)
     # An isolated channel's own agent is charged to that channel, so the
     # names are read for a hub admin too while anything is isolated.
-    if agent_names is not None and gated:
+    if (
+        agent_names is not None
+        and gated
+        and (
+            not hub_admin
+            or any_own_readers(policy)
+            or any(rule.invoker_role_ids for rule in policy.agent_rules.values())
+        )
+    ):
         # Resolving the agent's names may await the network (an MA lookup);
         # read the policy again after it, so the pin is decided on the policy
         # as it is once every await is done, not as it was before the lookup.

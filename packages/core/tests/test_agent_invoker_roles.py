@@ -216,3 +216,23 @@ def test_recorded_human_owner_does_not_authorize_automated_invocation(automated:
     with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
         _require_run_agent(GATED, grant)
     _require_run_agent(TenantAccessPolicy(), grant)
+
+
+def test_role_gated_agent_refuses_routine_save_even_for_live_admin() -> None:
+    from dataclasses import replace
+
+    assert (
+        authorize(
+            GATED,
+            subject=replace(MEMBER, is_admin=True),
+            action=Action.SAVE_ROUTINE,
+            agent=AgentRef.of("restricted"),
+        ).reason
+        == "invoker_not_allowed"
+    )
+    assert authorize(
+        GATED,
+        subject=MEMBER,
+        action=Action.SAVE_ROUTINE,
+        agent=AgentRef.of("ordinary"),
+    )

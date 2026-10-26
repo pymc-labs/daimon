@@ -535,3 +535,28 @@ async def test_agent_chat_role_revoked_before_message_send_denied_without_invali
             tool_name="ask",
             agent_names=names,
         )()
+
+
+async def test_ungated_hub_admin_keeps_lookup_exemption(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    auth = dataclasses.replace(
+        await _member(db_session, policy=_PINNED, role=Role.ADMIN),
+        platform="discord",
+    )
+    names = AsyncMock(side_effect=AssertionError("ungated hub admin must not need MA lookup"))
+    with _BALANCE_OK:
+        assert (
+            await _admit(
+                auth,
+                sessionmaker=db_session_factory,
+                membership_resolver=_current_member(is_admin=True),
+                billing_config=None,
+                tool_name="ask",
+                agent_names=names,
+                pin_exempt=True,
+            )
+            is auth
+        )
+    names.assert_not_awaited()

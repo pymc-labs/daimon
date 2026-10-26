@@ -20,13 +20,23 @@ be satisfied. Empty roles leave the agent's existing admission behavior intact.
 Role IDs must be Discord snowflakes and cannot name `@everyone` (the guild ID).
 
 Membership is checked live when the target agent is selected, on continuations
-and queued sends, and at execution reauthorization. A revoked role or unavailable
-membership lookup refuses further work through the usual invoker refusal.
+and queued sends, and before model sends and tool confirmations. Revocation
+refuses work at the next such check; it does not interrupt a step already in
+progress. An unavailable membership lookup also refuses further work through
+the usual invoker refusal.
 Handoffs check the person requesting the switch against the destination agent;
 worker delegation and API/MCP chat also enforce the destination's requirement.
 Routines, scheduler jobs, bots and other non-human invocations cannot use an
-agent with this requirement. Roles are Discord-only: writers refuse setting
-this rule on Slack, Teams or CLI tenants, and unsupported membership fails closed.
+agent with this requirement. Saving a routine for a role-gated agent is refused.
+Watches, timers, long jobs and fleet completion wakes are unattended and cannot
+invoke these agents. A handoff from an unattended turn cannot switch to one,
+even when its recorded owner currently holds a matching role.
+
+Archiving an agent drops its role rule. Setting invoker roles on one of an
+agent's aliases replaces the invoker roles on its other aliases, preserving
+spatial rules on every alias.
+
+Roles are Discord-only: writers refuse setting this rule on Slack, Teams or CLI tenants, and unsupported membership fails closed.
 
 ## Approval gate overrides
 

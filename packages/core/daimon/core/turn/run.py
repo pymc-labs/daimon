@@ -1115,18 +1115,14 @@ async def run_prepared_turn_impl(
         raise AdmissionDenied(reason="invoker_not_allowed")
     if watch_row is not None and (watch_row.reason != "watch_fired" or attended is not False):
         raise ValueError("Watch turns must be explicitly unattended")
-    # Automated wakes have a recorded owner, not a current human invoker.
-    # Keep that distinction on the grant so every subsequent recheck holds it.
-    if (
-        origin == "routine"
-        or worker_finished is not None
-        or watch_row is not None
-        or job_row is not None
-    ) and prepared.admission.grant is not None:
-        automated_grant = replace(prepared.admission.grant, human_invocation=False)
-        prepared = replace(prepared, admission=replace(prepared.admission, grant=automated_grant))
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
     unattended = not (attended if attended is not None else origin != "routine")
+    # Attendance, rather than a list of wake reasons, distinguishes a current
+    # human invocation from work running for a recorded owner.
+    if unattended and prepared.admission.grant is not None:
+        automated_grant = replace(prepared.admission.grant, human_invocation=False)
+        automated = replace(prepared.admission, grant=automated_grant)
+        prepared = replace(prepared, admission=await reauthorize(deps, automated))
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
