@@ -24,7 +24,7 @@ from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.receipts import SendReceipt
 from mux.contracts.resources import ProviderBinding
 from mux.errors import OperationConflict, ScopeViolation
-from mux.state.lease import LeaseBusy, StaleFence
+from mux.state.lease import Lease, LeaseBusy, StaleFence
 from mux.state.memory import MemoryStateStore, SimulatedCrash
 from mux.state.store import StateStore, binding_slot
 from mux.testing.drivers.anthropic.ma import list_response, send_events_response
@@ -976,3 +976,67 @@ async def test_worker_allocation_does_not_change_key_after_a_definite_native_ref
     assert len(traffic.requests) == 1
     assert (await store.get_operation(SCOPE, "worker:agent_create:0")).operation.status == "failed"
     assert await store.get_operation(SCOPE, "worker:agent_create:1") is None
+
+
+class BlippingStore(MemoryStateStore):
+    """A store whose lease renewals fail with a dropped connection `blips` times."""
+
+    def __init__(self, blips: int) -> None:
+        super().__init__()
+        self.blips = blips
+        self.renewal_attempts = 0
+
+    async def renew_lease(self, lease: Lease, *, now: datetime, ttl: timedelta) -> Lease:
+        self.renewal_attempts += 1
+        if self.blips > 0:
+            self.blips -= 1
+            raise ConnectionError("database connection dropped")
+        return await super().renew_lease(lease, now=now, ttl=ttl)
+
+
+async def _run_through_renewals(store: BlippingStore, *, ttl: timedelta, hold_s: float) -> None:
+    await store.put_binding(BINDING, expected_generation=0)
+    persistence = TurnPersistence(
+        store,
+        BINDING,
+        SCOPE,
+        operation_key="root",
+        ttl=ttl,
+        send_timeout_s=0.1,
+        renew_interval_s=0.01,
+    )
+
+    async def pump() -> None:
+        await asyncio.sleep(hold_s)
+
+    await persistence.run(pump)
+
+
+async def test_a_database_blip_inside_the_lease_ttl_does_not_end_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("daimon.core.turn.persistence._RENEW_RETRY_INITIAL_S", 0.01)
+    store = BlippingStore(blips=3)
+    await _run_through_renewals(store, ttl=timedelta(seconds=30), hold_s=0.3)
+    assert store.renewal_attempts > 3, "the failed renewals were retried and then succeeded"
+
+
+async def test_a_database_outage_longer_than_the_lease_ends_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("daimon.core.turn.persistence._RENEW_RETRY_INITIAL_S", 0.01)
+    monkeypatch.setattr("daimon.core.turn.persistence._RENEW_RETRY_MAX_S", 0.02)
+    monkeypatch.setattr("daimon.core.turn.persistence._RENEW_GIVE_UP_MARGIN_S", 0.0)
+    store = BlippingStore(blips=10**6)
+    with pytest.raises(ConnectionError):
+        await _run_through_renewals(store, ttl=timedelta(seconds=1), hold_s=30)
+    assert store.renewal_attempts > 5, "it kept trying until shortly before the lease expired"
+
+
+def test_the_default_lease_bounds_a_killed_holders_stranding_to_150_seconds() -> None:
+    from daimon.core.turn.persistence import LEASE_RENEW_INTERVAL_S, LEASE_TTL
+
+    assert timedelta(seconds=150) == LEASE_TTL and LEASE_RENEW_INTERVAL_S == 30.0
+    persistence = context(MemoryStateStore())
+    assert persistence._ttl == LEASE_TTL  # pyright: ignore[reportPrivateUsage]
+    assert persistence._send_timeout_s < LEASE_TTL.total_seconds()  # pyright: ignore[reportPrivateUsage]

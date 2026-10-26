@@ -1141,7 +1141,9 @@ thread waits for it, polling the store with a short backoff, rather than raising
 turn that exhausts it ends through the ordinary ceiling outcome without retiring
 the thread's session mapping. Stop ends the wait as an interrupt. The store
 decides whether the lease is free, so a holder that dies frees the slot when its
-TTL lapses. If the holder replaced the session while the turn waited, the turn
+TTL lapses. The TTL is 150 seconds and a running turn renews every 30, so a holder
+killed without cleanup (SIGKILL, out-of-memory, node loss) holds its thread for
+at most 150 seconds; a graceful drain releases the lease at once. If the holder replaced the session while the turn waited, the turn
 adopts that replacement through the same recovery that heals a dead session.
 Callers that use `TurnPersistence` directly keep the immediate `LeaseBusy`.
 
@@ -1162,8 +1164,10 @@ ID, revision and preview authority. A stream gap checkpoints its last cursor
 without fabricating completion; the host still replays through its existing
 native history walk. Cancel acknowledgements stay distinct from independently
 observed stop events, which are also journaled. Lease renewal runs during the
-turn, sends have a timeout below the lease TTL, and losing renewal cancels the
-pump. Claims, receipt commits and journal appends all require the active fence.
+turn, sends have a timeout below the lease TTL, and losing the lease cancels the
+pump. A renewal that fails for a reason other than a lost lease (a dropped
+database connection) is retried with a short backoff until 10 seconds before
+the lease would expire, so a database blip shorter than that does not end the turn. Claims, receipt commits and journal appends all require the active fence.
 
 Direct driver calls without a prepared binding context retain their existing
 port behavior and are not claimed to persist a complete turn journal. Native

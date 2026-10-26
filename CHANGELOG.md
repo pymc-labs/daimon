@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- On the opt-in mux turn path, a process killed without cleanup (out of memory, node loss) no longer holds its thread for five minutes: the thread lease now lasts 150 seconds and is renewed every 30, so the next message in that thread waits at most 150 seconds. A turn also now rides out a brief database failure while renewing its lease instead of ending on the first error.
 - Removed Fleet orchestration, worker tools, configuration and controls. Ordinary agents and provider switching remain available. Migration 0141 deletes Fleet-only history when separately applied; shared turn/accounting history remains.
 
 - `create_agent` now reads back as `get_agent` and `list_agents` do: an agent created on GPT or Gemini gives its `provider` and that provider's model as `active_model`, and `model` stays its own Claude model (it used to put the provider's model in `model`).
