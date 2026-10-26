@@ -116,7 +116,7 @@ class FixtureProvider:
             count += add("client", client)
             if count == 2:
                 break
-        opening, closing = '<context_cards as_of="2026-10-23">\n', "\n</context_cards>\n\n"
+        opening, closing = '<context_cards as_of="2026-10-23">\n', "\n</context_cards>"
         budget = estimate_tokens(opening + closing)
         rendered: list[str] = []
         emitted: list[EmittedCard] = []

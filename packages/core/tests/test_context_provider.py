@@ -661,3 +661,77 @@ async def test_context_client_constructor_is_independent_of_other_transport_over
         assert isinstance(provider.client, constructor)
     finally:
         await provider.aclose()
+
+
+async def test_mcp_never_shares_response_cookies_or_bearers_between_tenants(monkeypatch) -> None:
+    other = uuid.uuid4()
+    one_env = f"DAIMON_CONTEXT_{TENANT.hex.upper()}_BRIDGE"
+    two_env = f"DAIMON_CONTEXT_{other.hex.upper()}_BRIDGE"
+    monkeypatch.setenv(one_env, "tenant-one-bearer")
+    monkeypatch.setenv(two_env, "tenant-two-bearer")
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        assert "cookie" not in request.headers
+        return httpx.Response(
+            200,
+            headers={"set-cookie": "session=tenant-one; Path=/; Secure; HttpOnly"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "context",
+                "result": {"structuredContent": {"status": "empty"}},
+            },
+        )
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    try:
+        for tenant, bearer_env in ((TENANT, one_env), (other, two_env), (TENANT, None)):
+            await provider(
+                ProviderConfig(endpoint="https://provider.invalid/mcp", bearer_env=bearer_env),
+                REQUEST.model_copy(update={"tenant_id": tenant}),
+            )
+        assert [r.headers.get("authorization") for r in seen] == [
+            "Bearer tenant-one-bearer",
+            "Bearer tenant-two-bearer",
+            None,
+        ]
+        assert not provider.client.cookies
+        assert "authorization" not in provider.client.headers
+        assert "cookie" not in provider.client.headers
+    finally:
+        await provider.aclose()
+
+
+async def test_multiple_provider_owners_load_tls_roots_once(monkeypatch) -> None:
+    import ssl
+
+    from daimon.core import context_provider as context_module
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    calls = 0
+
+    def create_context(*, trust_env):
+        nonlocal calls
+        assert trust_env is False
+        calls += 1
+        return context
+
+    context_module._ssl_context.cache_clear()
+    monkeypatch.setattr(httpx, "create_ssl_context", create_context)
+    providers = []
+    try:
+        providers.extend([McpProvider(), McpProvider()])
+        assert calls == 1
+        assert providers[0].client is not providers[1].client
+    finally:
+        for provider in providers:
+            await provider.aclose()
+        context_module._ssl_context.cache_clear()
+
+
+def test_context_place_type_is_required() -> None:
+    payload = REQUEST.model_dump()
+    payload.pop("place_type")
+    with pytest.raises(ValueError):
+        ContextRequest.model_validate(payload)

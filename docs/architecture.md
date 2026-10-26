@@ -1127,6 +1127,10 @@ tenant UUID without hyphens in uppercase, then `_`. The secret stays in the
 host environment and is never stored in the binding. The provider verifies
 caller, server, requester and destination; request metadata grants no placement
 authority. Endpoints require HTTPS, with redirects and environment proxies off.
+Each provider owner keeps its own connection pool and refuses all cookies;
+authentication headers are set independently on every request. The process
+loads TLS roots once, outside the turn path, and reuses that SSL context when
+building further provider owners.
 The client posts MCP `tools/call` for `context_cards_for_turn` without initialize,
 for FastMCP `stateless_http=True, json_response=False`; both JSON and SSE replies
 must contain one JSON-RPC result with a v1 `ContextResponse` in `structuredContent`.

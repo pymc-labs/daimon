@@ -11,6 +11,9 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from functools import cache
+from http.cookiejar import CookieJar, DefaultCookiePolicy
+from ssl import SSLContext
 from typing import Literal, Protocol
 
 import httpx
@@ -43,7 +46,7 @@ class ContextRequest(BaseModel):
     channel_id: str | None
     parent_channel_id: str | None = None
     thread_id: str | None = None
-    place_type: Literal["channel", "thread", "dm"] = "channel"
+    place_type: Literal["channel", "thread", "dm"]
     requester_platform_user_id: str
     agent_id: str
     # This is host-attested origin metadata, NOT evidence of internal placement.
@@ -90,12 +93,24 @@ class Provider(Protocol):
     ) -> ContextResponse: ...
 
 
+@cache
+def _ssl_context() -> SSLContext:
+    # Warmed by provider construction outside turns; subsequent owners do no CA I/O.
+    return httpx.create_ssl_context(trust_env=False)
+
+
 class McpProvider:
     """Stateless MCP tools/call with bounded JSON or SSE replies."""
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        # Construct outside the turn path: loading TLS roots is synchronous.
-        self.client = AsyncClient(transport=transport, follow_redirects=False, trust_env=False)
+        # The imported constructor isolates this owner from other transports' overrides.
+        self.client = AsyncClient(
+            transport=transport,
+            verify=_ssl_context(),
+            follow_redirects=False,
+            trust_env=False,
+            cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
+        )
 
     async def aclose(self) -> None:
         await self.client.aclose()
