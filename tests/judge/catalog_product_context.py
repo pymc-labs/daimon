@@ -179,6 +179,7 @@ class ProductContext:
         try:
             admission = await admit(
                 deps,
+                origin="chat",
                 requester_org=RequesterOrg.HOST,
                 tenant_id=tenant,
                 platform=self.admin.platform,

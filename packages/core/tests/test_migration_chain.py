@@ -219,6 +219,13 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if reflected and kind == "column" and name == "is_external":
             return getattr(getattr(obj, "table", None), "name", None) != "turn_origins"
+        if (
+            kind == "column"
+            and name == "human_invocation"
+            and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
+            and expected != HEAD
+        ):
+            return False
         if kind == "column" and expected not in (
             SANDBOX_HEAD,
             RECRUITMENT_HEAD,
