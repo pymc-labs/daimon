@@ -591,6 +591,7 @@ def test_prepared_turn_public_fields_exclude_recorder() -> None:
         "watermark",
         "reused",
         "session_account_id",
+        "session_model_id",
         "continuity",
         "backend",
         "session_ref",

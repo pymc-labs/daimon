@@ -1134,6 +1134,8 @@ and exception class, never provider text, card IDs, sources or credentials.
 
 The turn fragment precedes user input. The once-only system fragment joins the
 system message, or precedes user input on models without system-message support.
+`PreparedTurn.session_model_id` carries the frozen session model for this
+capability decision, including when a reused session differs from its live agent.
 Acknowledgements advance only after inference input send succeeds. A new MA
 session starts fresh. Acknowledgements use a bounded process-local LRU (1,024
 sessions, 24 hours idle, at most 512 hashes each); restart or eviction can repeat
