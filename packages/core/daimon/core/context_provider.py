@@ -15,6 +15,7 @@ from typing import Literal, Protocol
 
 import httpx
 import structlog
+from httpx import AsyncClient
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 log = structlog.get_logger(__name__)
@@ -94,9 +95,7 @@ class McpProvider:
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
         # Construct outside the turn path: loading TLS roots is synchronous.
-        self.client = httpx.AsyncClient(
-            transport=transport, follow_redirects=False, trust_env=False
-        )
+        self.client = AsyncClient(transport=transport, follow_redirects=False, trust_env=False)
 
     async def aclose(self) -> None:
         await self.client.aclose()

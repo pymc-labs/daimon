@@ -621,6 +621,9 @@ async def test_mcp_reuses_one_client_and_passes_each_call_timeout(monkeypatch) -
     def forbidden_constructor(*args, **kwargs):
         pytest.fail("a provider turn constructed a client")
 
+    from daimon.core import context_provider as context_module
+
+    monkeypatch.setattr(context_module, "AsyncClient", forbidden_constructor)
     monkeypatch.setattr(httpx, "AsyncClient", forbidden_constructor)
     try:
         for timeout_ms in (20, 80):
@@ -642,3 +645,19 @@ async def test_mcp_reuses_one_client_and_passes_each_call_timeout(monkeypatch) -
 def test_unknown_place_is_not_a_wire_request() -> None:
     with pytest.raises(ValueError):
         ContextRequest.model_validate(REQUEST.model_dump() | {"place_type": "unknown"})
+
+
+async def test_context_client_constructor_is_independent_of_other_transport_overrides(
+    monkeypatch,
+) -> None:
+    constructor = httpx.AsyncClient
+
+    def other_transport_client(*, verify, proxy, timeout, trust_env):
+        pytest.fail("context startup used another transport owner's client factory")
+
+    monkeypatch.setattr(httpx, "AsyncClient", other_transport_client)
+    provider = McpProvider(httpx.MockTransport(lambda request: httpx.Response(200)))
+    try:
+        assert isinstance(provider.client, constructor)
+    finally:
+        await provider.aclose()
