@@ -1122,7 +1122,11 @@ async def run_prepared_turn_impl(
     if unattended and prepared.admission.grant is not None:
         automated_grant = replace(prepared.admission.grant, human_invocation=False)
         automated = replace(prepared.admission, grant=automated_grant)
-        prepared = replace(prepared, admission=await reauthorize(deps, automated))
+        # Check authority without claiming the prepared session has adopted new
+        # seals or mounts. The send gate must still detect posture changes and
+        # require preparation again before it sends into that session.
+        await reauthorize(deps, automated)
+        prepared = replace(prepared, admission=automated)
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
