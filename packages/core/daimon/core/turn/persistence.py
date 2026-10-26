@@ -19,7 +19,7 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, OperationStatus
 from mux.contracts.resources import ProviderBinding
 from mux.drivers.anthropic import classify_mutation_failure, single_attempt_mutation
-from mux.errors import ProviderError, ScopeViolation
+from mux.errors import MuxError, ProviderError, ScopeViolation
 from mux.state.journal import JournalAppend, JournalEntry
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.mutation_retry import MutationFailure, MutationRetryPolicy, RetryStop
@@ -32,6 +32,18 @@ if TYPE_CHECKING:
 
 
 log = structlog.get_logger(__name__)
+
+#: How long a thread lease lives without a renewal, and how often a running turn renews it.
+#: A holder killed without cleanup strands its thread for at most the TTL, so the TTL is kept
+#: short and the renewal five times as frequent; `send_timeout_s` must stay below it.
+LEASE_TTL = timedelta(seconds=150)
+LEASE_RENEW_INTERVAL_S = 30.0
+
+#: A renewal that keeps failing is abandoned this long before the lease would have expired,
+#: so the turn ends while it still holds the fence rather than after another holder may.
+_RENEW_GIVE_UP_MARGIN_S = 10.0
+_RENEW_RETRY_INITIAL_S = 1.0
+_RENEW_RETRY_MAX_S = 5.0
 
 # Kinds that never pass the root budget check, and so never count an input.
 _UNCOUNTED_KINDS = frozenset({"cancel", "archive", "recovery-interrupt"})
@@ -122,8 +134,8 @@ class TurnPersistence:
         source_agent_id: str | None = None,
         session_ref: ResourceRef | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
-        ttl: timedelta = timedelta(minutes=5),
-        renew_interval_s: float = 60.0,
+        ttl: timedelta = LEASE_TTL,
+        renew_interval_s: float = LEASE_RENEW_INTERVAL_S,
         send_timeout_s: float = 120.0,
         lease_wait: LeaseWait | None = None,
         retry: MutationRetry | None = None,
@@ -217,9 +229,37 @@ class TurnPersistence:
     async def _renew(self) -> None:
         while True:
             await asyncio.sleep(self._renew_interval_s)
-            self._lease = await self.store.renew_lease(
-                self._fence(), now=self._now(), ttl=self._ttl
-            )
+            self._lease = await self._renew_once()
+
+    async def _renew_once(self) -> Lease:
+        """Renew the lease, riding out a transient store failure within the lease's own life.
+
+        A lost lease (`StaleFence`) or any other contract refusal (`MuxError`) ends the turn at
+        once. Anything else, such as a dropped connection, is retried with a short backoff until
+        shortly before the lease would have expired, so a database blip shorter than that does
+        not end a turn that is still safely the holder.
+        """
+        lease = self._fence()
+        loop = asyncio.get_running_loop()
+        remaining_s = (lease.expires_at - self._now()).total_seconds()
+        give_up = loop.time() + remaining_s - _RENEW_GIVE_UP_MARGIN_S
+        delay = _RENEW_RETRY_INITIAL_S
+        while True:
+            try:
+                return await self.store.renew_lease(lease, now=self._now(), ttl=self._ttl)
+            except MuxError:
+                raise
+            except Exception as error:
+                if loop.time() + delay >= give_up:
+                    raise
+                log.warning(
+                    "mux.lease_renewal_retry",
+                    operation=self.operation_key,
+                    error_type=type(error).__name__,
+                    retry_in_s=delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, _RENEW_RETRY_MAX_S)
 
     async def _acquire_lease(self) -> Lease:
         """Take the binding's lease; with `lease_wait`, queue behind a live holder.
