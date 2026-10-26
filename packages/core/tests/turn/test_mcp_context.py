@@ -26,6 +26,7 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.mcp_context import (
     SKIP,
+    AgentServer,
     ContextMemo,
     Expiring,
     ServerState,
@@ -175,11 +176,12 @@ def _rig(
     *,
     loader: Loader | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    memo: ContextMemo | None = None,
     **settings: object,
 ) -> Rig:
     server = server or FakeServer()
     loader = loader or Loader()
-    memo = ContextMemo()
+    memo = memo or ContextMemo()
     fetch = build_turn_context_fetch(
         McpContextSettings.model_validate({"enabled": True, **settings}),
         credentials=loader,
@@ -332,12 +334,45 @@ async def test_a_new_server_is_looked_up_in_the_background_then_asked() -> None:
 async def test_a_server_without_the_tool_costs_later_turns_nothing() -> None:
     """Ordinary servers: one background lookup, then no request and no read for hours."""
     rig = _rig(FakeServer(tools=[{"name": "search"}]))
-    await rig.warm()
+    asked: list[str] = []
+
+    async def refused(server_name: str, tool_name: str) -> bool:
+        asked.append(server_name)
+        return False
+
+    assert await rig.ask(permitted=refused) == ""
+    await rig.settle()
+    rig.server.forget()
     reads = rig.loader.reads
 
-    assert await rig.ask() == "", "no tool, no context"
+    assert await rig.ask(permitted=refused) == "", "no tool, no context"
     assert rig.server.requests == [], "the server is not contacted"
     assert rig.loader.reads == reads, "nor is the credential read repeated"
+    assert asked == [], "nor its permission, which tool safety would refuse"
+
+
+async def test_a_failing_lookup_rests_longer_each_time() -> None:
+    """A server that fails its lookups is left alone for longer each time, up to hours."""
+
+    async def broken(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    now = [0.0]
+    memo = ContextMemo(
+        resting=Expiring[AgentServer, bool](clock=lambda: now[0]),
+        failures=Expiring[AgentServer, int](clock=lambda: now[0]),
+    )
+    rig = _rig(transport=httpx.MockTransport(broken), memo=memo)
+    rests: list[float] = []
+    for _ in range(8):
+        await rig.ask()
+        await rig.settle()
+        reads = rig.loader.reads
+        assert await rig.ask() == "" and rig.loader.reads == reads, "a resting server costs nothing"
+        ((until, _),) = memo.resting.entries.values()
+        rests.append(until - now[0])
+        now[0] = until
+    assert rests == [600, 1200, 2400, 4800, 9600, 19200, 21600, 21600], rests
 
 
 async def test_a_slow_new_server_never_slows_a_turn() -> None:
@@ -402,15 +437,20 @@ async def test_fetch_skips_servers_without_a_shared_token_for_a_minute() -> None
     assert rig.loader.reads == 1, "the missing token is remembered for a while"
 
 
-async def test_fetch_skips_a_server_the_turn_may_not_call() -> None:
+async def test_fetch_skips_a_server_the_turn_may_not_call_for_a_minute() -> None:
     rig = _rig()
+    await rig.warm()
+    asked: list[str] = []
 
     async def refused(server_name: str, tool_name: str) -> bool:
+        asked.append(server_name)
         return False
 
     assert await rig.ask(permitted=refused) == "", "not permitted, no context"
-    await rig.settle()
-    assert rig.server.requests == [], "and the server is not even looked up"
+    assert rig.server.requests == [], "and the server is sent nothing"
+    reads = rig.loader.reads
+    assert await rig.ask(permitted=refused) == ""
+    assert (asked, rig.loader.reads) == (["knowledge"], reads), "the refusal is remembered"
 
 
 async def test_fetch_adds_nothing_from_a_slow_server_and_rests_it() -> None:
@@ -445,7 +485,9 @@ async def test_fetch_adds_nothing_whatever_goes_wrong() -> None:
     await broken.settle()
     assert await broken.ask() == "", "and the server rests"
     assert await _rig(loader=Unreadable()).ask() == "", "a credential read that raises"
-    assert await _rig().ask(permitted=admission_changed) == "", "a changed turn"
+    changed = _rig()
+    await changed.warm()
+    assert await changed.ask(permitted=admission_changed) == "", "a changed turn"
 
 
 async def test_fetch_only_for_listed_tenants() -> None:

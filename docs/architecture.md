@@ -1099,8 +1099,10 @@ unasked: on and not `always_ask` in the agent's toolset, an allow from
 `decide_tool_call` with agent rules, and an admission unchanged since the turn
 was prepared. Each non-empty answer goes in an untrusted `<mcp_context>` block.
 The setting is on by default, so a server is first looked up in a background
-task no turn waits on; one without the tool is then skipped for six hours, and
-a server without a shared token for a minute, before any read. Each server
+task no turn waits on, which only lists its tools. Before any read, one without
+the tool is then skipped for six hours, one whose lookup failed for ten minutes
+(doubling up to six hours), and one without a shared token or that the turn may
+not call for a minute. Each server
 that offers it gets at most `timeout_s`, and the turn's cancel ends the wait;
 its MCP session and tool list are reused for ten minutes, so a typical turn is
 one `tools/call`, and one that failed is skipped for a minute. Routines, hand-offs, held, shared and sealed turns ask nothing.

@@ -73,8 +73,9 @@ REUSE_S = 600.0
 OFFERING_S = 86_400.0
 """How long a server seen offering the tool is asked without a fresh lookup first."""
 NO_TOOL_S = 21_600.0
-NO_TOKEN_S = 60.0
-FAILURE_REST_S = 60.0
+"""How long a server without the tool, or whose lookups keep failing, is left alone."""
+REST_S = 60.0
+"""How long a server rests after a failed call, a missing token or a refusal."""
 MEMO_SIZE = 1024
 _TOOL_PAGES = 10
 _NOTE = (
@@ -110,6 +111,9 @@ class ServerState:
 
 
 SKIP = ServerState(offered=False)
+
+type AgentServer = tuple[uuid.UUID, uuid.UUID, str]
+"""Tenant, agent and canonical URL: what is known before the credential read."""
 
 
 @dataclass
@@ -150,8 +154,11 @@ class ContextMemo:
         default_factory=lambda: Expiring[tuple[str, str], bool]()
     )
     without_tool: Expiring[str, bool] = field(default_factory=lambda: Expiring[str, bool]())
-    without_token: Expiring[tuple[uuid.UUID, uuid.UUID, str], bool] = field(
-        default_factory=lambda: Expiring[tuple[uuid.UUID, uuid.UUID, str], bool]()
+    resting: Expiring[AgentServer, bool] = field(
+        default_factory=lambda: Expiring[AgentServer, bool]()
+    )
+    failures: Expiring[AgentServer, int] = field(
+        default_factory=lambda: Expiring[AgentServer, int]()
     )
     lookups: dict[tuple[str, str], asyncio.Task[None]] = field(
         default_factory=lambda: dict[tuple[str, str], asyncio.Task[None]]()
@@ -369,7 +376,7 @@ async def _ask(
     # Boundary: context is an optional extra. Whatever a server does (fails, stalls,
     # answers malformed), the turn goes on without its answer, never without a reply.
     except Exception as err:
-        memo.sessions.remember(server.key, SKIP, for_s=FAILURE_REST_S)
+        memo.sessions.remember(server.key, SKIP, for_s=REST_S)
         log.warning(
             "mcp_context.failed",
             server=server.name,
@@ -389,6 +396,7 @@ async def _ask(
 async def _look_up(
     server: ContextServer,
     *,
+    at: AgentServer,
     tool: str,
     memo: ContextMemo,
     timeout_s: float,
@@ -399,11 +407,14 @@ async def _look_up(
         async with asyncio.timeout(timeout_s), _client(timeout_s, transport) as http:
             state = await _discover(http, server, tool)
     # Boundary: a lookup no turn waits on. Whatever goes wrong, the server rests and
-    # is looked up again later.
+    # is looked up again later, each time after a longer rest.
     except Exception as err:
-        memo.sessions.remember(server.key, SKIP, for_s=REUSE_S)
+        failed = (memo.failures.recall(at) or 0) + 1
+        memo.failures.remember(at, failed, for_s=2 * NO_TOOL_S)
+        memo.resting.remember(at, True, for_s=min(REUSE_S * 2 ** (failed - 1), NO_TOOL_S))
         log.info("mcp_context.lookup_failed", server=server.name, error=type(err).__name__)
         return
+    memo.failures.forget(at)
     memo.learned(server, state)
     log.info("mcp_context.looked_up", server=server.name, offered=state.offered)
 
@@ -422,12 +433,13 @@ def build_turn_context_fetch(
     tenants = frozenset(settings.tenants)
     known = memo if memo is not None else ContextMemo()
 
-    def look_up_later(server: ContextServer) -> None:
+    def look_up_later(server: ContextServer, at: AgentServer) -> None:
         if server.key in known.lookups:
             return
         task = asyncio.create_task(
             _look_up(
                 server,
+                at=at,
                 tool=settings.tool,
                 memo=known,
                 timeout_s=settings.timeout_s,
@@ -452,12 +464,12 @@ def build_turn_context_fetch(
             return ""
         try:
             agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
-            # A server known to lack the tool, or a shared token, costs the turn nothing.
+            # A server known to lack the tool, or resting, costs the turn nothing.
             candidates = [
                 (name, url)
                 for name, url in servers
                 if not known.without_tool.recall(canonical_mcp_url(url))
-                and not known.without_token.recall((tenant_id, agent_id, canonical_mcp_url(url)))
+                and not known.resting.recall((tenant_id, agent_id, canonical_mcp_url(url)))
             ]
             if not candidates:
                 return ""
@@ -468,18 +480,20 @@ def build_turn_context_fetch(
             for _, url in candidates:
                 if canonical_mcp_url(url) not in tokened:
                     key = (tenant_id, agent_id, canonical_mcp_url(url))
-                    known.without_token.remember(key, True, for_s=NO_TOKEN_S)
+                    known.resting.remember(key, True, for_s=REST_S)
             targets: list[ContextServer] = []
             for server in found:
+                at = (tenant_id, agent_id, canonical_mcp_url(server.url))
                 state = known.sessions.recall(server.key)
                 if state is not None and not state.offered:
                     continue
-                if not await permitted(server.name, settings.tool):
-                    continue
-                if known.offering.recall(server.key):
+                # A lookup only lists the tools: nothing is sent before `permitted`.
+                if not known.offering.recall(server.key):
+                    look_up_later(server, at)
+                elif await permitted(server.name, settings.tool):
                     targets.append(server)
                 else:
-                    look_up_later(server)
+                    known.resting.remember(at, True, for_s=REST_S)
         # Boundary, as in `_ask`: a credential or rule read that fails costs the
         # turn its context, not its reply.
         except Exception as err:
