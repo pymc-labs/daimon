@@ -11,8 +11,10 @@ and fails, which errs toward a loud false positive, never a missed split.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -210,3 +212,87 @@ def test_ssh_behind_timeout_is_still_checked() -> None:
     )
     with pytest.raises(AssertionError, match="one argument"):
         _check_workflow("fixture.yml", source)
+
+
+@pytest.mark.parametrize(
+    ("stage", "failures", "code", "error", "attempts", "success"),
+    [
+        ("refresh", 2, 1, "private refresh failure", 3, True),
+        ("scp", 2, 255, "private copy failure", 3, True),
+        ("refresh", 3, 255, "private refresh failure", 3, False),
+        ("scp", 3, 255, "private copy failure", 3, False),
+        ("action", 2, 255, "user@host: Permission denied (publickey).", 3, True),
+        ("action", 3, 255, "user@host: Permission denied (publickey).", 3, False),
+        ("action", 1, 255, "private connection lost after command started", 1, False),
+        ("action", 1, 1, "user@host: Permission denied (publickey).", 1, False),
+        ("action", 1, 255, "remote log: Permission denied (publickey)", 1, False),
+    ],
+)
+def test_lane_action_retries(
+    tmp_path: Path,
+    stage: str,
+    failures: int,
+    code: int,
+    error: str,
+    attempts: int,
+    success: bool,
+) -> None:
+    source = (_WORKFLOWS / "lane.yml").read_text()
+    document = cast("Node", yaml.compose(source))  # pyright: ignore[reportUnknownMemberType]
+    script = next(block.value for block in _run_blocks(document) if "refresh=" in block.value)
+    # Exercise the actual workflow locally: no network, cloud credentials or sleeps.
+    mock = r"""
+set -euo pipefail
+declare -A counts=([refresh]=0 [scp]=0 [action]=0)
+sleep() { [[ "$1" == 3 ]]; }
+gcloud() {
+  local stage=action
+  if [[ "$2" == scp ]]; then stage=scp;
+  elif [[ "$*" == *metadata.google.internal* ]]; then stage=refresh; fi
+  counts[$stage]=$(( ${counts[$stage]} + 1 ))
+  printf '%s\n' "$stage" >> "$RUNNER_TEMP/calls"
+  echo 'PRIVATE remote stdout'
+  echo "$FAIL_ERROR" >&2
+  if [[ "$stage" == "$FAIL_STAGE" ]] && (( ${counts[$stage]} <= FAILURES )); then
+    return "$FAIL_CODE"
+  fi
+}
+"""
+    result = subprocess.run(
+        ["bash", "-c", mock + _EXPRESSION.sub("host", script)],
+        cwd=_WORKFLOWS.parents[1],
+        env={
+            **os.environ,
+            "RUNNER_TEMP": str(tmp_path),
+            "LANE": "preview",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "ACTION": "deploy",
+            "ZONE": "zone",
+            "HOST": "host",
+            "PROJECT": "project",
+            "DAIMON_NOTEBOOK_IMAGE": "notebook:sha",
+            "DAIMON_LANE_IMAGE": "daimon:sha",
+            "SHA": "a" * 40,
+            "ACTOR": "actor",
+            "RUN_URL": "https://example.test/run",
+            "FAIL_STAGE": stage,
+            "FAILURES": str(failures),
+            "FAIL_CODE": str(code),
+            "FAIL_ERROR": error,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert calls.count(stage) == attempts
+    assert (result.returncode == 0) == success
+    assert result.stdout == ""
+    assert result.stderr == (
+        ""
+        if success or stage != "action"
+        else "Lane action failed. Full logs stay on the lane host (sudo lane logs).\n"
+    )
+    if not success and stage != "action":
+        assert "action" not in calls
