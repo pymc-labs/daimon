@@ -36,8 +36,8 @@ from daimon.core.turn.mcp_context import (
     mcp_context_prefix,
     plain_text,
     thread_session_id,
-    tool_enabled,
     tool_permission,
+    toolset_allows,
 )
 from daimon.core.turn_hold import TurnHold
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -230,16 +230,18 @@ def _toolset_agent(
     )
 
 
-def test_tool_enabled_follows_the_agents_toolset() -> None:
-    """A tool switched off for the agent is never called on its behalf."""
+def test_toolset_allows_follows_the_agents_toolset() -> None:
+    """A tool switched off for the agent, or set to ask first, is never called on its behalf."""
     agent = _toolset_agent(
         configs=[
-            {"name": "context", "enabled": False, "permission_policy": {"type": "always_allow"}}
+            {"name": "context", "enabled": False, "permission_policy": {"type": "always_allow"}},
+            {"name": "notes", "enabled": True, "permission_policy": {"type": "always_ask"}},
         ]
     )
-    assert not tool_enabled(agent, "knowledge", "context"), "switched off by name"
-    assert tool_enabled(agent, "knowledge", "search"), "others follow the toolset default"
-    assert not tool_enabled(agent, "other", "context"), "a server with no toolset is not used"
+    assert not toolset_allows(agent, "knowledge", "context"), "switched off by name"
+    assert not toolset_allows(agent, "knowledge", "notes"), "stored as always_ask"
+    assert toolset_allows(agent, "knowledge", "search"), "others follow the toolset default"
+    assert not toolset_allows(agent, "other", "context"), "a server with no toolset is not used"
 
 
 def test_context_text_joins_text_and_raises_on_a_tool_error() -> None:
@@ -268,9 +270,9 @@ def test_server_memo_forgets_the_least_recent_server_past_its_size() -> None:
     memo = ServerMemo(size=2)
     for name in ("a", "b"):
         memo.remember((name, "v1"), SKIP, for_s=60)
-    memo.remember(("a", "v1"), SKIP, for_s=60)
+    assert memo.recall(("a", "v1")) == SKIP
     memo.remember(("c", "v1"), SKIP, for_s=60)
-    assert list(memo.entries) == [("a", "v1"), ("c", "v1")], "bounded, least recent out first"
+    assert list(memo.entries) == [("a", "v1"), ("c", "v1")], "bounded, least recently used out"
 
 
 async def test_fetch_sends_the_message_and_thread_id_to_the_context_tool() -> None:
@@ -324,6 +326,34 @@ async def test_fetch_opens_a_new_session_when_the_server_forgot_its_own() -> Non
     ], "a 404 on the old session opens a new one, once"
     assert server.headers[-1]["mcp-session-id"] == "srv-session-2", "and calls on it"
     assert "Acme renewed in May" in briefing, "the turn still gets its answer"
+
+
+async def test_fetch_keeps_each_tokens_session_apart() -> None:
+    """Two credentials for one server never share an MCP session, whatever their version."""
+    server = FakeServer()
+    token = ["tok-1"]
+
+    async def load(
+        *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    ) -> tuple[ResolvedMcpCredential, ...]:
+        return (ResolvedMcpCredential(mcp_server_url=URL, token=token[0], version="v1"),)
+
+    fetch = build_turn_context_fetch(
+        McpContextSettings(enabled=True),
+        credentials=load,
+        id_key=KEY,
+        transport=httpx.MockTransport(server.handle),
+    )
+    assert fetch is not None
+    await _ask(fetch)
+    token[0] = "tok-2"
+    server.requests.clear()
+    server.headers.clear()
+
+    await _ask(fetch)
+
+    assert server.methods()[0] == "initialize", "another token opens its own session"
+    assert server.headers[-1]["mcp-session-id"] == "srv-session-2", "and calls on it"
 
 
 async def test_fetch_stops_asking_a_server_without_the_tool() -> None:

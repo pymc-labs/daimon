@@ -8,19 +8,21 @@ token, just before the message is sent, and each non-empty answer goes in
 front of the message, quoted as data like a tool result. Like progress plans
 it rides in the message, so the agent's prompt cache is untouched.
 
-The call obeys the rules the model's own call would: a tool switched off in
-the agent's toolset, or one tool safety would not run unasked (a deny or ask
-rule, or a write by name unless `effects` marks it a read), is not called.
+The call obeys the rules the model's own call would: a tool switched off or
+set to `always_ask` in the agent's toolset, or one tool safety would not run
+unasked (a deny or ask rule, or a write by name unless `effects` marks it a
+read), is not called.
 Only shared tokens (`agent_mcp_credentials`): an OAuth sign-in is personal and
 its token is never readable here. Routines, hand-offs, unprompted replies,
 held, shared and sealed turns ask nothing, nor does a turn whose admission
 changed since it was prepared.
 
 Each server gets its own keyed id for the thread, so two servers cannot match
-up threads. A turn waits at most `timeout_s` for a server, and Stop ends the
-wait. A server's MCP session and tool list are reused for ten minutes, so a
-typical turn costs one request; a server without the tool is left alone for
-ten minutes, and one that failed for one.
+up threads; rotating the first crypto key changes them. A turn waits at most
+`timeout_s` for each server's answer, and Stop ends the wait. A server's MCP
+session and tool list are reused for ten minutes, so a typical turn costs one
+request; a server without the tool is left alone for ten minutes, and one that
+failed for one.
 """
 
 from __future__ import annotations
@@ -82,11 +84,11 @@ class ContextServer:
     name: str
     url: str
     token: str
-    token_version: str
 
     @property
     def key(self) -> tuple[str, str]:
-        return (canonical_mcp_url(self.url), self.token_version)
+        """Memo key: one server as reached with one token, which owns its MCP session."""
+        return (canonical_mcp_url(self.url), hashlib.sha256(self.token.encode()).hexdigest())
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,18 +138,20 @@ def context_servers(
     found: list[ContextServer] = []
     for name, url in servers:
         if (credential := by_url.get(canonical_mcp_url(url))) is not None:
-            found.append(ContextServer(name, url, credential.token, credential.version))
+            found.append(ContextServer(name, url, credential.token))
     return found
 
 
-def tool_enabled(agent: BetaManagedAgentsAgent, server_name: str, tool_name: str) -> bool:
-    """Whether the agent's toolset for `server_name` leaves `tool_name` switched on."""
+def toolset_allows(agent: BetaManagedAgentsAgent, server_name: str, tool_name: str) -> bool:
+    """Whether the agent's toolset for `server_name` runs `tool_name` unasked: switched
+    on, and not stored as `always_ask`."""
     for toolset in agent.tools:
         if isinstance(toolset, BetaManagedAgentsMCPToolset) and (
             toolset.mcp_server_name == server_name
         ):
             config = next((c for c in toolset.configs if c.name == tool_name), None)
-            return (config or toolset.default_config).enabled
+            chosen = config or toolset.default_config
+            return chosen.enabled and chosen.permission_policy.type != "always_ask"
     return False
 
 
@@ -212,7 +216,7 @@ def context_block(server_name: str, text: str) -> str:
 
 @dataclass
 class ServerMemo:
-    """Each server's last `ServerState`, by URL and token version; least recent out first."""
+    """Each server's last `ServerState`, by URL and token; least recently used out first."""
 
     clock: Callable[[], float] = time.monotonic
     size: int = MEMO_SIZE
@@ -222,7 +226,10 @@ class ServerMemo:
 
     def recall(self, key: tuple[str, str]) -> ServerState | None:
         entry = self.entries.get(key)
-        return entry[1] if entry is not None and entry[0] > self.clock() else None
+        if entry is None or entry[0] <= self.clock():
+            return None
+        self.entries.move_to_end(key)
+        return entry[1]
 
     def remember(self, key: tuple[str, str], state: ServerState, *, for_s: float) -> None:
         self.entries[key] = (self.clock() + for_s, state)
@@ -425,13 +432,13 @@ def tool_permission(
     recheck: Callable[[], Awaitable[None]],
 ) -> ToolPermitted:
     """Whether this turn may call a server's tool unasked, decided as the model's own
-    call would be: switched on in the toolset and a tool-safety verdict of allow,
+    call would be: allowed by the agent's toolset and a tool-safety verdict of allow,
     rules included. `recheck` (once, before the first call) raises if the admission
     changed since the turn was prepared, which leaves the turn without context."""
     rechecked: list[bool] = []
 
     async def permitted(server_name: str, tool_name: str) -> bool:
-        if not tool_enabled(agent, server_name, tool_name):
+        if not toolset_allows(agent, server_name, tool_name):
             return False
         if not rechecked:
             await recheck()

@@ -555,7 +555,8 @@ class McpContextSettings(BaseModel):
             "agent was connected to with a shared token that offers the context tool, "
             "and put each non-empty answer in front of the message as quoted data. The "
             "servers receive the message text, without mentions, and an opaque id for "
-            "the thread. Needs DAIMON_CRYPTO__KEYS. The call follows the agent's toolset "
+            "the thread (rotating the first crypto key changes it). Needs "
+            "DAIMON_CRYPTO__KEYS. The call follows the agent's toolset "
             "and tool safety: with tool safety on, mark the tool a read in "
             "DAIMON_TOOL_SAFETY__EFFECTS (`<server>/context`). Unprompted replies, held "
             "turns, channels shared with another organisation and sealed channels ask "
@@ -583,7 +584,7 @@ class McpContextSettings(BaseModel):
         gt=0,
         le=10,
         description=(
-            "Seconds a turn waits for each server. A server that fails or is slower "
+            "Seconds a turn waits for each server's answer. A server that fails or is slower "
             "adds nothing, and one that failed is not asked again for a minute. A "
             "server's MCP session is reused for ten minutes, so most turns cost one "
             "request per server."
@@ -2189,7 +2190,7 @@ class Settings(BaseSettings):
     )
     mcp_context: McpContextSettings = Field(
         default_factory=McpContextSettings,
-        description="Context from connected MCP servers on every turn. See McpContextSettings.",
+        description="Context from connected MCP servers on each chat turn. See McpContextSettings.",
     )
     slack: SlackSettings | None = None
     teams: TeamsSettings | None = None

@@ -1201,32 +1201,32 @@ async def run_prepared_turn_impl(
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
     prefix = context + plans + prepared.continuity.user_prefix
-    briefing_cell: list[str] = []
+    briefing_cell: list[tuple[Admission, str]] = []
 
-    async def briefing() -> str:
-        # Asked once, just before the first send (past any lease wait, under the
-        # ceiling); a recovery re-sends the same answer.
-        if not briefing_cell:
-            briefing_cell.append(
-                await mcp_context_prefix(
-                    deps.turn_context,
-                    prepared.admission,
-                    origin=origin,
-                    tenant_id=tenant_id,
-                    platform=platform,
-                    thread_id=thread_id,
-                    request_text=request_text,
-                    permitted=tool_permission(
-                        prepared.admission.agent,
-                        policy=deps.tool_safety,
-                        trusted_servers=trusted_servers_for(deps.public_url),
-                        rules=rules_for,
-                        recheck=decide_before_send(deps, prepared.admission),
-                    ),
-                    cancel=cancel,
-                )
-            )
-        return briefing_cell[0]
+    async def briefing(admission: Admission, attempt_cancel: asyncio.Event) -> str:
+        # Asked just before a send, past its lease wait and under the ceiling; a
+        # recovery on the same admission re-sends the same answer.
+        if briefing_cell and briefing_cell[0][0] is admission:
+            return briefing_cell[0][1]
+        text = await mcp_context_prefix(
+            deps.turn_context,
+            admission,
+            origin=origin,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            request_text=request_text,
+            permitted=tool_permission(
+                admission.agent,
+                policy=deps.tool_safety,
+                trusted_servers=trusted_servers_for(deps.public_url),
+                rules=rules_for,
+                recheck=lambda: decide_before_send(deps, admission)(),
+            ),
+            cancel=attempt_cancel,
+        )
+        briefing_cell[:] = [(admission, text)]
+        return text
 
     @contextlib.asynccontextmanager
     async def persisted(
@@ -1288,7 +1288,9 @@ async def run_prepared_turn_impl(
             async with persisted(
                 prepared.admission, ma_session_id, mapping_id, prepared.session_ref
             ):
-                message = _with_prefix(prefix + await briefing(), user_message)
+                message = _with_prefix(
+                    prefix + await briefing(prepared.admission, cancel), user_message
+                )
                 state = await run_turn(
                     **_turn_port_kwargs(
                         deps,
@@ -1443,9 +1445,7 @@ async def run_prepared_turn_impl(
             # died. What goes instead is this loss's own framing -- daimon's
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
-            reseeded_message = _with_prefix(
-                plans + loss_user_prefix + await briefing(), await reseed_user_message()
-            )
+            reseed = await reseed_user_message()
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
             # Mirror a LATE cancel on the ORIGINAL event into
@@ -1461,6 +1461,12 @@ async def run_prepared_turn_impl(
                     new_mapping_id,
                     attempt_cancel=fresh_cancel,
                 ):
+                    reseeded_message = _with_prefix(
+                        plans
+                        + loss_user_prefix
+                        + await briefing(recovery.admission or prepared.admission, fresh_cancel),
+                        reseed,
+                    )
                     recovered_state = await run_turn(
                         **_turn_port_kwargs(
                             deps,
