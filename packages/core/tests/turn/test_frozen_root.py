@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from typing import cast
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -29,7 +30,7 @@ from daimon.core.stores import (
     turn_card_intents,
     turn_origins,
 )
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Role, TurnCardIntentRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, AdmissionGrant
@@ -233,6 +234,7 @@ async def root_turn(
             thread.thread_id,
             False,
             platform="discord",
+            human_invocation=True,
         )
         admission = Admission(
             account.id,
@@ -1113,11 +1115,19 @@ async def test_one_intent_cannot_be_reserved_by_another_account(root_turn, statu
 
 async def run_root_input(value, *, intent_id=None, completion=None, lifecycle=None, message=None):
     deps, prepared, _, intent, origin, _, _, _ = value
+    prepared = cast(PreparedTurn, prepared)
 
     async def reseed():
         return message or "root input"
 
     lifecycle = lifecycle or RecordingLifecycle()
+    if completion is not None:
+        assert prepared.admission.grant is not None
+        admission = replace(
+            prepared.admission, grant=replace(prepared.admission.grant, human_invocation=False)
+        )
+        prepared = replace(prepared, admission=admission)
+    assert prepared.admission.grant is not None
     return await run_prepared_turn(
         deps,
         prepared,
@@ -1284,7 +1294,7 @@ async def test_started_completion_carries_original_run_across_two_real_turn_fram
                 run_id=original.fleet.run_id,
                 now=datetime.now(UTC),
             )
-            assert carried == original
+            assert carried == replace(original, human_invocation=False)
         by_card, _ = await read_frozen_root(
             deps,
             scope,
@@ -1292,7 +1302,7 @@ async def test_started_completion_carries_original_run_across_two_real_turn_fram
             run_id=original.fleet.run_id,
             now=datetime.now(UTC),
         )
-        assert by_card == original
+        assert by_card == replace(original, human_invocation=False)
         async with deps.sessionmaker() as db:
             assert (
                 await turn_origins.get_active_origin(
@@ -1369,7 +1379,7 @@ async def test_completion_bound_without_a_prepared_scope_resumes_the_original_ro
                 run_id=original.fleet.run_id,
                 now=datetime.now(UTC),
             )
-    assert carried == original
+    assert carried == replace(original, human_invocation=False)
     assert not [entry for entry in logs if entry["event"] == "fleet.resume_root_refused"]
     after = sum(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
     assert after == before + 1
@@ -1516,7 +1526,14 @@ async def test_retained_root_readers_follow_later_run_transitions(root_turn, sta
         ):
             if status in ("running", "collecting"):
                 parent, _ = await read_frozen_root(deps, scope, **selector, now=datetime.now(UTC))
-                assert parent == original
+                selector = cast(dict[str, UUID], selector)
+                from_original = (
+                    selector.get("origin_id") == original.fleet.origin_id
+                    or selector.get("intent_id") == cast(TurnCardIntentRow, intent).id
+                )
+                assert parent == (
+                    original if from_original else replace(original, human_invocation=False)
+                )
             else:
                 with pytest.raises(WorkerSpecRefused, match="stale"):
                     await read_frozen_root(deps, scope, **selector, now=datetime.now(UTC))
@@ -1703,7 +1720,7 @@ async def test_original_run_selected_even_with_a_newer_root_on_the_same_binding(
                 run_id=original.fleet.run_id,
                 now=datetime.now(UTC),
             )
-            assert carried == original
+            assert carried == replace(original, human_invocation=False)
 
 
 async def test_retention_never_extends_existing_database_expiry(root_turn):

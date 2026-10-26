@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 from anthropic import APIConnectionError
@@ -11,6 +12,13 @@ from daimon.core.stores import fleet, mux_state
 from ..test_fleet_budget import tariffs
 from .test_native_session_receipts import native_worker as native_worker
 from .test_native_session_receipts import source_read_only as source_read_only
+
+if TYPE_CHECKING:
+    from daimon.core.fleet import FleetWorker
+    from daimon.core.neutral_resources import WorkerPermissions
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+
 
 NOW = datetime(2026, 10, 12, 18, tzinfo=UTC)
 
@@ -749,3 +757,60 @@ async def test_an_unknown_agent_create_outcome_never_archives(native_worker):
         )
     assert sum(call.method == "POST" and call.path == "/v1/agents" for call in trace.requests) == 1
     assert not any(call.path.endswith("/archive") for call in trace.requests)
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_role_gated_human_root_runs_native_worker_or_refuses_revoked_role(
+    native_worker: "tuple[ProviderPreparationRequest, WorkerPermissions, FleetWorker, ScriptedTransport, object]",
+    revoked: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, root, worker, trace, _ = native_worker
+    assert request.admission.grant is not None and root.human_invocation
+    root_name = root.agent.names[0]
+    assert root_name is not None
+    subject = replace(root.subject, verified_membership=True, role_ids=("123",))
+    root = replace(root, subject=subject)
+    member = AsyncMock(
+        return_value=Membership(is_member=True, role_ids=() if revoked else ("123",))
+    )
+    request = replace(
+        request,
+        deps=replace(request.deps, membership_resolver=CachedMembershipResolver(member)),
+        admission=replace(
+            request.admission, grant=replace(request.admission.grant, subject=subject)
+        ),
+    )
+    async with request.deps.sessionmaker.begin() as db:
+        policy = await load_access_policy(db, tenant_id=request.tenant_id)
+        await set_access_policy(
+            db,
+            tenant_id=request.tenant_id,
+            policy=policy.model_copy(
+                update={"agent_rules": {root_name: AgentRule(invoker_role_ids=("123",))}}
+            ),
+        )
+    before = len(trace.requests)
+    call = run_worker(
+        request,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    if revoked:
+        with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+            await call
+        assert not any(call.method == "POST" for call in trace.requests[before:])
+    else:
+        result = await call
+        assert result.status == "succeeded" and result.result is not None
+    assert member.await_count > 0

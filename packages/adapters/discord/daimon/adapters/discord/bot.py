@@ -4330,6 +4330,8 @@ class DaimonBot(commands.Bot):
             role=role,
             role_ids=tuple(_role_ids),
             verified_membership=True if row.reason in ("watch_fired", "job_finished") else None,
+            origin=row.reason,
+            attended=continuation_attended(row),
             now=datetime.now(UTC),
             category_id=category_id,
             category_unresolved=category_unresolved,

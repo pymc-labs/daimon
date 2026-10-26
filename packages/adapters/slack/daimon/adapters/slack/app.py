@@ -3425,6 +3425,8 @@ class SlackApp:
             else await self._channel_shared(web_client, team_id=team_id, channel=channel),
             platform="slack",
             external_user_id=row.requester_external_user_id,
+            origin=row.reason,
+            attended=continuation_attended(row),
             channel_id=channel,
             thread_id=thread_id,
             role=role,

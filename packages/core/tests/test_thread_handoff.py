@@ -199,6 +199,7 @@ def _caller(account_id: uuid.UUID | None = None, *, admin: bool = False) -> Hand
     return HandoffCaller(
         account_id=account_id,
         admin=AdminCaller(platform_user_id="U1", is_server_admin=admin),
+        human_invocation=True,
     )
 
 

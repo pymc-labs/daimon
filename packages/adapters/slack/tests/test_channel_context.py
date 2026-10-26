@@ -83,6 +83,7 @@ def _grant(agent: str = _AGENT) -> AdmissionGrant:
         channel_id=_CHANNEL,
         thread_id=_TRIGGER,
         is_dm=False,
+        human_invocation=True,
     )
 
 

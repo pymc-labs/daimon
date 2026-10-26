@@ -54,6 +54,7 @@ def private_reply(row, text="private answer"):
             thread_id=row.scope_id,
             is_dm=True,
             cold_dm=row.is_cold,
+            human_invocation=True,
         ),
     )
 

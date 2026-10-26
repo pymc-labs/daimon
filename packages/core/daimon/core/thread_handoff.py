@@ -92,6 +92,7 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.thread_agent_bindings import lock_binding, upsert_responder_binding
 from daimon.core.stores.thread_sessions import list_live_thread_sessions, record_session_seals
+from daimon.core.turn.invocation import human_invocation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -134,7 +135,7 @@ class HandoffCaller:
     account_id: uuid.UUID | None
     admin: AdminCaller
     via_agent_key: bool = False
-    attended: bool = True
+    human_invocation: bool = False
 
 
 log = structlog.get_logger(__name__)
@@ -331,7 +332,7 @@ async def hand_over_thread(
     )
     subject = await _subject(session, tenant_id=tenant_id, platform=platform, caller=caller)
     target_roles = agent_invoker_roles(policy, destination.agent.names)
-    if target_roles and not caller.attended:
+    if target_roles and not caller.human_invocation:
         raise ThreadHandoffRefused(
             HandoffRefused(
                 reason="invoker_not_allowed",
@@ -550,6 +551,7 @@ async def switch_thread_on_request(
                 caller=HandoffCaller(
                     account_id=principal.account_id if principal is not None else None,
                     admin=caller,
+                    human_invocation=human_invocation("handoff", True),
                 ),
                 destination=HandoffDestination(
                     ma_agent_id=agent.id,

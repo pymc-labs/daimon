@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import httpx
@@ -31,6 +32,15 @@ from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTr
 from ..test_agent_backend import owned as owned
 from .test_fleet_source_permissions import NOW, compose
 from .test_fleet_source_permissions import captured as captured
+
+if TYPE_CHECKING:
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.authz import FleetFacts
+    from daimon.core.channel_backend import AgentBackendService, BackendActor
+    from daimon.core.stores.domain import BackendAgent
+    from daimon.core.turn.admission import AdmissionGrant
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 
 RESEARCHER_SYSTEM = "You are the research agent. Cite sources."
 
@@ -1146,3 +1156,56 @@ async def test_a_member_forks_across_models_under_the_default_grant_without_an_a
     assert "claude-opus-5-5-fast" not in {model.id for model in root.models}
     with pytest.raises(WorkerSpecRefused, match="backend: not_subset"):
         task_worker_spec(root, role="W3", task="Go.", model="claude-opus-5-5-fast")
+
+
+@pytest.mark.parametrize("human", [False, True], ids=["watch-root", "human-root"])
+async def test_named_gated_worker_requires_roots_human_principal(
+    captured: "tuple[BackendAgent, AdmissionGrant, AgentFleetGrant, FleetFacts, TenantAccessPolicy, ScriptedTransport]",
+    owned: "tuple[AgentBackendService, BackendAgent, BackendActor, async_sessionmaker[AsyncSession]]",
+    human: bool,
+) -> None:
+    from daimon.core.turn.invocation import human_invocation
+
+    source, admission, grant, fleet, policy, trace = captured
+    subject = replace(admission.subject, verified_membership=True, role_ids=("123", "456"))
+    admission = replace(
+        admission,
+        subject=subject,
+        human_invocation=human_invocation("chat" if human else "watch_fired", True),
+    )
+    rules = {"researcher": AgentRule(invoker_role_ids=("456",))}
+    if human:
+        root_name = admission.agent.names[0]
+        assert root_name is not None
+        rules[root_name] = AgentRule(invoker_role_ids=("123",))
+    policy = policy.model_copy(update={"agent_rules": rules})
+    root = compose((source, admission, grant, fleet, policy, trace))
+    researcher, actual = await capture_agent(
+        owned, fleet.scope, ma_id="gated-researcher-source", name="researcher"
+    )
+    target_admission = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    if not human:
+        with pytest.raises(WorkerSpecRefused, match="invoker_not_allowed"):
+            agent_worker_permissions(
+                root, researcher, target_admission, any_agent(grant), policy=policy, now=NOW
+            )
+    else:
+        worker = agent_worker_permissions(
+            root, researcher, target_admission, any_agent(grant), policy=policy, now=NOW
+        )
+        assert worker.human_invocation and worker.agent_id == researcher.agent_id
+        assert worker.root_agent == root.agent
+        assert researcher.source is not None
+        # The target role alone cannot replace the frozen root's role.
+        revoked = replace(worker, subject=replace(subject, role_ids=("456",)))
+        with pytest.raises(WorkerSpecRefused, match="invoker_not_allowed"):
+            resolve_worker_spec(
+                revoked,
+                researcher.source,
+                policy=policy,
+                now=NOW,
+                captured_source=researcher,
+                resources=worker.resources,
+                environment=worker.environment,
+                limits=worker.limits,
+            )

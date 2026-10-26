@@ -1819,13 +1819,18 @@ async def test_j10_fork_yourself_across_models_means_fleet_workers_not_a_saved_c
 
 
 @pytest.mark.parametrize("gated", [False, True])
-async def test_role_refresh_is_target_specific_and_preserves_identity(gated: bool) -> None:
+@pytest.mark.parametrize("client", [False, True])
+async def test_role_refresh_is_target_specific_and_preserves_identity(
+    gated: bool, client: bool
+) -> None:
     from unittest.mock import patch
 
     from daimon.core.access_policy import AgentRule
 
     root = host_parent()
-    root = replace(root, subject=replace(root.subject, client=True, via_agent_key=True))
+    root = replace(
+        root, subject=replace(root.subject, is_admin=False, client=client, via_agent_key=True)
+    )
     policy = TenantAccessPolicy(
         agent_rules={
             "root" if gated else "unrelated": AgentRule(invoker_role_ids=("123",)),
@@ -1847,7 +1852,7 @@ async def test_role_refresh_is_target_specific_and_preserves_identity(gated: boo
         )
     if gated:
         fetch.assert_awaited_once()
-        assert result.subject.client and result.subject.via_agent_key
+        assert result.subject.client is client and result.subject.via_agent_key
         assert not result.subject.is_admin
         assert result.subject.role_ids == ("123",)
     else:

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 import structlog
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -1060,6 +1060,10 @@ class WorkerPermissions:
     agent_id: uuid.UUID | None = None
     # The grant's per-worker runtime; the run's own deadline is in `limits`.
     max_worker_seconds: int | None = None
+    # Frozen principal provenance, independent of worker confirmation surfaces.
+    human_invocation: bool = False
+    # Named-agent delegation keeps the original root role requirement too.
+    root_agent: AgentRef | None = None
 
 
 @dataclass(frozen=True)
@@ -1692,6 +1696,8 @@ def fleet_root_permissions(
         WorkerPermissions(
             fleet=fleet,
             subject=admission.subject,
+            human_invocation=admission.human_invocation,
+            root_agent=admission.agent,
             agent=admission.agent,
             spec=spec,
             base_system=spec.system or "",
@@ -1849,7 +1855,7 @@ def agent_worker_permissions(
         own_backends=_agent_worker_backends(source, backend, policy=policy, fleet=root.fleet),
     )
     # The run's own finite limits (deadline, budget, provider lines) bind every worker.
-    return replace(worker_root, limits=root.limits)
+    return replace(worker_root, limits=root.limits, root_agent=root.root_agent or root.agent)
 
 
 def _agent_worker_backends(
@@ -1903,6 +1909,8 @@ def freeze_root_permissions(
     """
     from daimon.core.channel_backend import check_backend
 
+    # Freeze the admission decision; a recorded owner cannot become a principal.
+    grants = replace(grants, human_invocation=admission.human_invocation)
     fleet, actual, effective = grants.fleet, source.source, source.effective_spec
     if (
         admission.tenant_id != source.tenant_id
@@ -2054,8 +2062,26 @@ def resolve_worker_spec(
         worker_spec_ceiling,
     )
 
+    def require_principal(agent: AgentRef) -> None:
+        if not parent.human_invocation and agent_invoker_roles(policy, agent.names):
+            raise WorkerSpecRefused("scope", "invoker_not_allowed")
+
+    require_principal(parent.agent)
+    root_agent = parent.root_agent or parent.agent
+    require_principal(root_agent)
     fleet = parent.fleet
     place = fleet.place
+    if agent_invoker_roles(policy, root_agent.names):
+        root_access = authorize(
+            policy,
+            subject=parent.subject,
+            action=Action.RUN_AGENT,
+            surface=Surface.FLEET,
+            agent=root_agent,
+            place=place,
+        )
+        if not root_access:
+            raise WorkerSpecRefused("scope", root_access.reason or "unbound")
     decision = authorize(
         policy,
         subject=parent.subject,
@@ -2092,6 +2118,7 @@ def resolve_worker_spec(
             raise WorkerSpecRefused("scope", "not_subset")
         if (spec.ref, spec.revision) not in parent.source_revisions:
             raise WorkerSpecRefused("scope", "stale")
+        require_principal(build_agent_ref(spec.spec.name, spec.spec.metadata or {}))
         clone = authorize(
             policy,
             subject=parent.subject,
@@ -2171,6 +2198,7 @@ def resolve_worker_spec(
     # the root's ownership or guidance metadata.
     if dict(resolved.metadata or {}) != dict(parent.spec.metadata or {}):
         raise WorkerSpecRefused("scope", "not_subset")
+    require_principal(build_agent_ref(resolved.name, resolved.metadata or {}))
     worker_run = authorize(
         policy,
         subject=parent.subject,

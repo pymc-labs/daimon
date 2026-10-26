@@ -112,6 +112,7 @@ async def test_recovery_reseed_policy_change_before_send(db_session, db_committi
         channel_id="vault",
         thread_id="thread-2",
         is_dm=False,
+        human_invocation=True,
     )
     admission = replace(
         _admission(account_id=account.id, agent=agent, env=env),

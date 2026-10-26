@@ -223,6 +223,7 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
             channel_id=root.fleet.root.channel.channel_id,
             thread_id=root.fleet.root.thread_id,
             is_dm=False,
+            human_invocation=True,
         )
         root = fleet_root_permissions(
             captured,
@@ -541,6 +542,7 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
             channel_id=root.fleet.root.channel.channel_id,
             thread_id=root.fleet.root.thread_id,
             is_dm=False,
+            human_invocation=True,
         )
         admission = Admission(
             account_id=account,

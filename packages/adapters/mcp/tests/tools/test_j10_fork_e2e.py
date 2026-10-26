@@ -339,6 +339,7 @@ async def root_turn_harness(
             thread.thread_id,
             False,
             platform="discord",
+            human_invocation=True,
         )
         admission = Admission(
             account_id,

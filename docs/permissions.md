@@ -25,12 +25,16 @@ refuses work at the next such check; it does not interrupt a step already in
 progress. An unavailable membership lookup also refuses further work through
 the usual invoker refusal.
 Handoffs check the person requesting the switch against the destination agent;
-worker delegation and API/MCP chat also enforce the destination's requirement.
+Workers spawned by a human-requested turn inherit its human principal, even
+though workers have no confirmation cards. Both the root agent's and worker
+target's role requirements are checked against fresh membership at dispatch.
+API/MCP chat also enforces the destination's requirement.
 Routines, scheduler jobs, bots and other non-human invocations cannot use an
 agent with this requirement. Saving a routine for a role-gated agent is refused.
 Watches, timers, long jobs and fleet completion wakes are unattended and cannot
 invoke these agents. A handoff from an unattended turn cannot switch to one,
-even when its recorded owner currently holds a matching role.
+even when its recorded owner currently holds a matching role. Unknown origins
+also carry no human principal and are refused.
 
 Archiving an agent drops its role rule. Setting invoker roles on one of an
 agent's aliases replaces the invoker roles on its other aliases, preserving

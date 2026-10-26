@@ -1117,16 +1117,6 @@ async def run_prepared_turn_impl(
         raise ValueError("Watch turns must be explicitly unattended")
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
     unattended = not (attended if attended is not None else origin != "routine")
-    # Attendance, rather than a list of wake reasons, distinguishes a current
-    # human invocation from work running for a recorded owner.
-    if unattended and prepared.admission.grant is not None:
-        automated_grant = replace(prepared.admission.grant, human_invocation=False)
-        automated = replace(prepared.admission, grant=automated_grant)
-        # Check authority without claiming the prepared session has adopted new
-        # seals or mounts. The send gate must still detect posture changes and
-        # require preparation again before it sends into that session.
-        await reauthorize(deps, automated)
-        prepared = replace(prepared, admission=automated)
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
@@ -1287,7 +1277,8 @@ async def run_prepared_turn_impl(
                             db,
                             origin_id=origin_id,
                             chat_session_id=grant,
-                            attended=not unattended,
+                            human_invocation=admission.grant is not None
+                            and admission.grant.human_invocation,
                             lease=lease,
                         )
                     yield

@@ -329,7 +329,7 @@ async def _hand_off_task_impl(
                     account_id=auth.account_id,
                     admin=admin,
                     via_agent_key=auth.agent_id is not None,
-                    attended=origin.attended,
+                    human_invocation=origin.human_invocation,
                 ),
                 destination=handoff_destination,
                 current_responder_ma_agent_id=origin.responder_ma_agent_id,

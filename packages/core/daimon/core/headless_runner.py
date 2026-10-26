@@ -945,6 +945,7 @@ async def run_worker(
         or admission.grant is None
         or admission.grant.tenant_id != request.tenant_id
         or admission.grant.subject != parent.subject
+        or admission.grant.human_invocation != parent.human_invocation
         or admission.grant.agent != parent.agent
         or request.tenant_id != worker.tenant_id
         or parent.fleet.run_id != worker.run_id
@@ -1017,7 +1018,10 @@ async def run_worker(
                     resolved_worker.spec.name, resolved_worker.spec.metadata or {}
                 ).names,
             )
-            if agent_invoker_roles(policy, (*parent.agent.names, *worker_names)):
+            if agent_invoker_roles(
+                policy,
+                (*(parent.root_agent or parent.agent).names, *parent.agent.names, *worker_names),
+            ):
                 from daimon.core.membership_subject import resolve_subject
 
                 if parent.subject.platform_user_id is not None:
@@ -1034,7 +1038,7 @@ async def run_worker(
                             live,
                             client=parent.subject.client,
                             via_agent_key=parent.subject.via_agent_key,
-                            is_admin=live.is_admin and not parent.subject.client,
+                            is_admin=live.is_admin and parent.subject.is_admin,
                         ),
                     )
             normalize = functools.partial(

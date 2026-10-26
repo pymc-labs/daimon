@@ -1657,7 +1657,9 @@ async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
     assert (handed is not None) == (pinned == "unpinned"), "a refusal rolls the hand-off back"
 
 
-async def test_unattended_handoff_refuses_role_gated_destination_and_queues_nothing(
+@pytest.mark.parametrize("human", [False, True], ids=["wake-refused", "human-allowed"])
+async def test_handoff_uses_calling_principal_before_binding_or_queueing(
+    human: bool,
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1706,36 +1708,36 @@ async def test_unattended_handoff_refuses_role_gated_destination_and_queues_noth
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
-        attended=False,
+        attended=human,
         chat_session_id="test-session",
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
-        with pytest.raises(ToolError, match="limited to certain people"):
-            await _hand_off_task_impl(
-                runtime,
-                auth,
-                origin_context_id=str(origin.id),
-                agent_id=_DESTINATION_ID,
-                continuation="run this task",
-            )
+        call = _hand_off_task_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            agent_id=_DESTINATION_ID,
+            continuation="run this task",
+        )
+        if human:
+            await call
+        else:
+            with pytest.raises(ToolError, match="limited to certain people"):
+                await call
     async with committing_sessionmaker() as session:
-        assert (
-            await get_binding(
-                session,
-                tenant_id=tenant.id,
-                platform="discord",
-                parent_channel_id="C_PARENT",
-                thread_id="T_THREAD",
-            )
-            is None
+        binding = await get_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="C_PARENT",
+            thread_id="T_THREAD",
         )
-        assert (
-            await list_pending_continuations(
-                session,
-                tenant_id=tenant.id,
-                platform="discord",
-                thread_id="T_THREAD",
-            )
-            == []
+        assert (binding is not None) is human
+        queued = await list_pending_continuations(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="T_THREAD",
         )
+        assert bool(queued) is human

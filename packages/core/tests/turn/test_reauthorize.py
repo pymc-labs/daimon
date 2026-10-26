@@ -477,24 +477,35 @@ async def test_agent_role_gate_denies_missing_resolver_on_new_turn(
         )
 
 
-async def test_unattended_timer_cannot_run_role_gated_agent(
+@pytest.mark.parametrize(
+    "origin,attended",
+    [
+        ("chat", False),  # timer continuation retains the chat rendering origin
+        ("watch_fired", True),
+        ("job_finished", True),
+        ("worker_finished", True),
+        ("routine", True),
+        ("long_job", True),
+        ("cli", True),
+        ("headless", True),
+        ("new_wake_reason", True),
+    ],
+)
+async def test_nonhuman_origins_refuse_gated_agent_at_admission(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    origin: str,
+    attended: bool,
 ) -> None:
-    import asyncio
     from dataclasses import replace
     from unittest.mock import AsyncMock
 
     from daimon.core.access_policy import AgentRule
     from daimon.core.membership import CachedMembershipResolver, Membership
-    from daimon.core.turn.run import run_prepared_turn
-    from daimon.testing.turn_fakes import RecordingLifecycle
-
-    from .test_run_prepared_turn import _prepared_turn  # pyright: ignore[reportPrivateUsage]
 
     tenant = await _seed_admittable_tenant(db_session, policy=None)
-    deps, admission = await _admit(db_session_factory, tmp_path, tenant)
+    deps, _ = await _admit(db_session_factory, tmp_path, tenant)
     deps = replace(
         deps,
         membership_resolver=CachedMembershipResolver(
@@ -504,32 +515,18 @@ async def test_unattended_timer_cannot_run_role_gated_agent(
     await _set_policy(
         db_session,
         tenant,
-        TenantAccessPolicy(
-            agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))},
-        ),
-    )
-    prepared = _prepared_turn(
-        deps=deps,
-        admission=admission,
-        tenant_id=tenant.id,
-        external_user_id="member-1",
-        ma_session_id="timer-session",
-        mapping_id=None,
-        session_account_id=admission.account_id,
+        TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
     )
     with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
-        await run_prepared_turn(
+        await admit(
             deps,
-            prepared,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
-            thread_id="thr-1",
             external_user_id="member-1",
-            user_message="timer",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=AsyncMock(return_value="timer"),
-            recovery_lifecycle=lambda _: RecordingLifecycle(),
-            origin="chat",
-            attended=False,
+            channel_id="chan-1",
+            thread_id="thr-1",
+            now=_NOW,
+            origin=origin,
+            attended=attended,
         )

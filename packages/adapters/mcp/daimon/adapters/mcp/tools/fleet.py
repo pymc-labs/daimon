@@ -383,7 +383,12 @@ class HostFleetToolService:
                 if obstacle is not None:
                     raise ToolError(fleet_root_obstacle_text(obstacle)) from None
                 raise ToolError("Fleet orchestration refused: root_unavailable.") from None
-            parent = replace(parent, subject=mcp_subject(caller, is_admin=caller.is_platform_admin))
+            parent = replace(
+                parent,
+                subject=mcp_subject(
+                    caller, is_admin=parent.subject.is_admin and caller.is_platform_admin
+                ),
+            )
         else:
             parent, policy = (
                 await self._parent_loader(caller)
@@ -412,6 +417,10 @@ class HostFleetToolService:
             or caller.agent_id is not None
         ):
             raise ToolError("Fleet orchestration refused: caller_root_mismatch.")
+        if origin is not None:
+            parent = replace(
+                parent, human_invocation=parent.human_invocation and origin.human_invocation
+            )
         parent = await self._refresh_role_subject(parent, policy, parent.agent.names)
         return parent, policy
 
@@ -423,7 +432,7 @@ class HostFleetToolService:
     ) -> WorkerPermissions:
         from daimon.core.access_policy import agent_invoker_roles
 
-        if agent_invoker_roles(policy, names):
+        if agent_invoker_roles(policy, (*(parent.root_agent or parent.agent).names, *names)):
             from daimon.core.membership_subject import resolve_subject
 
             runtime = self._runtime
@@ -448,7 +457,7 @@ class HostFleetToolService:
                         live,
                         client=parent.subject.client,
                         via_agent_key=parent.subject.via_agent_key,
-                        is_admin=live.is_admin and not parent.subject.client,
+                        is_admin=live.is_admin and parent.subject.is_admin,
                     ),
                 )
         return parent

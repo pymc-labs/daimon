@@ -79,6 +79,7 @@ def parent(provider="anthropic"):
         name="root", model=model, system="Protected root instruction", tools=tools, skills=()
     )
     return WorkerPermissions(
+        human_invocation=True,
         fleet=fleet,
         subject=Subject(platform_user_id="user"),
         agent=AgentRef.of("root"),
@@ -1771,6 +1772,7 @@ def frozen_root_inputs(provider="openai"):
         channel_id=root.fleet.root.channel.channel_id,
         thread_id=root.fleet.root.thread_id,
         is_dm=False,
+        human_invocation=True,
     )
     return root, source, grant
 
@@ -2031,6 +2033,7 @@ async def test_root_freeze_uses_actual_sdk_owner_capture_and_owned_resource_proj
         channel_id=fleet.root.channel.channel_id,
         thread_id=fleet.root.thread_id,
         is_dm=False,
+        human_invocation=True,
     )
     result = freeze_root_permissions(root, captured, admission=admission, policy=POLICY, now=NOW)
     assert result.agent_id == captured.agent_id and result.source_revisions == root.source_revisions
@@ -2234,16 +2237,21 @@ def test_frozen_root_accepts_fresh_membership_without_changing_invoker_or_grants
     )
 
     recorded = parent()
+    recorded = replace(recorded, subject=replace(recorded.subject, is_admin=True))
     current = replace(
         recorded,
         subject=replace(
             recorded.subject,
             role_ids=("123",),
             verified_membership=True,
-            is_admin=True,
+            is_admin=False,
         ),
     )
     assert _same_root_with_live_membership(recorded, current)
+    assert not _same_root_with_live_membership(
+        replace(recorded, subject=replace(recorded.subject, is_admin=False)),
+        replace(current, subject=replace(current.subject, is_admin=True)),
+    )
     for subject in (
         replace(current.subject, platform_user_id="another-human"),
         replace(current.subject, client=True),
@@ -2254,3 +2262,43 @@ def test_frozen_root_accepts_fresh_membership_without_changing_invoker_or_grants
         recorded,
         replace(current, limits=current.limits.model_copy(update={"budget_usd": Decimal("1000")})),
     )
+
+
+@pytest.mark.parametrize("target_gated", [False, True])
+@pytest.mark.parametrize("revoked", [False, True])
+def test_gated_root_delegates_with_current_root_and_target_roles(
+    target_gated: bool, revoked: bool
+) -> None:
+    root = parent()
+    root = replace(
+        root,
+        subject=replace(
+            root.subject, verified_membership=True, role_ids=() if revoked else ("123", "456")
+        ),
+    )
+    rules = {"root": AgentRule(invoker_role_ids=("123",))}
+    if target_gated:
+        rules["worker-target"] = AgentRule(invoker_role_ids=("456",))
+    policy = TenantAccessPolicy(agent_rules=rules)
+    target = root.spec.model_copy(update={"name": "worker-target"})
+    if revoked:
+        with pytest.raises(WorkerSpecRefused, match="invoker_not_allowed"):
+            resolve(root, target, policy=policy)
+    else:
+        result = resolve(root, target, policy=policy)
+        assert result.spec.name == "worker-target" and result.permissions.human_invocation
+
+
+def test_wake_root_cannot_delegate_into_gated_target_with_recorded_owners_roles() -> None:
+    from daimon.core.turn.invocation import human_invocation
+
+    root = parent()
+    root = replace(
+        root,
+        human_invocation=human_invocation("watch_fired", True),
+        subject=replace(root.subject, verified_membership=True, role_ids=("123",)),
+    )
+    target = root.spec.model_copy(update={"name": "worker-target"})
+    policy = TenantAccessPolicy(agent_rules={"worker-target": AgentRule(invoker_role_ids=("123",))})
+    with pytest.raises(WorkerSpecRefused, match="invoker_not_allowed"):
+        resolve(root, target, policy=policy)

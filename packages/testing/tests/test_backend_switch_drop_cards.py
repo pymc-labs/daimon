@@ -256,6 +256,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
                 channel_id="channel",
                 thread_id="thread",
                 is_dm=False,
+                human_invocation=True,
             ),
             origin_channel_id="channel",
             origin_thread_id="thread",

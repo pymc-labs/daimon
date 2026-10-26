@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add optional per-agent Discord invoker roles, requiring current human role
   membership even for server admins across chat, handoffs, MCP and workers.
-  Operators can set or clear them with `daimon agents rule invoker-roles`.
+  Human-requested fleet workers inherit their root principal; automated wakes
+  and unknown origins cannot acquire one from a recorded owner. Operators can
+  set or clear roles with `daimon agents rule invoker-roles`.
 
 - Let newly recognized platform admins connect GitHub repos without first sending
   a chat message to refresh their stored role. Delegated admins remain excluded.

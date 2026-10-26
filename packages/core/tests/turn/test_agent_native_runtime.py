@@ -1598,6 +1598,7 @@ async def claimed_worker_request(explicit_worker_request, monkeypatch, clone_sou
         channel_id=root.fleet.root.channel.channel_id,
         thread_id=root.fleet.root.thread_id,
         is_dm=False,
+        human_invocation=True,
     )
     selected = replace(
         request,

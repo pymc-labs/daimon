@@ -3,16 +3,18 @@
 import asyncio
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 from daimon.core.errors import TurnError
 from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused, HostFleetPorts
 from daimon.core.headless_runner import run_worker
-from daimon.core.neutral_resources import WorkerSpecRefused
+from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
 from daimon.core.stores import access_policy, fleet, mux_state
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.resources import AgentPatch
@@ -28,6 +30,14 @@ from .test_openai_worker_plan import db_session_factory as db_session_factory
 from .test_openai_worker_plan import owned as owned
 from .test_openai_worker_plan import owned_database_preflight as owned_database_preflight
 from .test_openai_worker_plan import provider as provider
+
+if TYPE_CHECKING:
+    from daimon.core.fleet import FleetWorker
+    from daimon.core.neutral_resources import ResolvedWorkerSpec, WorkerPermissions
+    from daimon.core.pricing import ModelRates, ProviderPrice
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+
 
 root_turn_factory = root_turn.__wrapped__
 
@@ -1395,3 +1405,68 @@ async def test_conversation_worker_native_mutations_reuse_the_owned_guard(worker
     assert checks == {"agent": 2, "session": 1}
 
     assert not any(call.method == "POST" and call.url.path.endswith("/events") for call in calls)
+
+
+@pytest.mark.parametrize("revoked", [False, True], ids=["current-role", "revoked-before-dispatch"])
+async def test_role_gated_human_root_reaches_worker_model_send(
+    worker_root: "tuple[ProviderPreparationRequest, WorkerPermissions, FleetWorker, ResolvedWorkerSpec, Mapping[tuple[str, str], ModelRates | ProviderPrice], list[httpx.Request], object, ScriptedTransport, object]",
+    revoked: bool,
+) -> None:
+    """Real native worker dispatch, including its attended=False tool posture."""
+    from unittest.mock import AsyncMock, patch
+
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    request, root, worker, resolved, prices, calls, _, _, _ = worker_root
+    assert request.admission.grant is not None
+    assert root.human_invocation and request.admission.grant.human_invocation
+    policy = await _policy(request)
+    policy = policy.model_copy(
+        update={"agent_rules": {root.agent.names[0]: AgentRule(invoker_role_ids=("123",))}}
+    )
+    member = AsyncMock(return_value=Membership(is_member=True, is_admin=True, role_ids=("123",)))
+    deps = replace(request.deps, membership_resolver=CachedMembershipResolver(member))
+    # The frozen requester was not an administrator; a live promotion must not
+    # widen the worker's authority when membership is refreshed at dispatch.
+    assert not root.subject.is_admin
+    subject = replace(root.subject, verified_membership=True, role_ids=("123",))
+    root = replace(root, subject=subject)
+    request = replace(
+        request,
+        deps=deps,
+        admission=replace(
+            request.admission, grant=replace(request.admission.grant, subject=subject)
+        ),
+    )
+    async with deps.sessionmaker.begin() as db:
+        await access_policy.set_access_policy(db, tenant_id=request.tenant_id, policy=policy)
+    derived = await request.for_worker(root, resolved)
+    if revoked:
+        member.return_value = Membership(is_member=True, is_admin=True, role_ids=())
+    with patch(
+        "daimon.core.headless_runner.resolve_worker_spec", wraps=resolve_worker_spec
+    ) as checked:
+        call = run_worker(
+            derived,
+            parent=root,
+            worker=worker,
+            trigger_message="Complete the task",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+        if revoked:
+            with pytest.raises((AdmissionDenied, WorkerSpecRefused), match="invoker_not_allowed"):
+                await call
+            assert not any(request.method == "POST" for request in calls)
+        else:
+            result = await call
+            assert result.status == "succeeded" and result.result is not None
+            assert checked.call_args_list and all(
+                not call.args[0].subject.is_admin for call in checked.call_args_list
+            ), "live membership never promotes frozen admin authority"
+            assert [request.url.path for request in calls if request.method == "POST"] == [
+                "/v1/agents",
+                "/v1/agents/sessions",
+            ]
+    assert member.await_count > 0
