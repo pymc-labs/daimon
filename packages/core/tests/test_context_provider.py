@@ -304,6 +304,35 @@ async def test_concurrent_ack_uses_200_ms_from_hook_start(lock_wait: float) -> N
     await asyncio.gather(*owner._detached)
 
 
+@pytest.mark.parametrize(
+    ("acknowledged", "first_timeout_ms", "expected_budget_ms"),
+    [(True, 400, 200), (False, 50, 50)],
+)
+async def test_lock_wait_uses_current_acknowledgement_budget(
+    acknowledged: bool, first_timeout_ms: int, expected_budget_ms: int
+) -> None:
+    fixture = FixtureProvider(FIXTURE, tenant_id=str(TENANT))
+    owner = ContextProviders(provider=fixture)
+
+    async def load(request: ContextRequest) -> LoadedProvider:
+        return LoadedProvider(
+            CONFIG.model_copy(update={"first_call_timeout_ms": first_timeout_ms}),
+            "fixture-server",
+        )
+
+    async with owner.turn(REQUEST, load) as holding:
+        assert holding.response.system_fragment
+        if acknowledged:
+            holding.accepted()
+        started = time.monotonic()
+        async with owner.turn(REQUEST, load) as blocked:
+            elapsed = time.monotonic() - started
+            assert blocked.response == ContextResponse()
+            assert expected_budget_ms / 1000 * 0.75 <= elapsed < expected_budget_ms / 1000 + 0.1
+        assert len(fixture.requests) == 1
+        assert not owner._detached
+
+
 async def test_hard_deadline_includes_cancellation_resistant_provider_and_config() -> None:
     release = asyncio.Event()
     finished = asyncio.Event()

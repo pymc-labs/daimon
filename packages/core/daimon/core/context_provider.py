@@ -274,11 +274,6 @@ class ContextProviders:
             loaded = await _bounded(load(request), TURN_CEILING_SECONDS, self._detached)
             if loaded is not None and loaded.config.enabled:
                 config = loaded.config
-                # Until we hold the lock, allow either configured budget.
-                expires = started + max(
-                    min(config.first_call_timeout_ms / 1000, FIRST_CALL_CEILING_SECONDS),
-                    min(config.timeout_ms / 1000, TURN_CEILING_SECONDS),
-                )
                 destination = repr(
                     (
                         request.platform,
@@ -305,6 +300,13 @@ class ContextProviders:
                     self.sessions[key] = SessionContext()
                 state = self.sessions[key]
                 self.sessions.move_to_end(key)
+                # Acknowledgement only advances, so an already acknowledged session
+                # can use its shorter lock deadline before acquiring the lock.
+                expires = started + (
+                    min(config.timeout_ms / 1000, TURN_CEILING_SECONDS)
+                    if state.system_received
+                    else min(config.first_call_timeout_ms / 1000, FIRST_CALL_CEILING_SECONDS)
+                )
                 # asyncio.Lock is cancellable, with no user provider code involved.
                 async with asyncio.timeout(max(0, expires - time.monotonic())):
                     await state.lock.acquire()
