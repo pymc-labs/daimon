@@ -1090,13 +1090,18 @@ ordinary tool line.
 
 Per-turn context (`DAIMON_MCP_CONTEXT__ENABLED`, `daimon.core.turn.mcp_context`)
 also rides in front of the user message. The chat adapters pass the person's
-own words as `request_text`; `run_prepared_turn` sends them, with an opaque
-per-server id for the thread, to each of the agent's MCP servers that has a
-shared token in `agent_mcp_credentials` and offers a `context` tool, and puts
-each non-empty answer in an untrusted `<mcp_context>` block. Each server gets
-at most `timeout_s`; its tool list is remembered for ten minutes, and one that
-failed is skipped for a minute. Routines, hand-offs, held, shared and sealed
-turns ask nothing. The recovery re-run reuses the same answers.
+own words as `request_text` (`None` for an unprompted reply). Inside
+`persisted`, just before the send, `run_prepared_turn` sends them, without
+mentions and with a keyed per-server id for the thread, to each of the agent's
+MCP servers that has a shared token in `agent_mcp_credentials`, offers a
+`context` tool, and would be allowed the call unasked: switched on in the
+toolset, an allow from `decide_tool_call` with agent rules, and an admission
+unchanged since the turn was prepared. Each non-empty answer goes in an
+untrusted `<mcp_context>` block. Each server gets at most `timeout_s`, and the
+turn's cancel ends the wait; its MCP session and tool list are reused for ten
+minutes, so a typical turn is one `tools/call`, and one that failed is skipped
+for a minute. Routines, hand-offs, held, shared and sealed turns ask nothing.
+The recovery re-run reuses the same answers.
 
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
 immediate idle acknowledgement is observed. The interrupt and acknowledgement

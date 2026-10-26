@@ -44,8 +44,9 @@ organisation a Teams deployment serves), daimon stores:
   personal access token used by `get_cli_token`), encrypted at rest.
 
 When the operator turns on per-turn context (`DAIMON_MCP_CONTEXT__ENABLED`), each
-chat message is also sent, with an opaque id for its thread, to the agent's MCP
-servers that were connected with a shared token and offer a context tool.
+chat message addressed to the agent is also sent, without mentions and with an
+opaque id for its thread, to the agent's MCP servers that were connected with a
+shared token and offer a context tool.
 Their answers go into the message the agent receives, like a tool result.
 
 Conversation content lives in Anthropic's Managed Agents service. When an admin
