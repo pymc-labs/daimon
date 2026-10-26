@@ -12,28 +12,23 @@ nothing here retries or swallows — a server that cannot be discovered raises
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import cast
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from daimon.core.errors import DaimonError
 from daimon.core.mcp_oauth.models import AuthorizationServerMetadata, ProtectedResourceMetadata
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
-from pydantic import BaseModel, JsonValue
+from daimon.core.mcp_rpc import (
+    INITIALIZE_BODY,
+    PROTOCOL_VERSION,
+    mcp_headers,
+    mcp_request,
+    open_mcp_session,
+)
+from pydantic import BaseModel
 
-_PROTOCOL_VERSION = "2025-06-18"
-_INITIALIZE_BODY = {
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "initialize",
-    "params": {
-        "protocolVersion": _PROTOCOL_VERSION,
-        "capabilities": {},
-        "clientInfo": {"name": "daimon", "version": "0"},
-    },
-}
 _RESOURCE_METADATA_RE = re.compile(r'resource_metadata="([^"]+)"', re.IGNORECASE)
 
 
@@ -89,11 +84,11 @@ async def probe_mcp_server(
     assert_public_https_url(mcp_server_url, what="connection URL")
     headers = {
         "Accept": "application/json, text/event-stream",
-        "MCP-Protocol-Version": _PROTOCOL_VERSION,
+        "MCP-Protocol-Version": PROTOCOL_VERSION,
     }
     if bearer_token is not None:
         headers["Authorization"] = f"Bearer {bearer_token}"
-    response = await http.post(mcp_server_url, json=_INITIALIZE_BODY, headers=headers)
+    response = await http.post(mcp_server_url, json=INITIALIZE_BODY, headers=headers)
     match = _RESOURCE_METADATA_RE.search(response.headers.get("www-authenticate", ""))
     return McpProbe(
         status_code=response.status_code,
@@ -205,76 +200,25 @@ async def list_mcp_tools(mcp_server_url: str, bearer_token: str) -> frozenset[st
     The configured destination is the only authority; redirects are disabled.
     Both JSON and the protocol's SSE response form are accepted.
     """
-    import json
-
     assert_public_https_url(mcp_server_url, what="connection URL")
-    headers = {
-        "Accept": "application/json, text/event-stream",
-        "MCP-Protocol-Version": _PROTOCOL_VERSION,
-        "Authorization": f"Bearer {bearer_token}",
-    }
+    headers = mcp_headers(bearer_token)
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as http:
-
-            async def rpc(body: Mapping[str, object]) -> dict[str, JsonValue]:
-                response = await http.post(mcp_server_url, json=body, headers=headers)
-                if response.status_code != 200 or len(response.content) > 1024 * 1024:
-                    raise ValueError("MCP catalogue read refused")
-                session = response.headers.get("mcp-session-id")
-                if session:
-                    headers["Mcp-Session-Id"] = session
-                try:
-                    if response.headers.get("content-type", "").startswith("text/event-stream"):
-                        frames = [
-                            cast(JsonValue, json.loads(line[5:].strip()))
-                            for line in response.text.splitlines()
-                            if line.startswith("data:")
-                        ]
-                        results = [
-                            item
-                            for item in frames
-                            if isinstance(item, dict) and item.get("id") == body["id"]
-                        ]
-                        if len(results) != 1:
-                            raise ValueError("MCP catalogue response is ambiguous")
-                        payload = results[0]
-                    else:
-                        payload = cast(JsonValue, response.json())
-                    if (
-                        not isinstance(payload, dict)
-                        or payload.get("id") != body["id"]
-                        or "error" in payload
-                    ):
-                        raise ValueError("invalid MCP catalogue response")
-                    result = payload.get("result")
-                    if not isinstance(result, dict):
-                        raise ValueError("invalid MCP catalogue result")
-                    return result
-                except (ValueError, KeyError):
-                    raise ValueError("invalid MCP catalogue response") from None
-
-            await rpc(_INITIALIZE_BODY)
-            response = await http.post(
-                mcp_server_url,
-                headers=headers,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "notifications/initialized",
-                },
-            )
-            if response.status_code not in (200, 202, 204):
-                raise ValueError("MCP initialization refused")
+            await open_mcp_session(http, mcp_server_url, headers)
             names: set[str] = set()
             cursor: str | None = None
             seen: set[str] = set()
             for page in range(100):
-                result = await rpc(
+                result = await mcp_request(
+                    http,
+                    mcp_server_url,
+                    headers,
                     {
                         "jsonrpc": "2.0",
                         "id": page + 2,
                         "method": "tools/list",
                         "params": {"cursor": cursor} if cursor else {},
-                    }
+                    },
                 )
                 tools = result.get("tools")
                 if not isinstance(tools, list):
