@@ -12,8 +12,9 @@ leases, operations). Two things have to survive that:
   afterwards. Triggers on the private-state tables enforce that rule in the database, so
   a process still running code from before this migration is held to it too: it can no
   longer recreate an erased account's slot, lease, operation or usage row. A trigger never
-  waits for a lock: against an account whose erasure is running it refuses the write. Account and
-  principal ids are random and never reused, so a returning person is unaffected.
+  waits for a lock: against an account whose erasure is running (the `mux-erasure:<id>`
+  advisory lock, not the account lock ordinary self-hosted writes hold) it refuses the
+  write. Account and principal ids are random and never reused, so a returning person is unaffected.
 
 Upgrade only adds tables, functions and triggers and drops two foreign keys; it rewrites
 no rows. The downgrade drops them and puts the two foreign keys back NOT VALID, so rows
@@ -47,7 +48,9 @@ BEGIN
         RETURN false;
     END IF;
     parsed := subject::uuid;
-    IF NOT pg_try_advisory_xact_lock_shared(hashtextextended(parsed::text, 0)) THEN
+    IF NOT pg_try_advisory_xact_lock_shared(
+            hashtextextended('mux-erasure:' || parsed::text, 0)
+        ) THEN
         RAISE EXCEPTION 'the account is being erased';
     END IF;
     RETURN EXISTS (SELECT 1 FROM erased_account WHERE account_id = parsed);
@@ -63,7 +66,9 @@ BEGIN
         RETURN false;
     END IF;
     parsed := subject::uuid;
-    IF NOT pg_try_advisory_xact_lock_shared(hashtextextended(parsed::text, 0)) THEN
+    IF NOT pg_try_advisory_xact_lock_shared(
+            hashtextextended('mux-erasure:' || parsed::text, 0)
+        ) THEN
         RAISE EXCEPTION 'the account is being erased';
     END IF;
     RETURN EXISTS (SELECT 1 FROM erased_principal WHERE principal_id = parsed);

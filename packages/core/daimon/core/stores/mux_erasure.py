@@ -32,23 +32,29 @@ A private slot's `account_id` is never cleared or rewritten: NULL means shared.
 The fence
 ---------
 Every writer of an account's private mux state calls `fence_writers` first. It takes the
-account's advisory lock *shared* (`lock_account` is the exclusive side, held by purge for
-its whole transaction), then refuses an account found in `erased_account`; an operation's
-principal is fenced the same way against `erased_principal`. A write that began before
-the erasure therefore finishes first and is erased with the rest; one that begins after
-it is refused. Lock order, in every transaction that uses it:
+account's *erasure* advisory lock shared (key `mux-erasure:<id>`; purge takes it
+exclusive, via `lock_for_erasure`, for the rest of its transaction), then refuses an
+account found in `erased_account`; an operation's principal is fenced the same way against
+`erased_principal`. A write that began before the erasure therefore finishes first and is
+erased with the rest; one that begins after it is refused. The erasure key is not the
+account lock `privacy_session_deletes.lock_account` takes: the self-hosted resource
+writers hold that one exclusively for ordinary writes, and a trigger that treated it as
+"an erasure is running" would refuse them. Lock order, in every transaction that uses it:
 
-1. the account advisory lock (shared for writers, exclusive for purge and the
-   self-hosted resource writers);
-2. the principal advisory locks, in id order;
+1. the account lock (`lock_account`: exclusive for purge and the self-hosted resource
+   writers; the mux writers do not take it);
+2. the erasure locks, account then principals in id order (shared for mux writers and
+   triggers, exclusive for purge only);
 3. tenant-level locks (self-hosted resources);
 4. row locks (slot, lease, operation, journal head, observation advisory lock).
 
 Purge takes (1) and (2) first and deletes children before parents, so it never waits on a
-row lock held by a writer that has not yet taken them. A caller therefore takes the
-fence before it locks any row it later hands to a store, and does its reads and writes
-in the one transaction that holds it (see `thread_release.apply_thread_release`):
-a second transaction asking for the fence queues behind a waiting purge.
+row lock held by a writer that has not yet taken them, and a self-hosted writer that
+holds (1) and then fences with (2) cannot be waited on by a purge that has not got (1).
+A caller therefore takes the fence before it locks any row it later hands to a store, and
+does its reads and writes in the one transaction that holds it (see
+`thread_release.apply_thread_release`): a second transaction asking for the fence queues
+behind a waiting purge.
 
 Writers that predate the fence are held to the same rule by database triggers
 (`daimon.core._erasure_guards`, installed by migration 0142).
@@ -345,12 +351,6 @@ async def erase(
     """
     key = _account_key(account_id)
     principals = {str(principal) for principal in principal_ids}
-    # Writers that act for a principal lock it after the account; so does purge.
-    for principal in sorted(principals):
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock(hashtextextended(:principal, 0))"),
-            {"principal": principal},
-        )
     await _detach_accounting(session, key)
     events = await _delete(
         session, delete(Journal).where(Journal.session_id.in_(_private_session_ids(key)))
@@ -406,11 +406,38 @@ def _uuid_or_none(value: str | None) -> uuid.UUID | None:
         return None
 
 
+def _erasure_key(subject: uuid.UUID) -> str:
+    """The advisory-lock key of an account or principal's erasure.
+
+    A key of its own, not the one `lock_account` takes: the self-hosted resource writers
+    hold that one exclusively for ordinary writes, and an ordinary write is not an erasure.
+    `_erasure_guards` builds the same key in SQL.
+    """
+    return f"mux-erasure:{subject}"
+
+
 async def _lock_shared(session: AsyncSession, subject: uuid.UUID) -> None:
     await session.execute(
-        text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:subject, 0))"),
-        {"subject": str(subject)},
+        text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+        {"key": _erasure_key(subject)},
     )
+
+
+async def lock_for_erasure(
+    session: AsyncSession, *, account_id: uuid.UUID, principal_ids: Iterable[uuid.UUID]
+) -> None:
+    """Take the erasure keys exclusively: the account's, then each principal's in id order.
+
+    Only `purge_account` calls this, in its transaction after `lock_account`; nothing
+    else may take an erasure key exclusively (a test guards that). Writers hold the keys
+    shared through `fence_writers` or a trigger, so this waits for them and, once held,
+    refuses them.
+    """
+    for subject in (account_id, *sorted(set(principal_ids))):
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": _erasure_key(subject)},
+        )
 
 
 async def fence_writers(

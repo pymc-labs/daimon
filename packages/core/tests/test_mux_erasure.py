@@ -857,7 +857,8 @@ async def wait_until_blocked(sm: Factory, task: asyncio.Task[Any], person: Perso
             waiting = await session.scalar(
                 text(
                     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
-                    " AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(:a, 0)"
+                    " AND ((classid::bigint << 32) | objid::bigint)"
+                    " = hashtextextended('mux-erasure:' || :a, 0)"
                     " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
                 ),
                 {"a": person.key},
@@ -897,17 +898,15 @@ async def test_a_writer_that_starts_during_erasure_waits_and_is_then_refused(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Order 2: purge holds the exclusive lock; the writer waits, then finds the tombstone."""
-    from daimon.core.stores import security_audit
-
     reached, release = asyncio.Event(), asyncio.Event()
-    original = security_audit.erase_account_for_privacy
+    original = mux_erasure.lock_for_erasure
 
     async def paused(*args: Any, **kwargs: Any) -> Any:
+        await original(*args, **kwargs)
         reached.set()
         await release.wait()
-        return await original(*args, **kwargs)
 
-    monkeypatch.setattr(security_audit, "erase_account_for_privacy", paused)
+    monkeypatch.setattr(mux_erasure, "lock_for_erasure", paused)
     purge = asyncio.create_task(erase_a(world))
     await asyncio.wait_for(reached.wait(), 10)
     writer = asyncio.create_task(

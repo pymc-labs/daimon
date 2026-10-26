@@ -112,6 +112,7 @@ from __future__ import annotations
 import asyncio
 import random
 import uuid
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import Literal
 
@@ -397,10 +398,10 @@ async def _purge_principal_in_session(
         # fallback), keyed by (tenant, platform, platform user) like the grants
         # above. Deleted AFTER the principal row: a name write locks that row,
         # so one racing this purge has either committed (and is deleted here)
-        # or will find no principal and store nothing. The in-process queue is
-        # dropped too, so a queued write cannot follow.
-        user_key = (principal.tenant_id, principal.platform, principal.external_id)
-        platform_names.forget_users([user_key])
+        # or will find no principal and store nothing. The caller drops the
+        # in-process queue once the transaction has committed (`_forget_queued_names`):
+        # a rolled-back or retried purge must not discard names for a person it did
+        # not delete.
         platform_user_names_count = await platform_names_store.delete_user_names_for_platform_user(
             session,
             tenant_id=principal.tenant_id,
@@ -470,6 +471,8 @@ async def purge_principal(
         # Capture before the `async with` block closes the session.
         tenant_id = principal.tenant_id
         account_id = principal.account_id
+        queued_names = _queued_name_keys([principal])
+    platform_names.forget_users(queued_names)
 
     # DB transaction committed. Upstream deletion is best-effort — a single
     # call, since one principal belongs to exactly one tenant/account.
@@ -496,18 +499,35 @@ async def purge_principal(
     return PrincipalPurgeResult(db=db_report)
 
 
+def _queued_name_keys(principals: Iterable[Principal]) -> list[platform_names.UserKey]:
+    """The (tenant, platform, user) keys whose queued display names a purge drops."""
+    return [
+        (principal.tenant_id, principal.platform, principal.external_id)
+        for principal in principals
+        if isinstance(principal, PlatformPrincipalRow)
+    ]
+
+
 async def _purge_account_transaction(
     session: AsyncSession, *, account_id: uuid.UUID
-) -> tuple[PurgeReport, mux_erasure_store.MuxRetained]:
+) -> tuple[PurgeReport, mux_erasure_store.MuxRetained, list[platform_names.UserKey]]:
     """Everything `purge_account` deletes locally, in the caller's transaction.
 
-    Takes the account's exclusive lock first (see `stores.mux_erasure` for the lock order).
+    Takes the account lock, then the erasure locks (see `stores.mux_erasure` for the lock
+    order).
     """
     await privacy_deletes_store.lock_account(session, account_id=account_id)
     await security_audit_store.erase_account_for_privacy(session, account_id=account_id)
     cli_list = await identity_store.list_cli_principals_for_account(session, account_id=account_id)
     pp_list = await identity_store.list_platform_principals_for_account(
         session, account_id=account_id
+    )
+    # The erasure locks, after the account lock above: from here no mux writer of this
+    # account or its principals can start, and those already running have finished.
+    await mux_erasure_store.lock_for_erasure(
+        session,
+        account_id=account_id,
+        principal_ids=[principal.id for principal in (*cli_list, *pp_list)],
     )
     # Capture every distinct tenant before the session closes — each
     # tenant's agents must be enumerated for upstream session deletion.
@@ -627,7 +647,7 @@ async def _purge_account_transaction(
             direct_message_conversations=direct_message_count,
         )
     )
-    return db_report, mux_retained
+    return db_report, mux_retained, _queued_name_keys((*cli_list, *pp_list))
 
 
 #: A purge that cannot get the account lock, or loses a deadlock, rolls back whole and
@@ -650,7 +670,7 @@ def _retryable(error: DBAPIError) -> bool:
 
 async def _purge_account_with_retries(
     sm: async_sessionmaker[AsyncSession], *, account_id: uuid.UUID
-) -> tuple[PurgeReport, mux_erasure_store.MuxRetained]:
+) -> tuple[PurgeReport, mux_erasure_store.MuxRetained, list[platform_names.UserKey]]:
     for attempt in range(1, PURGE_ATTEMPTS + 1):
         try:
             async with sm() as session, session.begin():
@@ -690,7 +710,10 @@ async def purge_account(
     Sessions are enumerated across EVERY linked-principal tenant —
     `principal_links` permits an account to span tenants.
     """
-    db_report, mux_retained = await _purge_account_with_retries(sm, account_id=account_id)
+    db_report, mux_retained, queued_names = await _purge_account_with_retries(
+        sm, account_id=account_id
+    )
+    platform_names.forget_users(queued_names)
 
     # DB transaction committed. Upstream deletion is best-effort,
     # looped over every tenant the account's principals belonged to.

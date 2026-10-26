@@ -16,14 +16,19 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
-from daimon.core import _erasure_guards, thread_release
+from daimon.core import _erasure_guards, platform_names, thread_release
 from daimon.core import purge as purge_module
+from daimon.core.ma import SessionDeletionReport
 from daimon.core.purge import AccountPurgeFailed, purge_account
 from daimon.core.stores import mux_erasure, mux_state, security_audit, thread_provider_releases
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.stores.selfhosted_resources import SelfHostedEnvironments
+from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Scope
+from mux.contracts.resources import EnvironmentSpec
 from mux.errors import ScopeViolation
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -269,16 +274,16 @@ async def test_a_process_from_before_the_fence_still_serves_everyone_else(
 def pause_purge_after_its_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[asyncio.Event, asyncio.Event]:
-    """Hold a purge right after it took the account lock; returns (reached, release)."""
+    """Hold a purge right after it took its erasure locks; returns (reached, release)."""
     reached, release = asyncio.Event(), asyncio.Event()
-    original = security_audit.erase_account_for_privacy
+    original = mux_erasure.lock_for_erasure
 
     async def paused(*args: Any, **kwargs: Any) -> Any:
+        await original(*args, **kwargs)
         reached.set()
         await release.wait()
-        return await original(*args, **kwargs)
 
-    monkeypatch.setattr(security_audit, "erase_account_for_privacy", paused)
+    monkeypatch.setattr(mux_erasure, "lock_for_erasure", paused)
     return reached, release
 
 
@@ -340,20 +345,44 @@ async def test_purge_waits_for_an_old_writer_that_got_in_first_and_then_succeeds
     assert await count(sm, "accounts", "id = :a", a=person.account_id) == 0
 
 
-async def _waits_for(sm: Factory, event: str) -> None:
+async def _wait_for_account_lock_waiter(sm: Factory, person: Person) -> None:
+    """Return once a backend waits for `person`'s account lock (`lock_account`'s key)."""
     for _ in range(250):
         async with sm() as db:
             waiting = await db.scalar(
                 text(
-                    "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid()"
-                    " AND datname = current_database() AND wait_event = :event"
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                    " AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(:a, 0)"
+                    " AND database = (SELECT oid FROM pg_database"
+                    " WHERE datname = current_database())"
                 ),
-                {"event": event},
+                {"a": person.key},
             )
         if waiting:
             return
         await asyncio.sleep(0.02)
-    raise AssertionError(f"nothing waited on {event}")
+    raise AssertionError("nothing waits for the account lock")
+
+
+async def _wait_until_erasing(sm: Factory, person: Person) -> None:
+    """Return once a purge holds `person`'s erasure lock exclusively."""
+    for _ in range(250):
+        async with sm() as db:
+            holding = await db.scalar(
+                text(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted"
+                    " AND mode = 'ExclusiveLock'"
+                    " AND ((classid::bigint << 32) | objid::bigint)"
+                    " = hashtextextended('mux-erasure:' || :a, 0)"
+                    " AND database = (SELECT oid FROM pg_database"
+                    " WHERE datname = current_database())"
+                ),
+                {"a": person.key},
+            )
+        if holding:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("no purge holds the erasure lock")
 
 
 @pytest.mark.parametrize("kind", ["current_release", "old_renew", "old_binding", "old_operation"])
@@ -408,7 +437,7 @@ async def test_a_writer_holding_a_row_never_makes_a_purge_fail(
         if kind == "current_release":
             await wait_until_blocked(sm, purge, person)
         else:
-            await _waits_for(sm, "transactionid")
+            await _wait_until_erasing(sm, person)
         resume.set()
         outcome = await asyncio.wait_for(asyncio.gather(writer, purge, return_exceptions=True), 15)
     finally:
@@ -472,7 +501,7 @@ async def test_an_old_thread_release_and_a_purge_both_finish(
     try:
         await asyncio.wait_for(at_the_binding.wait(), 10)
         purge = asyncio.create_task(purge_account(sm=sm, account_id=person.account_id))
-        await _waits_for(sm, "transactionid")
+        await _wait_until_erasing(sm, person)
         resume.set()
         outcome = await asyncio.wait_for(asyncio.gather(release, purge, return_exceptions=True), 15)
     finally:
@@ -569,3 +598,216 @@ async def test_the_migration_carries_the_guards_the_models_install(sm: Factory) 
     assert {
         _erasure_guards.trigger_name(table) for table in _erasure_guards.GUARDED_TABLES
     } <= triggers
+
+
+# The erasure lock is not the account lock ordinary self-hosted writes hold
+
+
+def _environment_spec() -> EnvironmentSpec:
+    return EnvironmentSpec(
+        name="normal",
+        execution="self_hosted",
+        native_config=ExtensionConfig(
+            namespace="selfhosted.environment",
+            version=1,
+            value={
+                "harness_url": "https://harness.example",
+                "auth_mode": "bearer_env",
+                "auth_ref": "HARNESS_TOKEN",
+            },
+        ),
+    )
+
+
+@pytest.mark.parametrize("kind", ["old_renew", "old_binding", "old_operation", "old_usage"])
+async def test_an_ordinary_resource_write_does_not_make_an_old_mux_write_look_like_an_erasure(
+    sm: Factory,
+    store_before_the_fence: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """A self-hosted resource write holds the account lock exclusively; no purge is running.
+
+    The triggers used to read that lock as "an erasure is running" and refused the old
+    process's lease renewals, binding updates, operations and usage, losing the usage.
+    """
+    person = await make_person(sm, uuid.uuid4(), f"ordinary-{kind}")
+    current = PostgresStateStore(sm, trust_caller_clock=True)
+    conversation = await converse(current, person, kind, thread(person.tenant_id, "t"))
+    resources = SelfHostedEnvironments(sm)
+    held, resume = asyncio.Event(), asyncio.Event()
+    previous = resources._previous  # pyright: ignore[reportPrivateUsage]
+
+    async def paused(*args: Any, **kwargs: Any) -> Any:
+        held.set()
+        await resume.wait()
+        return await previous(*args, **kwargs)
+
+    monkeypatch.setattr(resources, "_previous", paused)
+    resource = asyncio.create_task(resources.create(person.scope(), _environment_spec(), key="n"))
+    old = store_before_the_fence.PostgresStateStore(sm, trust_caller_clock=True)
+    try:
+        await asyncio.wait_for(held.wait(), 10)
+        action = {
+            "old_renew": lambda: old.renew_lease(conversation.lease, now=NOW, ttl=TTL),
+            "old_binding": lambda: old.put_binding(
+                conversation.binding.model_copy(update={"generation": 2}), expected_generation=1
+            ),
+            "old_operation": lambda: old.begin_operation(
+                person.scope(),
+                key="new",
+                request_digest="d",
+                operation_id="o",
+                now=NOW,
+                slot=conversation.slot,
+            ),
+            "old_usage": lambda: old.record_usage(
+                conversation.binding.id, usage(conversation.resource, "new")
+            ),
+        }[kind]()
+        await asyncio.wait_for(action, 5)
+    finally:
+        resume.set()
+        await asyncio.wait_for(resource, 10)
+    assert await count(sm, "erased_account") == 0
+    if kind == "old_operation":
+        assert await count(sm, "operation", "key = 'new'") == 1
+    if kind == "old_usage":
+        assert await count(sm, "usage_observation", "observation_id = 'new'") == 1
+
+
+async def test_a_current_writer_is_not_held_up_by_an_ordinary_resource_write(sm: Factory) -> None:
+    person = await make_person(sm, uuid.uuid4(), "current-ordinary")
+    current = PostgresStateStore(sm, trust_caller_clock=True)
+    conversation = await converse(current, person, "ordinary", thread(person.tenant_id, "t"))
+    async with SelfHostedEnvironments(sm)._write(person.scope()):  # pyright: ignore[reportPrivateUsage]
+        await asyncio.wait_for(current.renew_lease(conversation.lease, now=NOW, ttl=TTL), 5)
+
+
+async def test_ordinary_writes_old_and_new_and_a_purge_do_not_deadlock(
+    sm: Factory, store_before_the_fence: types.ModuleType
+) -> None:
+    """A self-hosted write holds the account lock; a purge queues for it; mux writes go on.
+
+    The purge takes the account lock before the erasure lock, so it holds neither while the
+    self-hosted write is open, and the writes (an old process's, the current store's, and
+    the self-hosted write's own) finish without waiting on it.
+    """
+    person = await make_person(sm, uuid.uuid4(), "three-way")
+    current = PostgresStateStore(sm, trust_caller_clock=True)
+    conversation = await converse(current, person, "three-way", thread(person.tenant_id, "t"))
+    old = store_before_the_fence.PostgresStateStore(sm, trust_caller_clock=True)
+    purge = None
+    try:
+        async with SelfHostedEnvironments(sm)._write(person.scope()):  # pyright: ignore[reportPrivateUsage]
+            purge = asyncio.create_task(purge_account(sm=sm, account_id=person.account_id))
+            await _wait_for_account_lock_waiter(sm, person)
+            await asyncio.wait_for(
+                old.begin_operation(
+                    person.scope(),
+                    key="old-three-way",
+                    request_digest="d",
+                    operation_id="o",
+                    now=NOW,
+                    slot=conversation.slot,
+                ),
+                5,
+            )
+            await asyncio.wait_for(current.renew_lease(conversation.lease, now=NOW, ttl=TTL), 5)
+            assert not purge.done()
+        result = await asyncio.wait_for(purge, 15)
+    finally:
+        if purge is not None and not purge.done():
+            purge.cancel()
+            await asyncio.gather(purge, return_exceptions=True)
+    assert result.db.accounts == 1
+    assert await count(sm, "operation", "key = 'old-three-way'") == 0
+    assert await count(sm, "accounts", "id = :a", a=person.account_id) == 0
+
+
+def test_only_purge_takes_an_erasure_lock_exclusively() -> None:
+    """The erasure key is built in two files, and exclusively locked in one place."""
+    root = Path(__file__).resolve().parents[1] / "daimon"
+    holders = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*.py")
+        if "mux-erasure:" in path.read_text()
+    }
+    assert holders == {"core/_erasure_guards.py", "core/stores/mux_erasure.py"}
+    guards = (root / "core/_erasure_guards.py").read_text()
+    assert "pg_advisory_xact_lock(" not in guards.replace("pg_try_advisory_xact_lock", "")
+    store = (root / "core/stores/mux_erasure.py").read_text()
+    assert store.count("pg_advisory_xact_lock(") == 1
+    assert store.index("pg_advisory_xact_lock(") > store.index("async def lock_for_erasure")
+
+
+# A purge that is retried keeps the display names it did not delete
+
+
+@pytest.mark.parametrize("finish", [True, False])
+async def test_a_retried_purge_drops_queued_names_once_and_only_after_it_commits(
+    sm: Factory, monkeypatch: pytest.MonkeyPatch, finish: bool
+) -> None:
+    person = await make_person(sm, uuid.uuid4(), "late-retry")
+    current = PostgresStateStore(sm, trust_caller_clock=True)
+    conversation = await converse(current, person, "late-retry", thread(person.tenant_id, "t"))
+    monkeypatch.setattr(purge_module, "PURGE_ATTEMPTS", 2)
+    original = purge_module._purge_account_transaction  # pyright: ignore[reportPrivateUsage]
+    forgotten: list[tuple[Any, ...]] = []
+    forget = platform_names.forget_users
+
+    def track(keys: Any) -> None:
+        keys = list(keys)
+        forgotten.append(tuple(keys))
+        forget(keys)
+
+    monkeypatch.setattr(platform_names, "forget_users", track)
+    upstream = AsyncMock(return_value=SessionDeletionReport())
+    memory = AsyncMock(return_value=True)
+    monkeypatch.setattr(purge_module, "retry_account_session_delete", upstream)
+    monkeypatch.setattr(purge_module, "delete_personal_memory_stores_for_account", memory)
+    attempts = 0
+
+    async def fails_after_its_deletes(session: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        result = await original(session, **kwargs)
+        if attempts == 1 or not finish:
+            await session.execute(
+                text(
+                    "DO $$ BEGIN RAISE EXCEPTION 'late lock failure' USING ERRCODE='55P03'; END $$"
+                )
+            )
+        return result
+
+    monkeypatch.setattr(purge_module, "_purge_account_transaction", fails_after_its_deletes)
+    platform_names.defer_writes()
+    platform_names.remember_user_name(
+        sm,
+        tenant_id=person.tenant_id,
+        platform="discord",
+        user_id="late-retry",
+        display_name="Pending",
+    )
+    try:
+        if finish:
+            result = await purge_account(sm=sm, account_id=person.account_id, anthropic=object())  # pyright: ignore[reportArgumentType]
+            assert result.db.accounts == 1 and result.db.mux_journal_events == 1
+            upstream.assert_awaited_once()
+            memory.assert_awaited_once()
+            assert await count(sm, "accounts", "id = :a", a=person.account_id) == 0
+            assert len(forgotten) == 1 and len(forgotten[0]) == 1
+            assert platform_names.pending_count() == 0
+        else:
+            with pytest.raises(AccountPurgeFailed, match="nothing was deleted"):
+                await purge_account(sm=sm, account_id=person.account_id, anthropic=object())  # pyright: ignore[reportArgumentType]
+            upstream.assert_not_awaited()
+            memory.assert_not_awaited()
+            assert await count(sm, "accounts", "id = :a", a=person.account_id) == 1
+            assert await current.read_events(conversation.resource.id)
+            assert forgotten == []
+            assert platform_names.pending_count() == 1, "a rolled-back purge keeps the queued name"
+        assert attempts == 2
+    finally:
+        platform_names.forget_all()
+        platform_names.defer_writes(False)

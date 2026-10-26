@@ -4,15 +4,16 @@
 code. A process still running the code from before the erasure shipped has no such
 check, so the same rule is enforced where every writer passes: a trigger on each table
 that holds a person's private mux state. A trigger never waits. It tries the account's
-advisory lock shared, the lock `fence_writers` takes (purge holds it exclusive): if that
-fails, an erasure of the account is running or queued, and the write is refused as "being
-erased". Otherwise it refuses an id found in `erased_account` (or `erased_principal`).
-Waiting is what a trigger must not do: it runs after the writer holds row locks, and a
-purge that needs those rows while the writer waits for the purge is a cycle (Postgres
-cannot see one that spans two of the writer's transactions). A writer that already took
-the lock through `fence_writers` in the same transaction holds it, so the try succeeds.
-Account and principal ids are random UUIDs that are never reused, so a returning person
-starts with ids no tombstone names.
+*erasure* advisory lock shared, the lock `fence_writers` takes and purge takes exclusive
+(`mux-erasure:<id>`, not the account lock the self-hosted resource writers hold for
+ordinary writes): if that fails, an erasure of the account is running or queued, and the
+write is refused as "being erased". Otherwise it refuses an id found in `erased_account`
+(or `erased_principal`). Waiting is what a trigger must not do: it runs after the writer
+holds row locks, and a purge that needs those rows while the writer waits for the purge is
+a cycle (Postgres cannot see one that spans two of the writer's transactions). A writer
+that already took the lock through `fence_writers` in the same transaction holds it, so
+the try succeeds. Account and principal ids are random UUIDs that are never reused, so a
+returning person starts with ids no tombstone names.
 
 Only a text that is a UUID can name an account; anything else (the operator, a
 `selfhosted-billing:<binding id>` operation, its `host:selfhosted-billing` principal)
@@ -41,7 +42,9 @@ BEGIN
         RETURN false;
     END IF;
     parsed := subject::uuid;
-    IF NOT pg_try_advisory_xact_lock_shared(hashtextextended(parsed::text, 0)) THEN
+    IF NOT pg_try_advisory_xact_lock_shared(
+            hashtextextended('mux-erasure:' || parsed::text, 0)
+        ) THEN
         RAISE EXCEPTION 'the account is being erased';
     END IF;
     RETURN EXISTS (SELECT 1 FROM {tombstone_table} WHERE {column} = parsed);

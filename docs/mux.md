@@ -671,18 +671,38 @@ erased account's id.
 After the purge the account is fenced. Binding publication, lease acquire and renew,
 operation begin, claim and result, journal append (which also carries recovery
 imports), usage recording and release requests call `mux_erasure.fence_writers`
-first. It takes the account's advisory lock shared; purge holds the same lock
-exclusive for its whole transaction, so a write either finishes before the purge and
-is erased with the rest, or starts after it and is refused (`ScopeViolation`, "the
-account was erased") because the account is in `erased_account`. An operation is also
-fenced by its principal (`erased_principal`, with the purge locking each principal after
-the account), and usage and journal writes by the account named on the session they
-write to, so an erased caller cannot write into a shared conversation either.
-Lock order in a transaction: the account lock, then the principal locks, then
-tenant-level locks, then row locks. A caller that holds a row it later hands to a store
-must take the fence first and do its work in one transaction, as
+first. It takes the account's erasure lock shared (an advisory lock keyed
+`mux-erasure:<id>`); purge takes the same lock exclusive after `lock_account` and holds
+it for its whole transaction, so a write either finishes before the purge and is erased
+with the rest, or starts after it and is refused (`ScopeViolation`, "the account was
+erased") because the account is in `erased_account`. The erasure lock is a key of its own:
+the self-hosted resource writers hold the account lock exclusively for ordinary writes,
+and that must not read as an erasure. An operation is also fenced by its principal
+(`erased_principal`, the erasure lock of each principal taken after the account's), and
+usage and journal writes by the account named on the session they write to, so an erased
+caller cannot write into a shared conversation either.
+Lock order in a transaction: the account lock (purge and the self-hosted writers only),
+then the erasure locks (account, then principals in id order), then tenant-level locks,
+then row locks. Only purge takes an erasure lock exclusively. A caller that holds a row it
+later hands to a store must take the fence first and do its work in one transaction, as
 `thread_release.apply_thread_release` does against the Postgres store; a second
 transaction asking for the fence queues behind a waiting purge.
+
+Migration 0142 also installs triggers on the slot, lease, release-request, operation and
+usage-observation tables that apply the same rule in the database: an old process that
+is still running while the migration is applied cannot recreate an erased account's slot,
+lease, operation or usage row either. A trigger never waits. It tries the erasure lock
+shared; if an erasure holds or queues for it, the write is refused ("the account is being
+erased") instead of waiting, because a trigger runs after its writer already holds row
+locks and a purge that needs those rows would otherwise be in a cycle Postgres cannot
+always see. A writer that took the fence in the same transaction already holds the lock,
+so the try succeeds, and an ordinary self-hosted write, which holds only the account lock,
+never trips it. Account and principal ids are random and never reused, so a returning
+person is unaffected. A write into a shared conversation's journal names no account in its
+row, so that one rule is enforced only by the application. Shared slots, other accounts,
+ids that are not UUIDs (operator and billing identities, `host:` principals) and the
+in-memory store are never fenced. A turn still running when its account is erased fails
+at its next write; its usage after that point is not recorded.
 
 The purge transaction runs with a lock timeout of five seconds. If it loses a deadlock or
 cannot get the account lock in time it rolls back whole and starts again, up to five
