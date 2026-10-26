@@ -1243,6 +1243,19 @@ async def read_frozen_root(
     return root.permissions, policy
 
 
+def _same_root_with_live_membership(
+    recorded: WorkerPermissions, current: WorkerPermissions
+) -> bool:
+    """Membership may change; the principal and every frozen grant must match."""
+    subject = replace(
+        recorded.subject,
+        is_admin=current.subject.is_admin,
+        role_ids=current.subject.role_ids,
+        verified_membership=current.subject.verified_membership,
+    )
+    return subject == current.subject and replace(recorded, subject=current.subject) == current
+
+
 async def read_frozen_preparation(
     deps: TurnDeps,
     parent: WorkerPermissions,
@@ -1262,14 +1275,20 @@ async def read_frozen_preparation(
     from mux.contracts.resources import Agent, Environment
     from mux.state.operations import request_digest
 
-    root, _ = await _read_frozen_root(
+    root, policy = await _read_frozen_root(
         deps,
         parent.fleet.scope,
         origin_id=parent.fleet.origin_id,
         run_id=parent.fleet.run_id,
         now=now(),
     )
-    if root.permissions != parent or root.preparation is None:
+    live_membership = any(rule.invoker_role_ids for rule in policy.agent_rules.values())
+    matches = (
+        _same_root_with_live_membership(root.permissions, parent)
+        if live_membership
+        else root.permissions == parent
+    )
+    if not matches or root.preparation is None:
         raise WorkerSpecRefused("origin", "unbound")
     bound = min(deadline, parent.limits.deadline)
     async with asyncio.timeout(remaining_s(bound, now=now(), refuse_expired=True)):
@@ -1301,6 +1320,13 @@ async def read_frozen_preparation(
                     if name in admission_facts
                 },
             )
+            if live_membership:
+                grant = admission.grant
+                if grant is None or grant.subject != root.permissions.subject:
+                    raise WorkerSpecRefused("origin", "unbound")
+                # Carry freshly checked evidence without changing the frozen
+                # principal, source, place, scope or finite worker ceilings.
+                admission = replace(admission, grant=replace(grant, subject=parent.subject))
             request = ProviderPreparationRequest(
                 deps,
                 admission,

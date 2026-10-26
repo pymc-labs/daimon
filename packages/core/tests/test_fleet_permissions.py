@@ -2226,3 +2226,31 @@ def test_worker_delegation_into_role_gated_target_requires_human_role(admin: boo
         root, subject=Subject(platform_user_id="user", verified_membership=True, role_ids=("123",))
     )
     assert resolve(allowed, target, policy=policy).spec.name == "target"
+
+
+def test_frozen_root_accepts_fresh_membership_without_changing_invoker_or_grants() -> None:
+    from daimon.core.turn.runtime_manifest import (
+        _same_root_with_live_membership,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    recorded = parent()
+    current = replace(
+        recorded,
+        subject=replace(
+            recorded.subject,
+            role_ids=("123",),
+            verified_membership=True,
+            is_admin=True,
+        ),
+    )
+    assert _same_root_with_live_membership(recorded, current)
+    for subject in (
+        replace(current.subject, platform_user_id="another-human"),
+        replace(current.subject, client=True),
+        replace(current.subject, via_agent_key=True),
+    ):
+        assert not _same_root_with_live_membership(recorded, replace(current, subject=subject))
+    assert not _same_root_with_live_membership(
+        recorded,
+        replace(current, limits=current.limits.model_copy(update={"budget_usd": Decimal("1000")})),
+    )

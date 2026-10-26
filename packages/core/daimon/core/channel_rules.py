@@ -927,7 +927,7 @@ async def set_agent_invoker_roles(
 ) -> TenantAccessPolicy:
     """Set the human invoker roles, preserving spatial rules on every alias."""
     if platform != "discord":
-        raise RuleRefused("agent invoker roles are supported only for Discord")
+        raise RuleRefused("agent invoker roles are not supported on this platform")
     if not authorize(TenantAccessPolicy(), subject=subject, action=Action.SET_AGENT_RULE):
         raise ChannelRuleRefused("admin_required")
     roles = AgentRule(invoker_role_ids=tuple(role_ids)).invoker_role_ids

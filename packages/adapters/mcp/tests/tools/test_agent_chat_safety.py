@@ -1470,7 +1470,12 @@ async def test_revocation_between_confirmations_leaves_the_second_unanswered(
                     policy=TenantAccessPolicy(invoker_user_ids=("someone-else",)),
                 )
 
-    with patch.object(safety, "_answer", answer):
+    with (
+        patch.object(safety, "_answer", answer),
+        patch.object(
+            agent_chat, "_resolve_ma_agent", AsyncMock(return_value=ma_agent(id=_MA_AGENT_ID))
+        ),
+    ):
         worker = safety.watch_turn(
             runtime, auth, _SESSION, turn_event_id=boundary, rules_channel_id=None
         )
