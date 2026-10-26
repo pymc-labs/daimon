@@ -519,9 +519,15 @@ async def transfer_workspace(
     if any(rule.invoker_role_ids for rule in access.agent_rules.values()):
         try:
             predecessor = await retrieve_agent(client, old_snapshot.ma_agent_id, scope=scope)
-        except anthropic.APIStatusError:
+        except anthropic.APIStatusError as err:
+            if not _is_not_found(err):
+                raise
             # Unknown role requirements must never authorize a checkpoint send.
-            log.warning("workspace_transfer.checkpoint_failed", session_id=old_session_id)
+            log.warning(
+                "workspace_transfer.checkpoint_failed",
+                session_id=old_session_id,
+                status=err.status_code,
+            )
             return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_failed")
         ref = build_agent_ref(predecessor.name, predecessor.metadata, old_snapshot.agent_name)
         if agent_invoker_roles(access, ref.names):

@@ -1911,7 +1911,7 @@ async def test_handoff_away_from_gated_agent_skips_checkpoint_after_revocation(
     assert state.sent_batches == []
 
 
-@pytest.mark.parametrize("status", [404, 403, 429, 500])
+@pytest.mark.parametrize("status", [404, 401, 403, 429, 500])
 async def test_deleted_predecessor_degrades_without_sending_checkpoint(
     monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
@@ -1945,7 +1945,7 @@ async def test_deleted_predecessor_degrades_without_sending_checkpoint(
             )
         ),
     )
-    outcome = await transfer_workspace(
+    transfer = transfer_workspace(
         client,
         MagicMock(),
         old_session_id=old_session,
@@ -1961,9 +1961,15 @@ async def test_deleted_predecessor_degrades_without_sending_checkpoint(
         platform="discord",
         account_id=ACCOUNT_ID,
     )
-    assert isinstance(outcome, TranscriptOnly)
-    assert outcome.gap_reason == "checkpoint_failed"
-    assert "Fitted it" in outcome.transcript
+    if status == 404:
+        outcome = await transfer
+        assert isinstance(outcome, TranscriptOnly)
+        assert outcome.gap_reason == "checkpoint_failed"
+        assert "Fitted it" in outcome.transcript
+    else:
+        with pytest.raises(anthropic.APIStatusError) as exc:
+            await transfer
+        assert exc.value.status_code == status
     assert state.sent_batches == []
 
 
@@ -1988,10 +1994,9 @@ async def test_ungated_checkpoint_is_sent_with_unrelated_role_rule(
             )
         ),
     )
-    monkeypatch.setattr(
-        "daimon.core.mux_compat.retrieve_agent",
-        AsyncMock(return_value=ma_agent(name="analysis-bot")),
-    )
+    role_lookup = AsyncMock(return_value=ma_agent(name="analysis-bot"))
+    monkeypatch.setattr("daimon.core.mux_compat.retrieve_agent", role_lookup)
     await test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
         db_session, db_session_factory, env_turn_path, turn_io_used
     )
+    role_lookup.assert_awaited()
