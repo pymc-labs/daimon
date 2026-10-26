@@ -19,8 +19,9 @@ from typing import Any
 
 import pytest
 from daimon.core import _erasure_guards, thread_release
-from daimon.core.purge import purge_account
-from daimon.core.stores import mux_state, security_audit, thread_provider_releases
+from daimon.core import purge as purge_module
+from daimon.core.purge import AccountPurgeFailed, purge_account
+from daimon.core.stores import mux_erasure, mux_state, security_audit, thread_provider_releases
 from daimon.core.stores.mux_state import PostgresStateStore
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
@@ -264,13 +265,11 @@ async def test_a_process_from_before_the_fence_still_serves_everyone_else(
     assert await old.mark_outbox_applied(pending[0]) is False
 
 
-async def test_a_process_from_before_the_fence_waits_for_a_running_purge(
-    sm: Factory, store_before_the_fence: types.ModuleType, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The trigger takes the account lock shared, as the fence does: no write slips past the purge."""
-    person = await make_person(sm, uuid.uuid4(), "old-racing")
-    current = PostgresStateStore(sm, trust_caller_clock=True)
-    await converse(current, person, "old-racing", thread(person.tenant_id, "t"))
+@pytest.fixture
+def pause_purge_after_its_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[asyncio.Event, asyncio.Event]:
+    """Hold a purge right after it took the account lock; returns (reached, release)."""
     reached, release = asyncio.Event(), asyncio.Event()
     original = security_audit.erase_account_for_privacy
 
@@ -280,20 +279,272 @@ async def test_a_process_from_before_the_fence_waits_for_a_running_purge(
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(security_audit, "erase_account_for_privacy", paused)
+    return reached, release
+
+
+async def test_a_process_from_before_the_fence_is_refused_during_a_running_purge(
+    sm: Factory,
+    store_before_the_fence: types.ModuleType,
+    pause_purge_after_its_lock: tuple[asyncio.Event, asyncio.Event],
+) -> None:
+    """The trigger never waits: a write that meets a running purge is refused at once."""
+    reached, release = pause_purge_after_its_lock
+    person = await make_person(sm, uuid.uuid4(), "old-racing")
+    current = PostgresStateStore(sm, trust_caller_clock=True)
+    await converse(current, person, "old-racing", thread(person.tenant_id, "t"))
     purge = asyncio.create_task(purge_account(sm=sm, account_id=person.account_id))
-    await asyncio.wait_for(reached.wait(), 10)
+    try:
+        await asyncio.wait_for(reached.wait(), 10)
+        old = store_before_the_fence.PostgresStateStore(sm, trust_caller_clock=True)
+        with pytest.raises(DBAPIError, match="the account is being erased"):
+            await asyncio.wait_for(
+                old.begin_operation(
+                    person.scope(), key="racing", request_digest="d", operation_id="o", now=NOW
+                ),
+                10,
+            )
+    finally:
+        release.set()
+        await purge
+    assert await count(sm, "operation", "key = 'racing'") == 0
+
+
+async def test_purge_waits_for_an_old_writer_that_got_in_first_and_then_succeeds(
+    sm: Factory, store_before_the_fence: types.ModuleType
+) -> None:
+    """A writer past its trigger holds the account lock shared; purge waits, then erases it."""
+    person = await make_person(sm, uuid.uuid4(), "old-first")
+    current = PostgresStateStore(sm, trust_caller_clock=True)
+    conversation = await converse(current, person, "old-first", thread(person.tenant_id, "t"))
+    purge = None
+    try:
+        async with sm() as writer, writer.begin():
+            await store_before_the_fence.begin_operation(
+                writer,
+                person.scope(),
+                key="old-in-flight",
+                request_digest="d",
+                operation_id="o",
+                now=NOW,
+                slot=conversation.slot,
+            )
+            purge = asyncio.create_task(purge_account(sm=sm, account_id=person.account_id))
+            await wait_until_blocked(sm, purge, person)
+            assert not purge.done()
+        result = await asyncio.wait_for(purge, 10)
+    finally:
+        if purge is not None and not purge.done():
+            purge.cancel()
+    assert result.db.mux_operations == 2
+    assert await count(sm, "operation", "key = 'old-in-flight'") == 0
+    assert await count(sm, "accounts", "id = :a", a=person.account_id) == 0
+
+
+async def _waits_for(sm: Factory, event: str) -> None:
+    for _ in range(250):
+        async with sm() as db:
+            waiting = await db.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid()"
+                    " AND datname = current_database() AND wait_event = :event"
+                ),
+                {"event": event},
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"nothing waited on {event}")
+
+
+@pytest.mark.parametrize("kind", ["current_release", "old_renew", "old_binding", "old_operation"])
+async def test_a_writer_holding_a_row_never_makes_a_purge_fail(
+    sm: Factory,
+    store_before_the_fence: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """A writer holds its row, a purge of its account queues behind it, the writer resumes.
+
+    New code took the account fence before the row, so the purge waits for the fence and
+    the writer finishes. An old process meets the trigger only after its row lock; the
+    trigger refuses instead of waiting for the purge, so no cycle forms and the purge, which
+    would otherwise be Postgres's deadlock victim, deletes the account.
+    """
+    person = await make_person(sm, uuid.uuid4(), f"inversion-{kind}")
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    conversation = await converse(store, person, kind, thread(person.tenant_id, "t"))
+    row_locked, resume = asyncio.Event(), asyncio.Event()
+    module = mux_state if kind == "current_release" else store_before_the_fence
+    hook = {
+        "current_release": "_save_lease",
+        "old_renew": "_save_lease",
+        "old_binding": "_binding",
+        "old_operation": "_save_operation",
+    }[kind]
+    original = getattr(module, hook)
+
+    async def paused(*args: Any, **kwargs: Any) -> Any:
+        row_locked.set()
+        await resume.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(module, hook, paused)
     old = store_before_the_fence.PostgresStateStore(sm, trust_caller_clock=True)
-    writer = asyncio.create_task(
-        old.begin_operation(
-            person.scope(), key="racing", request_digest="d", operation_id="o", now=NOW
+    action = {
+        "current_release": lambda: store.release_lease(conversation.lease),
+        "old_renew": lambda: old.renew_lease(conversation.lease, now=NOW, ttl=TTL),
+        "old_binding": lambda: old.put_binding(
+            conversation.binding.model_copy(update={"generation": 2}), expected_generation=1
+        ),
+        "old_operation": lambda: old.claim_send(
+            person.scope(), conversation.operation_key, now=NOW, fence=conversation.lease
+        ),
+    }[kind]()
+    writer = asyncio.create_task(action)
+    purge = None
+    try:
+        await asyncio.wait_for(row_locked.wait(), 10)
+        purge = asyncio.create_task(purge_account(sm=sm, account_id=person.account_id))
+        if kind == "current_release":
+            await wait_until_blocked(sm, purge, person)
+        else:
+            await _waits_for(sm, "transactionid")
+        resume.set()
+        outcome = await asyncio.wait_for(asyncio.gather(writer, purge, return_exceptions=True), 15)
+    finally:
+        resume.set()
+        for task in (writer, purge):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(t for t in (writer, purge) if t), return_exceptions=True)
+    written, purged = outcome
+    assert not isinstance(purged, BaseException), f"the purge failed: {purged!r}"
+    assert await count(sm, "accounts", "id = :a", a=person.account_id) == 0
+    assert await count(sm, "provider_binding_slot", "account_id = :a", a=person.key) == 0
+    if kind == "current_release":
+        assert not isinstance(written, BaseException), f"the release failed: {written!r}"
+    else:
+        assert isinstance(written, DBAPIError) and "being erased" in str(written)
+
+
+async def test_an_old_thread_release_and_a_purge_both_finish(
+    sm: Factory, store_before_the_fence: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old release keeps the request row in one transaction and writes the binding in
+    another; Postgres cannot see that dependency, so the second must be refused, not wait."""
+    source = subprocess.run(
+        ["git", "show", f"{STORE_BEFORE_THE_FENCE}:packages/core/daimon/core/thread_release.py"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    old_release = types.ModuleType("thread_release_before_the_fence")
+    exec(compile(source, "thread_release_before_the_fence.py", "exec"), old_release.__dict__)
+    person = await make_person(sm, uuid.uuid4(), "old-thread-release")
+    current = PostgresStateStore(sm, trust_caller_clock=True)
+    conversation = await converse(current, person, "old-release", thread(person.tenant_id, "t"))
+    async with sm.begin() as session:
+        await thread_provider_releases.put_request(
+            session, conversation.slot, generation=1, now=NOW
+        )
+    old = store_before_the_fence.PostgresStateStore(sm, trust_caller_clock=True)
+    at_the_binding, resume = asyncio.Event(), asyncio.Event()
+    original = old.put_binding
+
+    async def paused(*args: Any, **kwargs: Any) -> Any:
+        at_the_binding.set()
+        await resume.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(old, "put_binding", paused)
+    release = asyncio.create_task(
+        old_release.apply_thread_release(
+            sm,
+            old,
+            conversation.slot,
+            tenant_id=person.tenant_id,
+            account_id=person.account_id,
+            now=NOW,
         )
     )
-    await wait_until_blocked(sm, writer, person)
-    release.set()
-    await purge
-    with pytest.raises(DBAPIError, match="the account was erased"):
-        await writer
-    assert await count(sm, "operation", "key = 'racing'") == 0
+    purge = None
+    try:
+        await asyncio.wait_for(at_the_binding.wait(), 10)
+        purge = asyncio.create_task(purge_account(sm=sm, account_id=person.account_id))
+        await _waits_for(sm, "transactionid")
+        resume.set()
+        outcome = await asyncio.wait_for(asyncio.gather(release, purge, return_exceptions=True), 15)
+    finally:
+        resume.set()
+        for task in (release, purge):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(t for t in (release, purge) if t), return_exceptions=True)
+    released, purged = outcome
+    assert not isinstance(purged, BaseException), f"the purge failed: {purged!r}"
+    assert isinstance(released, DBAPIError) and "being erased" in str(released)
+    assert await count(sm, "accounts", "id = :a", a=person.account_id) == 0
+
+
+# A purge that cannot get its lock
+
+
+async def test_a_purge_retries_a_lock_it_could_not_get_and_then_succeeds(
+    sm: Factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(purge_module, "PURGE_LOCK_TIMEOUT", "150ms")
+    person = await make_person(sm, uuid.uuid4(), "retry-then-succeed")
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    await converse(store, person, "retry", thread(person.tenant_id, "t"))
+    purge = None
+    try:
+        async with sm() as writer, writer.begin():
+            await mux_erasure.fence_writers(writer, person.key)
+            purge = asyncio.create_task(purge_account(sm=sm, account_id=person.account_id))
+            await wait_until_blocked(sm, purge, person)
+            await asyncio.sleep(0.5)  # the first attempt times out and starts over
+            assert not purge.done()
+        result = await asyncio.wait_for(purge, 15)
+    finally:
+        if purge is not None and not purge.done():
+            purge.cancel()
+    assert result.db.accounts == 1
+    assert await count(sm, "accounts", "id = :a", a=person.account_id) == 0
+
+
+async def test_a_purge_that_never_gets_its_lock_fails_and_deletes_nothing(
+    sm: Factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(purge_module, "PURGE_LOCK_TIMEOUT", "100ms")
+    monkeypatch.setattr(purge_module, "PURGE_ATTEMPTS", 2)
+    person = await make_person(sm, uuid.uuid4(), "retry-then-fail")
+    store = PostgresStateStore(sm, trust_caller_clock=True)
+    await converse(store, person, "retry-fail", thread(person.tenant_id, "t"))
+    async with sm() as writer, writer.begin():
+        await mux_erasure.fence_writers(writer, person.key)
+        with pytest.raises(AccountPurgeFailed, match="nothing was deleted"):
+            await asyncio.wait_for(purge_account(sm=sm, account_id=person.account_id), 15)
+    assert await count(sm, "accounts", "id = :a", a=person.account_id) == 1
+    assert await count(sm, "provider_binding_slot", "account_id = :a", a=person.key) == 1
+    assert await count(sm, "erased_account", "account_id = :a", a=person.account_id) == 0
+
+
+async def test_a_purge_does_not_retry_an_error_that_is_not_a_lock_failure(
+    sm: Factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    person = await make_person(sm, uuid.uuid4(), "no-retry")
+    attempts = 0
+
+    async def broken(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        await args[0].execute(text("SELECT 1/0"))
+
+    monkeypatch.setattr(security_audit, "erase_account_for_privacy", broken)
+    with pytest.raises(DBAPIError):
+        await purge_account(sm=sm, account_id=person.account_id)
+    assert attempts == 1
 
 
 async def test_the_migration_carries_the_guards_the_models_install(sm: Factory) -> None:

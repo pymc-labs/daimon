@@ -459,6 +459,7 @@ async def renew_lease(
 
 
 async def release_lease(session: AsyncSession, lease: Lease) -> None:
+    await mux_erasure.fence_writers(session, lease.slot.account_id)
     state = await _lease_state(session, lease.slot, lock="update")
     await _save_lease(session, leases.release(state, lease))
 

@@ -305,6 +305,16 @@ def build_deleting_view() -> dict[str, Any]:
     }
 
 
+def build_delete_failed_view(message: str) -> dict[str, Any]:
+    """The modal that replaces "Deleting…" when the purge rolled back: nothing was deleted."""
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Privacy"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": message}}],
+    }
+
+
 def build_post_delete_view(
     result: AccountPurgeResult, *, display_name: str = "daimon"
 ) -> dict[str, Any]:

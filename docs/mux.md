@@ -684,13 +684,23 @@ must take the fence first and do its work in one transaction, as
 `thread_release.apply_thread_release` does against the Postgres store; a second
 transaction asking for the fence queues behind a waiting purge.
 
+The purge transaction runs with a lock timeout of five seconds. If it loses a deadlock or
+cannot get the account lock in time it rolls back whole and starts again, up to five
+attempts with a short jittered pause, then fails with `AccountPurgeFailed`, a message the
+Discord and Slack panels show ("nothing was deleted, try again"). Teams shows its generic
+failure card. A failed purge never reports success.
+
 Migration 0142 also installs triggers on the slot, lease, release-request, operation and
 usage-observation tables that apply the same rule in the database: an old process that
 is still running while the migration is applied cannot recreate an erased account's slot,
-lease, operation or usage row either, and its writes wait for a running purge the same
-way. Account and principal ids are random and never reused, so a returning person is
-unaffected. A write into a shared conversation's journal names no account in its row,
-so that one rule is enforced only by the application. Shared slots, other accounts, ids
+lease, operation or usage row either. A trigger never waits. It tries the account lock
+shared; if an erasure holds or queues for it, the write is refused ("the account is being
+erased") instead of waiting, because a trigger runs after its writer already holds row
+locks and a purge that needs those rows would otherwise be in a cycle Postgres cannot
+always see. A writer that took the fence in the same transaction already holds the lock,
+so the try succeeds. Account and principal ids are random and never reused, so a
+returning person is unaffected. A write into a shared conversation's journal names no
+account in its row, so that one rule is enforced only by the application. Shared slots, other accounts, ids
 that are not UUIDs (operator and billing identities, `host:` principals) and the
 in-memory store are never fenced. A turn still running when its account is erased fails
 at its next write; its usage after that point is not recorded.
