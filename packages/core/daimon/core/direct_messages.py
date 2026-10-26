@@ -482,6 +482,7 @@ async def reply_to_dm(
                     thread_id=conversation.scope_id,
                     external_user_id=external_user_id,
                     user_message=user_message,
+                    request_text=text,
                     lifecycle=_CollectReply(),
                     cancel=asyncio.Event(),
                     reseed_user_message=reseed,
