@@ -769,6 +769,7 @@ async def test_role_gated_human_root_runs_native_worker_or_refuses_revoked_role(
     from daimon.core.access_policy import AgentRule
     from daimon.core.headless_runner import run_worker
     from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.neutral_resources import WorkerSpecRefused
     from daimon.core.stores.access_policy import load_access_policy, set_access_policy
     from daimon.core.turn.errors import AdmissionDenied
 
@@ -807,7 +808,7 @@ async def test_role_gated_human_root_runs_native_worker_or_refuses_revoked_role(
         cancel=asyncio.Event(),
     )
     if revoked:
-        with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        with pytest.raises((AdmissionDenied, WorkerSpecRefused), match="invoker_not_allowed"):
             await call
         assert not any(call.method == "POST" for call in trace.requests[before:])
     else:

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.core.authz import AgentRef, Place, Subject, Surface
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
@@ -19,6 +20,7 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import record_snapshot
 from daimon.core.stores.turn_origins import get_active_origin
+from daimon.core.turn.admission import AdmissionGrant
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.asgi import call_mcp_tool
@@ -34,6 +36,7 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import make_end_turn, make_status_idle
 from .test_run_prepared_turn import _admission, _deps, _prepared_turn, _recovery_lifecycle, _reseed
@@ -41,8 +44,8 @@ from .test_run_prepared_turn import _admission, _deps, _prepared_turn, _recovery
 
 @pytest.mark.parametrize("tool", ["continue_turn", "ask", "cancel_turn", "archive_my_session"])
 async def test_external_key_cannot_drive_human_session_during_stream_open(
-    db_session, db_session_factory, tool
-):
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tool: str
+) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
@@ -123,7 +126,21 @@ async def test_external_key_cannot_drive_human_session_during_stream_open(
     )
     prepared = _prepared_turn(
         deps=deps,
-        admission=_admission(account_id=account.id, agent=agent, env=ma_environment()),
+        admission=dataclasses.replace(
+            _admission(account_id=account.id, agent=agent, env=ma_environment()),
+            grant=AdmissionGrant(
+                tenant_id=tenant.id,
+                subject=Subject(platform_user_id="user"),
+                surface=Surface.CHANNEL,
+                turn_place=Place(channel_id="thread-1", parent_channel_id="C1"),
+                run_place=Place(channel_id="thread-1", parent_channel_id="C1"),
+                agent=AgentRef.of(agent.name),
+                channel_id="C1",
+                thread_id="thread-1",
+                is_dm=False,
+                human_invocation=True,
+            ),
+        ),
         tenant_id=tenant.id,
         external_user_id="user",
         ma_session_id=native.id,
