@@ -552,8 +552,9 @@ class DiscordFleetCardFactory:
     @classmethod
     def from_runtime(cls, service: FleetOrchestrator, deps: TurnDeps) -> Self:
         """Bind the real intent/root owner, retaining its original scope."""
+        from daimon.core.membership_subject import resolve_subject
         from daimon.core.mux_backend import resource_scope
-        from daimon.core.native_admins import load_live_subject, load_stored_subject
+        from daimon.core.native_admins import load_live_subject
         from daimon.core.stores.identity import find_platform_principal
         from daimon.core.stores.mux_state import get_fleet_root_operation
         from daimon.core.stores.turn_card_intents import get_turn_card_intent
@@ -581,12 +582,13 @@ class DiscordFleetCardFactory:
                     if original is None:
                         raise FleetRefused("prerequisites_unavailable")
                     subject = (
-                        await load_stored_subject(
-                            db,
+                        await resolve_subject(
+                            deps.sessionmaker,
+                            deps.membership_resolver,
                             tenant_id=tenant_id,
-                            platform="discord",
-                            account_id=original.account_id,
-                            platform_user_id=str(requester_id),
+                            user_id=str(requester_id),
+                            require_fresh=True,
+                            session=db,
                         )
                         if interaction is None
                         else await load_live_subject(
@@ -766,6 +768,8 @@ class DiscordFleetCard:
         wake_id: uuid.UUID | None = None,
         record: RecordCard | None = None,
     ) -> None:
+        self._new_turn = run_id is None and wake_id is None
+        self._has_workers = False
         self._run_id = run_id
         self._service = service
         # An ended run's cost in words, read once (`_read`).
@@ -825,6 +829,7 @@ class DiscordFleetCard:
         (`FleetOrchestrator.run_cost`), read once.
         """
         run, workers = await self._service.read_snapshot(parent, policy, run_id)
+        self._has_workers |= bool(workers)
         if run.status not in RUN_TRANSITIONS and run.id not in self._costs:
             self._costs[run.id] = fleet_cost_words(await self._service.run_cost(parent, run))
         return run, workers
@@ -1046,7 +1051,7 @@ class DiscordFleetCard:
         return allowed
 
     async def summary_gate(
-        self, *, render: bool = True, seen: bool = True
+        self, *, render: bool = True, seen: bool = True, tool_free: bool = False
     ) -> tuple[bool, str | None]:
         """Decide what the turn's final answer may show, and end the card with it.
 
@@ -1056,14 +1061,17 @@ class DiscordFleetCard:
         notice): a partial result; the notice heads the root's answer. (False,
         notice): the notice replaces it. A result the root has not seen is owed
         to a wake turn, which delivers it; the run ends only after that.
+        `tool_free` proves a new turn has no worker output if the lookup refuses.
         """
         async with self._lock:
+            empty = False
             try:
                 snapshot = await self._snapshot(None)
                 if snapshot is None:
                     return True, None
                 parent, policy, run, workers = snapshot
                 if not workers:
+                    empty = True
                     # The root started nothing, so its answer carries no worker output.
                     run = await self._settle(parent, policy, run)
                     if render and self._message is not None:
@@ -1086,6 +1094,11 @@ class DiscordFleetCard:
                 elif ready or blocked:
                     run = await self._settle(parent, policy, run, unless_waking=not seen)
             except (FleetRefused, WorkerSpecRefused):
+                # A new, tool-free turn cannot have spawned or collected workers.
+                # Preserve its own answer even if current fleet authority is gone.
+                # Existing runs/wakes and turns with tools remain fail closed.
+                if empty or (self._new_turn and tool_free and not self._has_workers):
+                    return True, None
                 return False, _UNAVAILABLE
             if render:
                 # Collect can observe rows newer than the initial snapshot.

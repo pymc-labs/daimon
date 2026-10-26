@@ -28,7 +28,7 @@ from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts, Fleet
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
-from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock, TurnState
 from discord.webhook.async_ import AsyncWebhookAdapter, async_context
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
@@ -2718,3 +2718,182 @@ def test_a_setup_error_reads_as_ours_with_a_log_reference():
         f"failed: a setup error on our side; give an admin the reference (ref {str(failed.id)[:8]})"
     )
     assert "couldn't be set up on that model" not in status
+
+
+@pytest.mark.parametrize("membership", ["core", "revoked", "unknown", "ungated"])
+async def test_runtime_card_preserves_tool_free_answer_with_fresh_membership(
+    monkeypatch: pytest.MonkeyPatch, membership: str
+):
+    """Admission's role snapshot must not be reused at terminal rendering."""
+    from types import SimpleNamespace
+
+    from daimon.core import membership_subject, native_admins
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.membership import Membership, MembershipResolver
+    from daimon.core.stores import identity, mux_state, turn_card_intents
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.deps import TurnDeps
+
+    _, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), ())
+    service = FleetOrchestrator(owner)
+    sessionmaker = MagicMock(spec=async_sessionmaker)
+    resolver = create_autospec(MembershipResolver, instance=True)
+    resolver.resolve.return_value = Membership(
+        is_member=None if membership == "unknown" else True,
+        role_ids=("999",) if membership == "core" else (),
+        is_admin=True,  # Even admins need the agent's role.
+    )
+    deps = create_autospec(TurnDeps, instance=True)
+    deps.sessionmaker = sessionmaker
+    deps.membership_resolver = resolver
+    monkeypatch.setattr(
+        identity,
+        "find_platform_principal",
+        AsyncMock(return_value=SimpleNamespace(account_id=ACCOUNT)),
+    )
+    monkeypatch.setattr(
+        membership_subject,
+        "get_tenant",
+        AsyncMock(
+            return_value=SimpleNamespace(platform="discord", external_id="60", archived_at=None)
+        ),
+    )
+    monkeypatch.setattr(membership_subject, "is_daimon_admin", AsyncMock(return_value=True))
+    stored = AsyncMock(side_effect=AssertionError("Stored roles cannot authorize rendering"))
+    monkeypatch.setattr(native_admins, "load_stored_subject", stored)
+    monkeypatch.setattr(turn_card_intents, "get_turn_card_intent", AsyncMock(return_value=None))
+    monkeypatch.setattr(mux_state, "get_fleet_root_operation", AsyncMock(return_value=object()))
+    policy = POLICY.model_copy(
+        update={
+            "agent_rules": {}
+            if membership == "ungated"
+            else {"root": AgentRule(invoker_role_ids=("999",))}
+        }
+    )
+    frozen = replace(
+        parent(),
+        subject=Subject(platform_user_id="123", role_ids=("999",), verified_membership=True),
+    )
+    monkeypatch.setattr(
+        runtime_manifest, "read_frozen_root", AsyncMock(return_value=(frozen, policy))
+    )
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id, thread.guild.id = 70, 50, 60
+    card = DiscordFleetCardFactory.from_runtime(service, deps)(
+        thread, 123, send, edit, turn_card_intent_id=UUID(int=71)
+    )
+    assert card is not None
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    answer = "I review synthetic memory suggestions."
+    await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=answer)]))
+    contents = [
+        call.kwargs.get("content", "") for call in send.await_args_list + edit.await_args_list
+    ]
+    assert any(answer in content for content in contents)
+    assert not any("Fleet" in content for content in contents)
+    assert resolver.resolve.await_count > 0
+    for call in resolver.resolve.await_args_list:
+        assert call.args == (TENANT, "60", "123")
+        assert call.kwargs == {"require_fresh": True}
+    if membership in ("revoked", "unknown"):
+        owner.read_run.assert_not_awaited()
+    else:
+        owner.read_run.assert_awaited()
+    stored.assert_not_awaited()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+async def test_revoked_role_never_discloses_a_fleet_answer(existing: bool):
+    from daimon.core.access_policy import AgentRule
+
+    _, owner, loader, send, edit = setup()
+    policy = POLICY.model_copy(
+        update={"agent_rules": {"root": AgentRule(invoker_role_ids=("999",))}}
+    )
+    # The requester has lost the required role since admission.
+    loader.return_value = (
+        replace(
+            parent(),
+            subject=Subject(platform_user_id="123", is_admin=True, verified_membership=True),
+        ),
+        policy,
+    )
+    card = DiscordFleetCard(
+        run_id=RUN if existing else None,
+        service=FleetOrchestrator(owner),
+        load_parent=loader,
+        send=send,
+        edit=edit,
+    )
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    content: list[ContentBlock] = [TextBlock(kind="text", text="Secret worker result")]
+    if not existing:
+        content.insert(
+            0,
+            ToolUseBlock(
+                kind="tool_use", id="tool", type="agent.tool_use", name="fleet_collect", input={}
+            ),
+        )
+    await lifecycle.on_terminal_success(TurnState(content=content))
+    contents = [
+        call.kwargs.get("content", "") for call in send.await_args_list + edit.await_args_list
+    ]
+    assert any("Fleet status is unavailable" in content for content in contents)
+    assert not any("Secret worker result" in content for content in contents)
+    owner.read_run.assert_not_awaited()
+
+
+async def test_empty_fleet_settlement_refusal_preserves_the_answer():
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), ())
+    owner.settle_run.side_effect = FleetRefused("invoker_not_allowed")
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    await lifecycle.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="Ordinary answer")])
+    )
+    contents = [
+        call.kwargs.get("content", "") for call in send.await_args_list + edit.await_args_list
+    ]
+    assert any("Ordinary answer" in content for content in contents)
+    assert not any("Fleet status is unavailable" in content for content in contents)
+
+
+async def test_observed_workers_keep_a_new_turn_fail_closed_after_role_revocation():
+    from daimon.core.access_policy import AgentRule
+
+    _, owner, loader, send, edit = setup()
+    policy = POLICY.model_copy(
+        update={"agent_rules": {"root": AgentRule(invoker_role_ids=("999",))}}
+    )
+    loader.return_value = (
+        replace(
+            parent(),
+            subject=Subject(platform_user_id="123", role_ids=("999",), verified_membership=True),
+        ),
+        policy,
+    )
+    card = DiscordFleetCard(
+        run_id=None,
+        service=FleetOrchestrator(owner),
+        load_parent=loader,
+        send=send,
+        edit=edit,
+    )
+    assert await card.refresh() is True
+    loader.return_value = (
+        replace(parent(), subject=Subject(platform_user_id="123", verified_membership=True)),
+        policy,
+    )
+    assert await card.summary_gate(tool_free=True) == (
+        False,
+        "Fleet status is unavailable, so there's no fleet result to share.",
+    )
+    # No further snapshot reaches the store after revocation.
+    owner.read_run.assert_awaited_once()

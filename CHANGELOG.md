@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed Discord fleet rendering losing verified invoker roles and replacing ordinary
+  tool-free answers with a fleet-unavailable notice. Fleet results still require current authorization.
+
 - Optional tenant-scoped pre-turn MCP context providers, configured with `daimon context-provider set`, with bounded fail-open calls and session acknowledgements.
   Keep idle provider connections alive for 240 seconds so turns can reuse them.
 
