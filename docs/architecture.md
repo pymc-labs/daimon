@@ -1145,6 +1145,10 @@ recomputes tokens as `ceil(chars / 3.5)`. A refusal, timeout, invalid response
 or exception produces a normal turn without context; failures log only tenant
 and exception class, never provider text, card IDs, sources or credentials.
 
+Connections are reused and idle connections are kept for 240 s; the first call
+after a longer idle pays a fresh TLS handshake, which can exceed the 200 ms
+budget so that turn gets no context.
+
 The turn fragment precedes user input. The once-only system fragment joins the
 system message, or precedes user input on models without system-message support.
 `PreparedTurn.session_model_id` carries the frozen session model for this
