@@ -361,13 +361,13 @@ async def hand_over_thread(
         from daimon.core.stores import agent_owners
 
         # FOR SHARE: a revoke of the ownership waits for this binding, never races it.
-        owner = await agent_owners.owner_of(
+        owned = await agent_owners.is_owner(
             session,
             tenant_id,
             derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=destination.ma_agent_id),
+            caller.account_id,
             lock=True,
         )
-        owned = owner is not None and owner == caller.account_id
     reachable = await is_agent_reachable_in_tenant(
         session, tenant_id=tenant_id, agent_name=destination.name, default=default
     )

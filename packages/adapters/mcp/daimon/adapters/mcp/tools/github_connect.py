@@ -9,6 +9,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._owner import may_own
 from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -229,6 +230,7 @@ async def _github_connect_impl(
             ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            allow_owner=may_own(auth),
         )
         if not manages:
             await record_connect_request(
@@ -254,8 +256,9 @@ async def _github_connect_impl(
             return ConnectResult(
                 status="ask_admin",
                 message=(
-                    f"Only an admin can connect repos to {agent.name}. Tell the person in one "
-                    f"line to ask an admin to say here: connect {repo_label} to {agent.name}."
+                    f"Only an admin or an owner of {agent.name} can connect repos to it. Tell "
+                    f"the person in one line to ask an admin or an owner to say here: connect "
+                    f"{repo_label} to {agent.name}."
                 ),
             )
         if repo_name is not None:
@@ -467,9 +470,9 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Use this when someone asks to let an agent read a private repository
         at github.com/owner/repo. Show a single-use
-        connection button bound to the selected agent to an admin; repos
-        connected this way are for that agent only. Other members get Ask an
-        admin and a recorded request. The card may go to the requester's
+        connection button bound to the selected agent to an admin or to an owner
+        of that agent; repos connected this way are for that agent only. Other
+        members get Ask an admin and a recorded request. The card may go to the requester's
         private chat instead; the result says so. Never repeat a private link in a
         shared reply. For a setup
         target, pass its current name and MA id from turn_controls; otherwise

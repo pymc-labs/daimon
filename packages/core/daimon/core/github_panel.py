@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
 from daimon.core.native_admins import AdminCaller, read_stored_admin
@@ -68,8 +69,24 @@ async def can_manage_agent_github(
     is_daimon_managed: bool,
     default: DeploymentDefault,
 ) -> bool:
-    """Only a server admin can connect, grant and remove repos for an agent."""
-    return caller.is_server_admin
+    """A server admin, or an owner of the agent, can connect, grant and remove its repos.
+
+    The owner is read now, from the live caller's platform user; a defaults-managed
+    agent has no owner who counts.
+    """
+    if caller.is_server_admin:
+        return True
+    return (
+        not is_daimon_managed
+        and caller.platform_user_id is not None
+        and await owns_agent(
+            session,
+            tenant_id=tenant_id,
+            ma_agent_id=ma_agent_id,
+            platform=platform,
+            platform_user_id=caller.platform_user_id,
+        )
+    )
 
 
 async def requester_manages_agent(
@@ -84,8 +101,15 @@ async def requester_manages_agent(
     default: DeploymentDefault,
     is_daimon_managed: bool | None,
     other_names: tuple[str | None, ...] = (),
+    allow_owner: bool = True,
 ) -> bool:
-    """Use the stored native admin role for an out-of-turn GitHub save."""
+    """The stored native admin role, or a current owner of the agent, for an out-of-turn save.
+
+    The owner is read from the owner tables at the call, never from the invitation
+    that carries the request. A person from another organisation never owns an agent
+    and a defaults-managed agent has no owner who counts. A caller whose credential
+    cannot stand for an owner (an agent-scoped key) passes `allow_owner=False`.
+    """
     if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
         return False
     stored = await read_stored_admin(
@@ -95,7 +119,15 @@ async def requester_manages_agent(
         account_id=account_id,
         platform_user_id=platform_user_id,
     )
-    return stored.is_admin
+    if stored.is_admin:
+        return True
+    return (
+        allow_owner
+        and not is_daimon_managed
+        and await owns_agent(
+            session, tenant_id=tenant_id, ma_agent_id=ma_agent_id, account_id=account_id
+        )
+    )
 
 
 async def sync_connect_admin(

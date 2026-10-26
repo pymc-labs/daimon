@@ -3078,9 +3078,9 @@
         <blank line>
         Use this when someone asks to let an agent read a private repository
         at github.com/owner/repo. Show a single-use
-        connection button bound to the selected agent to an admin; repos
-        connected this way are for that agent only. Other members get Ask an
-        admin and a recorded request. The card may go to the requester's
+        connection button bound to the selected agent to an admin or to an owner
+        of that agent; repos connected this way are for that agent only. Other
+        members get Ask an admin and a recorded request. The card may go to the requester's
         private chat instead; the result says so. Never repeat a private link in a
         shared reply. For a setup
         target, pass its current name and MA id from turn_controls; otherwise
@@ -4616,7 +4616,8 @@
         A clear ask is enough: call it right away and reply with the returned
         line. Ask only if the repo or agent is unclear. confirmed is ignored.
         The Connect GitHub page also adds and removes repos. If it was the working
-        repo, the working repo is cleared. Other agents keep their access.
+        repo, the working repo is cleared. Other agents keep their access. An admin or an
+        owner of the agent may remove any repo from it.
         Pass the current turn origin and selected agent identity.
       ''',
       'parameters': dict({
@@ -6414,9 +6415,9 @@
         A clear ask is enough: set it right away and reply with the returned
         line. Ask once in plain words during agent setup. Use an owner/repo already on
         this agent's list. Other repos have token access; clone one with gh repo clone when
-        asked. Only an admin may change this setting. Pass the current turn origin and the
-        selected agent's name and MA id. If the repo is not on its list, offer
-        the single Connect GitHub link.
+        asked. Only an admin or an owner of the agent may change this setting.
+        Pass the current turn origin and the selected agent's name and MA id.
+        If the repo is not on its list, offer the single Connect GitHub link.
       ''',
       'parameters': dict({
         'additionalProperties': False,

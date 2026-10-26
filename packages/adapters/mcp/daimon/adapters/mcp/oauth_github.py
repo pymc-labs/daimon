@@ -26,6 +26,7 @@ from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.web_icons import icon, platform_mark
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -1870,8 +1871,8 @@ def _confirmation_page(
             _access_choices(agent=agent_name is not None),
             "</aside></div>",
             '<details class="gh-access-help"><summary>How this works</summary>'
-            "<p>The agent can read and change connected repos. People also need their own "
-            "GitHub permission to use them."
+            "<p>The agent can read and change connected repos through the Daimon GitHub App. "
+            "What it can do does not depend on each person's own GitHub permission."
             + (f" {html.escape(audience_line(agent_name, write=True))}" if agent_name else "")
             + "</p></details>",
             '<div class="gh-finish"><div class="gh-finish-status">'
@@ -2066,6 +2067,28 @@ def build_oauth_github_routes(
                 None if live is None else metadata.get(MA_METADATA_KEY_MANAGED) == "true"
             ),
             other_names=agent_pin_names(live.name, metadata) if live is not None else (),
+        )
+
+    async def requester_owns_agent(
+        session: AsyncSession,
+        invitation: github_connect.Invitation,
+        live: BetaManagedAgentsAgent | None,
+    ) -> bool:
+        """Whether the link's requester owns the link's agent right now, as a person.
+
+        Read from the owner tables at each call. A defaults-managed agent, an agent
+        that can't be read, an operator-issued link and a person from another
+        organisation never count.
+        """
+        if invitation.agent_id is None or invitation.operator_issued or live is None:
+            return False
+        if live.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
+            return False
+        return await owns_agent(
+            session,
+            tenant_id=invitation.tenant_id,
+            ma_agent_id=invitation.agent_ma_id,
+            account_id=invitation.requester_account_id,
         )
 
     async def successful_page(
@@ -2593,31 +2616,46 @@ def build_oauth_github_routes(
                 )
                 for repo_id in selected_ids
             ]
+            acts_as_owner = False
             if not invitation.operator_issued:
                 if (
                     invitation.requester_platform_user_id is not None
                     and invitation.requester_platform_user_id != requester.platform_user_id
                 ):
                     return _error("You can no longer manage this agent.", 403, retry_confirm_url)
-                try:
-                    still_admin = await _attest_native_admin(
-                        requester=requester,
-                        settings=settings,
-                        sessionmaker=sessionmaker,
-                        fernet=fernet,
-                    )
-                except AdminAttestationUnavailable:
-                    return transient_error(_ADMIN_RETRY, 503)
-                if not still_admin:
-                    return _error("You can no longer manage this agent.", 403, retry_confirm_url)
+                # The requester still stands as an owner of this agent, or is still a
+                # native admin on the platform. The owner is re-read in the write
+                # transaction below, so a removal in between refuses the save.
+                async with sessionmaker() as session:
+                    acts_as_owner = await requester_owns_agent(session, invitation, live)
+                if not acts_as_owner:
+                    try:
+                        still_admin = await _attest_native_admin(
+                            requester=requester,
+                            settings=settings,
+                            sessionmaker=sessionmaker,
+                            fernet=fernet,
+                        )
+                    except AdminAttestationUnavailable:
+                        return transient_error(_ADMIN_RETRY, 503)
+                    if not still_admin:
+                        return _error(
+                            "You can no longer manage this agent.", 403, retry_confirm_url
+                        )
             try:
                 async with sessionmaker.begin() as session:
                     await session.execute(sql_text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
                     transaction_requester = await get_account_with_tenant(
                         session, account_id=invitation.requester_account_id
                     )
-                    manages = transaction_requester is not None and await may_manage_agent(
-                        session, invitation, transaction_requester, live
+                    # The authority proved above is the one re-checked here: an owner
+                    # must still own the agent, never fall back to a stale stored role.
+                    manages = transaction_requester is not None and (
+                        await requester_owns_agent(session, invitation, live)
+                        if acts_as_owner
+                        else await may_manage_agent(
+                            session, invitation, transaction_requester, live
+                        )
                     )
                     if not manages:
                         return _error("You can no longer manage this agent.", 403)

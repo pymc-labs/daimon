@@ -903,6 +903,11 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Who may edit an agent: no content, and ON DELETE CASCADE with
             # accounts.id, after which the agent is admin-only again.
             "agent_owner",
+            # Same shape for co-owners: the person's own row is ON DELETE CASCADE with
+            # accounts.id, and the admin who added them is ON DELETE SET NULL, so erasing
+            # either account never leaves an identifier behind. Covered by
+            # test_agent_co_owners.py.
+            "agent_co_owners",
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",

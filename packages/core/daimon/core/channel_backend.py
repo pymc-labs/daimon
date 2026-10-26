@@ -1828,8 +1828,7 @@ async def may_edit_as_owner(
     """Whether `actor` is a person who owns the agent. Agent keys and clients never are."""
     if actor.subject.via_agent_key or actor.subject.client:
         return False
-    owner = await agent_owners.owner_of(session, tenant_id, agent_id, lock=True)
-    return owner is not None and owner == actor.account_id
+    return await agent_owners.is_owner(session, tenant_id, agent_id, actor.account_id, lock=True)
 
 
 def _required(settings: AgentSettings | None) -> tuple[Capability, ...]:
