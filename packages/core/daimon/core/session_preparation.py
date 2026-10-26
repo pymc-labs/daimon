@@ -770,6 +770,7 @@ async def _prepare_session_for_turn_locked(
                 channel_id=current.budget_channel_id,
             ),
             continuity=continuity,
+            session_model_id=model_id,
         )
 
     async def from_fresh(

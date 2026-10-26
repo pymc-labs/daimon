@@ -1170,7 +1170,7 @@ async def run_prepared_turn_impl(
                 return None
             return LoadedProvider(config, tenant.external_id)
 
-    def context_hook_for(admission: Admission) -> ContextHook | None:
+    def context_hook_for(admission: Admission, model_id: str | None) -> ContextHook | None:
         revision = admission.backend_revision
         if revision is not None and revision.profile != "anthropic.managed_agents":
             return None
@@ -1205,7 +1205,7 @@ async def run_prepared_turn_impl(
                 message_text=(context_message_text or "") if platform == "discord" else "",
             ),
             load_context_config,
-            system_message_supported=supports_system_message(admission.agent.model.id),
+            system_message_supported=supports_system_message(model_id or admission.agent.model.id),
         )
 
     async def authorize_watch(admission: Admission, session_id: str) -> None:
@@ -1719,7 +1719,9 @@ async def run_prepared_turn_impl(
                             **action_kwargs,
                             image_blocks=image_blocks,
                             system_blocks=prepared.continuity.system_blocks,
-                            context_hook=context_hook_for(prepared.admission),
+                            context_hook=context_hook_for(
+                                prepared.admission, prepared.session_model_id
+                            ),
                             before_send=checked_send
                             if before_send is not None
                             or root_intent is not None
@@ -1897,7 +1899,9 @@ async def run_prepared_turn_impl(
                         tool_confirmation=recovery_confirmation,
                         image_blocks=image_blocks,
                         system_blocks=loss_system_blocks,
-                        context_hook=context_hook_for(recovery.admission or prepared.admission),
+                        context_hook=context_hook_for(
+                            recovery.admission or prepared.admission, recovery.model_id
+                        ),
                         # Reseeding and opening the stream await platform and MA
                         # calls after recovery's last decision.
                         before_send=decide_before_send(

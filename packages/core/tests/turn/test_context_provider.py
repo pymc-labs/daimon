@@ -130,11 +130,13 @@ async def test_denied_before_send_does_not_acknowledge_context() -> None:
 
 
 @pytest.mark.parametrize("dm", [False, True])
+@pytest.mark.parametrize("older_session", [False, True])
 async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
     db_session,
     db_nullpool_engine,
     monkeypatch,
     dm: bool,
+    older_session: bool,
 ) -> None:
     from dataclasses import replace
     from types import SimpleNamespace
@@ -192,7 +194,7 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
     )
     admission = _admission(
         account_id=account.id,
-        agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+        agent=ma_agent(id="ag_1", tenant_id=tenant.id, model="claude-sonnet-5"),
         env=ma_environment(id="env_1", tenant_id=tenant.id),
     )
     place = Place() if dm else Place(channel_id="thread-1", parent_channel_id="staff")
@@ -221,6 +223,10 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
         ma_session_id="sess_1",
         mapping_id=row.id,
         session_account_id=account.id,
+    )
+    prepared = replace(
+        prepared,
+        session_model_id="claude-sonnet-4-6" if older_session else "claude-sonnet-5",
     )
     outcome = await run_prepared_turn(
         deps,
@@ -251,6 +257,11 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
     assert request.mention_ids == ("bob",) and request.message_text == "Orbit's plan"
     assert request.agent_id == "ag_1" and request.requester_platform_user_id == "alice"
     assert "context_cards" in sent[0][1][0]["content"][0]["text"]
+    if older_session:
+        assert sent[0][1][0]["content"][0]["text"].startswith("Dated reference data")
+        assert len(sent[0][1]) == 1
+    else:
+        assert sent[0][1][-1]["type"] == "system.message"
 
 
 async def test_unsupported_system_message_models_receive_once_only_user_fragment() -> None:
