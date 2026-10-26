@@ -1191,6 +1191,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
     from daimon.core.headless_runner import run_turn as headless_turn
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mcp_auth import mint_agent_mcp_token, mint_jwt, mint_panel_mcp_token
+    from daimon.core.stores.agent_owners import set_owner
     from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
     from daimon.core.turn import io as turn_io_module
     from daimon.testing.asgi import call_mcp_tool
@@ -1337,6 +1338,15 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         await check_sessions(other, handle)
         other_tokens.append((other, False))
         async with db_session_factory.begin() as token_db:
+            # A coding key verifies only for an admin or an owner of its agent; the
+            # point here is that even a valid one cannot borrow the DM execution.
+            await set_owner(
+                token_db,
+                tenant_id=tenant.id,
+                agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=admission.agent.id),
+                owner_account_id=admission.account_id,
+                source="admin_assigned",
+            )
             agent_token = await mint_agent_mcp_token(
                 token_db,
                 account_id=admission.account_id,
