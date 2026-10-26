@@ -21,7 +21,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import resolve_agent_mcp_credentials
@@ -58,8 +57,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     pass
-
-log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -186,8 +183,6 @@ def build_turn_deps(
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     fernet = build_multifernet(crypto_keys) if crypto_keys else None
     context = cast(object, settings.mcp_context)
-    if isinstance(context, McpContextSettings) and context.enabled and fernet is None:
-        log.warning("mcp_context.off", reason="DAIMON_CRYPTO__KEYS is not set")
     return TurnDeps(
         anthropic=anthropic,
         messages=anthropic,

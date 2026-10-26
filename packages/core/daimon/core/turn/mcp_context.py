@@ -1,28 +1,33 @@
 """Per-turn context from the agent's own MCP servers (`DAIMON_MCP_CONTEXT__*`).
 
-A connected server may offer a context tool: given a person's message, and an
-id for the thread so it can skip what it already said there, it answers with
-what it knows that bears on the message, or nothing. With the setting on, a
-chat turn asks every such server the agent was connected to with a shared
-token, just before the message is sent, and each non-empty answer goes in
-front of the message, quoted as data like a tool result. Like progress plans
-it rides in the message, so the agent's prompt cache is untouched.
+A connected server may offer a context tool: given a person's message and an
+id for the thread (so it can skip what it already said there), it answers with
+what it knows that bears on the message, or nothing. A chat turn asks every
+such server the agent was connected to with a shared token, just before the
+message is sent, and each non-empty answer goes in front of the message,
+quoted as data like a tool result. Like progress plans it rides in the
+message, so the agent's prompt cache is untouched.
+
+On by default, so a server without the tool must cost a turn nothing. The
+first turn that meets a server looks its tools up in the background and does
+not wait; a server without the tool is then left alone for six hours, and an
+agent's server without a shared token for a minute, with no read on the turn
+for either. A server that offers the tool is asked from the next turn on; its
+MCP session and tool list are reused for ten minutes, so a typical turn costs
+one request.
 
 The call obeys the rules the model's own call would: a tool switched off or
 set to `always_ask` in the agent's toolset, or one tool safety would not run
 unasked (a deny or ask rule, or a write by name unless `effects` marks it a
-read), is not called.
-Only shared tokens (`agent_mcp_credentials`): an OAuth sign-in is personal and
-its token is never readable here. Routines, hand-offs, unprompted replies,
-held, shared and sealed turns ask nothing, nor does a turn whose admission
-changed since it was prepared.
+read), is not called. Only shared tokens (`agent_mcp_credentials`): an OAuth
+sign-in is personal and its token is never readable here. Routines, hand-offs,
+unprompted replies, held, shared and sealed turns ask nothing, nor does a turn
+whose admission changed since it was prepared.
 
 Each server gets its own keyed id for the thread, so two servers cannot match
 up threads; rotating the first crypto key changes them. A turn waits at most
-`timeout_s` for each server's answer, and Stop ends the wait. A server's MCP
-session and tool list are reused for ten minutes, so a typical turn costs one
-request; a server without the tool is left alone for ten minutes, and one that
-failed for one.
+`timeout_s` for each server's answer, and Stop ends the wait; a server that
+failed rests for a minute.
 """
 
 from __future__ import annotations
@@ -64,6 +69,11 @@ log = structlog.get_logger(__name__)
 MAX_PROMPT_CHARS = 8_000
 MAX_CONTEXT_CHARS = 8_000
 REUSE_S = 600.0
+"""How long a server's MCP session and tool list are reused."""
+OFFERING_S = 86_400.0
+"""How long a server seen offering the tool is asked without a fresh lookup first."""
+NO_TOOL_S = 21_600.0
+NO_TOKEN_S = 60.0
 FAILURE_REST_S = 60.0
 MEMO_SIZE = 1024
 _TOOL_PAGES = 10
@@ -87,7 +97,7 @@ class ContextServer:
 
     @property
     def key(self) -> tuple[str, str]:
-        """Memo key: one server as reached with one token, which owns its MCP session."""
+        """One server as reached with one token, which owns its MCP session."""
         return (canonical_mcp_url(self.url), hashlib.sha256(self.token.encode()).hexdigest())
 
 
@@ -96,11 +106,65 @@ class ServerState:
     """What a server last said: whether it offers the tool, and the session to reuse."""
 
     offered: bool
-    takes_thread_id: bool = False
     mcp_session_id: str | None = None
 
 
 SKIP = ServerState(offered=False)
+
+
+@dataclass
+class Expiring[K, V]:
+    """A bounded map whose entries lapse; least recently used out first."""
+
+    clock: Callable[[], float] = time.monotonic
+    size: int = MEMO_SIZE
+    entries: OrderedDict[K, tuple[float, V]] = field(
+        default_factory=lambda: OrderedDict[K, tuple[float, V]]()
+    )
+
+    def recall(self, key: K) -> V | None:
+        entry = self.entries.get(key)
+        if entry is None or entry[0] <= self.clock():
+            return None
+        self.entries.move_to_end(key)
+        return entry[1]
+
+    def remember(self, key: K, value: V, *, for_s: float) -> None:
+        self.entries[key] = (self.clock() + for_s, value)
+        self.entries.move_to_end(key)
+        while len(self.entries) > self.size:
+            self.entries.popitem(last=False)
+
+    def forget(self, key: K) -> None:
+        self.entries.pop(key, None)
+
+
+@dataclass
+class ContextMemo:
+    """What this process learned about servers, so most turns ask nothing of them."""
+
+    sessions: Expiring[tuple[str, str], ServerState] = field(
+        default_factory=lambda: Expiring[tuple[str, str], ServerState]()
+    )
+    offering: Expiring[tuple[str, str], bool] = field(
+        default_factory=lambda: Expiring[tuple[str, str], bool]()
+    )
+    without_tool: Expiring[str, bool] = field(default_factory=lambda: Expiring[str, bool]())
+    without_token: Expiring[tuple[uuid.UUID, uuid.UUID, str], bool] = field(
+        default_factory=lambda: Expiring[tuple[uuid.UUID, uuid.UUID, str], bool]()
+    )
+    lookups: dict[tuple[str, str], asyncio.Task[None]] = field(
+        default_factory=lambda: dict[tuple[str, str], asyncio.Task[None]]()
+    )
+
+    def learned(self, server: ContextServer, state: ServerState) -> None:
+        if state.offered:
+            self.sessions.remember(server.key, state, for_s=REUSE_S)
+            self.offering.remember(server.key, True, for_s=OFFERING_S)
+        else:
+            self.without_tool.remember(canonical_mcp_url(server.url), True, for_s=NO_TOOL_S)
+            self.sessions.forget(server.key)
+            self.offering.forget(server.key)
 
 
 class CredentialsLoader(Protocol):
@@ -158,9 +222,9 @@ def toolset_allows(agent: BetaManagedAgentsAgent, server_name: str, tool_name: s
 def context_tool(tools: Sequence[JsonValue], name: str) -> ServerState | None:
     """The state of the tool called `name` in one `tools/list` page; None if absent.
 
-    Offered only when its input takes a string `prompt` and requires nothing but
-    `prompt` and a string `session`: anything else is some other tool that
-    happens to share the name, and must not be sent the person's message.
+    Offered only when its input takes a string `prompt` and a string `session`
+    and requires nothing else: anything less is some other tool that happens to
+    share the name, and must not be sent the person's message.
     """
     for tool in tools:
         if not isinstance(tool, dict) or tool.get("name") != name:
@@ -170,16 +234,12 @@ def context_tool(tools: Sequence[JsonValue], name: str) -> ServerState | None:
         required = schema.get("required", []) if isinstance(schema, dict) else None
         if not isinstance(properties, dict) or not isinstance(required, list):
             return SKIP
-        prompt, session = properties.get("prompt"), properties.get("session")
-        takes_thread_id = isinstance(session, dict) and session.get("type") == "string"
-        allowed = {"prompt", "session"} if takes_thread_id else {"prompt"}
-        if (
-            not isinstance(prompt, dict)
-            or prompt.get("type") != "string"
-            or not all(isinstance(item, str) and item in allowed for item in required)
-        ):
+        if not all(
+            isinstance(spec := properties.get(key), dict) and spec.get("type") == "string"
+            for key in ("prompt", "session")
+        ) or not all(item in ("prompt", "session") for item in required):
             return SKIP
-        return ServerState(offered=True, takes_thread_id=takes_thread_id)
+        return ServerState(offered=True)
     return None
 
 
@@ -212,30 +272,6 @@ def context_block(server_name: str, text: str) -> str:
     """One server's answer, quoted as untrusted data, ready to go in front of the message."""
     lines = untrusted_block("mcp_context", [escape(text)], {"server": server_name}, note=_NOTE)
     return "\n".join(lines) + "\n\n"
-
-
-@dataclass
-class ServerMemo:
-    """Each server's last `ServerState`, by URL and token; least recently used out first."""
-
-    clock: Callable[[], float] = time.monotonic
-    size: int = MEMO_SIZE
-    entries: OrderedDict[tuple[str, str], tuple[float, ServerState]] = field(
-        default_factory=OrderedDict[tuple[str, str], tuple[float, ServerState]]
-    )
-
-    def recall(self, key: tuple[str, str]) -> ServerState | None:
-        entry = self.entries.get(key)
-        if entry is None or entry[0] <= self.clock():
-            return None
-        self.entries.move_to_end(key)
-        return entry[1]
-
-    def remember(self, key: tuple[str, str], state: ServerState, *, for_s: float) -> None:
-        self.entries[key] = (self.clock() + for_s, state)
-        self.entries.move_to_end(key)
-        while len(self.entries) > self.size:
-            self.entries.popitem(last=False)
 
 
 def _request(method: str, params: Mapping[str, JsonValue]) -> dict[str, object]:
@@ -276,9 +312,7 @@ async def _call(
     headers = mcp_headers(server.token)
     if state.mcp_session_id is not None:
         headers["Mcp-Session-Id"] = state.mcp_session_id
-    arguments: dict[str, JsonValue] = {"prompt": prompt[:MAX_PROMPT_CHARS]}
-    if state.takes_thread_id:
-        arguments["session"] = thread_id
+    arguments: dict[str, JsonValue] = {"prompt": prompt[:MAX_PROMPT_CHARS], "session": thread_id}
     result = await mcp_request(
         http, server.url, headers, _request("tools/call", {"name": tool, "arguments": arguments})
     )
@@ -292,12 +326,10 @@ async def fetch_server_context(
     tool: str,
     prompt: str,
     thread_id: str,
-    memo: ServerMemo,
+    memo: ContextMemo,
 ) -> str:
     """One server's answer: one `tools/call` on a remembered session, else discover first."""
-    state = memo.recall(server.key)
-    if state is not None and not state.offered:
-        return ""
+    state = memo.sessions.recall(server.key)
     if state is not None:
         try:
             return await _call(http, server, state, tool=tool, prompt=prompt, thread_id=thread_id)
@@ -306,10 +338,15 @@ async def fetch_server_context(
             if err.status_code != 404 or state.mcp_session_id is None:
                 raise
     state = await _discover(http, server, tool)
-    memo.remember(server.key, state, for_s=REUSE_S)
+    memo.learned(server, state)
     if not state.offered:
         return ""
     return await _call(http, server, state, tool=tool, prompt=prompt, thread_id=thread_id)
+
+
+def _client(timeout_s: float, transport: httpx.AsyncBaseTransport | None) -> httpx.AsyncClient:
+    # No redirects: the configured URL is the only authority.
+    return httpx.AsyncClient(timeout=timeout_s, follow_redirects=False, transport=transport)
 
 
 async def _ask(
@@ -318,26 +355,21 @@ async def _ask(
     tool: str,
     prompt: str,
     thread_id: str,
-    memo: ServerMemo,
+    memo: ContextMemo,
     timeout_s: float,
     transport: httpx.AsyncBaseTransport | None,
 ) -> str:
     started = time.monotonic()
     try:
         assert_public_https_url(server.url, what="connection URL")
-        async with (
-            asyncio.timeout(timeout_s),
-            httpx.AsyncClient(
-                timeout=timeout_s, follow_redirects=False, transport=transport
-            ) as http,
-        ):
+        async with asyncio.timeout(timeout_s), _client(timeout_s, transport) as http:
             text = await fetch_server_context(
                 http, server, tool=tool, prompt=prompt, thread_id=thread_id, memo=memo
             )
     # Boundary: context is an optional extra. Whatever a server does (fails, stalls,
     # answers malformed), the turn goes on without its answer, never without a reply.
     except Exception as err:
-        memo.remember(server.key, SKIP, for_s=FAILURE_REST_S)
+        memo.sessions.remember(server.key, SKIP, for_s=FAILURE_REST_S)
         log.warning(
             "mcp_context.failed",
             server=server.name,
@@ -354,18 +386,57 @@ async def _ask(
     return text
 
 
+async def _look_up(
+    server: ContextServer,
+    *,
+    tool: str,
+    memo: ContextMemo,
+    timeout_s: float,
+    transport: httpx.AsyncBaseTransport | None,
+) -> None:
+    try:
+        assert_public_https_url(server.url, what="connection URL")
+        async with asyncio.timeout(timeout_s), _client(timeout_s, transport) as http:
+            state = await _discover(http, server, tool)
+    # Boundary: a lookup no turn waits on. Whatever goes wrong, the server rests and
+    # is looked up again later.
+    except Exception as err:
+        memo.sessions.remember(server.key, SKIP, for_s=REUSE_S)
+        log.info("mcp_context.lookup_failed", server=server.name, error=type(err).__name__)
+        return
+    memo.learned(server, state)
+    log.info("mcp_context.looked_up", server=server.name, offered=state.offered)
+
+
 def build_turn_context_fetch(
     settings: McpContextSettings,
     *,
     credentials: CredentialsLoader,
     id_key: bytes,
     transport: httpx.AsyncBaseTransport | None = None,
+    memo: ContextMemo | None = None,
 ) -> TurnContextFetch | None:
     """The deployment's fetch, or None when the setting is off."""
     if not settings.enabled:
         return None
     tenants = frozenset(settings.tenants)
-    memo = ServerMemo()
+    known = memo if memo is not None else ContextMemo()
+
+    def look_up_later(server: ContextServer) -> None:
+        if server.key in known.lookups:
+            return
+        task = asyncio.create_task(
+            _look_up(
+                server,
+                tool=settings.tool,
+                memo=known,
+                timeout_s=settings.timeout_s,
+                transport=transport,
+            ),
+            name="mcp_context.look_up",
+        )
+        known.lookups[server.key] = task
+        task.add_done_callback(lambda _: known.lookups.pop(server.key, None))
 
     async def fetch(
         *,
@@ -380,15 +451,35 @@ def build_turn_context_fetch(
         if not servers or (tenants and tenant_id not in tenants):
             return ""
         try:
-            stored = await credentials(
-                tenant_id=tenant_id,
-                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
-            )
-            targets = [
-                server
-                for server in context_servers(servers, stored)
-                if await permitted(server.name, settings.tool)
+            agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+            # A server known to lack the tool, or a shared token, costs the turn nothing.
+            candidates = [
+                (name, url)
+                for name, url in servers
+                if not known.without_tool.recall(canonical_mcp_url(url))
+                and not known.without_token.recall((tenant_id, agent_id, canonical_mcp_url(url)))
             ]
+            if not candidates:
+                return ""
+            found = context_servers(
+                candidates, await credentials(tenant_id=tenant_id, agent_id=agent_id)
+            )
+            tokened = {canonical_mcp_url(server.url) for server in found}
+            for _, url in candidates:
+                if canonical_mcp_url(url) not in tokened:
+                    key = (tenant_id, agent_id, canonical_mcp_url(url))
+                    known.without_token.remember(key, True, for_s=NO_TOKEN_S)
+            targets: list[ContextServer] = []
+            for server in found:
+                state = known.sessions.recall(server.key)
+                if state is not None and not state.offered:
+                    continue
+                if not await permitted(server.name, settings.tool):
+                    continue
+                if known.offering.recall(server.key):
+                    targets.append(server)
+                else:
+                    look_up_later(server)
         # Boundary, as in `_ask`: a credential or rule read that fails costs the
         # turn its context, not its reply.
         except Exception as err:
@@ -407,7 +498,7 @@ def build_turn_context_fetch(
                         platform=platform,
                         thread_scope=thread_scope,
                     ),
-                    memo=memo,
+                    memo=known,
                     timeout_s=settings.timeout_s,
                     transport=transport,
                 )

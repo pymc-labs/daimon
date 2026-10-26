@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -25,7 +26,8 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.mcp_context import (
     SKIP,
-    ServerMemo,
+    ContextMemo,
+    Expiring,
     ServerState,
     ToolPermitted,
     TurnContextFetch,
@@ -81,6 +83,10 @@ class FakeServer:
     def methods(self) -> list[str]:
         return [str(r["method"]) for r in self.requests]
 
+    def forget(self) -> None:
+        self.requests.clear()
+        self.headers.clear()
+
     def restart(self) -> None:
         self.sessions.clear()
 
@@ -119,77 +125,103 @@ async def _allowed(server_name: str, tool_name: str) -> bool:
     return True
 
 
-def _fetch(
-    server: FakeServer,
-    *,
-    credentials: tuple[ResolvedMcpCredential, ...] = (CREDENTIAL,),
-    **settings: object,
-) -> TurnContextFetch:
-    async def load(
-        *, tenant_id: uuid.UUID, agent_id: uuid.UUID
-    ) -> tuple[ResolvedMcpCredential, ...]:
-        return credentials
+@dataclass
+class Loader:
+    """The credential read, counted."""
 
+    credentials: tuple[ResolvedMcpCredential, ...] = (CREDENTIAL,)
+    reads: int = 0
+
+    async def __call__(
+        self, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    ) -> tuple[ResolvedMcpCredential, ...]:
+        self.reads += 1
+        return self.credentials
+
+
+@dataclass
+class Rig:
+    server: FakeServer
+    loader: Loader
+    memo: ContextMemo
+    fetch: TurnContextFetch
+
+    async def ask(
+        self, *, tenant_id: uuid.UUID = TENANT, permitted: ToolPermitted = _allowed
+    ) -> str:
+        return await self.fetch(
+            tenant_id=tenant_id,
+            ma_agent_id="ag_1",
+            servers=[("knowledge", URL)],
+            platform="slack",
+            thread_scope=SCOPE,
+            prompt="what did we agree with acme?",
+            permitted=permitted,
+        )
+
+    async def settle(self) -> None:
+        """Let the background lookups the last turn started finish."""
+        await asyncio.gather(*self.memo.lookups.values())
+
+    async def warm(self) -> None:
+        """A first turn: the server is looked up in the background, nothing is asked."""
+        assert await self.ask() == "", "the first turn never waits for a lookup"
+        await self.settle()
+        self.server.forget()
+
+
+def _rig(
+    server: FakeServer | None = None,
+    *,
+    loader: Loader | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+    **settings: object,
+) -> Rig:
+    server = server or FakeServer()
+    loader = loader or Loader()
+    memo = ContextMemo()
     fetch = build_turn_context_fetch(
         McpContextSettings.model_validate({"enabled": True, **settings}),
-        credentials=load,
+        credentials=loader,
         id_key=KEY,
-        transport=httpx.MockTransport(server.handle),
+        transport=transport or httpx.MockTransport(server.handle),
+        memo=memo,
     )
     assert fetch is not None, "an enabled setting builds a fetch"
-    return fetch
-
-
-async def _ask(
-    fetch: TurnContextFetch,
-    *,
-    tenant_id: uuid.UUID = TENANT,
-    permitted: ToolPermitted = _allowed,
-) -> str:
-    return await fetch(
-        tenant_id=tenant_id,
-        ma_agent_id="ag_1",
-        servers=[("knowledge", URL)],
-        platform="slack",
-        thread_scope=SCOPE,
-        prompt="what did we agree with acme?",
-        permitted=permitted,
-    )
+    return Rig(server, loader, memo, fetch)
 
 
 def _thread_id(url: str = URL, *, key: bytes = KEY, scope: str = SCOPE) -> str:
     return thread_session_id(url, key=key, tenant_id=TENANT, platform="slack", thread_scope=scope)
 
 
-def test_context_tool_offered_when_its_input_takes_a_prompt_and_an_optional_session() -> None:
-    """The context contract: a string `prompt`, optionally a string `session`, nothing else required."""
+def test_context_tool_offered_only_for_a_prompt_and_a_session() -> None:
+    """The contract: a string `prompt` and a string `session`, nothing else required."""
     assert context_tool([{"name": "search"}, CONTEXT_TOOL], "context") == ServerState(
-        offered=True, takes_thread_id=True
-    ), "the tool is found past other tools, and takes the thread id"
-    without_session: JsonValue = {
-        "name": "context",
-        "inputSchema": {"properties": {"prompt": {"type": "string"}}},
-    }
-    assert context_tool([without_session], "context") == ServerState(offered=True), (
-        "a tool with no session input is still asked, without the thread id"
-    )
+        offered=True
+    ), "the tool is found past other tools"
     assert context_tool([{"name": "search"}], "context") is None, "absent from this page"
 
 
-def test_context_tool_skipped_when_a_namesake_needs_other_input() -> None:
+def test_context_tool_skipped_when_a_namesake_takes_other_input() -> None:
     """A tool that merely shares the name must never be sent the person's message."""
+    no_session: JsonValue = {
+        "name": "context",
+        "inputSchema": {"properties": {"prompt": {"type": "string"}}},
+    }
     needs_more: JsonValue = {
         "name": "context",
         "inputSchema": {
-            "properties": {"prompt": {"type": "string"}, "library": {"type": "string"}},
+            "properties": {"prompt": {"type": "string"}, "session": {"type": "string"}},
             "required": ["prompt", "library"],
         },
     }
     no_prompt: JsonValue = {
         "name": "context",
-        "inputSchema": {"properties": {"query": {"type": "string"}}},
+        "inputSchema": {"properties": {"query": {"type": "string"}, "session": {"type": "string"}}},
     }
-    assert context_tool([needs_more], "context") == SKIP, "a second required input"
+    assert context_tool([no_session], "context") == SKIP, "no session input"
+    assert context_tool([needs_more], "context") == SKIP, "another required input"
     assert context_tool([no_prompt], "context") == SKIP, "no prompt input"
     assert context_tool([{"name": "context"}], "context") == SKIP, "no input schema at all"
 
@@ -266,133 +298,131 @@ def test_context_block_escapes_the_answer_and_marks_it_untrusted() -> None:
     assert block.endswith("</mcp_context>\n\n"), "the block ends before the message starts"
 
 
-def test_server_memo_forgets_the_least_recent_server_past_its_size() -> None:
-    memo = ServerMemo(size=2)
+def test_expiring_forgets_the_least_recently_used_past_its_size() -> None:
+    memo = Expiring[str, bool](size=2)
     for name in ("a", "b"):
-        memo.remember((name, "v1"), SKIP, for_s=60)
-    assert memo.recall(("a", "v1")) == SKIP
-    memo.remember(("c", "v1"), SKIP, for_s=60)
-    assert list(memo.entries) == [("a", "v1"), ("c", "v1")], "bounded, least recently used out"
+        memo.remember(name, True, for_s=60)
+    assert memo.recall("a")
+    memo.remember("c", True, for_s=60)
+    assert list(memo.entries) == ["a", "c"], "bounded, least recently used out"
 
 
-async def test_fetch_sends_the_message_and_thread_id_to_the_context_tool() -> None:
-    server = FakeServer()
-    briefing = await _ask(_fetch(server))
+async def test_a_new_server_is_looked_up_in_the_background_then_asked() -> None:
+    rig = _rig()
 
-    assert server.methods() == [
-        "initialize",
-        "notifications/initialized",
-        "tools/list",
-        "tools/call",
-    ], "the first turn opens a session, lists the tools, then calls"
-    assert server.requests[-1]["params"] == {
+    assert await rig.ask() == "", "the first turn does not wait for the lookup"
+    await rig.settle()
+    assert rig.server.methods() == ["initialize", "notifications/initialized", "tools/list"], (
+        "the lookup lists the tools and sends no message"
+    )
+    rig.server.forget()
+
+    briefing = await rig.ask()
+
+    assert rig.server.methods() == ["tools/call"], "the next turn is one call on that session"
+    assert rig.server.requests[0]["params"] == {
         "name": "context",
         "arguments": {"prompt": "what did we agree with acme?", "session": _thread_id()},
     }, "the person's words and this server's thread id"
-    assert server.headers[-1]["authorization"] == "Bearer tok-1", "the shared token"
-    assert server.headers[-1]["mcp-session-id"] == "srv-session-1", "on the server's session"
+    assert rig.server.headers[0]["authorization"] == "Bearer tok-1", "the shared token"
+    assert rig.server.headers[0]["mcp-session-id"] == "srv-session-1", "the looked-up session"
     assert briefing == context_block("knowledge", "Acme renewed in May [e:1a2b]."), briefing
 
 
-async def test_fetch_reuses_the_session_so_a_later_turn_is_one_request() -> None:
-    server = FakeServer(sse=True)
-    fetch = _fetch(server)
-    await _ask(fetch)
-    server.requests.clear()
-    server.headers.clear()
+async def test_a_server_without_the_tool_costs_later_turns_nothing() -> None:
+    """Ordinary servers: one background lookup, then no request and no read for hours."""
+    rig = _rig(FakeServer(tools=[{"name": "search"}]))
+    await rig.warm()
+    reads = rig.loader.reads
 
-    briefing = await _ask(fetch)
+    assert await rig.ask() == "", "no tool, no context"
+    assert rig.server.requests == [], "the server is not contacted"
+    assert rig.loader.reads == reads, "nor is the credential read repeated"
 
-    assert server.methods() == ["tools/call"], "one request per turn once the server is known"
-    assert server.headers[0]["mcp-session-id"] == "srv-session-1", "on the remembered session"
+
+async def test_a_slow_new_server_never_slows_a_turn() -> None:
+    rig = _rig(FakeServer(delay_s=0.5))
+    started = time.monotonic()
+    assert await rig.ask() == ""
+    assert time.monotonic() - started < 0.2, "the turn did not wait for the lookup"
+    await rig.settle()
+
+
+async def test_fetch_reuses_the_session_with_sse_replies() -> None:
+    rig = _rig(FakeServer(sse=True))
+    await rig.warm()
+    await rig.ask()
+    rig.server.forget()
+
+    briefing = await rig.ask()
+
+    assert rig.server.methods() == ["tools/call"], "one request per turn"
     assert "Acme renewed in May" in briefing, "SSE replies are read too"
 
 
 async def test_fetch_opens_a_new_session_when_the_server_forgot_its_own() -> None:
-    server = FakeServer()
-    fetch = _fetch(server)
-    await _ask(fetch)
-    server.restart()
-    server.requests.clear()
+    rig = _rig()
+    await rig.warm()
+    rig.server.restart()
 
-    briefing = await _ask(fetch)
+    briefing = await rig.ask()
 
-    assert server.methods() == [
+    assert rig.server.methods() == [
         "tools/call",
         "initialize",
         "notifications/initialized",
         "tools/list",
         "tools/call",
     ], "a 404 on the old session opens a new one, once"
-    assert server.headers[-1]["mcp-session-id"] == "srv-session-2", "and calls on it"
+    assert rig.server.headers[-1]["mcp-session-id"] == "srv-session-2", "and calls on it"
     assert "Acme renewed in May" in briefing, "the turn still gets its answer"
 
 
 async def test_fetch_keeps_each_tokens_session_apart() -> None:
-    """Two credentials for one server never share an MCP session, whatever their version."""
-    server = FakeServer()
-    token = ["tok-1"]
-
-    async def load(
-        *, tenant_id: uuid.UUID, agent_id: uuid.UUID
-    ) -> tuple[ResolvedMcpCredential, ...]:
-        return (ResolvedMcpCredential(mcp_server_url=URL, token=token[0], version="v1"),)
-
-    fetch = build_turn_context_fetch(
-        McpContextSettings(enabled=True),
-        credentials=load,
-        id_key=KEY,
-        transport=httpx.MockTransport(server.handle),
+    """Two credentials for one server never share an MCP session."""
+    rig = _rig()
+    await rig.warm()
+    rig.loader.credentials = (
+        ResolvedMcpCredential(mcp_server_url=URL, token="tok-2", version="v1"),
     )
-    assert fetch is not None
-    await _ask(fetch)
-    token[0] = "tok-2"
-    server.requests.clear()
-    server.headers.clear()
 
-    await _ask(fetch)
-
-    assert server.methods()[0] == "initialize", "another token opens its own session"
-    assert server.headers[-1]["mcp-session-id"] == "srv-session-2", "and calls on it"
+    assert await rig.ask() == "", "another token is a server not yet looked up"
+    await rig.settle()
+    assert rig.server.methods()[0] == "initialize", "it opens its own session"
+    rig.server.forget()
+    await rig.ask()
+    assert rig.server.headers[0]["mcp-session-id"] == "srv-session-2", "and calls on it"
 
 
-async def test_fetch_stops_asking_a_server_without_the_tool() -> None:
-    server = FakeServer(tools=[{"name": "search"}])
-    fetch = _fetch(server)
-
-    assert await _ask(fetch) == "", "no tool, no context"
-    assert "tools/call" not in server.methods(), "the message is never sent"
-    server.requests.clear()
-    assert await _ask(fetch) == "", "still no context"
-    assert server.requests == [], "a server without the tool is not contacted again soon"
-
-
-async def test_fetch_skips_servers_without_a_shared_token() -> None:
-    server = FakeServer()
-    briefing = await _ask(_fetch(server, credentials=()))
-    assert briefing == "", "an OAuth-only or anonymous server is never asked"
-    assert server.requests == [], "and is not contacted at all"
+async def test_fetch_skips_servers_without_a_shared_token_for_a_minute() -> None:
+    rig = _rig(loader=Loader(credentials=()))
+    assert await rig.ask() == "", "an OAuth-only or anonymous server is never asked"
+    assert await rig.ask() == ""
+    assert rig.server.requests == [], "and is not contacted at all"
+    assert rig.loader.reads == 1, "the missing token is remembered for a while"
 
 
 async def test_fetch_skips_a_server_the_turn_may_not_call() -> None:
-    server = FakeServer()
+    rig = _rig()
 
     async def refused(server_name: str, tool_name: str) -> bool:
         return False
 
-    assert await _ask(_fetch(server), permitted=refused) == "", "not permitted, no context"
-    assert server.requests == [], "and the server is not contacted"
+    assert await rig.ask(permitted=refused) == "", "not permitted, no context"
+    await rig.settle()
+    assert rig.server.requests == [], "and the server is not even looked up"
 
 
 async def test_fetch_adds_nothing_from_a_slow_server_and_rests_it() -> None:
-    server = FakeServer(delay_s=0.5)
-    fetch = _fetch(server, timeout_s=0.05)
+    rig = _rig(timeout_s=0.05)
+    await rig.warm()
+    rig.server.delay_s = 0.5
 
-    assert await _ask(fetch) == "", "the turn does not wait past the timeout"
-    server.requests.clear()
-    server.delay_s = 0.0
-    assert await _ask(fetch) == "", "a failed server rests"
-    assert server.requests == [], "so a slow server cannot slow every turn"
+    assert await rig.ask() == "", "the turn does not wait past the timeout"
+    rig.server.forget()
+    rig.server.delay_s = 0.0
+    assert await rig.ask() == "", "a failed server rests"
+    assert rig.server.requests == [], "so a slow server cannot slow every turn"
 
 
 async def test_fetch_adds_nothing_whatever_goes_wrong() -> None:
@@ -401,47 +431,40 @@ async def test_fetch_adds_nothing_whatever_goes_wrong() -> None:
     async def broken_server(request: httpx.Request) -> httpx.Response:
         raise RuntimeError("unexpected")
 
-    async def stored(
-        *, tenant_id: uuid.UUID, agent_id: uuid.UUID
-    ) -> tuple[ResolvedMcpCredential, ...]:
-        return (CREDENTIAL,)
-
-    async def unreadable(
-        *, tenant_id: uuid.UUID, agent_id: uuid.UUID
-    ) -> tuple[ResolvedMcpCredential, ...]:
-        raise RuntimeError("database down")
+    class Unreadable(Loader):
+        async def __call__(
+            self, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+        ) -> tuple[ResolvedMcpCredential, ...]:
+            raise RuntimeError("database down")
 
     async def admission_changed(server_name: str, tool_name: str) -> bool:
         raise SessionBusyError(pending_reasons=("seal",), retry_after=datetime.now(UTC))
 
-    settings = McpContextSettings(enabled=True)
-    server_fails = build_turn_context_fetch(
-        settings, credentials=stored, id_key=KEY, transport=httpx.MockTransport(broken_server)
-    )
-    loader_fails = build_turn_context_fetch(settings, credentials=unreadable, id_key=KEY)
-    assert server_fails is not None and loader_fails is not None
-    assert await _ask(server_fails) == "", "a server that raises"
-    assert await _ask(loader_fails) == "", "a credential read that raises"
-    assert await _ask(_fetch(FakeServer()), permitted=admission_changed) == "", "a changed turn"
+    broken = _rig(transport=httpx.MockTransport(broken_server))
+    assert await broken.ask() == "", "a lookup that raises"
+    await broken.settle()
+    assert await broken.ask() == "", "and the server rests"
+    assert await _rig(loader=Unreadable()).ask() == "", "a credential read that raises"
+    assert await _rig().ask(permitted=admission_changed) == "", "a changed turn"
 
 
 async def test_fetch_only_for_listed_tenants() -> None:
-    server = FakeServer()
-    fetch = _fetch(server, tenants=[str(TENANT)])
-    assert await _ask(fetch, tenant_id=uuid.uuid4()) == "", "another tenant asks nothing"
-    assert server.requests == [], "and contacts no server"
-    assert await _ask(fetch) != "", "a listed tenant is asked"
+    rig = _rig(tenants=[str(TENANT)])
+    assert await rig.ask(tenant_id=uuid.uuid4()) == "", "another tenant asks nothing"
+    await rig.settle()
+    assert rig.server.requests == [] and rig.loader.reads == 0, "and reads nothing"
+    await rig.warm()
+    assert await rig.ask() != "", "a listed tenant is asked"
 
 
 def test_build_returns_none_when_disabled() -> None:
-    async def load(
-        *, tenant_id: uuid.UUID, agent_id: uuid.UUID
-    ) -> tuple[ResolvedMcpCredential, ...]:
-        raise AssertionError("never read")
-
-    assert build_turn_context_fetch(McpContextSettings(), credentials=load, id_key=KEY) is None, (
-        "off by default"
-    )
+    assert (
+        build_turn_context_fetch(
+            McpContextSettings(enabled=False), credentials=Loader(), id_key=KEY
+        )
+        is None
+    ), "the setting turns it off"
+    assert McpContextSettings().enabled, "on by default"
 
 
 async def test_tool_permission_decides_as_the_models_own_call_would() -> None:
