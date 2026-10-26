@@ -1094,13 +1094,16 @@ own words as `request_text` (`None` for an unprompted reply). Inside
 `persisted`, just before the send, `run_prepared_turn` sends them, without
 mentions and with a keyed per-server id for the thread, to each of the agent's
 MCP servers that has a shared token in `agent_mcp_credentials`, offers a
-`context` tool, and would be allowed the call unasked: on and not
-`always_ask` in the agent's toolset, an allow from `decide_tool_call` with agent rules, and an admission
-unchanged since the turn was prepared. Each non-empty answer goes in an
-untrusted `<mcp_context>` block. Each server gets at most `timeout_s`, and the
-turn's cancel ends the wait; its MCP session and tool list are reused for ten
-minutes, so a typical turn is one `tools/call`, and one that failed is skipped
-for a minute. Routines, hand-offs, held, shared and sealed turns ask nothing.
+`context` tool (a string `prompt` and `session`), and would be allowed the call
+unasked: on and not `always_ask` in the agent's toolset, an allow from
+`decide_tool_call` with agent rules, and an admission unchanged since the turn
+was prepared. Each non-empty answer goes in an untrusted `<mcp_context>` block.
+The setting is on by default, so a server is first looked up in a background
+task no turn waits on; one without the tool is then skipped for six hours, and
+a server without a shared token for a minute, before any read. Each server
+that offers it gets at most `timeout_s`, and the turn's cancel ends the wait;
+its MCP session and tool list are reused for ten minutes, so a typical turn is
+one `tools/call`, and one that failed is skipped for a minute. Routines, hand-offs, held, shared and sealed turns ask nothing.
 A recovery re-run asks inside its own lease; on the same admission it re-sends
 the same answers.
 

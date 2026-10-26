@@ -43,8 +43,8 @@ organisation a Teams deployment serves), daimon stores:
 - **Agent credentials** — any bound external credentials (e.g. a GitHub
   personal access token used by `get_cli_token`), encrypted at rest.
 
-When the operator turns on per-turn context (`DAIMON_MCP_CONTEXT__ENABLED`), each
-chat message addressed to the agent is also sent, without mentions and with an
+With per-turn context on (`DAIMON_MCP_CONTEXT__ENABLED`, the default), each chat
+message addressed to the agent is also sent, without mentions and with an
 opaque id for its thread, to the agent's MCP servers that were connected with a
 shared token and offer a context tool. Discord messages queued while the agent
 was busy go together, each with its author's display name when there are several.
