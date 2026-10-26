@@ -368,6 +368,8 @@ class DiscordDriver:
         self, *, workspace_id: str, channel_id: str, user_id: str, text: str
     ) -> discord.Message:
         message = MagicMock(spec=discord.Message)
+        # Keep request identity concrete when a reused session renders a delta.
+        message.id = int(channel_id) + 1
         message.content = f"<@999> {text}"
         message.author = MagicMock()
         message.author.bot = False
