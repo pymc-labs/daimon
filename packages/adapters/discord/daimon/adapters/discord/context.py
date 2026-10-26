@@ -13,6 +13,7 @@ from datetime import timedelta
 from xml.sax.saxutils import escape, quoteattr
 
 import structlog
+from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.vision import is_oversized_image, is_vision_image_attachment
 from daimon.core.media.vision import MAX_VISION_IMAGE_DIMENSION
 from daimon.core.turn_keys import render_keys_element
@@ -107,7 +108,11 @@ _DELIVERY_HINT = (
     "addressed to you, and that other threads are separate conversations; never say it did "
     "not reach you or that you did not receive it. When the user_query has a reply_to id, "
     "the person is replying to that message: find it by that id in the history or in the "
-    "reply_targets block, and answer about that message, not the latest one"
+    "reply_targets block, and answer about that message, not the latest one. "
+    "The user_query message_id and channel_id identify the request message itself and "
+    "where the human posted it, which may differ from your response thread. For merged "
+    "requests, query_sources lists each original message with its own message_id, "
+    "channel_id, text and optional reply_to; cite those ids for each source"
 )
 
 
@@ -324,6 +329,15 @@ def _render_message(
     return lines
 
 
+def _request_identity_attrs(message: discord.Message) -> str:
+    """Button input IDs identify interactions, not citable Discord messages."""
+    if isinstance(message, ButtonMessage):
+        return ' kind="button"'
+    return (
+        f" message_id={quoteattr(str(message.id))} channel_id={quoteattr(str(message.channel.id))}"
+    )
+
+
 def _render_user_query(
     trigger: discord.Message,
     bot_user_id: int | None,
@@ -332,22 +346,27 @@ def _render_user_query(
     is_admin: bool,
     unprompted: bool = False,
     query_text: str | None = None,
-    single_query: bool = True,
+    query_messages: Sequence[discord.Message] = (),
 ) -> str:
     """Render the ``<user_query>`` element for a turn's trigger message.
 
-    ``reply_to`` names the message the trigger replies to. A composite query of
-    several messages carries none (``single_query=False``): which of them
-    replied to what is told by the ``<reply_targets>`` block instead.
+    ``reply_to`` names the message the trigger replies to. A composite query
+    carries no single ``reply_to``: ``query_sources`` maps each request to its
+    target, and ``<reply_targets>`` supplies the targets' content.
+
+    ``message_id`` and ``channel_id`` identify the human's actual message,
+    independently of the response thread. Composite ``query_sources`` retain
+    every source's identity and text, including repeated text and non-replies.
 
     All three builders use this renderer so initial, delta and reseeded
     context carry the same author, timestamp and permission attributes.
     ``is_admin`` uses the lowercase literal ``"true"``/``"false"`` so the
     model knows whether the caller can make an admin-gated change.
     """
-    reply_to = _reply_target_id(trigger) if single_query else None
+    composite = len(query_messages) > 1
+    reply_to = _reply_target_id(trigger) if not composite else None
     attrs = (
-        f" author_name={quoteattr(trigger.author.display_name)}"
+        _request_identity_attrs(trigger) + f" author_name={quoteattr(trigger.author.display_name)}"
         f" user_id={quoteattr(str(trigger.author.id))}"
         f" timestamp={quoteattr(trigger.created_at.isoformat())}"
         f" is_admin={quoteattr('true' if is_admin else 'false')}"
@@ -361,6 +380,18 @@ def _render_user_query(
             bot_display_name=bot_display_name,
         )
     )
+    if composite:
+        sources: list[str] = []
+        for message in query_messages:
+            target_id = _reply_target_id(message)
+            source_attrs = _request_identity_attrs(message) + (
+                f" reply_to={quoteattr(str(target_id))}" if target_id is not None else ""
+            )
+            text = escape(
+                _strip_bot_mention(message.content, bot_user_id, bot_display_name=bot_display_name)
+            )
+            sources.append(f"<message{source_attrs}>{text}</message>")
+        content += "<query_sources>" + "".join(sources) + "</query_sources>"
     return f"<user_query{attrs}>{content}</user_query>"
 
 
@@ -479,7 +510,7 @@ async def build_context_xml(
             is_admin=is_admin,
             unprompted=unprompted,
             query_text=query_text,
-            single_query=len(queries) == 1,
+            query_messages=queries,
         )
     )
 
@@ -606,7 +637,7 @@ async def build_delta_xml(
             is_admin=is_admin,
             unprompted=unprompted,
             query_text=query_text,
-            single_query=len(queries) == 1,
+            query_messages=queries,
         )
     )
 
@@ -624,6 +655,9 @@ async def build_channel_context_xml(
     omit_oversized_image_urls: bool = False,
     is_admin: bool = False,
     key_names: Sequence[str] = (),
+    query_text: str | None = None,
+    query_message_ids: Sequence[int] = (),
+    query_messages: Sequence[discord.Message] = (),
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from parent channel history for a channel-mention turn.
 
@@ -690,7 +724,9 @@ async def build_channel_context_xml(
 
     messages = recent
     messages.sort(key=lambda m: m.created_at)
-    messages = [m for m in messages if m.id != trigger.id]
+    queries = tuple(query_messages) or (trigger,)
+    excluded_ids = {trigger.id, *query_message_ids, *(m.id for m in queries)}
+    messages = [m for m in messages if m.id not in excluded_ids]
 
     image_atts: list[discord.Attachment] = [
         att for msg in messages for att in msg.attachments if is_vision_image_attachment(att)
@@ -718,7 +754,7 @@ async def build_channel_context_xml(
     lines.extend(
         await _reply_target_lines(
             channel,
-            (trigger,),
+            queries,
             {m.id for m in messages},
             bot_user_id=bot_user_id,
             bot_display_name=bot_display_name,
@@ -731,7 +767,12 @@ async def build_channel_context_xml(
     lines.append("")
     lines.append(
         _render_user_query(
-            trigger, bot_user_id, bot_display_name=bot_display_name, is_admin=is_admin
+            trigger,
+            bot_user_id,
+            bot_display_name=bot_display_name,
+            is_admin=is_admin,
+            query_text=query_text,
+            query_messages=queries,
         )
     )
 

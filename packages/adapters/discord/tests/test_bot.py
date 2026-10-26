@@ -2926,3 +2926,28 @@ async def test_replay_does_not_repeat_a_provisioning_notice(
     await bot.on_message(message, startup_replay=True)
     message.channel.send.assert_awaited_once()
     assert "setting up" in message.channel.send.await_args.args[0]
+
+
+async def test_queue_keeps_original_messages_with_identical_text() -> None:
+    bot = make_bot(_make_runtime(MagicMock()))
+    first = _make_channel_message(content="remember this", channel_id=800)
+    first.id = 31
+    second = _make_channel_message(content="remember this", channel_id=900)
+    second.id = 32
+    bot._pending[900] = [first, second]  # pyright: ignore[reportPrivateUsage]
+
+    with (
+        patch.object(bot, "_handle_mention", new_callable=AsyncMock) as handle,
+        patch.object(bot, "_clear_queued_reactions", new_callable=AsyncMock),
+    ):
+        await bot._drain_pending_mentions(900, "123456", uuid.uuid4())  # pyright: ignore[reportPrivateUsage]
+
+    handle.assert_awaited_once()
+    assert handle.await_args.args[0] is first
+    sources = handle.await_args.kwargs["query_messages"]
+    assert len(sources) == 2
+    assert sources[0] is first
+    assert sources[1] is second
+    assert [(m.id, m.channel.id) for m in sources] == [(31, 800), (32, 900)]
+    assert handle.await_args.kwargs["admitted_message_ids"] == ("31", "32")
+    assert handle.await_args.kwargs["content_override"] == "remember this\n\nremember this"

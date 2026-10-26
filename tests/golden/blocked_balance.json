@@ -43,7 +43,9 @@
           "\ud83d\udc40"
         ],
         "kwargs": {},
-        "receiver": null
+        "receiver": {
+          "id": "1000000"
+        }
       },
       "platform": "platform_client",
       "result": null
@@ -316,7 +318,9 @@
           }
         ],
         "kwargs": {},
-        "receiver": null
+        "receiver": {
+          "id": "1000000"
+        }
       },
       "platform": "platform_client",
       "result": null

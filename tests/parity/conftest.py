@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import os
 from collections.abc import AsyncIterator
+from itertools import count
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +55,12 @@ def driver(request: pytest.FixtureRequest) -> PlatformDriver:
     if request.param == "slack":
         return SlackDriver()
     return TeamsDriver()
+
+
+@pytest.fixture(autouse=True)
+def _discord_request_ids(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Request IDs stay unique across driver instances and stable across replays."""
+    monkeypatch.setattr(DiscordDriver, "_request_ids", count(1_000_000))
 
 
 @pytest.fixture(autouse=True)
