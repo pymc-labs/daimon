@@ -112,7 +112,8 @@ class CodingKeysView(PanelViewBase):
 
     async def _show(self, interaction: discord.Interaction, *, page: int) -> None:
         """Re-read the list live and show `page` of it; a viewer who lost access is turned away."""
-        await interaction.response.defer()
+        if not interaction.response.is_done():
+            await interaction.response.defer()
         view = await load_coding_keys_view(
             interaction,
             runtime=self.runtime,

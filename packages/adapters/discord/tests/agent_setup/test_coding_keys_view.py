@@ -158,13 +158,24 @@ async def test_an_owner_revokes_their_own_key_from_the_list(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     await world.build()
-    monkeypatch.setattr(CodingKeysView, "swap_to", AsyncMock())
+    swap = AsyncMock()
+    monkeypatch.setattr(CodingKeysView, "swap_to", swap)
     view = await world.view(as_account=world.owner.id, interaction=_member_interaction())
     assert view is not None
 
-    await view._on_revoke(  # pyright: ignore[reportPrivateUsage]
-        _member_interaction(), jti=world.owner_key
-    )
+    # A real interaction can be deferred once: the refreshed list must not defer again.
+    click = _member_interaction()
+    deferred: list[bool] = []
+
+    async def defer_once(*_args: object, **_kwargs: object) -> None:
+        if deferred:
+            raise AssertionError("deferred twice")
+        deferred.append(True)
+
+    click.response.defer = AsyncMock(side_effect=defer_once)
+    click.response.is_done = lambda: bool(deferred)
+    await view._on_revoke(click, jti=world.owner_key)  # pyright: ignore[reportPrivateUsage]
+    swap.assert_awaited()  # the list was shown again after the revoke
 
     async with world.runtime.sessionmaker() as session:
         row = await get_mcp_token(session, jti=world.owner_key)
