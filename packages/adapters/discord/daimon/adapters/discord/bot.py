@@ -6123,7 +6123,9 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     thread_id=str(thread.id),
                     external_user_id=str(message.author.id),
-                    context_mention_ids=tuple(str(u.id) for u in message.mentions if not u.bot),
+                    context_mention_ids=tuple(
+                        str(u.id) for u in message.mentions if not getattr(u, "bot", True)
+                    ),
                     context_message_text=message.content,
                     user_message=(
                         render_turn_origin(
