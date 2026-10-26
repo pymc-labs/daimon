@@ -68,8 +68,21 @@ def build_cascade_preview_container(
         will_happen_rows.append(
             f"-# Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
         )
+    if preview.mux_slots.count > 0:
+        n = amount(preview.mux_slots.count, "saved conversation")
+        will_happen_rows.append(f"-# 💬 Delete Daimon's copy of {n}, with its messages")
     if preview.account.count > 0:
         will_happen_rows.append("-# 🪪 Remove your account")
+
+    shared_conversations = preview.retained_shared_conversations.count
+    shared_rows = (
+        [
+            f"-# Your messages in {amount(shared_conversations, 'shared conversation')}"
+            " stay for the people still using them."
+        ]
+        if shared_conversations > 0
+        else []
+    )
 
     body_rows: list[str] = [
         "⚡ **What will happen**",
@@ -79,6 +92,7 @@ def build_cascade_preview_container(
         "📋 **What is intentionally kept elsewhere**",
         "",
         "-# Usage records are retained for service integrity and cannot be erased on request.",
+        *shared_rows,
         "-# Uploaded skill files stay in Managed Agents; shared agents may keep using them.",
         "-# The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",

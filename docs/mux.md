@@ -638,6 +638,50 @@ check. Tenantless established creation uses a named legacy host capability.
 Workspace export/restore remain unsupported lifecycle methods and fail explicitly. The driver keeps no operation cache
 and makes no request during construction.
 
+## Account erasure
+
+Account deletion (`purge_account`) erases an account's private mux state in the same
+transaction as the account itself, and the privacy preview counts the same inventory
+(`daimon.core.stores.mux_erasure`). The mux tables carry the owner as plain text with
+no foreign key to `accounts`, so the inventory selects by those columns, in every
+tenant, and never by searching JSON:
+
+| Erased | Selected by |
+| --- | --- |
+| private slots, their binding generations, journal sessions, projections and events | `provider_binding_slot.account_id` is the account |
+| leases, pending provider-release requests | `thread_lease.account_id`, `thread_provider_release.account_id` |
+| operations | `operation.account_id` is the account, or `operation.principal_id` is one of its principals, unless the operation ran against a shared slot |
+
+Kept: shared slots (`account_id` NULL) and everything under them, other accounts' rows,
+the operations the person ran against a shared slot (the preview counts them as
+retained shared conversations), and synthetic billing operations
+(`selfhosted-billing:<binding id>`), which no account or principal matches. A private
+slot's `account_id` is never cleared: NULL means shared.
+
+`usage_observation` and `accounting_outbox` are financial evidence and survive. They no
+longer cascade from the slot (migration `0142_mux_account_erasure` drops those two
+foreign keys; the tenant foreign key still removes them with the tenant). For each
+erased slot that has usage rows, `accounting_binding_context` keeps the binding id,
+tenant, platform, channel and profiles, which is all settlement reads from the binding,
+so the pending-usage drain, `apply_usage_outbox` and replays behave as before and a
+revision is still debited once. The usage rows, and the billing-context operations that
+settle them, keep the session reference they were recorded with, which includes the
+erased account's id.
+
+After the purge the account is fenced. Binding publication, lease acquire and renew,
+operation begin, claim and result, journal append (which also carries recovery
+imports), usage recording and release requests call `mux_erasure.fence_writers`
+first. It takes the account's advisory lock shared; purge holds the same lock
+exclusive for its whole transaction, so a write either finishes before the purge and
+is erased with the rest, or starts after it and is refused (`ScopeViolation`, "the
+account was erased") because the account is in `erased_account`. Lock order in a
+transaction: the account lock, then tenant-level locks, then row locks. Shared slots,
+other accounts, ids that are not account UUIDs (operator and billing identities) and
+the in-memory store are never fenced. A turn still running when its account is erased
+fails at its next write; its usage after that point is not recorded.
+
+`thread_sessions`, the legacy mapping, is outside this inventory.
+
 ## Accounting observations
 
 The Anthropic usage driver converts each model-request end event into one

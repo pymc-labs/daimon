@@ -38,6 +38,7 @@ from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
+from daimon.core.stores import mux_erasure as mux_erasure_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import selfhosted_resources as selfhosted_store
@@ -98,6 +99,20 @@ class PurgePreview(BaseModel):
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     microsoft_user_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    # Provider-neutral conversation state erased with the account (stores.mux_erasure),
+    # one row per PurgeReport mux field.
+    mux_slots: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    mux_binding_generations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    mux_journal_sessions: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    mux_journal_events: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    mux_leases: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    mux_release_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    mux_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    # What stays, so the confirmation can say so: conversations other people share with
+    # the person (and the person's requests in them), and settlement records.
+    retained_shared_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    retained_shared_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    retained_accounting_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def summary_line(preview: PurgePreview) -> str:
@@ -121,6 +136,8 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.platform_user_names, "remembered name"),
         (preview.teams_messages, "message record"),
         (preview.microsoft_user_tokens, "saved Microsoft account"),
+        (preview.mux_slots, "saved conversation"),
+        (preview.mux_journal_events, "saved conversation message"),
     )
     parts = [
         "saved settings"
@@ -452,6 +469,9 @@ async def collect_purge_preview(
                         session, tenant_id=pp.tenant_id, user_id=pp.external_id
                     )
                 )
+        mux = await mux_erasure_store.inventory(
+            session, account_id=account_id, principal_ids=[p.id for p in (*cli_list, *pp_list)]
+        )
         direct_message_count = await direct_messages_store.count_conversations_for_account(
             session, account_id=account_id
         )
@@ -491,4 +511,20 @@ async def collect_purge_preview(
         platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
         teams_messages=PurgePreviewRow(count=teams_messages_total, example=None),
         microsoft_user_tokens=PurgePreviewRow(count=microsoft_user_tokens_total, example=None),
+        mux_slots=PurgePreviewRow(count=mux.erased.slots, example=None),
+        mux_binding_generations=PurgePreviewRow(count=mux.erased.binding_generations, example=None),
+        mux_journal_sessions=PurgePreviewRow(count=mux.erased.journal_sessions, example=None),
+        mux_journal_events=PurgePreviewRow(count=mux.erased.journal_events, example=None),
+        mux_leases=PurgePreviewRow(count=mux.erased.leases, example=None),
+        mux_release_requests=PurgePreviewRow(count=mux.erased.release_requests, example=None),
+        mux_operations=PurgePreviewRow(count=mux.erased.operations, example=None),
+        retained_shared_conversations=PurgePreviewRow(
+            count=mux.retained.shared_conversations, example=None
+        ),
+        retained_shared_operations=PurgePreviewRow(
+            count=mux.retained.shared_operations, example=None
+        ),
+        retained_accounting_records=PurgePreviewRow(
+            count=mux.retained.accounting_records, example=None
+        ),
     )

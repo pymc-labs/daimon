@@ -5,6 +5,17 @@ receipts. The tenant’s shared agent and environment records remain available.
 Personal resource writes take the account-erasure lock and reject erased accounts,
 so an in-flight mutation cannot leave a new personal receipt after erasure.
 
+Account erasure also removes the account's private provider-neutral conversation
+state: every private binding slot with its binding generations, journal sessions,
+projections and events, plus its leases, pending provider-release requests and
+operations. Slots, operations and leases are found by the account id they store as
+text, in every tenant, not through the account's current principals. The preview
+counts exactly what the purge removes. Shared conversation slots, and the operations
+the person ran against them, are kept; usage observations and accounting outbox rows
+are kept as financial evidence and keep settling (see
+[Account erasure](mux.md#account-erasure)). After the purge the account is fenced:
+no retained scope, lease or session writes for it.
+
 For a selected `selfhosted.loop` profile that passes capability admission, the
 host resolves the agent and environment from tenant-scoped Postgres resource
 ports. Identity and channel-access checks precede resolution; agent policy and

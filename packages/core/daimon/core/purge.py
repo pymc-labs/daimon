@@ -52,6 +52,12 @@ principal UUID. The orchestrator dispatches manually rather than via a unified
 Protocol.
 
 Deliberate carve-outs:
+- Provider-neutral (mux) state: a person's private slots, with their binding generations,
+  journal, leases, operations and release requests, are erased with the account, and the
+  account is fenced so no retained scope or lease writes again (`stores.mux_erasure`).
+  Shared slots and the operations a person ran against them stay, as do the usage
+  observations and accounting outbox rows of the erased slots: the tenant still settles
+  from them. Purge reports them as retained rather than removing them.
 - Shared setup conversations retain their binding and other participants' work;
   account deletion removes creator attribution through ON DELETE SET NULL.
   Short-lived turn origins are removed through the account's ON DELETE CASCADE,
@@ -128,6 +134,7 @@ from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
+from daimon.core.stores import mux_erasure as mux_erasure_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import privacy_session_deletes as privacy_deletes_store
 from daimon.core.stores import routines as routines_store
@@ -179,6 +186,14 @@ class PurgeReport(BaseModel):
     platform_user_names: int = 0
     teams_messages: int = 0
     microsoft_user_tokens: int = 0
+    # The account's private provider slots and what hangs off them (stores.mux_erasure).
+    mux_slots: int = 0
+    mux_binding_generations: int = 0
+    mux_journal_sessions: int = 0
+    mux_journal_events: int = 0
+    mux_leases: int = 0
+    mux_release_requests: int = 0
+    mux_operations: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -211,6 +226,13 @@ class PurgeReport(BaseModel):
             platform_user_names=self.platform_user_names + other.platform_user_names,
             teams_messages=self.teams_messages + other.teams_messages,
             microsoft_user_tokens=self.microsoft_user_tokens + other.microsoft_user_tokens,
+            mux_slots=self.mux_slots + other.mux_slots,
+            mux_binding_generations=self.mux_binding_generations + other.mux_binding_generations,
+            mux_journal_sessions=self.mux_journal_sessions + other.mux_journal_sessions,
+            mux_journal_events=self.mux_journal_events + other.mux_journal_events,
+            mux_leases=self.mux_leases + other.mux_leases,
+            mux_release_requests=self.mux_release_requests + other.mux_release_requests,
+            mux_operations=self.mux_operations + other.mux_operations,
         )
 
 
@@ -221,6 +243,11 @@ class AccountPurgeResult(BaseModel):
 
     db: PurgeReport
     sessions: SessionDeletionReport = Field(default_factory=SessionDeletionReport)
+    # What the account's erasure left in the mux tables: shared conversations and
+    # settlement evidence (see `daimon.core.stores.mux_erasure`).
+    mux_retained: mux_erasure_store.MuxRetained = Field(
+        default_factory=mux_erasure_store.MuxRetained
+    )
 
 
 # FK-safe order: routines -> principal_links -> principal row. Append new
@@ -511,6 +538,19 @@ async def purge_account(
         # Conversation/artifact records are purged. Conservative holds contain
         # financial attempt metadata, not conversation payload; retain them as
         # audit evidence rather than replenishing a cap when an account is erased.
+        # The account's private provider slots, journal, leases, operations and release
+        # requests. Shared conversations and settlement evidence stay (the retained
+        # counts say so). Before the account row goes: operations are also matched by
+        # the principals gathered above.
+        principal_ids = [principal.id for principal in (*cli_list, *pp_list)]
+        mux_retained = (
+            await mux_erasure_store.inventory(
+                session, account_id=account_id, principal_ids=principal_ids
+            )
+        ).retained
+        mux_erased = await mux_erasure_store.erase(
+            session, account_id=account_id, principal_ids=principal_ids
+        )
         gemini_records_count = await gemini_state_store.delete_records_for_account(
             session, account_id=account_id
         )
@@ -574,8 +614,17 @@ async def purge_account(
             if github_account_link is not None and account_count
             else 0
         )
+        if account_count or mux_erased.total or mux_retained.total:
+            await mux_erasure_store.mark_erased(session, account_id=account_id)
         db_report = report.merge(
             PurgeReport(
+                mux_slots=mux_erased.slots,
+                mux_binding_generations=mux_erased.binding_generations,
+                mux_journal_sessions=mux_erased.journal_sessions,
+                mux_journal_events=mux_erased.journal_events,
+                mux_leases=mux_erased.leases,
+                mux_release_requests=mux_erased.release_requests,
+                mux_operations=mux_erased.operations,
                 mcp_tokens=mcp_tokens_count,
                 gemini_records=gemini_records_count,
                 selfhosted_operations=selfhosted_operations_count,
@@ -609,9 +658,9 @@ async def purge_account(
             anthropic, sm, account_id=account_id
         ):
             sessions = replace(sessions, upstream_error=True)
-        return AccountPurgeResult(db=db_report, sessions=sessions)
+        return AccountPurgeResult(db=db_report, sessions=sessions, mux_retained=mux_retained)
 
-    return AccountPurgeResult(db=db_report)
+    return AccountPurgeResult(db=db_report, mux_retained=mux_retained)
 
 
 async def retry_account_session_delete(

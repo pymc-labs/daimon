@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - On the opt-in mux turn path, a process killed without cleanup (out of memory, node loss) no longer holds its thread for five minutes: the thread lease now lasts 150 seconds and is renewed every 30, so the next message in that thread waits at most 150 seconds. A turn also now rides out a brief database failure while renewing its lease instead of ending on the first error.
+- Deleting your account now also deletes Daimon's own copy of your private conversations on the provider-neutral turn path (GPT, Gemini and self-hosted agents, and Claude when that path is on): the stored messages, state, leases, retry records and pending provider switches for every private conversation, in every server. The privacy preview counts them, and says how many shared conversations stay for the people still using them. After deletion, no earlier turn or lease can write for the account. Usage records stay for billing and keep settling exactly once. Migration 0142 detaches usage rows from their conversation and adds an erased-account list; no existing row is changed.
+
 - Removed Fleet orchestration, worker tools, configuration and controls. Ordinary agents and provider switching remain available. Migration 0141 deletes Fleet-only history when separately applied; shared turn/accounting history remains.
 
 - `create_agent` now reads back as `get_agent` and `list_agents` do: an agent created on GPT or Gemini gives its `provider` and that provider's model as `active_model`, and `model` stays its own Claude model (it used to put the provider's model in `model`).

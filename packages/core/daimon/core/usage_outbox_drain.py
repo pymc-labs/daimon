@@ -39,7 +39,7 @@ async def drain_pending_usage(
         rows = await mux_state.pending_outbox_for_profiles(
             db, NO_INFRASTRUCTURE_PROFILES, limit=limit, after=_cursor
         )
-    last = rows[-1][0] if rows else None
+    last = rows[-1].row if rows else None
     _cursor = (
         (last.binding_id, last.observation_id, last.revision)
         if last is not None and len(rows) == limit
@@ -48,11 +48,12 @@ async def drain_pending_usage(
     applied, debited, skipped, estimated = 0, Decimal(0), 0, 0
     # An observation's newest revision carries its whole cost; older ones only close.
     counted: set[tuple[str, str]] = set()
-    for row, tenant_id, binding in rows:
+    for settlement in rows:
+        row, tenant_id = settlement.row, settlement.tenant_id
         observation = row.observation
-        infrastructure = known_infrastructure_usd(binding.profile)
+        infrastructure = known_infrastructure_usd(settlement.profile)
         price = (
-            provider_prices(binding.profile).get(
+            provider_prices(settlement.profile).get(
                 (observation.session.provider, observation.model.id)
             )
             if observation.model is not None
@@ -73,7 +74,7 @@ async def drain_pending_usage(
                     infrastructure_usd=infrastructure,
                     billing_grain=observation.grain,
                     markup=markup,
-                    channel_id=binding.thread.channel.channel_id,
+                    channel_id=settlement.channel_id,
                 )
         except Exception as error:  # one bad row must not stop the rest
             log.warning(
