@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Optional tenant-scoped pre-turn MCP context providers, configured with `daimon context-provider set`, with bounded fail-open calls and session acknowledgements.
+  Keep idle provider connections alive for 240 seconds so turns can reuse them.
 
 - Preserve Discord request message and channel IDs in turn context, including every
   source of a merged queued request, so agents can cite the original messages.

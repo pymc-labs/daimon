@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from unittest import mock
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core.authz import Subject
 from daimon.core.context_provider import (
+    KEEPALIVE_EXPIRY_SECONDS,
     ContextProviders,
     ContextRequest,
     ContextResponse,
@@ -231,6 +233,17 @@ async def test_concurrent_turns_serialize_hash_acceptance() -> None:
     await asyncio.gather(first_task, second_task)
     assert len(provider.requests) == 2
     assert provider.requests[-1].sent_hashes
+
+
+async def test_mcp_pool_keeps_idle_connections_between_turns() -> None:
+    with mock.patch("httpcore.AsyncConnectionPool") as pool:
+        pool.return_value.aclose = mock.AsyncMock()
+        provider = McpProvider()
+    assert pool.call_args.kwargs["keepalive_expiry"] == KEEPALIVE_EXPIRY_SECONDS
+    defaults = httpx.Limits()
+    assert pool.call_args.kwargs["max_connections"] == defaults.max_connections
+    assert pool.call_args.kwargs["max_keepalive_connections"] == defaults.max_keepalive_connections
+    await provider.aclose()
 
 
 @pytest.mark.parametrize("sse", [False, True])

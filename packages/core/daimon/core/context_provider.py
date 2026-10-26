@@ -23,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
 
 log = structlog.get_logger(__name__)
 MAX_RESPONSE_BYTES = 65_536
+# Expire idle connections before the provider's 300-second keep-alive.
+KEEPALIVE_EXPIRY_SECONDS = 240
 
 
 class ProviderConfig(BaseModel):
@@ -106,6 +108,7 @@ class McpProvider:
         # The imported constructor isolates this owner from other transports' overrides.
         self.client = AsyncClient(
             transport=transport,
+            limits=httpx.Limits(keepalive_expiry=KEEPALIVE_EXPIRY_SECONDS),
             verify=_ssl_context(),
             follow_redirects=False,
             trust_env=False,
