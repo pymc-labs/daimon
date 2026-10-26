@@ -209,6 +209,8 @@ class PreparedTurn:
     session_account_id: uuid.UUID
     _record: UsageRecorder | ObservationRecorder
     continuity: ContinuityOutcome = CONTINUED
+    # Capability decisions follow the session snapshot, including reused sessions.
+    session_model_id: str | None = field(default=None, kw_only=True)
     _finalize: Callable[[], Awaitable[None]] | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
@@ -1734,6 +1736,7 @@ async def bind_session_impl(
                     model_id=fresh.snapshot.pricing_id,
                     channel_id=admission.budget_channel_id,
                 ),
+                session_model_id=fresh.snapshot.pricing_id,
                 session_ref=resource_ref(backend, "session", fresh.ma_session_id, scope=scope),
                 _scope=scope,
             )

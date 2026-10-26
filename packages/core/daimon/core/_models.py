@@ -4701,3 +4701,21 @@ class LongJobCancelAuditRecord(Base):
     requested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class ContextProviderBinding(Base):
+    """Admin-owned pre-turn provider; empty selectors are the tenant default."""
+
+    __tablename__ = "context_provider_bindings"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "channel_id", "agent_id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    channel_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    agent_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    updated_by: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

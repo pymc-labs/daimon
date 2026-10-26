@@ -175,14 +175,14 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 
 | Package | Path | Owns |
 | --- | --- | --- |
-| `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, MA helpers, the turn pipeline. Imports no adapter. |
+| `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, MA helpers, the turn pipeline and pre-turn context providers. Imports no adapter. |
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text and `/` commands answered privately (`private_replies.py`) and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Signed callback ingress and bounded poll scheduling; no turns or provider credentials. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | Routine dispatch, long-job workers and maintenance sweeps. |
-| `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
+| `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary, including `context-provider set` bindings. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
 | `mux` | `packages/mux/` | A separate namespace, not part of `daimon`: the provider-neutral managed-agent contract. Not called by Daimon yet. See [mux.md](mux.md). |
 | `notebook_host`, `report_host` | `apps/*/src/` | Standalone services that talk to Daimon over HTTP only. |
@@ -1086,6 +1086,74 @@ is a backstop against an MA session that never leaves `running`, not a latency
 target; legitimate turns that fit a model or build a notebook run for many
 minutes. `admit()` sits deliberately outside it.
 
+### Pre-turn context providers
+
+Before the driver sends inference input, `core/context_provider.py` loads an
+optional binding through `core/stores/context_providers.py`. Bindings select one
+provider by channel and MA agent: channel+agent, channel, agent, then tenant.
+An explicitly disabled override stops fallback. With no binding the input is
+unchanged. Discord supplies raw message text and ordered non-bot mentions;
+other surfaces supply no mentions or raw text. The hook currently serves
+Managed Agents sessions, including replacement sessions during recovery.
+For DMs, `channel_id` carries `private_dm_id` when known, otherwise the admitted
+`dm:` scope ID. `thread_id` carries the adapter's DM conversation identity,
+which is likewise the private DM ID when known or the `dm:` scope ID. These
+values identify the destination; the provider must still verify the requester.
+
+A deployment operator can bind a provider with:
+
+```bash
+daimon context-provider set provider.json --tenant TENANT_UUID --channel CHANNEL_ID --agent MA_AGENT_ID
+```
+
+Omit either selector for a broader binding. This is a deployment-operator CLI:
+shell access to the configured host is the gate. The store also rejects setters
+without human-admin authority and setters using agent keys; the CLI supplies
+operator authority. To disable a binding, set `"enabled": false` in its JSON and
+run the same command with the same selectors. There is no delete command;
+a disabled override continues to stop fallback. Example `provider.json`:
+
+```json
+{
+  "transport": "mcp",
+  "endpoint": "https://provider.example/mcp",
+  "bearer_env": "DAIMON_CONTEXT_00000000000000000000000000000001_BRIDGE",
+  "enabled": true
+}
+```
+
+The bearer environment name must start with `DAIMON_CONTEXT_`, followed by the
+tenant UUID without hyphens in uppercase, then `_`. The secret stays in the
+host environment and is never stored in the binding. The provider verifies
+caller, server, requester and destination; request metadata grants no placement
+authority. Endpoints require HTTPS, with redirects and environment proxies off.
+Each provider owner keeps its own connection pool and refuses all cookies;
+authentication headers are set independently on every request. The process
+loads TLS roots once, outside the turn path, and reuses that SSL context when
+building further provider owners.
+The client posts MCP `tools/call` for `context_cards_for_turn` without initialize,
+for FastMCP `stateless_http=True, json_response=False`; both JSON and SSE replies
+must contain one JSON-RPC result with a v1 `ContextResponse` in `structuredContent`.
+
+The host allows 200 ms total for the configuration read, session lock and
+provider call, without retries. `timeout_ms` can lower this ceiling. It drops
+the entire response above 64 KiB (enforced while streaming), 2,500 turn tokens,
+or the independent system budget (1,000 by default, configurable up to 2,000
+with `system_max_tokens`). `max_tokens` can lower the turn budget. The host
+recomputes tokens as `ceil(chars / 3.5)`. A refusal, timeout, invalid response
+or exception produces a normal turn without context; failures log only tenant
+and exception class, never provider text, card IDs, sources or credentials.
+
+The turn fragment precedes user input. The once-only system fragment joins the
+system message, or precedes user input on models without system-message support.
+`PreparedTurn.session_model_id` carries the frozen session model for this
+capability decision, including when a reused session differs from its live agent.
+Acknowledgements advance only after inference input send succeeds. A new MA
+session starts fresh. Acknowledgements use a bounded process-local LRU (1,024
+sessions, 24 hours idle, at most 512 hashes each); restart or eviction can repeat
+cards. They are neither durable nor shared across workers, and do not cache
+provider authorization. Already injected historical content cannot be retracted.
+
 ### The driver
 
 `packages/core/daimon/core/turn/driver.py` opens the SSE stream, posts the
@@ -1813,6 +1881,10 @@ new session starts with nothing. A target its rules refuse here is refused by
 admission before any of this runs.
 
 ## Entry points that are not a chat message
+
+- **`daimon context-provider set`**, in
+  `packages/adapters/cli/daimon/adapters/cli/commands/context_provider.py`, binds
+  a pre-turn MCP provider as the deployment operator. It does not run a turn.
 
 - **Agent setup picture controls** show the current agent picture in Details.
   Admins get **Use default**, which restores the generated face. Custom

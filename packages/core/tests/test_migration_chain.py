@@ -77,7 +77,10 @@ REMOVAL_HEAD = "0146_remove_recruitment"
 LONG_JOBS_HEAD = "0147_long_jobs"
 
 
-HEAD = "0148_daimon_admins"
+ADMINS_HEAD = "0148_daimon_admins"
+
+
+HEAD = "0149_context_provider_bindings"
 
 
 CHAIN = [
@@ -97,6 +100,7 @@ CHAIN = [
     RECRUITMENT_HEAD,
     REMOVAL_HEAD,
     LONG_JOBS_HEAD,
+    ADMINS_HEAD,
     HEAD,
 ]
 
@@ -114,6 +118,7 @@ SANDBOX_COLUMNS = {
 
 TABLES = {
     "daimon_admins",
+    "context_provider_bindings",
     "selfhosted_agents",
     "selfhosted_environments",
     "selfhosted_resource_operations",
@@ -175,15 +180,25 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             RECRUITMENT_HEAD,
             REMOVAL_HEAD,
             LONG_JOBS_HEAD,
+            ADMINS_HEAD,
             HEAD,
         )
         else {name for name in TABLES if not name.startswith("lead_")}
     )
-    if expected not in (LONG_JOBS_HEAD, HEAD):
+    if expected not in (LONG_JOBS_HEAD, ADMINS_HEAD, HEAD):
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
     if expected != HEAD:
+        compared_tables = compared_tables - {"context_provider_bindings"}
+    if expected not in (ADMINS_HEAD, HEAD):
         compared_tables = compared_tables - {"daimon_admins"}
-    if expected not in (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, LONG_JOBS_HEAD, HEAD):
+    if expected not in (
+        SANDBOX_HEAD,
+        RECRUITMENT_HEAD,
+        REMOVAL_HEAD,
+        LONG_JOBS_HEAD,
+        ADMINS_HEAD,
+        HEAD,
+    ):
         compared_tables = compared_tables - {"routine_sandbox_history"}
 
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
@@ -208,6 +223,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             RECRUITMENT_HEAD,
             REMOVAL_HEAD,
             LONG_JOBS_HEAD,
+            ADMINS_HEAD,
             HEAD,
         ):
             return name not in SANDBOX_COLUMNS
@@ -220,7 +236,14 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     inspector = inspect(connection)
     constraints = {c["name"] for c in inspector.get_check_constraints("routines")}
     assert {"ck_routines_destination_kind", "ck_routines_dm_owner"} <= constraints
-    if expected in (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, LONG_JOBS_HEAD, HEAD):
+    if expected in (
+        SANDBOX_HEAD,
+        RECRUITMENT_HEAD,
+        REMOVAL_HEAD,
+        LONG_JOBS_HEAD,
+        ADMINS_HEAD,
+        HEAD,
+    ):
         # compare_metadata does not compare CHECK constraints.
         [via] = [
             c
@@ -362,8 +385,13 @@ async def test_deployed_upgrade_and_downgrade_paths(
             _assert_head(sync, LONG_JOBS_HEAD)
             command.upgrade(config, "head")
             _assert_head(sync)
+            command.downgrade(config, ADMINS_HEAD)
+            _assert_head(sync, ADMINS_HEAD)
+            assert not inspect(sync).has_table("context_provider_bindings")
             with pytest.raises(NotImplementedError, match="Delegation audit history"):
                 command.downgrade(config, LONG_JOBS_HEAD)
+            _assert_head(sync, ADMINS_HEAD)
+            command.upgrade(config, HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)
