@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
+from types import SimpleNamespace
 from typing import cast
 
 import httpx
@@ -50,8 +51,14 @@ def clients_for(
             )
             clients.append(self)
 
-    monkeypatch.setattr(deployment.httpx, "Client", OfflineSyncClient)
-    monkeypatch.setattr(deployment.httpx, "AsyncClient", OfflineClient)
+    # Scope the fake to Gemini: other host owners also construct HTTP clients.
+    monkeypatch.setattr(
+        deployment,
+        "httpx",
+        SimpleNamespace(
+            **(vars(httpx) | {"Client": OfflineSyncClient, "AsyncClient": OfflineClient})
+        ),
+    )
     return clients
 
 
@@ -227,3 +234,17 @@ async def test_ambient_override_refuses_before_owned_client_or_native_request(
         else:
             await transport.open_stream("native")
     assert clients == [] and calls == []
+
+
+async def test_gemini_fakes_leave_context_client_construction_intact(monkeypatch) -> None:
+    from daimon.core.context_provider import McpProvider
+
+    constructor = httpx.AsyncClient
+    clients = clients_for(monkeypatch, lambda request: httpx.Response(200, json={}))
+    assert httpx.AsyncClient is constructor
+    provider = McpProvider()
+    try:
+        assert isinstance(provider.client, constructor)
+        assert not clients
+    finally:
+        await provider.aclose()
