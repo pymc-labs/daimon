@@ -381,6 +381,13 @@ def create_mcp_app(
         ),
     )
 
+    identity = effective_settings.mcp_identity
+    relay_clients: dict[str, httpx.AsyncClient] = {}
+    if identity.servers and identity.signing_key is not None:
+        from daimon.adapters.mcp.identity_relay import build_relay_clients
+
+        relay_clients = build_relay_clients(identity.servers)
+
     @asynccontextmanager
     async def audit_lifespan(_server: FastMCP) -> AsyncIterator[None]:
         try:
@@ -401,6 +408,8 @@ def create_mcp_app(
             finally:
                 await identity_middleware.drain_audit()
                 await slack_http.close()
+                for client in relay_clients.values():
+                    await client.aclose()
 
     # Session state is keyed per request (StripSessionIdMiddleware, below) and
     # kept a day: bound it. Nothing needs it past the request.
@@ -566,8 +575,7 @@ def create_mcp_app(
         methods=["PUT"],
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
-    identity = effective_settings.mcp_identity
-    if identity.servers and identity.signing_key is not None:
+    if relay_clients and identity.signing_key is not None:
         from daimon.adapters.mcp.identity_relay import (
             RELAY_METHODS,
             RELAY_ROUTE,
@@ -584,8 +592,7 @@ def create_mcp_app(
                 tokens=IdentityTokenCache(
                     load_signing_key(identity.signing_key.get_secret_value())
                 ),
-                # No read timeout: a server's SSE stream stays open between events.
-                http=httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None)),
+                clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
             ),
             methods=RELAY_METHODS,
