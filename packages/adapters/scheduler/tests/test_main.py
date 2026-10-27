@@ -58,7 +58,7 @@ from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.accounts import delete_account
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import find_platform_principal
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.routines import create_routine, get_routine, update_routine
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.thread_sessions import create_thread_session
@@ -3088,9 +3088,6 @@ async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
             update={"destination_kind": "channel", "destination_id": channel, "channel_id": channel}
         )
 
-    unplaced_thread = row.model_copy(
-        update={"destination_kind": "thread", "destination_id": "thread-1", "channel_id": None}
-    )
     with (
         unittest.mock.patch(
             "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
@@ -3101,6 +3098,18 @@ async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
         await fire(to_channel("chan-shared"))
         await fire(to_channel("chan-private"))
         await fire(row)
+        async with db_session_factory.begin() as session:
+            await update_routine(
+                session,
+                row.id,
+                tenant_id=tenant.id,
+                destination_kind="thread",
+                destination_id="thread-1",
+                channel_id=None,
+                edited_by="u-owner",
+            )
+            unplaced_thread = await get_routine(session, row.id, tenant_id=tenant.id)
+        assert unplaced_thread is not None
         await fire(unplaced_thread)
     await fake_client.close()
 
