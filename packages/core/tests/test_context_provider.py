@@ -1193,3 +1193,358 @@ def test_context_place_type_is_required() -> None:
     payload.pop("place_type")
     with pytest.raises(ValueError):
         ContextRequest.model_validate(payload)
+
+
+class WarmClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.ticks: asyncio.Queue[None] = asyncio.Queue()
+        self.waiting: asyncio.Queue[None] = asyncio.Queue()
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        assert seconds == 20
+        self.waiting.put_nowait(None)
+        await self.ticks.get()
+
+    async def ready(self) -> None:
+        await asyncio.wait_for(self.waiting.get(), 1)
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+        self.ticks.put_nowait(None)
+
+
+@pytest.fixture
+def warm_clock(monkeypatch):
+    from types import SimpleNamespace
+
+    from daimon.core import context_provider as module
+
+    clock = WarmClock()
+    # Patch module references only; the event loop keeps its real clock/sleep.
+    monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(
+        module,
+        "asyncio",
+        SimpleNamespace(
+            create_task=asyncio.create_task,
+            timeout=asyncio.timeout,
+            sleep=clock.sleep,
+            gather=asyncio.gather,
+        ),
+    )
+    return clock
+
+
+async def test_keepwarm_preconnect_refresh_idle_and_same_pool(warm_clock, monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "context",
+                    "result": {"structuredContent": {"status": "empty"}},
+                },
+            )
+        return httpx.Response(503, content=b"unavailable", headers={"set-cookie": "secret=bad"})
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    original_client = provider.client
+    config = ProviderConfig(
+        endpoint="https://provider.invalid:8443/mcp?secret=hidden",
+        enabled=True,
+        bearer_env="DAIMON_CONTEXT_00000000000000000000000000000001_KEY",
+    )
+    configs = [
+        config,
+        config,
+        ProviderConfig(endpoint="http://skip.invalid", enabled=True),
+        ProviderConfig(endpoint="https://disabled.invalid", enabled=False),
+    ]
+    loads = 0
+
+    async def load():
+        nonlocal loads
+        loads += 1
+        return list(configs)
+
+    owner = ContextProviders(provider=provider)
+    with mock.patch.dict("os.environ", {}, clear=True):
+        owner.start(load)
+        owner.start(load)  # Exactly one task per owner.
+        await warm_clock.ready()
+    assert [(r.method, str(r.url)) for r in requests] == [
+        ("GET", "https://provider.invalid:8443/health")
+    ]
+    assert provider.client is original_client
+    assert "authorization" not in requests[0].headers
+    assert "cookie" not in requests[0].headers
+    assert requests[0].content == b""
+    monkeypatch.setenv(config.bearer_env, "test-key")
+    warm_clock.advance(180)
+    await warm_clock.ready()
+    assert len(requests) == 1
+    await provider(config, REQUEST)
+    assert requests[-1].headers["authorization"] == "Bearer test-key"
+    assert "cookie" not in requests[-1].headers
+    warm_clock.advance(180)
+    await warm_clock.ready()
+    assert len(requests) == 2  # Recent turn suppresses the ping.
+    warm_clock.advance(20)
+    await warm_clock.ready()
+    assert requests[-1].method == "GET"
+    assert "authorization" not in requests[-1].headers
+    configs[:] = [ProviderConfig(endpoint="https://new.invalid/other", enabled=True)]
+    warm_clock.advance(20)
+    await warm_clock.ready()
+    assert str(requests[-1].url) == "https://new.invalid/health"
+    configs.clear()
+    count = len(requests)
+    warm_clock.advance(220)
+    await warm_clock.ready()
+    assert loads == 6
+    assert len(requests) == count
+    await owner.aclose()
+    assert provider._keepwarm_task.done()
+    assert provider.client.is_closed
+    warm_clock.advance(220)
+    assert len(requests) == count
+
+
+async def test_keepwarm_failures_logged_and_retried(warm_clock) -> None:
+    attempts = 0
+    loads = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectError("private server details")
+
+    async def load():
+        nonlocal loads
+        loads += 1
+        if loads == 1:
+            raise RuntimeError("private database details")
+        return [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    with mock.patch("daimon.core.context_provider.log") as logger:
+        provider.start(load)
+        await warm_clock.ready()
+        warm_clock.advance(20)
+        await warm_clock.ready()
+        warm_clock.advance(200)
+        await warm_clock.ready()
+        assert attempts == 2
+        assert logger.warning.call_count == 3
+        assert "private" not in repr(logger.mock_calls)
+    await provider.aclose()
+
+
+async def test_keepwarm_close_cancels_inflight_ping() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return httpx.Response(200)
+
+    async def load():
+        return [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    provider.start(load)
+    await asyncio.wait_for(started.wait(), 1)
+    await asyncio.wait_for(provider.aclose(), 1)
+    assert cancelled.is_set()
+    assert provider.client.is_closed
+
+
+@pytest.mark.parametrize("phase", ["load", "ping"])
+async def test_keepwarm_timeout_is_bounded_and_swallowed(monkeypatch, warm_clock, phase) -> None:
+    from daimon.core import context_provider as module
+
+    monkeypatch.setattr(module, "KEEPWARM_TIMEOUT_SECONDS", 0.01)
+
+    async def handle(request):
+        await asyncio.Event().wait()
+
+    async def load():
+        if phase == "load":
+            await asyncio.Event().wait()
+        return [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    with mock.patch.object(module, "log") as logger:
+        provider.start(load)
+        await warm_clock.ready()
+        logger.warning.assert_called_once_with(
+            "context_provider.keepwarm_failed", error_class="TimeoutError"
+        )
+    await provider.aclose()
+
+
+async def test_provider_trace_logs_one_safe_timing_record(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from daimon.core import context_provider as module
+
+    monotonic = mock.Mock(side_effect=[0, 0, 0.002, 0.002, 0.009, 0.009, 0.020, 0.020])
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=monotonic))
+
+    async def handle(request):
+        trace = request.extensions["trace"]
+        for phase in [
+            "connection.connect_tcp",
+            "connection.start_tls",
+            "http11.receive_response_headers",
+        ]:
+            await trace(phase + ".started", {"headers": "private bearer"})
+            await trace(phase + ".complete", {"return_value": "private text"})
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": "context",
+                "result": {"structuredContent": {"status": "empty"}},
+            },
+        )
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    with mock.patch.object(module, "log") as logger:
+        await provider(
+            ProviderConfig(endpoint="https://provider.invalid/mcp?private=secret"), REQUEST
+        )
+        logger.info.assert_called_once()
+        args, fields = logger.info.call_args
+        assert args == ("context_provider.timing",)
+        assert fields["new_connection"] is True
+        assert fields["connect_ms"] == 2
+        assert fields["tls_ms"] == 7
+        assert fields["headers_ms"] == 11
+        assert fields["dns_ms"] is None
+        assert fields["connect_includes_dns"] is True
+        assert "private" not in repr(logger.mock_calls)
+    await provider.aclose()
+
+
+async def test_runtime_start_loads_bindings_in_owned_transaction(warm_clock) -> None:
+    from types import SimpleNamespace
+
+    from daimon.core.turn.deps import TurnDeps
+
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(204)
+
+    session = object()
+    transaction = mock.MagicMock()
+    transaction.__aenter__ = mock.AsyncMock(return_value=session)
+    transaction.__aexit__ = mock.AsyncMock()
+    sessionmaker = mock.Mock()
+    sessionmaker.begin.return_value = transaction
+    owner = ContextProviders(provider=McpProvider(httpx.MockTransport(handle)))
+    deps = SimpleNamespace(sessionmaker=sessionmaker, context_providers=owner)
+    with mock.patch.object(
+        context_providers, "warmup_configs", new_callable=mock.AsyncMock
+    ) as load:
+        load.return_value = [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+        TurnDeps.start_context_providers(deps)
+        # Synchronous startup only schedules work.
+        load.assert_not_awaited()
+        await warm_clock.ready()
+        load.assert_awaited_once_with(session)
+        transaction.__aexit__.assert_awaited_once()
+        assert str(requests[0].url) == "https://provider.invalid/health"
+    await owner.aclose()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_provider_trace_reused_connection_or_failure_logs_once(fails) -> None:
+    from daimon.core import context_provider as module
+
+    def handle(request):
+        if fails:
+            raise httpx.ConnectError("secret error")
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": "context",
+                "result": {"structuredContent": {"status": "empty"}},
+            },
+        )
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    config = ProviderConfig(endpoint="https://provider.invalid/mcp")
+    with mock.patch.object(module, "log") as logger:
+        if fails:
+            with pytest.raises(httpx.ConnectError):
+                await provider(config, REQUEST)
+        else:
+            await provider(config, REQUEST)
+        logger.info.assert_called_once()
+        assert logger.info.call_args.kwargs["new_connection"] is False
+        assert logger.info.call_args.kwargs["connect_ms"] == 0
+        assert logger.info.call_args.kwargs["tls_ms"] == 0
+        assert "secret" not in repr(logger.mock_calls)
+    await provider.aclose()
+
+
+@pytest.mark.parametrize("status", [302, 500])
+async def test_keepwarm_drains_health_body_without_following_redirects(warm_clock, status) -> None:
+    consumed = []
+    closed = asyncio.Event()
+    requests = []
+
+    class HealthBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for chunk in (b"one", b"two"):
+                consumed.append(chunk)
+                yield chunk
+
+        async def aclose(self):
+            closed.set()
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(
+            status, headers={"location": "https://other.invalid"}, stream=HealthBody()
+        )
+
+    async def load():
+        return [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    provider.start(load)
+    await warm_clock.ready()
+    assert consumed == [b"one", b"two"]
+    assert closed.is_set()
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://provider.invalid/health"
+    await provider.aclose()
+
+
+async def test_invalid_provider_endpoint_still_logs_one_timing_record() -> None:
+    from daimon.core import context_provider as module
+
+    provider = McpProvider(httpx.MockTransport(lambda _: httpx.Response(200)))
+    with mock.patch.object(module, "log") as logger:
+        with pytest.raises(httpx.InvalidURL):
+            await provider(ProviderConfig(endpoint="https://provider.invalid:invalid/mcp"), REQUEST)
+        logger.info.assert_called_once()
+        assert logger.info.call_args.args == ("context_provider.timing",)
+    await provider.aclose()

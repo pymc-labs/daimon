@@ -1131,7 +1131,17 @@ authority. Endpoints require HTTPS, with redirects and environment proxies off.
 Each provider owner keeps its own connection pool and refuses all cookies;
 authentication headers are set independently on every request. The process
 loads TLS roots once, outside the turn path, and reuses that SSL context when
-building further provider owners.
+building further provider owners. Discord, Slack, Teams and the scheduler start
+best-effort background pre-connects to enabled HTTPS binding origins at runtime
+startup. The same pooled client sends unauthenticated `GET /health` after about
+200 seconds without traffic, below its 240-second connection expiry and the
+provider's 300-second idle close. Health requests carry no credentials or
+session/tenant metadata, ignore status codes, and never follow redirects. The
+owner re-reads bindings every 20 seconds and stops on runtime shutdown; database
+reads and health requests have five-second limits and failures only log.
+Provider calls emit one timing record from the HTTP trace (connect including
+DNS, TLS, response-header wait, and whether a connection opened); DNS is null
+because the standard transport trace does not expose resolution separately.
 The client posts MCP `tools/call` for `context_cards_for_turn` without initialize,
 for FastMCP `stateless_http=True, json_response=False`; both JSON and SSE replies
 must contain one JSON-RPC result with a v1 `ContextResponse` in `structuredContent`.

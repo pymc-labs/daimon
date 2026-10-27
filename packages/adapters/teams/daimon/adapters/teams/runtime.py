@@ -188,6 +188,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
             resolver_cache=resolver_cache,
             billing_config=billing_config,
         )
+        turn_deps.start_context_providers()
         try:
             yield TeamsRuntime(
                 settings=settings,
@@ -202,6 +203,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
                 owner_key=owner_key,
             )
         finally:
+            await turn_deps.context_providers.aclose()
             await drain_outcomes()
             await drain_budget_notices()
             await engine.dispose()
