@@ -262,6 +262,7 @@ async def test_list_session_events_admits_thread_status_events_through_fastmcp(
             ),
         ),
     )
+
     def events(request: httpx.Request, _match: object) -> httpx.Response:
         event_reads.append(request.url.path)
         return httpx.Response(

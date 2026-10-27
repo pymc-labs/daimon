@@ -250,9 +250,7 @@ async def test_revoked_source_result_is_absent_from_next_isolated_session(
             changed = created.agent.model_copy(
                 update={"mcp_servers": [*created.agent.mcp_servers, other]}
             )
-        return created.model_copy(
-            update={"agent": changed}
-        )
+        return created.model_copy(update={"agent": changed})
 
     monkeypatch.setattr(sessions, "create_session_record", provider_ignores_override)
     with pytest.raises(ValueError, match="provider did not honor isolated session"):

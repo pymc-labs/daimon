@@ -766,7 +766,7 @@ async def _continue_turn_impl(
     require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
     if (session.metadata or {}).get(MA_METADATA_KEY_CONTEXT_ISOLATED) == "true":
-        raise ToolError("This conversation requires a fresh request. Start a new turn.")
+        raise ToolError("This conversation requires a fresh request. Start a new conversation.")
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)

@@ -376,7 +376,9 @@ async def test_isolated_relay_requires_a_live_requester_message(
     async with _relay(
         db_session_factory, upstream, generate_signing_key(), ISOLATED_SERVER
     ) as client:
-        responses = [await _call(client, token) for token in (valid, legacy, idle, no_message, foreign)]
+        responses = [
+            await _call(client, token) for token in (valid, legacy, idle, no_message, foreign)
+        ]
     assert [response.status_code for response in responses] == [200, 403, 403, 403, 403]
     assert len(upstream.requests) == 1
 

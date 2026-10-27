@@ -175,7 +175,8 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         or not isinstance(name, str)
         or not name
         or not (key is None or isinstance(key, str))
-        or isolated is not None and isolated is not True
+        or isolated is not None
+        and isolated is not True
     ):
         raise ValueError("relay claim has the wrong shape")
     return RelayBinding(
