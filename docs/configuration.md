@@ -396,9 +396,8 @@ otherwise invalidate every issued login).
 
 `str | None` · optional · default unset
 
-Slack OAuth app client ID for the /slack/mcp login mount. Register
-&lt;DAIMON_MCP__PUBLIC_URL origin&gt;/slack/auth/callback as a redirect URL on the Slack
-app.
+Slack OAuth app client ID for the /slack/mcp login mount. Register &lt;hub
+origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url).
 
 ### `DAIMON_HUB__SLACK_CLIENT_SECRET`
 
@@ -410,15 +409,24 @@ Slack OAuth app client secret for the /slack/mcp login mount.
 
 `str | None` · optional · default unset
 
-Discord OAuth app client ID for the /discord/mcp login mount. Register
-&lt;DAIMON_MCP__PUBLIC_URL origin&gt;/discord/auth/callback as a redirect URI on the
-Discord app.
+Discord OAuth app client ID for the /discord/mcp login mount. Register &lt;hub
+origin&gt;/discord/auth/callback as a redirect URI on the Discord app (see public_url).
 
 ### `DAIMON_HUB__DISCORD_CLIENT_SECRET`
 
 `SecretStr | None` · optional · default unset · secret
 
 Discord OAuth app client secret for the /discord/mcp login mount.
+
+### `DAIMON_HUB__PUBLIC_URL`
+
+`HttpUrl | None` · optional · default unset
+
+Origin the login mounts are served from, e.g. https://mcp.example.com. It becomes the
+OAuth issuer and callback base, so it must be the address coding agents connect to.
+Unset, the mounts use the origin of DAIMON_MCP__PUBLIC_URL. Set it to give the mounts a
+public hostname without moving the agents' /mcp endpoint, whose URL is stored in every
+agent's credential vault.
 
 ### `DAIMON_HUB__ALLOWED_CLIENT_REDIRECT_URIS`
 
