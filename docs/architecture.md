@@ -1006,6 +1006,9 @@ MCP and headless sessions do not store refusal history. When their token
 rotation reports a refused repository, the scheduler backs off later mint
 attempts using the same delay as transient refresh failures, including while a
 turn is active.
+A mapped session that Managed Agents reports archived or gone stops being
+refreshed until the next turn replaces it; every other refresh failure keeps
+the backoff.
 The session mounts only the selected working
 repository, if there is one, and uses its own vault for `GH_TOKEN` and Copilot.
 Other granted repos are available through that token
