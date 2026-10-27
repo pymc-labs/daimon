@@ -7,6 +7,7 @@ import math
 import os
 import time
 import uuid
+from asyncio import sleep as _keepwarm_sleep
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from ssl import SSLContext
+from time import monotonic as _keepwarm_now
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -28,6 +30,8 @@ KEEPALIVE_EXPIRY_SECONDS = 240
 KEEPWARM_IDLE_SECONDS = 200
 KEEPWARM_TICK_SECONDS = 20
 KEEPWARM_TIMEOUT_SECONDS = 5.0
+KEEPWARM_REFRESH_TICKS = 10
+KEEPWARM_MAX_RESPONSE_BYTES = 4096
 TURN_CEILING_SECONDS = 0.2
 FIRST_CALL_CEILING_SECONDS = 0.4
 DETACHED_CALL_TIMEOUT_SECONDS = 5.0
@@ -180,35 +184,49 @@ class McpProvider:
             self._keepwarm_task = asyncio.create_task(self._keepwarm(load))
 
     async def _keepwarm(self, load: Callable[[], Awaitable[list[ProviderConfig]]]) -> None:
+        origins: set[httpx.URL] = set()
+        refresh_in = 0
         while True:
             try:
-                async with asyncio.timeout(KEEPWARM_TIMEOUT_SECONDS):
-                    configs = await load()
-                origins = {
-                    _origin(config.endpoint)
-                    for config in configs
-                    if config.enabled and httpx.URL(config.endpoint).scheme == "https"
-                }
-                self._last_traffic = {
-                    origin: touched
-                    for origin, touched in self._last_traffic.items()
-                    if origin in origins
-                }
+                if refresh_in == 0:
+                    refresh_in = KEEPWARM_REFRESH_TICKS
+                    async with asyncio.timeout(KEEPWARM_TIMEOUT_SECONDS):
+                        configs = await load()
+                    refreshed: set[httpx.URL] = set()
+                    for config in configs:
+                        try:
+                            config = ProviderConfig.model_validate(config)
+                            if config.enabled and httpx.URL(config.endpoint).scheme == "https":
+                                refreshed.add(_origin(config.endpoint))
+                        except Exception as error:
+                            log.warning(
+                                "context_provider.keepwarm_skipped",
+                                error_class=type(error).__name__,
+                            )
+                    origins = refreshed
+                    self._last_traffic = {
+                        origin: touched
+                        for origin, touched in self._last_traffic.items()
+                        if origin in origins
+                    }
                 await asyncio.gather(
                     *(
                         self._ping(origin)
                         for origin in origins
-                        if time.monotonic() - self._last_traffic.get(origin, -math.inf)
+                        if _keepwarm_now() - self._last_traffic.get(origin, -math.inf)
                         >= KEEPWARM_IDLE_SECONDS
                     )
                 )
             except Exception as error:
                 log.warning("context_provider.keepwarm_failed", error_class=type(error).__name__)
-            await asyncio.sleep(KEEPWARM_TICK_SECONDS)
+                if not origins:
+                    refresh_in = 0
+            refresh_in = max(0, refresh_in - 1)
+            await _keepwarm_sleep(KEEPWARM_TICK_SECONDS)
 
     async def _ping(self, origin: httpx.URL) -> None:
         try:
-            self._last_traffic[origin] = time.monotonic()
+            self._last_traffic[origin] = _keepwarm_now()
             async with asyncio.timeout(KEEPWARM_TIMEOUT_SECONDS):
                 # No config/credential resolution or destination data on health requests.
                 async with self.client.stream(
@@ -216,13 +234,16 @@ class McpProvider:
                     origin.copy_with(path="/health"),
                     timeout=KEEPWARM_TIMEOUT_SECONDS,
                 ) as reply:
-                    async for _ in reply.aiter_bytes():
-                        pass
+                    read = 0
+                    async for chunk in reply.aiter_bytes(chunk_size=KEEPWARM_MAX_RESPONSE_BYTES):
+                        read += len(chunk)
+                        if read >= KEEPWARM_MAX_RESPONSE_BYTES:
+                            break
                     log.debug("context_provider.keepwarm", status=reply.status_code)
         except Exception as error:
             log.warning("context_provider.keepwarm_failed", error_class=type(error).__name__)
         finally:
-            self._last_traffic[origin] = time.monotonic()
+            self._last_traffic[origin] = _keepwarm_now()
 
     async def aclose(self) -> None:
         if self._keepwarm_task is not None:
@@ -234,11 +255,11 @@ class McpProvider:
         timing = _CallTiming()
         try:
             origin = _origin(config.endpoint)
-            self._last_traffic[origin] = time.monotonic()
+            self._last_traffic[origin] = _keepwarm_now()
             try:
                 return await self._call(config, request, timing)
             finally:
-                self._last_traffic[origin] = time.monotonic()
+                self._last_traffic[origin] = _keepwarm_now()
         finally:
             timing.log()
 

@@ -99,5 +99,11 @@ async def warmup_configs(session: AsyncSession) -> list[ProviderConfig]:
                 ContextProviderBinding.tenant_id == tenant_id,
             )
         )
-        configs.extend(ProviderConfig.model_validate(row) for row in rows)
+        for row in rows:
+            try:
+                configs.append(ProviderConfig.model_validate(row))
+            except Exception as error:
+                structlog.get_logger(__name__).warning(
+                    "context_provider.keepwarm_skipped", error_class=type(error).__name__
+                )
     return configs

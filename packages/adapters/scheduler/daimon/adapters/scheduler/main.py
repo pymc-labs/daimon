@@ -1631,7 +1631,8 @@ async def run(
             log.debug("scheduler.signal_handler_unavailable", signal=sig.name)
 
     try:
-        dm_turn_deps.start_context_providers()
+        if not args.once:
+            dm_turn_deps.start_context_providers()
         if args.once:
             await run_one_tick(
                 now=datetime.now(UTC),

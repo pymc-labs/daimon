@@ -1133,12 +1133,16 @@ authentication headers are set independently on every request. The process
 loads TLS roots once, outside the turn path, and reuses that SSL context when
 building further provider owners. Discord, Slack, Teams and the scheduler start
 best-effort background pre-connects to enabled HTTPS binding origins at runtime
-startup. The same pooled client sends unauthenticated `GET /health` after about
-200 seconds without traffic, below its 240-second connection expiry and the
+startup (except scheduler `--once`). The same pooled client sends unauthenticated
+`GET /health` after about 200 seconds without traffic, below its 240-second
+connection expiry and the
 provider's 300-second idle close. Health requests carry no credentials or
 session/tenant metadata, ignore status codes, and never follow redirects. The
-owner re-reads bindings every 20 seconds and stops on runtime shutdown; database
-reads and health requests have five-second limits and failures only log.
+owner checks idle connections every 20 seconds and reloads bindings every tenth
+check (about 200 seconds). An initial failed load retries on the next check;
+malformed bindings are individually skipped and logged. The task stops on
+runtime shutdown. Database reads and health requests have five-second limits;
+health bodies are read up to 4 KiB, then closed, and failures only log.
 Provider calls emit one timing record from the HTTP trace (connect including
 DNS, TLS, response-header wait, and whether a connection opened); DNS is null
 because the standard transport trace does not expose resolution separately.
