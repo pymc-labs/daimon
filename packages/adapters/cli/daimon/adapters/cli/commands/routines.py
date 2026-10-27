@@ -53,7 +53,7 @@ from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.identity import get_or_create_cli_principal
-from daimon.core.stores.routine_move import rollback_rows, seed_routines
+from daimon.core.stores.routine_move import pause_for_handback, rollback_rows, seed_routines
 from daimon.core.stores.routines import (
     DM_SANDBOX_REFUSAL,
     PIN_UNAVAILABLE_REFUSAL,
@@ -520,17 +520,7 @@ def export_rollback_command(
     if ids_file is not None:
         if internal_ids:
             raise UserFacingError("Use either --id or --ids-file.")
-        try:
-            payload = cast(JsonValue, json.loads(ids_file.read_text()))
-            if (
-                not isinstance(payload, list)
-                or not payload
-                or not all(isinstance(item, str) for item in payload)
-            ):
-                raise ValueError("expected a nonempty JSON array of routine ids")
-            internal_ids = [uuid.UUID(item) for item in payload if isinstance(item, str)]
-        except (OSError, ValueError) as exc:
-            raise UserFacingError(f"Cannot read routine ids: {exc}") from exc
+        internal_ids = read_internal_ids(ids_file)
     settings = load_settings()
 
     async def run() -> str:
@@ -550,3 +540,80 @@ def export_rollback_command(
         output.write_text(rendered)
     else:
         typer.echo(rendered, nl=False)
+
+
+def read_internal_ids(path: Path) -> list[uuid.UUID]:
+    try:
+        payload = cast(JsonValue, json.loads(path.read_text()))
+        if (
+            not isinstance(payload, list)
+            or not payload
+            or not all(isinstance(item, str) for item in payload)
+        ):
+            raise ValueError("expected a nonempty JSON array of routine ids")
+        ids = [uuid.UUID(item) for item in payload if isinstance(item, str)]
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate routine id")
+        return ids
+    except (OSError, ValueError) as exc:
+        raise UserFacingError(f"Cannot read routine ids: {exc}") from exc
+
+
+@routines_app.command("pause-for-handback")
+def pause_for_handback_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    ids_file: Annotated[
+        Path, typer.Option("--ids-file", help="JSON array of internal routine ids.")
+    ],
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Pause and capture the whole selection.")
+    ] = False,
+) -> None:
+    """Operator only: capture the next run and pause routines for return to the internal bot."""
+    ids = read_internal_ids(ids_file)
+    settings = load_settings()
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            await run_pause_for_handback(
+                rt=rt,
+                console=Console(highlight=False),
+                tenant_id=tenant,
+                internal_ids=ids,
+                apply=apply,
+            )
+
+    asyncio.run(run())
+
+
+async def run_pause_for_handback(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    tenant_id: uuid.UUID,
+    internal_ids: list[uuid.UUID],
+    apply: bool,
+    now: datetime | None = None,
+) -> None:
+    try:
+        async with rt.sessionmaker.begin() as session:
+            rows = await pause_for_handback(
+                session,
+                tenant_id=tenant_id,
+                internal_routine_ids=internal_ids,
+                now=now or datetime.now(UTC),
+                apply=apply,
+            )
+    except StoreError as exc:
+        raise UserFacingError(str(exc)) from exc
+    for row in rows:
+        recorded = row.handback_paused_at is not None
+        enabled = row.handback_enabled if recorded else row.enabled
+        next_run = row.handback_next_fire_at if recorded else row.next_fire_at
+        console.print(
+            f"{row.internal_routine_id}: enabled={str(enabled).lower()} "
+            f"expected_next_run={next_run.isoformat() if next_run else 'null'} "
+            f"({'already captured; preserved' if recorded else 'pause and capture'})",
+            markup=False,
+        )
+    console.print("Applied atomically." if apply else "Dry run: nothing written.")

@@ -86,6 +86,9 @@ async def seed_routines(
                     next_fire_at=slot,
                     enabled=True,
                     seeded_after=seeds[row.internal_routine_id],
+                    handback_paused_at=None,
+                    handback_enabled=None,
+                    handback_next_fire_at=None,
                     updated_at=func.greatest(
                         func.clock_timestamp(), Routine.updated_at + timedelta(microseconds=1)
                     ),
@@ -127,4 +130,78 @@ async def rollback_rows(
             )
     if not rows:
         raise StoreError("No routines matched the export selection.")
+    return rows
+
+
+async def pause_for_handback(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    internal_routine_ids: list[UUID],
+    now: datetime,
+    apply: bool = False,
+) -> list[RoutineRow]:
+    """Capture the pre-pause schedule once; caller owns the whole transaction."""
+    if not internal_routine_ids:
+        raise StoreError("Select at least one routine to pause.")
+    if len(set(internal_routine_ids)) != len(internal_routine_ids):
+        raise StoreError("Duplicate routine id in handback selection.")
+    statement = (
+        select(Routine)
+        .where(
+            Routine.tenant_id == tenant_id, Routine.internal_routine_id.in_(internal_routine_ids)
+        )
+        .order_by(Routine.id)
+    )
+    if apply:
+        statement = statement.with_for_update()
+    rows = [
+        RoutineRow.model_validate(orm)
+        for orm in (
+            await session.scalars(statement.execution_options(populate_existing=True))
+        ).all()
+    ]
+    for rid in internal_routine_ids:
+        matches = [row for row in rows if row.internal_routine_id == rid]
+        if len(matches) != 1:
+            reason = (
+                "no Daimon routine has this id in the selected team"
+                if not matches
+                else "several routines match"
+            )
+            raise StoreError(f"{rid}: {reason}. Nothing was changed.")
+    if apply:
+        for row in rows:
+            if row.handback_paused_at is not None:
+                if row.enabled:
+                    raise StoreError(
+                        f"{row.internal_routine_id}: handback record conflicts "
+                        "with a routine that is on."
+                    )
+                continue
+            saved = await session.scalar(
+                update(Routine)
+                .where(
+                    Routine.id == row.id,
+                    Routine.tenant_id == tenant_id,
+                    Routine.updated_at == row.updated_at,
+                    Routine.handback_paused_at.is_(None),
+                )
+                .values(
+                    enabled=False,
+                    next_fire_at=None,
+                    handback_paused_at=now,
+                    handback_enabled=Routine.enabled,
+                    handback_next_fire_at=Routine.next_fire_at,
+                    updated_at=func.greatest(
+                        func.clock_timestamp(), Routine.updated_at + timedelta(microseconds=1)
+                    ),
+                )
+                .returning(Routine.id)
+            )
+            if saved is None:
+                raise StoreError(
+                    f"{row.internal_routine_id}: routine changed during handback. "
+                    "Nothing was changed."
+                )
     return rows

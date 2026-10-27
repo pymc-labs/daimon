@@ -19,7 +19,8 @@ async def upgrade_from_previous(session):
         text(
             "ALTER TABLE routines DROP CONSTRAINT uq_routines_tenant_internal_id, "
             "DROP COLUMN internal_routine_id, DROP COLUMN seeded_after, "
-            "DROP COLUMN last_fired_slot, DROP COLUMN last_finished_at, DROP COLUMN last_finished_claim_at"
+            "DROP COLUMN last_fired_slot, DROP COLUMN last_finished_at, DROP COLUMN last_finished_claim_at, "
+            "DROP COLUMN handback_paused_at, DROP COLUMN handback_enabled, DROP COLUMN handback_next_fire_at"
         )
     )
     path = Path(__file__).parents[1] / "alembic/versions/0151_routine_claimed_slot.py"

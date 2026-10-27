@@ -1,4 +1,4 @@
-"""Retain handover identity, claimed slots, seed T and completion evidence.
+"""Retain handover identity, slot evidence and the captured handback schedule.
 
 downgrade: destructive
 """
@@ -15,6 +15,13 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    op.add_column(
+        "routines", sa.Column("handback_paused_at", sa.DateTime(timezone=True), nullable=True)
+    )
+    op.add_column("routines", sa.Column("handback_enabled", sa.Boolean(), nullable=True))
+    op.add_column(
+        "routines", sa.Column("handback_next_fire_at", sa.DateTime(timezone=True), nullable=True)
+    )
     op.add_column(
         "routines", sa.Column("last_fired_slot", sa.DateTime(timezone=True), nullable=True)
     )
@@ -43,6 +50,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    op.drop_column("routines", "handback_next_fire_at")
+    op.drop_column("routines", "handback_enabled")
+    op.drop_column("routines", "handback_paused_at")
     op.drop_constraint("uq_routines_tenant_internal_id", "routines", type_="unique")
     op.drop_column("routines", "internal_routine_id")
     op.drop_column("routines", "seeded_after")

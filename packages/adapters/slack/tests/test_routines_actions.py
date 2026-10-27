@@ -565,7 +565,7 @@ async def test_resume_of_running_routine_replies_without_rescheduling_or_reporti
     )
     await handle_routine_action(runtime, payload)
     assert any(
-        "This routine is already running." in body
+        "This routine is already on." in body
         for body in _ephemeral_bodies(fake_slack_web_client.mock)
     )
     reported.assert_not_called()

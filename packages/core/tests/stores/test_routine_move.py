@@ -69,7 +69,7 @@ async def test_seed_dry_run_then_apply_and_resume_refuses(db_session_factory):
             assert stored.enabled
             assert stored.seeded_after == entries[0].last_completed_slot
             assert stored.next_fire_at == NOW - timedelta(hours=1)
-            with pytest.raises(StoreError, match="already running"):
+            with pytest.raises(StoreError, match="already on"):
                 await resume_routine(session, row.id, tenant_id=tid, now=NOW)
 
 
@@ -107,7 +107,7 @@ async def test_batch_refusal_writes_nothing(db_session_factory, invalid):
         else:
             values = {
                 "fired": {"last_fired_at": NOW},
-                "delivery": {"delivery_status": "skipped"},
+                "delivery": {"delivery_status": "pending"},
                 "enabled": {"enabled": True},
             }[invalid]
             await session.execute(update(Routine).where(Routine.id == rows[1].id).values(**values))
@@ -314,3 +314,138 @@ async def test_two_sessions_seeding_and_resuming_cannot_both_succeed(
         stored = await get_routine(session, rows[0].id, tenant_id=tid)
         assert stored.enabled and stored.next_fire_at == entries[0].internal_next_run
         assert stored.seeded_after == entries[0].last_completed_slot
+
+
+async def test_handback_preview_apply_and_idempotence(db_session_factory):
+    from daimon.core.stores.routine_move import pause_for_handback
+
+    async with db_session_factory.begin() as session:
+        tid, rows, entries = await setup(session)
+        await seed_routines(session, entries, tenant_id=tid, now=NOW, apply=True)
+    ids = [row.internal_routine_id for row in rows]
+    async with db_session_factory.begin() as session:
+        await pause_for_handback(session, tenant_id=tid, internal_routine_ids=ids, now=NOW)
+        assert all(
+            row.enabled and row.handback_paused_at is None
+            for row in await rollback_rows(session, tenant_id=tid)
+        )
+    async with db_session_factory.begin() as session:
+        await pause_for_handback(
+            session, tenant_id=tid, internal_routine_ids=ids, now=NOW, apply=True
+        )
+    async with db_session_factory.begin() as session:
+        captured = await rollback_rows(session, tenant_id=tid)
+        for row in captured:
+            assert not row.enabled and row.next_fire_at is None
+            assert row.handback_enabled is True and row.handback_paused_at == NOW
+            assert row.handback_next_fire_at == NOW - timedelta(hours=1)
+        await pause_for_handback(
+            session,
+            tenant_id=tid,
+            internal_routine_ids=ids,
+            now=NOW + timedelta(hours=2),
+            apply=True,
+        )
+        assert captured == await rollback_rows(session, tenant_id=tid)
+
+
+@pytest.mark.parametrize("invalid", ["empty", "duplicate", "unknown", "cross-team"])
+async def test_handback_batch_refuses_without_partial_pause(db_session_factory, invalid):
+    from daimon.core.stores.routine_move import pause_for_handback
+
+    async with db_session_factory.begin() as session:
+        tid, rows, entries = await setup(session)
+        await seed_routines(session, entries, tenant_id=tid, now=NOW, apply=True)
+        ids = [row.internal_routine_id for row in rows]
+        if invalid == "empty":
+            ids = []
+        elif invalid == "duplicate":
+            ids.append(ids[0])
+        elif invalid == "unknown":
+            ids.append(uuid.uuid4())
+        else:
+            _, other, _ = await setup(session, count=1)
+            ids.append(other[0].internal_routine_id)
+    with pytest.raises(StoreError):
+        async with db_session_factory.begin() as session:
+            await pause_for_handback(
+                session, tenant_id=tid, internal_routine_ids=ids, now=NOW, apply=True
+            )
+    async with db_session_factory() as session:
+        stored = await rollback_rows(session, tenant_id=tid)
+        assert all(row.enabled and row.handback_paused_at is None for row in stored)
+
+
+@pytest.mark.parametrize("restart", ["seed", "resume"])
+async def test_restart_clears_handback_record(db_session, restart):
+    from daimon.core.stores.routine_move import pause_for_handback
+
+    tid, rows, entries = await setup(db_session, count=1)
+    await pause_for_handback(
+        db_session,
+        tenant_id=tid,
+        internal_routine_ids=[rows[0].internal_routine_id],
+        now=NOW,
+        apply=True,
+    )
+    if restart == "seed":
+        await seed_routines(db_session, entries, tenant_id=tid, now=NOW, apply=True)
+    else:
+        await resume_routine(db_session, rows[0].id, tenant_id=tid, now=NOW)
+    row = await get_routine(db_session, rows[0].id, tenant_id=tid)
+    assert row.enabled
+    assert (
+        row.handback_paused_at is None
+        and row.handback_enabled is None
+        and row.handback_next_fire_at is None
+    )
+
+
+async def test_seed_claim_handback_export_preserves_next_unrun_slot(db_session):
+    from daimon.core.cron import next_slot_at_or_after
+    from daimon.core.stores.routine_move import pause_for_handback
+
+    tid, rows, entries = await setup(db_session, count=1)
+    claim_now = datetime.now(UTC) - timedelta(minutes=1)
+    completed = claim_now.replace(minute=0, second=0, microsecond=0) - timedelta(days=3)
+    values = entries[0].model_dump(mode="json") | {
+        "last_completed_slot": completed.isoformat(),
+        "internal_next_run": next_slot_at_or_after("0 * * * *", "UTC", completed).isoformat(),
+    }
+    await db_session.execute(
+        update(Routine).where(Routine.id == rows[0].id).values(catch_up_policy="run-once")
+    )
+    await seed_routines(
+        db_session,
+        [RoutineSeedEntry.model_validate(values)],
+        tenant_id=tid,
+        now=claim_now,
+        apply=True,
+    )
+    claimed = (await claim_due_fireable(db_session, now=claim_now))[0]
+    assert claimed.last_fired_slot == completed + timedelta(hours=1)
+    next_run = (await get_routine(db_session, rows[0].id, tenant_id=tid)).next_fire_at
+    await pause_for_handback(
+        db_session,
+        tenant_id=tid,
+        internal_routine_ids=[rows[0].internal_routine_id],
+        now=claim_now,
+        apply=True,
+    )
+    before = routine_rollback_document(
+        await rollback_rows(db_session, tenant_id=tid), exported_at=claim_now
+    )
+    assert not before["final"] and before["routines"][0]["in_flight"]
+    await record_result(db_session, rows[0].id, tail=None, error=None, expected_row=claimed)
+    after = routine_rollback_document(
+        await rollback_rows(db_session, tenant_id=tid), exported_at=datetime.now(UTC)
+    )
+    assert after["final"], after["not_final_reasons"]
+    result = after["routines"][0]
+    assert result["enabled"] is True
+    assert result["expected_next_run"] == next_run.isoformat()
+    assert (
+        next_slot_at_or_after("0 * * * *", "UTC", datetime.fromisoformat(result["resume_after"]))
+        == next_run
+    )
+    assert datetime.fromisoformat(result["resume_after"]) > claimed.last_fired_slot

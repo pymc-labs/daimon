@@ -528,6 +528,13 @@ class Routine(Base):
     last_finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    handback_paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    handback_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    handback_next_fire_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_finished_claim_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

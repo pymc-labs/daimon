@@ -11,7 +11,7 @@ from daimon.core.stores.domain import RoutineRow
 
 
 @pytest.mark.parametrize(
-    "enabled, error", [(True, None), (False, RoutineAlreadyRunning("already running"))]
+    "enabled, error", [(True, None), (False, RoutineAlreadyRunning("This routine is already on."))]
 )
 async def test_resume_already_running_is_a_normal_result(enabled, error):
     now = datetime.now(UTC)

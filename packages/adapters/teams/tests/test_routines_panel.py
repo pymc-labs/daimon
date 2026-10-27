@@ -220,5 +220,5 @@ async def test_resume_of_running_routine_is_a_plain_reply(db_session_factory, te
     row = await _routine(db_session_factory, owner=AAD_OBJECT_ID, message="my standup")
     async with _running(db_session_factory, teams_api_fake) as service:
         response = await post_activity(service, _click("resume", row))
-    assert response["value"] == "This routine is already running."
+    assert response["value"] == "This routine is already on."
     assert await _load(db_session_factory, row) == row

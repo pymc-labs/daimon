@@ -220,6 +220,9 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
                 "last_fired_slot",
                 "last_finished_at",
                 "last_finished_claim_at",
+                "handback_paused_at",
+                "handback_enabled",
+                "handback_next_fire_at",
                 "seeded_after",
                 "internal_routine_id",
             }

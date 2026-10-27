@@ -861,12 +861,18 @@ async def resume_routine(
     if row is None:
         return None
     if row.enabled:
-        raise RoutineAlreadyRunning("This routine is already running.")
+        raise RoutineAlreadyRunning("This routine is already on.")
     nxt = next_slot_at_or_after(row.cron_expr, row.timezone, now)
     return await _save_routine_edit(
         session,
         row,
-        {"enabled": True, "next_fire_at": nxt},
+        {
+            "enabled": True,
+            "next_fire_at": nxt,
+            "handback_paused_at": None,
+            "handback_enabled": None,
+            "handback_next_fire_at": None,
+        },
         expected_updated_at=expected_updated_at,
     )
 

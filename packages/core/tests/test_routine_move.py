@@ -117,7 +117,7 @@ def test_seed_refuses_future_and_mismatch(changes: dict[str, str], message: str)
         {"enabled": True},
         {"last_fired_at": NOW},
         {"last_fired_slot": NOW},
-        {"delivery_status": "skipped"},
+        {"delivery_status": "pending"},
         {"delivered_at": NOW},
         {"delivery_payload": "pending"},
     ],
@@ -178,7 +178,8 @@ def test_freshness_setting_reads_scheduler_env(monkeypatch: pytest.MonkeyPatch) 
         ({"last_fired_slot": NOW}, False),
         ({"delivery_status": "pending"}, False),
         ({"delivery_status": "claimed"}, False),
-        ({"delivery_status": "delivered"}, True),
+        ({"delivery_status": "delivered"}, False),
+        ({"delivery_status": "delivered", "delivered_at": NOW}, True),
         ({"last_fired_at": NOW, "last_finished_at": NOW}, False),
     ],
 )
@@ -216,6 +217,7 @@ def test_export_watermark_is_slot_never_claim_wall_time() -> None:
         "delivery_status",
         "delivered_at",
         "resume_after",
+        "expected_next_run",
     }
     assert empty["internal_routine_id"] is None
 
@@ -276,3 +278,127 @@ def test_old_scheduler_claim_after_new_completion_is_never_final(shift):
 def test_empty_export_cannot_be_final():
     with pytest.raises(ValueError, match="at least one"):
         routine_rollback_document([], exported_at=NOW)
+
+
+def test_edit_only_skipped_delivery_is_not_a_fire():
+    routine = row(delivery_status="skipped", delivery_note="private_revision_changed")
+    assert seed_first_slot(entry(routine, "2026-10-27T10:00:00Z"), routine, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "zone, cron, next_run, expected_previous",
+    [
+        ("UTC", "0 * * * *", "2026-10-27T13:00:00+00:00", "2026-10-27T12:00:00+00:00"),
+        ("America/New_York", "0 9 * * *", "2026-03-08T13:00:00+00:00", "2026-03-07T14:00:00+00:00"),
+        ("America/New_York", "0 9 * * *", "2026-11-01T14:00:00+00:00", "2026-10-31T13:00:00+00:00"),
+    ],
+)
+def test_handback_preserves_enabled_and_next_run_across_dst(
+    zone, cron, next_run, expected_previous
+):
+    from daimon.core.cron import next_slot_at_or_after
+
+    next_run = datetime.fromisoformat(next_run)
+    previous = datetime.fromisoformat(expected_previous)
+    # A run-once claim coalesced several old slots. The reverse seed must
+    # consume those slots too, rather than resuming after the old claimed slot.
+    claim = previous - timedelta(days=3)
+    document = routine_rollback_document(
+        [
+            row(
+                timezone=zone,
+                cron_expr=cron,
+                catch_up_policy="run-once",
+                handback_paused_at=next_run - timedelta(minutes=1),
+                handback_enabled=True,
+                handback_next_fire_at=next_run,
+                last_fired_slot=claim,
+                last_fired_at=previous,
+                last_finished_at=previous,
+                last_finished_claim_at=previous,
+            )
+        ],
+        exported_at=next_run,
+    )
+    assert document["final"], document["not_final_reasons"]
+    result = document["routines"][0]
+    assert result["enabled"] is True
+    assert result["resume_after"] == expected_previous
+    assert result["expected_next_run"] == next_run.isoformat()
+    assert (
+        next_slot_at_or_after(cron, zone, datetime.fromisoformat(result["resume_after"]))
+        == next_run
+    )
+
+
+def test_user_paused_routine_remains_off_without_expected_next_run():
+    document = routine_rollback_document([row(seeded_after=NOW)], exported_at=NOW)
+    result = document["routines"][0]
+    assert document["final"]
+    assert result["enabled"] is False
+    assert result["expected_next_run"] is None
+    assert result["resume_after"] == NOW.isoformat()
+
+
+@pytest.mark.parametrize(
+    "changes, reason",
+    [
+        (
+            {
+                "handback_paused_at": NOW,
+                "handback_enabled": True,
+                "handback_next_fire_at": NOW,
+                "last_fired_slot": NOW,
+                "last_fired_at": NOW,
+            },
+            "before the last fired slot",
+        ),
+        ({"seeded_after": NOW + timedelta(seconds=1)}, "in the future"),
+        ({"last_fired_slot": NOW}, "fired slot and claim time are incomplete"),
+        ({"last_fired_at": NOW}, "fired slot and claim time are incomplete"),
+        ({"delivery_status": "delivered", "seeded_after": NOW}, "no delivery time"),
+        ({"handback_paused_at": NOW, "handback_enabled": True}, "no captured next run"),
+        (
+            {
+                "handback_paused_at": NOW,
+                "handback_enabled": True,
+                "handback_next_fire_at": NOW + timedelta(minutes=1),
+            },
+            "preceding slot",
+        ),
+    ],
+)
+def test_export_refuses_inconsistent_handback_records(changes, reason):
+    document = routine_rollback_document([row(**changes)], exported_at=NOW)
+    assert not document["final"]
+    assert reason in " ".join(document["not_final_reasons"])
+
+
+def test_uninvertible_dst_slot_is_not_final():
+    # No 02:30 exists on New York's spring-forward day. Never bless a
+    # captured 03:30 as 02:30 just because a different cron engine did.
+    document = routine_rollback_document(
+        [
+            row(
+                cron_expr="30 2 * * *",
+                timezone="America/New_York",
+                handback_paused_at=NOW,
+                handback_enabled=True,
+                handback_next_fire_at=datetime(2026, 3, 8, 7, 30, tzinfo=UTC),
+            )
+        ],
+        exported_at=NOW,
+    )
+    assert not document["final"]
+    assert "preceding slot" in " ".join(document["not_final_reasons"])
+
+
+def test_handback_of_user_paused_routine_preserves_off_state():
+    document = routine_rollback_document(
+        [row(seeded_after=NOW, handback_paused_at=NOW, handback_enabled=False)], exported_at=NOW
+    )
+    assert document["final"]
+    result = document["routines"][0]
+    assert result["enabled"] is False
+    assert result["expected_next_run"] is None
+    assert result["resume_after"] == NOW.isoformat()

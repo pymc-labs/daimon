@@ -460,4 +460,22 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
         if isinstance(item, tuple) and item[0] == "write":
             assert "expected_updated_at" not in item[2]
             item[2]["expected_updated_at"] = AT
+    if scenario == "stale" and op == "resume" and platform in ("slack", "teams"):
+        # Slot-safe cutover refuses a repeated resume instead of replacing the
+        # seeded next slot. The archived handlers wrote and rendered again.
+        assert not any(isinstance(item, tuple) and item[0] == "write" for item in actual)
+        if platform == "slack":
+            refusal = (
+                "refusal",
+                {"channel": "C1", "user": USER, "text": "This routine is already on."},
+            )
+            assert refusal in actual
+            assert expected[4][0] == "write"
+            expected = expected[:4] + [refusal] + expected[5:7] + [("response", None)]
+        else:
+            assert ("response", "This routine is already on.") in actual
+            expected = [
+                item for item in expected if not (isinstance(item, tuple) and item[0] == "write")
+            ]
+            expected[-1] = ("response", "This routine is already on.")
     assert expected == actual

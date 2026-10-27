@@ -994,6 +994,6 @@ async def test_resume_race_replies_already_running_without_callback_error(monkey
     interaction.response.send_message = AsyncMock()
     await button.callback(interaction)
     interaction.response.send_message.assert_awaited_once_with(
-        "This routine is already running.", ephemeral=True
+        "This routine is already on.", ephemeral=True
     )
     error.assert_not_awaited()

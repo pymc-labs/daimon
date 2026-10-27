@@ -32,6 +32,18 @@ def next_slot_at_or_after(cron_expr: str, tz: str, after: datetime) -> datetime:
     return nxt_utc
 
 
+def slot_before_next(cron_expr: str, tz: str, next_run: datetime) -> datetime:
+    """Invert the scheduler's next-slot calculation, refusing ambiguous DST results."""
+    zone = ZoneInfo(tz)
+    previous: datetime = croniter(cron_expr, next_run.astimezone(zone)).get_prev(datetime)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    if previous.tzinfo is None:
+        previous = previous.replace(tzinfo=zone)
+    previous = previous.astimezone(UTC)
+    if previous >= next_run or next_slot_at_or_after(cron_expr, tz, previous) != next_run:
+        raise ValueError("captured next run does not match the schedule's preceding slot")
+    return previous
+
+
 class InvalidScheduleError(ValueError):
     """A timezone or cron expression a routine cannot be scheduled on."""
 

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from daimon.core.cron import next_slot_at_or_after
+from daimon.core.cron import next_slot_at_or_after, slot_before_next
 from daimon.core.stores.domain import RoutineRow
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,7 +51,7 @@ class RoutineSeedEntry(BaseModel):
 
 
 def seed_first_slot(entry: RoutineSeedEntry, row: RoutineRow, *, now: datetime) -> datetime:
-    """Validate the handover against OS state and use OS cron semantics."""
+    """Validate the handover against Daimon state and use its cron semantics."""
     if row.internal_routine_id != entry.internal_routine_id:
         raise ValueError("internal_routine_id differs from the Daimon routine")
     if entry.last_completed_slot > now:
@@ -69,10 +69,10 @@ def seed_first_slot(entry: RoutineSeedEntry, row: RoutineRow, *, now: datetime) 
             row.last_fired_slot,
             row.last_finished_at,
             row.last_finished_claim_at,
-            row.delivery_status,
+            row.delivery_status if row.delivery_status != "skipped" else None,
             row.delivered_at,
             row.delivery_payload,
-            row.delivery_note,
+            row.delivery_note if row.delivery_status != "skipped" else None,
             row.delivery_lease_owner,
             row.delivery_lease_expires_at,
             row.last_result_tail,
@@ -102,8 +102,8 @@ def seed_scheduler_action(
 def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) -> dict[str, Any]:
     """The complete versioned rollback format; keep wire-format changes local here.
 
-    Claims count as fired even if execution fails. Older claims without slot
-    evidence cannot provide a safe watermark and prevent a final export.
+    Handback consumes every slot before the captured next run. Other paused
+    rows use claim or seed evidence. Incomplete evidence prevents finality.
     """
     if not rows:
         raise ValueError("Select at least one routine to export.")
@@ -134,7 +134,32 @@ def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) 
             reasons.append(f"{label}: delivery is {row.delivery_status}")
         if row.last_fired_at is not None and row.last_fired_slot is None:
             reasons.append(f"{label}: historical fire has no recorded slot")
+        if (row.last_fired_slot is None) != (row.last_fired_at is None):
+            reasons.append(f"{label}: fired slot and claim time are incomplete")
+        if row.delivery_status == "delivered" and row.delivered_at is None:
+            reasons.append(f"{label}: delivered output has no delivery time")
         resume_after = row.last_fired_slot or row.seeded_after
+        expected_next_run = None
+        enabled = row.enabled
+        if row.handback_paused_at is not None:
+            enabled = row.handback_enabled
+            expected_next_run = row.handback_next_fire_at
+            if enabled is None:
+                reasons.append(f"{label}: handback has no recorded on or off value")
+                enabled = False
+            if expected_next_run is not None:
+                try:
+                    resume_after = slot_before_next(row.cron_expr, row.timezone, expected_next_run)
+                except (ValueError, KeyError) as exc:
+                    resume_after = None
+                    reasons.append(f"{label}: {exc}")
+            elif enabled:
+                reasons.append(f"{label}: handback has no captured next run")
+        if resume_after is not None:
+            if row.last_fired_slot is not None and resume_after < row.last_fired_slot:
+                reasons.append(f"{label}: resume_after is before the last fired slot")
+            if resume_after > exported_at:
+                reasons.append(f"{label}: resume_after is in the future")
         if row.internal_routine_id is not None and resume_after is None:
             reasons.append(f"{row.internal_routine_id}: no fired slot or seeded T recorded")
         entries.append(
@@ -146,13 +171,14 @@ def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) 
                 "agent_name": row.agent_name,
                 "cron_expr": row.cron_expr,
                 "timezone": row.timezone,
-                "enabled": row.enabled,
+                "enabled": enabled,
                 "last_fired_slot": iso(row.last_fired_slot),
                 "last_fired_at": iso(row.last_fired_at),
                 "in_flight": in_flight,
                 "delivery_status": row.delivery_status,
                 "delivered_at": iso(row.delivered_at),
                 "resume_after": iso(resume_after),
+                "expected_next_run": iso(expected_next_run),
             }
         )
     return {

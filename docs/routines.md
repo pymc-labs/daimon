@@ -276,7 +276,7 @@ claimed run; catch-up applies to slots still pending in `next_fire_at`.
 ### Moving routines into Daimon and rolling back
 
 Use the operator CLI with database credentials. Before moving from the internal
-bot to Daimon OS, pause the internal bot's scheduler and drain its runs; take each
+bot to Daimon, pause the internal bot's scheduler and drain its runs; take each
 routine's last **completed scheduled slot** T from the internal bot. Keep the matching Daimon routines paused and never fired.
 The seed command is a dry run unless `--apply` is given:
 
@@ -313,7 +313,8 @@ Migration `0151_routine_claimed_slot` backfills only a first line exactly matchi
 `internal-routine-import-v1:<uuid>` in `trigger_message` (LF or CRLF); similarly named tags,
 suffixes and tags on later lines do not count. Duplicate imports within a team
 refuse the migration rather than choosing a match. Later prompt edits preserve
-this stored identity. Today only the migration populates it automatically.
+this stored identity. Today only the migration sets it; no command sets
+`internal_routine_id` for later imports.
 Routines imported after this migration must explicitly set `internal_routine_id`
 when they are imported; a prompt tag alone no longer links a new routine, and
 seed refuses it until that dedicated identity is set. Seed refuses both missing and ambiguous matches, and never
@@ -335,37 +336,55 @@ mismatches. An already enabled routine cannot be resumed again: pause it first.
 An ordinary resume of a paused routine schedules after now; use the seed command
 for the initial move so it starts strictly after T.
 
-For rollback, pause the Daimon routines, drain their executions and outbox, then
-export a read-only snapshot:
+For rollback, use the dedicated handback pause while the Daimon scheduler is
+stopped, then drain executions and delivery before exporting. Use the moved
+internal ids in both commands:
 
 ```sh
+daimon routines pause-for-handback --tenant TENANT_UUID --ids-file moved-ids.json
+daimon routines pause-for-handback --tenant TENANT_UUID --ids-file moved-ids.json --apply
 daimon routines export-rollback --tenant TENANT_UUID --ids-file moved-ids.json --output rollback.json
-daimon routines export-rollback --tenant TENANT_UUID --id INTERNAL_ROUTINE_UUID
-# Or select a JSON array of internal UUID strings:
-daimon routines export-rollback --tenant TENANT_UUID --ids-file ids.json
 ```
 
-Pass the moved internal ids with `--ids-file` for a handback. An unfiltered
-export includes every routine in the team, including native Daimon routines;
-any enabled routine in that selection prevents finality. Empty id files and
-selections matching no routines are refused. Without `--output`, JSON goes to stdout. The document has `format_version`, `exported_at`, `final`,
+`moved-ids.json` is a nonempty JSON array of internal UUID strings. The pause
+command previews each routine's enabled value and next run by default. Apply
+locks and validates the entire selection, then pauses it in one transaction,
+recording `handback_paused_at`, its pre-pause enabled value and its pre-pause
+`next_fire_at` (N). Unknown ids, ids outside the selected team, duplicate ids
+and empty selections refuse the whole batch. Repeating this command preserves
+the original captured values. Seeding or resuming clears the handback record.
+
+For a handback-paused routine, export restores the captured enabled value and
+sets `expected_next_run` to N. Its `resume_after` is the cron slot immediately
+before N in the routine's timezone. Daimon verifies that its next-slot function
+applied to that watermark returns N exactly; an invalid or ambiguous DST
+calculation prevents finality. This consumes slots already coalesced or skipped,
+including slots after a run-once routine's actual claimed slot. The internal bot
+must compute its next slot strictly after `resume_after`, check it equals
+`expected_next_run`, and restore `enabled` from the export. A handback that
+recorded an on routine without N cannot produce a final export.
+
+A routine paused by the user without the handback command exports `enabled=false`
+and `expected_next_run=null`, so it stays off. Its `resume_after` is the latest
+claimed slot, else the stored seed T, else null. A claim counts even if execution
+fails or delivery is skipped: it may have had effects. An imported routine with
+no watermark prevents finality. Historical claims without recorded slots cannot
+be reconstructed from wall time and also prevent finality.
+
+Pass the moved internal ids with `--ids-file` for handback. An unfiltered export
+includes every routine in the team, including native Daimon routines; any enabled
+routine in that selection prevents finality. Export also accepts repeated
+`--id INTERNAL_ROUTINE_UUID` filters. Empty id files and selections matching no
+routines are refused. Without `--output`, JSON goes to stdout. Export never
+writes to the database.
+
+The version-1 document has `format_version`, `exported_at`, `final`,
 `not_final_reasons`, and a `routines` array. Each entry contains
 `internal_routine_id` (null for routines not imported), Daimon's `routine_id`,
 `agent_name`, `cron_expr`, `timezone`, `enabled`, `last_fired_slot`, `last_fired_at`,
-`in_flight`, `delivery_status`, `delivered_at`, and `resume_after`. All exported
-timestamps are UTC. Filters use internal ids; omitting filters includes all team rows.
-
-`resume_after` is the latest **claimed slot**, never the claim wall time. A claim
-counts even if execution fails or delivery is skipped: it may have had effects.
-Resume the source at its first slot strictly after that watermark. Run-once
-coalescing retains the overdue slot actually claimed, rather than inventing a slot
-at claim time. If no slot has fired, `resume_after` falls back to the stored seed T;
-without either it is null. An imported routine without either watermark prevents
-a final export and gives a top-level reason. Historical claims from before slot
-recording cannot be reconstructed from wall time and also prevent finality.
-Use only `final=true` for handback: the source computes its next slot strictly
-after `resume_after`, restores its enabled flag from `enabled`, and leaves
-pending/claimed delivery to the operator.
+`in_flight`, `delivery_status`, `delivered_at`, `resume_after`, and
+`expected_next_run`. All exported timestamps are UTC. Use only `final=true` for
+handback. Pending or claimed delivery requires operator reconciliation.
 
 `last_finished_at` and `last_finished_claim_at` are cleared at each claim.
 Completion records its wall time and the exact claim time it completed, separately
@@ -387,11 +406,15 @@ from the completion's recorded claim time, export is non-final with an older-
 scheduler warning, even when old completion/output fields are present. That
 watermark may be stale: recover the actual claimed slot before handback, rather
 than treating a completed delivery as proof the slot record is current. The
-export format remains unchanged.
+completion fence is private evidence; it is not an export field.
 
 The export is
 non-final if any selected routine is enabled, in flight, has pending/claimed delivery,
-or has a historical fire without a recorded slot. Only paused, drained routines
+or has a historical fire without a recorded slot. It is also non-final if
+`resume_after` precedes `last_fired_slot` or is later than `exported_at`, exactly
+one of `last_fired_slot` and `last_fired_at` is null, or delivery is marked
+`delivered` without `delivered_at`. Inconsistent handback records or a failed
+next-slot equality check also prevent finality. Only paused, drained routines
 can produce a final snapshot. Finality describes this single database snapshot;
 keep the routines paused through the handback. Resolve undelivered work once
 rather than rerunning its slot on the source. The export never writes to the database.

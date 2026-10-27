@@ -12,7 +12,7 @@ from daimon.adapters.cli.commands.routines import (
 )
 from daimon.core.errors import UserFacingError
 from daimon.core.routine_move import RoutineSeedEntry
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.routines import create_routine, get_routine, resume_routine
 from daimon.testing.factories import make_tenant
 from rich.console import Console
 
@@ -102,3 +102,57 @@ def test_empty_ids_file_is_refused_before_opening_runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(routines, "load_settings", unexpected_settings)
     with pytest.raises(UserFacingError, match="nonempty"):
         routines.export_rollback_command(tenant=uuid.uuid4(), ids_file=path)
+
+
+@pytest.mark.parametrize("payload", [[], ["bad-id"], [str(uuid.UUID(int=1))] * 2])
+def test_handback_invalid_ids_are_refused_before_runtime(tmp_path, monkeypatch, payload):
+    from daimon.adapters.cli.commands import routines
+
+    path = tmp_path / "ids.json"
+    path.write_text(json.dumps(payload))
+    monkeypatch.setattr(
+        routines, "load_settings", lambda: pytest.fail("invalid ids reached runtime")
+    )
+    with pytest.raises(UserFacingError, match="Cannot read routine ids"):
+        routines.pause_for_handback_command(tenant=uuid.uuid4(), ids_file=path)
+
+
+async def test_handback_cli_preview_apply_and_preserve(db_session_factory):
+    from daimon.adapters.cli.commands.routines import run_pause_for_handback
+
+    next_run = datetime(2026, 10, 27, 13, tzinfo=UTC)
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id=None,
+            internal_routine_id=uuid.uuid4(),
+            agent_id="ag",
+            agent_name="daimon",
+            cron_expr="0 * * * *",
+            timezone_="UTC",
+            trigger_message="run",
+            enabled=False,
+        )
+        await resume_routine(
+            session, row.id, tenant_id=tenant.id, now=next_run - timedelta(hours=1)
+        )
+    output = StringIO()
+    for apply in (False, True, True):
+        await run_pause_for_handback(
+            rt=build_cli_runtime(db_session_factory),
+            console=Console(file=output, width=300),
+            tenant_id=tenant.id,
+            internal_ids=[row.internal_routine_id],
+            apply=apply,
+            now=datetime(2026, 10, 27, 12, tzinfo=UTC),
+        )
+        async with db_session_factory() as session:
+            stored = await get_routine(session, row.id, tenant_id=tenant.id)
+            assert stored.enabled is not apply
+    rendered = output.getvalue()
+    assert "enabled=true expected_next_run=2026-10-27T13:00:00+00:00" in rendered
+    assert "Dry run: nothing written." in rendered
+    assert "Applied atomically." in rendered
+    assert "already captured; preserved" in rendered
