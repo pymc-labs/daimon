@@ -400,11 +400,14 @@ register with each server. Read only by the mcp service.
 
 Remote MCP servers that opt in to signed identity. A JSON array; each entry has name
 (lowercase letters, digits and dashes), url (the server's https MCP endpoint), issuer
-(the issuer id the server gave you) and audience (the server's base URL). Attach such a
-server to an agent at &lt;app root&gt;/mcp-identity/&lt;name&gt; instead of its own URL:
-Daimon forwards each request with a short-lived EdDSA token naming the agent, the
-workspace and, for a person's turn, who asked, the channel and the message. Requires
-DAIMON_MCP_IDENTITY__SIGNING_KEY. Default: [] (off).
+(the issuer id the server gave you), audience (the server's base URL) and optionally
+workspaces, the only workspaces whose agents may use it, each
+"&lt;platform&gt;:&lt;workspace id&gt;" (for example "discord:&lt;guild id&gt;";
+default: every workspace). Attach such a server to an agent at &lt;app root&gt;/mcp-
+identity/&lt;name&gt; instead of its own URL: Daimon forwards each request with a short-
+lived EdDSA token naming the agent, the workspace and, for a person's turn, who asked,
+the channel and the message. Requires DAIMON_MCP_IDENTITY__SIGNING_KEY. Default: []
+(off).
 
 ## Hub
 

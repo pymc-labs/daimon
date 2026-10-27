@@ -2047,6 +2047,8 @@ class SignedIdentityServer(BaseModel):
     url: str
     issuer: str = Field(min_length=1)
     audience: str = Field(min_length=1)
+    # Servers are deployment-wide: without a list any workspace's agents may use one.
+    workspaces: frozenset[str] | None = None
 
     @field_validator("url")
     @classmethod
@@ -2075,8 +2077,10 @@ class McpIdentitySettings(BaseModel):
         description=(
             "Remote MCP servers that opt in to signed identity. A JSON array; each entry has "
             "name (lowercase letters, digits and dashes), url (the server's https MCP "
-            "endpoint), issuer (the issuer id the server gave you) and audience (the "
-            "server's base URL). Attach such a server to an agent at "
+            "endpoint), issuer (the issuer id the server gave you), audience (the "
+            "server's base URL) and optionally workspaces, the only workspaces whose agents "
+            'may use it, each "<platform>:<workspace id>" (for example "discord:<guild id>"; '
+            "default: every workspace). Attach such a server to an agent at "
             "<app root>/mcp-identity/<name> instead of its own URL: Daimon forwards each "
             "request with a short-lived EdDSA token naming the agent, the workspace and, "
             "for a person's turn, who asked, the channel and the message. Requires "
