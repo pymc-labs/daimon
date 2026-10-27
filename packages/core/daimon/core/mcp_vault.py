@@ -19,18 +19,21 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
+from anthropic.types.beta.vaults.beta_managed_agents_credential import (
+    BetaManagedAgentsCredential,
+)
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
 from daimon.core.mcp_hold import hold_from_metadata, hold_metadata_value, hold_vault_suffix
-from daimon.core.mcp_server_url import same_mcp_url
+from daimon.core.mcp_server_url import canonical_mcp_url, same_mcp_url
 from daimon.core.mux_compat import (
     create_vault,
     delete_credential,
@@ -54,6 +57,8 @@ LOCK_NAMESPACE = "mcp_vault"
 
 #: Credential metadata key that records the hold a held credential was minted with.
 HOLD_METADATA_KEY = "daimon_chat_hold"
+#: Marks a copy of the chat credential made for a signed-identity relay URL.
+RELAY_METADATA_KEY = "daimon_chat_relay"
 
 
 async def _find_vault_by_name(
@@ -205,13 +210,34 @@ async def _refresh_chat_credential_locked(
     preserve_context: bool = False,
     registered_payload: dict[str, Any] | None = None,
     create_missing: bool = True,
+    relay_urls: Sequence[str] = (),
 ) -> None:
+    """Keep the vault's Daimon credential fresh, and its identity relay copies with it.
+
+    Each URL in ``relay_urls`` (an agent's signed-identity relay, served by Daimon
+    itself) gets a copy of the same token, flagged ``RELAY_METADATA_KEY``. Flagged
+    copies already in the vault are kept in step on every refresh, so a refresh
+    that does not know the agent's servers never strands one on an older token.
+    """
     target = None
+    fresh = False
     metadata: dict[str, str] = {}
+    wanted = {canonical_mcp_url(url) for url in relay_urls}
+    relays: dict[str, BetaManagedAgentsCredential] = {}
     async for cred in list_credentials(client, vault_id, scope=scope):
         if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse):
             continue
-        if not same_server_url(cred.auth.mcp_server_url, public_url):
+        url = canonical_mcp_url(cred.auth.mcp_server_url)
+        if cred.auth.type == "static_bearer" and (
+            url in wanted
+            or (
+                (cred.metadata or {}).get(RELAY_METADATA_KEY) == "true"
+                and (cred.metadata or {}).get("daimon_chat_identity") == str(agent_id)
+            )
+        ):
+            relays[url] = cred
+            continue
+        if target is not None or not same_server_url(cred.auth.mcp_server_url, public_url):
             continue
         if cred.auth.type != "static_bearer":
             return  # A person's OAuth credential retains its slot and authority.
@@ -248,10 +274,16 @@ async def _refresh_chat_credential_locked(
             and (row.platform, row.channel_id)
             == ((None, None) if hold is None else (hold.platform, hold.channel_id))
         ):
-            return
+            fresh = True
         target = cred
-        break
 
+    wanted.update(relays)
+    if fresh and all(
+        url in relays
+        and (relays[url].metadata or {}).get("daimon_chat_jti") == metadata.get("daimon_chat_jti")
+        for url in wanted
+    ):
+        return
     if target is None and not create_missing:
         return
     if registered_payload is None:
@@ -284,12 +316,41 @@ async def _refresh_chat_credential_locked(
             hold=hold,
             registered_payload=payload,
             create_missing=create_missing,
+            relay_urls=tuple(wanted),
         )
         return
 
+    relay_payloads = {
+        url: {
+            "metadata": {**registered_payload["metadata"], RELAY_METADATA_KEY: "true"},
+            "auth": {**registered_payload["auth"], "mcp_server_url": url},
+        }
+        for url in sorted(wanted)
+    }
     if target is None:
         await store_credential(client, vault_id, registered_payload, scope=scope)
-        return
+    else:
+        await _update_chat_credential(
+            client, vault_id, target, metadata, registered_payload, scope=scope
+        )
+    for url, relay_payload in relay_payloads.items():
+        existing = relays.get(url)
+        if existing is None:
+            await store_credential(client, vault_id, relay_payload, scope=scope)
+        else:
+            relay_payload["auth"].pop("mcp_server_url")
+            await update_credential(client, vault_id, existing.id, relay_payload, scope=scope)
+
+
+async def _update_chat_credential(
+    client: AsyncAnthropic,
+    vault_id: str,
+    target: BetaManagedAgentsCredential,
+    metadata: dict[str, str],
+    registered_payload: dict[str, Any],
+    *,
+    scope: Scope,
+) -> None:
     registered_payload["metadata"] = {
         **{
             key: value
@@ -314,6 +375,7 @@ async def refresh_agent_mcp_vault(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     scope: Scope,
+    relay_urls: Sequence[str] = (),
 ) -> None:
     """Refresh the vault already mounted by a reused ordinary chat session."""
     async with session_factory() as session:
@@ -330,6 +392,7 @@ async def refresh_agent_mcp_vault(
             scope=scope,
             preserve_context=True,
             create_missing=False,
+            relay_urls=relay_urls,
         )
 
         await session.commit()
@@ -346,6 +409,7 @@ async def refresh_mounted_mcp_vaults(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     scope: Scope,
+    relay_urls: Sequence[str] = (),
 ) -> None:
     """Renew every actually mounted Daimon slot, without creating missing slots."""
     for vault_id in dict.fromkeys(vault_ids):
@@ -359,6 +423,7 @@ async def refresh_mounted_mcp_vaults(
             now=now,
             session_factory=session_factory,
             scope=scope,
+            relay_urls=relay_urls,
         )
 
 
@@ -374,6 +439,7 @@ async def _ensure_agent_mcp_vault_locked(
     slack_turn_context_id: uuid.UUID | None = None,
     hold: TurnHold | None = None,
     scope: Scope,
+    relay_urls: Sequence[str] = (),
 ) -> str:
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
     if slack_turn_context_id is not None:
@@ -394,6 +460,7 @@ async def _ensure_agent_mcp_vault_locked(
             scope=scope,
             slack_turn_context_id=slack_turn_context_id,
             hold=hold,
+            relay_urls=relay_urls,
         )
         return oldest.id
     vault = await create_vault(client, display_name, scope=scope)
@@ -408,6 +475,12 @@ async def _ensure_agent_mcp_vault_locked(
         hold=hold,
     )
     await store_credential(client, vault.id, payload, scope=scope)
+    for url in sorted({canonical_mcp_url(url) for url in relay_urls}):
+        relay_payload = {
+            "metadata": {**payload["metadata"], RELAY_METADATA_KEY: "true"},
+            "auth": {**payload["auth"], "mcp_server_url": url},
+        }
+        await store_credential(client, vault.id, relay_payload, scope=scope)
     return vault.id
 
 
@@ -433,8 +506,13 @@ async def ensure_agent_mcp_vault(
     slack_turn_context_id: uuid.UUID | None = None,
     hold: TurnHold | None = None,
     scope: Scope | None = None,
+    relay_urls: Sequence[str] = (),
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
+
+    ``relay_urls`` are the agent's signed-identity relay URLs
+    (`daimon.core.mcp_identity.identity_relay_urls`): each gets a copy of the
+    same credential, since the relay is Daimon's own endpoint at another URL.
 
     A Slack DM execution ID selects a separate vault namespace and signed claim;
     it never modifies the shared agent vault. Only sessions for that logical turn
@@ -496,6 +574,7 @@ async def ensure_agent_mcp_vault(
             slack_turn_context_id=slack_turn_context_id,
             hold=hold,
             scope=scope,
+            relay_urls=relay_urls,
         )
 
         await session.commit()

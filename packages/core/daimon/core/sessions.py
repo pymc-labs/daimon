@@ -79,6 +79,7 @@ from daimon.core.github_app_session import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
+from daimon.core.mcp_identity import identity_relay_urls
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
@@ -696,6 +697,10 @@ async def create_session(
                     slack_turn_context_id=slack_turn_context_id,
                     hold=hold,
                     scope=scope,
+                    relay_urls=identity_relay_urls(
+                        (server.url for server in agent.mcp_servers),
+                        public_url=str(mcp_settings.public_url),
+                    ),
                 )
         elif caller_vault:
             assert (
@@ -726,6 +731,10 @@ async def create_session(
                 slack_turn_context_id=slack_turn_context_id,
                 hold=hold,
                 scope=scope,
+                relay_urls=identity_relay_urls(
+                    (server.url for server in agent.mcp_servers),
+                    public_url=str(mcp_settings.public_url),
+                ),
             )
 
         # External MCP servers are attached to the AGENT, so every caller who
