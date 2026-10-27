@@ -13,7 +13,7 @@ from __future__ import annotations
 # pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs
 
@@ -566,6 +566,30 @@ def create_mcp_app(
         methods=["PUT"],
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
+    identity = effective_settings.mcp_identity
+    if identity.servers and identity.signing_key is not None:
+        from daimon.adapters.mcp.identity_relay import (
+            RELAY_METHODS,
+            RELAY_ROUTE,
+            build_identity_relay_route,
+        )
+        from daimon.core.mcp_identity import IdentityTokenCache, load_signing_key
+
+        app.add_route(
+            RELAY_ROUTE,
+            build_identity_relay_route(
+                servers={server.name: server for server in identity.servers},
+                auth=effective_auth,
+                sessionmaker=effective_sessionmaker,
+                tokens=IdentityTokenCache(
+                    load_signing_key(identity.signing_key.get_secret_value())
+                ),
+                # No read timeout: a server's SSE stream stays open between events.
+                http=httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=None)),
+                clock=lambda: datetime.now(UTC),
+            ),
+            methods=RELAY_METHODS,
+        )
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
     app.add_route(
         "/avatars/{token}/{sha12}.png",
