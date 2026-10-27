@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A server listed there is attached to an agent at `<root>/mcp-identity/<name>`. Daimon forwards
   each request with `Authorization: Bearer` and a two-minute EdDSA token signed with
   `DAIMON_MCP_IDENTITY__SIGNING_KEY`. The token names the agent and the workspace and, for a
-  person's turn on Discord, Slack or Teams, who asked and the channel and message. The key stays in
+  person's turn on Discord, Slack or Teams, who asked and the channel and message; routines and
+  agent chat name no person. An optional `workspaces` list limits a server to some workspaces. The key stays in
   the MCP service and never reaches the sandbox. `daimon mcp identity-keygen` makes a key and
   prints the public half for the server. Migration 0145 records the platform channel and message on
   turn origins. Self-hosted harness, GPT and Gemini agents are not covered yet.
