@@ -2038,6 +2038,90 @@ class DirectMessagePolicy(BaseModel):
         )
 
 
+class SignedIdentityServer(BaseModel):
+    """One remote MCP server that receives a signed caller identity on every request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+    url: str
+    issuer: str = Field(min_length=1)
+    audience: str = Field(min_length=1)
+
+    @field_validator("url")
+    @classmethod
+    def _https(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("a signed-identity server needs an https URL without credentials")
+        return value
+
+
+class McpIdentitySettings(BaseModel):
+    # The key is a secret: a validation error must not echo it.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    signing_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Ed25519 private key that signs caller identities for the servers in "
+            "DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte "
+            "seed. Generate one with `daimon mcp identity-keygen`, which also prints the "
+            "public key to register with each server. Read only by the mcp service."
+        ),
+    )
+    servers: Annotated[list[SignedIdentityServer], NoDecode] = Field(
+        default_factory=list[SignedIdentityServer],
+        description=(
+            "Remote MCP servers that opt in to signed identity. A JSON array; each entry has "
+            "name (lowercase letters, digits and dashes), url (the server's https MCP "
+            "endpoint), issuer (the issuer id the server gave you) and audience (the "
+            "server's base URL). Attach such a server to an agent at "
+            "<app root>/mcp-identity/<name> instead of its own URL: Daimon forwards each "
+            "request with a short-lived EdDSA token naming the agent, the workspace and, "
+            "for a person's turn, who asked, the channel and the message. Requires "
+            "DAIMON_MCP_IDENTITY__SIGNING_KEY. Default: [] (off)."
+        ),
+    )
+
+    @field_validator("servers", mode="before")
+    @classmethod
+    def _parse_json(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return []
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"DAIMON_MCP_IDENTITY__SERVERS is not valid JSON "
+                f"(line {err.lineno}, column {err.colno})"
+            ) from None
+
+    @field_validator("servers")
+    @classmethod
+    def _unique_names(cls, value: list[SignedIdentityServer]) -> list[SignedIdentityServer]:
+        if len({server.name for server in value}) != len(value):
+            raise ValueError("signed-identity server names must be unique")
+        return value
+
+    @field_validator("signing_key")
+    @classmethod
+    def _readable_key(cls, value: SecretStr | None) -> SecretStr | None:
+        from daimon.core.mcp_identity import load_signing_key
+
+        if value is not None:
+            load_signing_key(value.get_secret_value())
+        return value
+
+    @model_validator(mode="after")
+    def _servers_need_key(self) -> McpIdentitySettings:
+        if self.servers and self.signing_key is None:
+            raise ValueError("DAIMON_MCP_IDENTITY__SERVERS needs DAIMON_MCP_IDENTITY__SIGNING_KEY")
+        return self
+
+
 class AgentIdentitySettings(BaseModel):
     enabled: bool = Field(
         default=False,
@@ -2189,6 +2273,7 @@ class Settings(BaseSettings):
     ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     mcp_oauth: McpOAuthSettings = Field(default_factory=McpOAuthSettings)
+    mcp_identity: McpIdentitySettings = Field(default_factory=McpIdentitySettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
