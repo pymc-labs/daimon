@@ -29,6 +29,7 @@ from .test_main import _make_test_settings  # pyright: ignore[reportPrivateUsage
         "dm_files_error",
         "heal_then_fail",
         "heal_edit_then_fail",
+        "heal_refused",
         "dm_fail",
         "dm_busy",
     ],
@@ -130,6 +131,11 @@ async def test_routine_failure_paths_preserve_the_finished_reply_or_error(
                 ),
             ) as listing,
         ):
+            if case == "heal_refused":
+                monkeypatch.setattr(
+                    "daimon.adapters.scheduler.main.update_routine_agent_id",
+                    unittest.mock.AsyncMock(return_value=False),
+                )
             await run_one_tick(
                 now=now,
                 sm=db_session_factory,
@@ -158,6 +164,11 @@ async def test_routine_failure_paths_preserve_the_finished_reply_or_error(
             db_session_factory, platform="discord", post=post, now=datetime.now(UTC)
         )
         assert posted == ["Finished reply\n\nGenerated files could not be attached."]
+    elif case == "heal_refused":
+        assert saved.agent_id == "old_agent"
+        assert saved.last_error == "routine_changed"
+        assert saved.last_finished_at is not None
+        assert saved.last_finished_claim_at == saved.last_fired_at
     elif case == "heal_edit_then_fail":
         assert saved.trigger_message == "new configuration"
         assert saved.last_error is None

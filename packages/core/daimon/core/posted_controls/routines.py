@@ -7,11 +7,12 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Literal, Protocol
 
+from daimon.core.errors import RoutineAlreadyRunning
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
 RoutineAction = Literal["pause", "resume", "toggle"]
-RoutineResult = Literal["changed", "gone", "wrong_tenant", "not_owner"]
+RoutineResult = Literal["changed", "gone", "wrong_tenant", "not_owner", "already_running"]
 
 
 class Load(Protocol):
@@ -73,7 +74,16 @@ async def apply_routine_action(
     if op == "pause":
         await pause(session, routine_id, tenant_id=tenant_id, expected_updated_at=row.updated_at)
     else:
-        await resume(
-            session, routine_id, tenant_id=tenant_id, now=now(), expected_updated_at=row.updated_at
-        )
+        if row.enabled:
+            return "already_running"
+        try:
+            await resume(
+                session,
+                routine_id,
+                tenant_id=tenant_id,
+                now=now(),
+                expected_updated_at=row.updated_at,
+            )
+        except RoutineAlreadyRunning:
+            return "already_running"
     return "changed"

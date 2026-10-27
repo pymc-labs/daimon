@@ -537,3 +537,37 @@ async def test_handle_routine_action_output_by_admin_non_creator_checks_privacy(
     assert not any("can read this routine's output" in b for b in bodies), (
         "an admin must not be shown the creator-or-admin refusal"
     )
+
+
+async def test_resume_of_running_routine_replies_without_rescheduling_or_reporting_error(
+    db_session, db_session_factory, fake_slack_web_client, monkeypatch
+):
+    tenant_id, fernet_key, _ = await _seed_team(db_session)
+    routine = await create_routine(
+        db_session,
+        tenant_id=tenant_id,
+        created_by_user_id=_USER_ID,
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="0 * * * *",
+        timezone_="UTC",
+        trigger_message="run",
+        enabled=True,
+    )
+    runtime = build_slack_runtime(fernet_key, db_session_factory)
+    payload = _pause_payload(routine.id)
+    payload["actions"] = [
+        {"action_id": f"routine_action:{routine.id}", "selected_option": {"value": "resume"}}
+    ]
+    reported = MagicMock()
+    monkeypatch.setattr(
+        "daimon.adapters.slack.routines_panel.actions.capture_exception_with_scope", reported
+    )
+    await handle_routine_action(runtime, payload)
+    assert any(
+        "This routine is already on." in body
+        for body in _ephemeral_bodies(fake_slack_web_client.mock)
+    )
+    reported.assert_not_called()
+    async with db_session_factory() as session:
+        assert await get_routine(session, routine.id, tenant_id=tenant_id) == routine

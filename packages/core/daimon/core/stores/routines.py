@@ -29,7 +29,7 @@ from daimon.core._models import (
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.cron import next_slot_at_or_after
-from daimon.core.errors import StoreError
+from daimon.core.errors import RoutineAlreadyRunning, StoreError
 from daimon.core.permissions import limiting_ids_at
 from daimon.core.routine_files import OUTBOX_FILES, PREFIX, plain_payload
 from daimon.core.stores.access_policy import load_access_policy
@@ -85,6 +85,7 @@ async def create_routine(
     cron_expr: str,
     timezone_: str,
     trigger_message: str,
+    internal_routine_id: _uuid.UUID | None = None,
     enabled: bool = True,
     catch_up_policy: CatchUpPolicy = "skip",
     next_fire_at: datetime | None = None,
@@ -116,6 +117,7 @@ async def create_routine(
         await validate_dm_source(session, tenant_id, source_channel_id, source_thread_id)
     orm = Routine(
         tenant_id=tenant_id,
+        internal_routine_id=internal_routine_id,
         created_by_user_id=created_by_user_id,
         agent_id=agent_id,
         agent_name=agent_name,
@@ -364,6 +366,12 @@ async def _save_routine_edit(
     transaction, so the owner cannot carry an opt-in over to a new agent,
     prompt or destination.
     """
+    if "enabled" in values:
+        values.update(
+            handback_paused_at=None,
+            handback_enabled=None,
+            handback_next_fire_at=None,
+        )
     material_changed = any(
         key in values and values[key] != getattr(current, key) for key in _SANDBOX_MATERIAL
     )
@@ -858,11 +866,16 @@ async def resume_routine(
     row = await get_routine(session, routine_id, tenant_id=tenant_id)
     if row is None:
         return None
+    if row.enabled:
+        raise RoutineAlreadyRunning("This routine is already on.")
     nxt = next_slot_at_or_after(row.cron_expr, row.timezone, now)
     return await _save_routine_edit(
         session,
         row,
-        {"enabled": True, "next_fire_at": nxt},
+        {
+            "enabled": True,
+            "next_fire_at": nxt,
+        },
         expected_updated_at=expected_updated_at,
     )
 
@@ -951,6 +964,21 @@ async def record_result(
             # the same fenced write as its content. Delivery verifies THIS ID.
             values["agent_id"] = producing_agent_id
     await session.execute(statement.values(**values))
+    # Completion is independent of content/configuration fences: even a fire
+    # whose edited destination rejects its result has finished. Fence by claim
+    # time so an older completion cannot settle a newer claim.
+    completion = update(Routine).where(Routine.id == routine_id)
+    fired_row = expected_row or expected_private
+    if fired_row is not None:
+        completion = completion.where(
+            Routine.tenant_id == fired_row.tenant_id,
+            Routine.last_fired_at == fired_row.last_fired_at,
+        )
+    await session.execute(
+        completion.values(
+            last_finished_at=datetime.now(UTC), last_finished_claim_at=Routine.last_fired_at
+        )
+    )
     await session.flush()
 
 
@@ -1167,9 +1195,10 @@ async def claim_due_fireable(
     """Step 1: atomically claim due rows. Step 2: recompute next_fire_at.
 
     Returned rows reflect the row state BEFORE step-2 recompute (matches
-    predecessor): callers see `next_fire_at=None` and `last_fired_at=now`
-    on each claimed row, while the table itself has the freshly-computed
-    next slot stamped per row.
+    predecessor): callers see `next_fire_at=None`, `last_fired_at=now`,
+    the original scheduled slot in `last_fired_slot`, and no completion on
+    each claimed row. The table itself has the freshly-computed next slot.
+    Run-once coalescing retains the overdue slot selected, not the wall time.
     """
     window_start = now - max_age
 
@@ -1194,7 +1223,13 @@ async def claim_due_fireable(
     claim_stmt = (
         update(Routine)
         .where(Routine.id.in_(id_subq))
-        .values(next_fire_at=None, last_fired_at=now)
+        .values(
+            next_fire_at=None,
+            last_fired_at=now,
+            last_fired_slot=Routine.next_fire_at,
+            last_finished_at=None,
+            last_finished_claim_at=None,
+        )
         .returning(Routine)
         .execution_options(synchronize_session=False)
     )

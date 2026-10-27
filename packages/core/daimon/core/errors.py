@@ -73,6 +73,10 @@ class StoreError(DaimonError):
     """DB constraint violation, expected row missing, uniqueness violation."""
 
 
+class RoutineAlreadyRunning(StoreError):
+    """An enabled routine cannot be resumed and rescheduled again."""
+
+
 class TurnError(DaimonError):
     """A renderable turn failure. Carried on `TurnState.error`."""
 

@@ -960,3 +960,40 @@ async def test_legacy_private_output_button_checks_owner(
     else:
         assert "Only the owner" in call.args[0]
         assert "view" not in call.kwargs
+
+
+async def test_resume_race_replies_already_running_without_callback_error(monkeypatch):
+    from daimon.core.errors import RoutineAlreadyRunning
+
+    entry = _make_entry(
+        enabled=False,
+        created_by_user_id="42",
+        tenant_id=derive_tenant_uuid(platform="discord", workspace_id="G1"),
+    )
+    runtime = _runtime_with_session(_mock_session_with_row(entry.routine))
+    view = RoutinesPanelView(_make_state([entry]), runtime=runtime, allowed_user_id=42)
+    button = next(child for child in view.walk_children() if isinstance(child, _PauseButton))
+    button._view = view
+    monkeypatch.setattr(
+        "daimon.adapters.discord.routines_panel.panel.get_routine",
+        AsyncMock(return_value=entry.routine),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.discord.routines_panel.panel.checks.is_guild_admin",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.discord.routines_panel.panel.resume_routine_via_panel",
+        AsyncMock(side_effect=RoutineAlreadyRunning("already running")),
+    )
+    error = AsyncMock()
+    monkeypatch.setattr("daimon.adapters.discord.routines_panel.panel._send_callback_error", error)
+    interaction = MagicMock()
+    interaction.user.id = 42
+    interaction.guild_id = "G1"
+    interaction.response.send_message = AsyncMock()
+    await button.callback(interaction)
+    interaction.response.send_message.assert_awaited_once_with(
+        "This routine is already on.", ephemeral=True
+    )
+    error.assert_not_awaited()

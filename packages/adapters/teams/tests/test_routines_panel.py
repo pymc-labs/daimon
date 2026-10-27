@@ -214,3 +214,11 @@ async def test_legacy_output_is_owner_only_even_for_admins(
     else:
         assert "Only the owner" in body
         assert "private-error" not in body and "personal-memory-sentinel" not in body
+
+
+async def test_resume_of_running_routine_is_a_plain_reply(db_session_factory, teams_api_fake):
+    row = await _routine(db_session_factory, owner=AAD_OBJECT_ID, message="my standup")
+    async with _running(db_session_factory, teams_api_fake) as service:
+        response = await post_activity(service, _click("resume", row))
+    assert response["value"] == "This routine is already on."
+    assert await _load(db_session_factory, row) == row

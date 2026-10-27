@@ -457,7 +457,11 @@ async def _build_fire(
             target = delivery_target(row, platform=platform)
             if is_routine_parent_unknown(row):
                 await record_result(
-                    s, row.id, tail=None, error="routine_destination_parent_unknown"
+                    s,
+                    row.id,
+                    tail=None,
+                    error="routine_destination_parent_unknown",
+                    expected_row=row,
                 )
                 return
             parent_channel = routine_destination_channel(row)
@@ -479,7 +483,11 @@ async def _build_fire(
                     == "selfhosted"
                 ):
                     await record_result(
-                        s, row.id, tail=None, error="selfhosted_routines_unsupported"
+                        s,
+                        row.id,
+                        tail=None,
+                        error="selfhosted_routines_unsupported",
+                        expected_row=row,
                     )
                     return
             channels = {
@@ -496,7 +504,11 @@ async def _build_fire(
                     s, tenant_id=row.tenant_id, platform=platform, channel_id=routine_channel
                 ):
                     await record_result(
-                        s, row.id, tail=None, error="selfhosted_routines_unsupported"
+                        s,
+                        row.id,
+                        tail=None,
+                        error="selfhosted_routines_unsupported",
+                        expected_row=row,
                     )
                     return
             principal = await get_or_create_platform_principal(
@@ -730,6 +742,10 @@ async def _build_fire(
                     heal_s, row.id, resolved_agent_id, expected_updated_at=row.updated_at
                 )
             if not healed:
+                async with sm() as refused_s, refused_s.begin():
+                    await record_result(
+                        refused_s, row.id, tail=None, error="routine_changed", expected_row=row
+                    )
                 return
             row = row.model_copy(update={"agent_id": resolved_agent_id})
 

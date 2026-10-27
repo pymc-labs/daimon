@@ -208,6 +208,8 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     text = (
                         "This routine no longer exists."
                         if result == "gone"
+                        else "This routine is already on."
+                        if result == "already_running"
                         else "Only the routine's creator or a workspace admin "
                         "can pause or resume this routine."
                     )

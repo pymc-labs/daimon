@@ -460,6 +460,7 @@ class ChannelAdmin(Base):
 class Routine(Base):
     __tablename__ = "routines"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "internal_routine_id", name="uq_routines_tenant_internal_id"),
         Index(
             "routines_due_idx",
             "next_fire_at",
@@ -520,7 +521,23 @@ class Routine(Base):
     )
     last_skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     next_fire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    internal_routine_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    seeded_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_fired_slot: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    handback_paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    handback_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    handback_next_fire_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_finished_claim_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_result_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Optional place the result goes, and the outbox that posts it.

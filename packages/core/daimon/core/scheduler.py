@@ -150,8 +150,16 @@ async def run_one_tick(
             log.exception("claim_due_fireable failed")
             return dispatcher
 
-    async with sm() as intake_session:
-        intake_bindings = await configured_routines(intake_session, {row.tenant_id for row in rows})
+    try:
+        async with sm() as intake_session:
+            intake_bindings = await configured_routines(
+                intake_session, {row.tenant_id for row in rows}
+            )
+    except Exception:
+        log.exception("configured_routines failed")
+        for row in rows:
+            await _record_fire_error(sm, row, "routine_configuration_check_failed", None)
+        return dispatcher
 
     # Sequential cap check (cheaper
     # than checking inside the semaphore boundary; keeps the existing cap path).
@@ -166,6 +174,7 @@ async def run_one_tick(
                 over = await caps.is_over_cap(row.tenant_id, row.created_by_user_id)
             except Exception:
                 log.exception("caps.is_over_cap failed", routine_id=str(row.id))
+                await _record_fire_error(sm, row, "cap_check_failed", None)
                 continue
         if over:
             TurnObservation(

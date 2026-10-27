@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add slot-safe routine handover with claimed-slot and completion evidence,
+  stable internal ids, atomic `seed-first-run` and `pause-for-handback` operator
+  commands, and read-only `export-rollback`. Handback preserves the enabled state
+  and next unrun slot across coalescing and checks schedule, completion and
+  delivery consistency before declaring a final export. Repeated resume replies
+  plainly without replacing a seeded first run.
+
 - Fixed Discord fleet rendering losing verified invoker roles and replacing ordinary
   tool-free answers with a fleet-unavailable notice. Fleet results still require current authorization.
 

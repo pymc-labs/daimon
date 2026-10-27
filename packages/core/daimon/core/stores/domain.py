@@ -266,6 +266,14 @@ class RoutineRow(BaseModel):
     last_skip_reason: Literal["stale", "in_flight"] | None = None
     next_fire_at: datetime | None
     last_fired_at: datetime | None
+    internal_routine_id: uuid.UUID | None = None
+    seeded_after: datetime | None = None
+    last_fired_slot: datetime | None = None
+    last_finished_at: datetime | None = None
+    handback_paused_at: datetime | None = None
+    handback_enabled: bool | None = None
+    handback_next_fire_at: datetime | None = None
+    last_finished_claim_at: datetime | None = None
     last_error: str | None
     last_result_tail: str | None
     destination_kind: RoutineDestinationKind | None = None

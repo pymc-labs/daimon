@@ -1746,6 +1746,13 @@ hosted client cannot accept image content.
 Read from `daimon.adapters.scheduler.settings.SchedulerSettings`. Prefix
 `DAIMON_SCHEDULER__`.
 
+### `DAIMON_SCHEDULER__MAX_AGE_S`
+
+`float` · optional · default `900.0`
+
+Freshness window for routines with catch_up_policy=skip. Older slots are recorded as
+skipped and advanced; run-once routines ignore this window.
+
 ### `DAIMON_SCHEDULER__TICK_INTERVAL_S`
 
 `float` · optional · default `30.0`
@@ -1761,13 +1768,6 @@ Run the headless usage sweep: settle the MCP agent-chat sessions whose turns nob
 to the end (each headless send leaves a settle request; a status read that sees the turn
 end settles it first). It reads only the sessions those requests name. When off, such a
 session is billed the next time a read sees its last turn ended.
-
-### `DAIMON_SCHEDULER__MAX_AGE_S`
-
-`float` · optional · default `900.0`
-
-Freshness window for routines with catch_up_policy=skip. Older slots are recorded as
-skipped and advanced; run-once routines ignore this window.
 
 ### `DAIMON_SCHEDULER__MAX_CONCURRENT_FIRES`
 

@@ -80,7 +80,7 @@ LONG_JOBS_HEAD = "0147_long_jobs"
 ADMINS_HEAD = "0148_daimon_admins"
 
 
-HEAD = "0150_origin_human_invocation"
+HEAD = "0151_routine_claimed_slot"
 
 
 CHAIN = [
@@ -102,6 +102,7 @@ CHAIN = [
     LONG_JOBS_HEAD,
     ADMINS_HEAD,
     "0149_context_provider_bindings",
+    "0150_origin_human_invocation",
     HEAD,
 ]
 
@@ -212,6 +213,28 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         reflected: bool,
         _compare_to: object,
     ) -> bool:
+        if (
+            kind == "column"
+            and name
+            in {
+                "last_fired_slot",
+                "last_finished_at",
+                "last_finished_claim_at",
+                "handback_paused_at",
+                "handback_enabled",
+                "handback_next_fire_at",
+                "seeded_after",
+                "internal_routine_id",
+            }
+            and expected != HEAD
+        ):
+            return False
+        if (
+            kind == "unique_constraint"
+            and name == "uq_routines_tenant_internal_id"
+            and expected != HEAD
+        ):
+            return False
         # Historical main retains these two objects for older readers, while
         # its ORM intentionally omits them. These retained objects
         # are outside the ORM metadata comparison.
