@@ -106,7 +106,8 @@ from daimon.core.defaults.metadata import (
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
-from daimon.core.mcp_vault import refresh_mounted_mcp_vaults
+from daimon.core.mcp_identity import identity_relay_urls
+from daimon.core.mcp_vault import archive_relay_vaults, refresh_mounted_mcp_vaults
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -813,16 +814,20 @@ async def _continue_turn_impl(
         if mcp.public_url is not None and mcp.jwt_secret is not None:
             mounted = await _verify_agent_owns_session(runtime, auth, handle)
             assert auth.agent_id is not None  # verified above, including after fence acquisition
+            public_url = str(mcp.public_url)
             await refresh_mounted_mcp_vaults(
                 runtime.client,
                 vault_ids=mounted.vault_ids,
                 account_id=auth.account_id,
                 agent_id=auth.agent_id,
                 jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
-                public_url=str(mcp.public_url),
+                public_url=public_url,
                 now=now(),
                 session_factory=runtime.session_factory,
                 scope=mcp_scope(auth),
+                relay_urls=identity_relay_urls(
+                    (server.url for server in mounted.agent.mcp_servers), public_url=public_url
+                ),
             )
         # Inside the fence, so settle requests follow the order of the sends.
         turn_event_id = await _send_billed(runtime, handle, message, scope=mcp_scope(auth))
@@ -884,9 +889,14 @@ async def _archive_my_session_impl(
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
     cross-agent handles.
     """
-    await _verify_agent_owns_session(runtime, auth, handle)
+    mounted = await _verify_agent_owns_session(runtime, auth, handle)
     async with session_mutation_fence(runtime.session_factory, handle):
         await archive_session_record(runtime.client, handle, scope=mcp_scope(auth))
+    try:
+        await archive_relay_vaults(runtime.client, mounted.vault_ids, scope=mcp_scope(auth))
+    except Exception:
+        # The scheduler's janitor archives it once no live session mounts it.
+        log.exception("mcp.agent_chat.relay_vault_cleanup_failed", session_id=handle)
     try:
         await close_headless_app_session(
             runtime.client,

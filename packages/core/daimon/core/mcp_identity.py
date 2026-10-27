@@ -120,10 +120,15 @@ def identity_relay_urls(server_urls: Iterable[str], *, public_url: str) -> tuple
     """The attached URLs that are this deployment's relay, which need its credential.
 
     Kept exactly as attached: the managed runtime matches a credential to a server
-    by its URL string, so a canonical form could miss.
+    by its URL string, so a canonical form could miss. One per canonical URL, as a
+    vault holds one credential per server.
     """
     base = relay_base(public_url)
-    return tuple(sorted({url for url in server_urls if canonical_mcp_url(url).startswith(base)}))
+    by_server: dict[str, str] = {}
+    for url in sorted(server_urls):
+        if (canonical := canonical_mcp_url(url)).startswith(base):
+            by_server.setdefault(canonical, url)
+    return tuple(sorted(by_server.values()))
 
 
 @dataclass(frozen=True)

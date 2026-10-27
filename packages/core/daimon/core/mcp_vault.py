@@ -34,13 +34,14 @@ from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_r
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
 from daimon.core.mcp_hold import hold_from_metadata, hold_metadata_value, hold_vault_suffix
 from daimon.core.mcp_identity import RelayBinding
-from daimon.core.mcp_server_url import same_mcp_url
+from daimon.core.mcp_server_url import canonical_mcp_url, same_mcp_url
 from daimon.core.mux_compat import (
     archive_vault,
     create_vault,
     delete_credential,
     list_credentials,
     list_vaults,
+    retrieve_vault,
     store_credential,
     update_credential,
 )
@@ -63,6 +64,8 @@ HOLD_METADATA_KEY = "daimon_chat_hold"
 RELAY_METADATA_KEY = "daimon_chat_relay"
 RELAY_AGENT_NAME_METADATA_KEY = "daimon_relay_agent_name"
 RELAY_SESSION_METADATA_KEY = "daimon_relay_session"
+#: Display-name prefix of a session's own relay vault.
+RELAY_VAULT_PREFIX = "daimon-relay:"
 
 
 async def _find_vault_by_name(
@@ -466,7 +469,7 @@ async def create_relay_vault(
     so the relay can tell which session made a request: the caller's shared
     vault would let a routine or a stale session pass as someone's live turn.
     """
-    vault = await create_vault(client, f"daimon-relay:{account_id}:{agent_id}", scope=scope)
+    vault = await create_vault(client, f"{RELAY_VAULT_PREFIX}{account_id}:{agent_id}", scope=scope)
     try:
         async with session_factory() as session, session.begin():
             payload = await chat_mcp_credential(
@@ -491,6 +494,19 @@ async def create_relay_vault(
         await archive_vault(client, vault.id, scope=scope)
         raise
     return vault.id
+
+
+async def archive_relay_vaults(
+    client: AsyncAnthropic, vault_ids: Iterable[str], *, scope: Scope
+) -> None:
+    """Archive the relay vaults among a closed session's mounted vaults.
+
+    `mcp_vault_janitor.archive_idle_relay_vaults` archives any this misses.
+    """
+    for vault_id in dict.fromkeys(vault_ids):
+        vault = await retrieve_vault(client, vault_id, scope=scope)
+        if vault.display_name.startswith(RELAY_VAULT_PREFIX) and vault.archived_at is None:
+            await archive_vault(client, vault_id, scope=scope)
 
 
 async def refresh_relay_vault(
@@ -521,11 +537,14 @@ async def refresh_relay_vault(
             slots[cred.auth.mcp_server_url] = cred
     if not slots:
         return
+    # One slot per server: a URL differing only in form from a slot is that slot.
+    held = {canonical_mcp_url(url) for url in slots}
+    missing = [url for url in relay_urls if canonical_mcp_url(url) not in held]
     metadata = next(iter(slots.values())).metadata or {}
     expiries = {(cred.metadata or {}).get("daimon_chat_expires_at") for cred in slots.values()}
     expires_at = next(iter(expiries)) if len(expiries) == 1 else None
     if (
-        set(relay_urls) <= set(slots)
+        not missing
         and expires_at is not None
         and dt.datetime.fromisoformat(expires_at) > now + CHAT_TOKEN_REFRESH_MARGIN
     ):
@@ -540,7 +559,7 @@ async def refresh_relay_vault(
             account_id=account_id,
             agent_id=agent_id,
             jwt_secret=jwt_secret,
-            public_url=relay_urls[0] if relay_urls else next(iter(slots)),
+            public_url=next(iter(slots)),
             now=now,
             slack_turn_context_id=None if context is None else uuid.UUID(context),
             hold=hold_from_metadata(metadata.get(HOLD_METADATA_KEY)),
@@ -550,7 +569,7 @@ async def refresh_relay_vault(
             ),
         )
     # Registered before the provider write, as for the shared vault.
-    for url in dict.fromkeys([*slots, *relay_urls]):
+    for url in [*slots, *missing]:
         existing = slots.get(url)
         auth: dict[str, str] = {**payload["auth"], "mcp_server_url": url}
         if existing is None:

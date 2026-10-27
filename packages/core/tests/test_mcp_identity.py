@@ -151,6 +151,8 @@ def test_relay_urls_are_only_this_deployments_relay() -> None:
         [relay + "/", "https://tools.example.com/mcp", PUBLIC_URL], public_url=PUBLIC_URL
     )
     assert found == (relay + "/",), "only the relay, kept exactly as attached"
+    twice = identity_relay_urls([relay + "/", relay], public_url=PUBLIC_URL)
+    assert len(twice) == 1, "one URL per server, so a vault never holds two slots for it"
 
 
 def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:

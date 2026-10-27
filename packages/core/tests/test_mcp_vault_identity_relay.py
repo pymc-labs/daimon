@@ -20,6 +20,7 @@ from daimon.core.mcp_identity import (
 )
 from daimon.core.mcp_vault import (
     RELAY_METADATA_KEY,
+    archive_relay_vaults,
     chat_mcp_credential,
     create_relay_vault,
     refresh_mounted_mcp_vaults,
@@ -43,6 +44,7 @@ class _Vault:
         self.display_name = display_name
         self.creds = creds or []
         self.writes: list[tuple[str, dict[str, Any]]] = []
+        self.archived = False
 
     def by_url(self, url: str) -> dict[str, Any]:
         (cred,) = [c for c in self.creds if c["auth"]["mcp_server_url"] == url]
@@ -65,6 +67,9 @@ class _Vault:
             if path == "/v1/vaults" and req.method == "POST":
                 self.display_name = json.loads(req.content)["display_name"]
                 return httpx.Response(200, json=self.vault())
+            if path == "/v1/vaults/vlt_1/archive" and req.method == "POST":
+                self.archived = True
+                return httpx.Response(200, json=self.vault())
             if path == "/v1/vaults" and req.method == "GET":
                 vault: dict[str, Any] = {
                     "id": "vlt_1",
@@ -82,6 +87,8 @@ class _Vault:
                     for c in self.creds
                 ]
                 return httpx.Response(200, json={"data": public, "has_more": False})
+            if path == "/v1/vaults/vlt_1" and req.method == "GET":
+                return httpx.Response(200, json=self.vault())
             body = json.loads(req.content)
             if path == "/v1/vaults/vlt_1/credentials" and req.method == "POST":
                 cred: dict[str, Any] = {
@@ -96,8 +103,6 @@ class _Vault:
                 self.creds.append(cred)
                 self.writes.append(("create", body))
                 return httpx.Response(200, json=cred)
-            if path == "/v1/vaults/vlt_1" and req.method == "GET":
-                return httpx.Response(200, json=self.vault())
             if path.startswith("/v1/vaults/vlt_1/credentials/") and req.method == "POST":
                 (cred,) = [c for c in self.creds if c["id"] == path.rsplit("/", 1)[-1]]
                 cred["metadata"] = body.get("metadata") or {}
@@ -212,8 +217,9 @@ async def test_fresh_relay_vault_and_other_vaults_are_left_alone(
         db_session_factory, RelayBinding("Helper", uuid.uuid4()), RELAY
     )
     writes = len(vault.writes)
-    await _refresh(db_session_factory, vault, account_id, agent_id, relay_urls=(RELAY,), now=NOW)
-    assert len(vault.writes) == writes, "a fresh, complete relay vault is not rewritten"
+    for urls in ((RELAY,), (RELAY + "/",)):
+        await _refresh(db_session_factory, vault, account_id, agent_id, relay_urls=urls, now=NOW)
+    assert len(vault.writes) == writes, "a fresh relay vault holding each server is not rewritten"
 
     async with db_session_factory() as db, db.begin():
         payload = await chat_mcp_credential(
@@ -227,3 +233,10 @@ async def test_fresh_relay_vault_and_other_vaults_are_left_alone(
     assert [cred["auth"]["mcp_server_url"] for cred in shared.creds] == [PUBLIC_URL], (
         "the caller's shared vault never gets a relay credential"
     )
+
+
+async def test_closing_a_session_archives_only_its_relay_vault() -> None:
+    relay, shared = _Vault(f"daimon-relay:{uuid.uuid4()}:{uuid.uuid4()}"), _Vault("daimon-mcp:x")
+    for vault in (relay, shared):
+        await archive_relay_vaults(_client(vault), ["vlt_1"], scope=SCOPE)
+    assert (relay.archived, shared.archived) == (True, False), "the shared vault stays"
