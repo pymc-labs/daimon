@@ -159,7 +159,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
-from daimon.core.turn.outcomes import observe_turn, record_refusal
+from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
@@ -1603,6 +1603,7 @@ class TeamsApp:
                     "teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc
                 )
                 capture_exception_with_scope(exc)
+                finish_with_error(exc)
                 await holder[-1].close_with_notice(failure_notice(exc))
                 await holder[-1].release_controls()  # An answer that landed keeps its own.
                 if reraise:

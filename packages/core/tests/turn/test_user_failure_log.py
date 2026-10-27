@@ -21,6 +21,7 @@ from daimon.core.turn import outcomes
 from daimon.core.turn.outcomes import (
     TurnObservation,
     drain_outcomes,
+    finish_with_error,
     observe_turn,
     record_refusal,
 )
@@ -291,3 +292,33 @@ async def test_a_routine_fire_that_returns_without_finishing_logs_nothing(
     assert fired == [row.id]
     assert _failures(logs) == []
     assert [r.reason for r in written] == [TerminationReason.UNKNOWN]
+
+
+async def test_a_failure_the_adapter_shows_and_swallows_still_logs_once(
+    sessionmaker: async_sessionmaker[AsyncSession], written: list[OutcomeRecord]
+) -> None:
+    """A Teams or wizard turn that posts its own failure card and returns."""
+    with capture_logs() as logs:
+        with observe_turn(sessionmaker, tenant_id=uuid.uuid4(), platform="teams"):
+            try:
+                raise ConnectionError("graph unavailable")
+            except ConnectionError as exc:
+                finish_with_error(exc)
+        await drain_outcomes()
+    failures = _failures(logs)
+    assert [(f["reason"], f["error_class"]) for f in failures] == [("unknown", "ConnectionError")]
+    assert [row.reason for row in written] == [TerminationReason.UNKNOWN]
+
+
+async def test_swallowing_after_the_turn_already_ended_changes_nothing(
+    sessionmaker: async_sessionmaker[AsyncSession], written: list[OutcomeRecord]
+) -> None:
+    with capture_logs() as logs:
+        with observe_turn(sessionmaker, tenant_id=uuid.uuid4(), platform="teams"):
+            outcome = outcomes.current_outcome.get()
+            assert outcome is not None
+            outcome.finish(reason=TerminationReason.COMPLETED)
+            finish_with_error(RuntimeError("card update failed after the answer"))
+        await drain_outcomes()
+    assert _failures(logs) == []
+    assert [row.reason for row in written] == [TerminationReason.COMPLETED]

@@ -126,7 +126,7 @@ from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, 
 from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.lifecycle import TurnLifecycle
-from daimon.core.turn.outcomes import observe_turn, record_refusal
+from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
@@ -867,6 +867,7 @@ async def run_wizard_submit_turn_observed(
                     await wm_session.commit()
     except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
         _log.warning("wizard_submit.turn_failed", error=str(exc), short_id=row.id)
+        finish_with_error(exc)
         await _render_wizard_turn_error(
             interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state
         )
@@ -874,6 +875,7 @@ async def run_wizard_submit_turn_observed(
         # background-task adapter boundary (see module docstring); nothing above this task will
         # otherwise report the failure
         _log.exception("wizard_submit.turn_failed_unexpected", error=str(exc), short_id=row.id)
+        finish_with_error(exc)
         await _render_wizard_turn_error(
             interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state
         )

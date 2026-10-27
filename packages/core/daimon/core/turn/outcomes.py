@@ -390,6 +390,15 @@ def observe_turn(
             observation.finish(reason=TerminationReason.UNKNOWN, fallback=True)
 
 
+def finish_with_error(exc: BaseException) -> None:
+    """End the active turn with `exc` when an adapter shows the failure itself and
+    returns instead of raising, so the boundary's catch-all finish does not treat
+    a failed answer as a quiet return. A turn that already ended is unchanged."""
+    observation = current_outcome.get()
+    if observation is not None:
+        observation.finish(error=exc)
+
+
 def record_refusal(
     sm: async_sessionmaker[AsyncSession],
     *,
