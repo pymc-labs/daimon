@@ -683,12 +683,9 @@ async def create_session(
             )
             for tool in agent.tools
         )
-        or frozenset(
-            tool.mcp_server_name for tool in agent.tools if tool.type == "mcp_toolset"
-        )
+        or frozenset(tool.mcp_server_name for tool in agent.tools if tool.type == "mcp_toolset")
         != isolated_relay_names | {"daimon-mcp"}
-        or sum(tool.type == "mcp_toolset" for tool in agent.tools)
-        != len(isolated_relay_names) + 1
+        or sum(tool.type == "mcp_toolset" for tool in agent.tools) != len(isolated_relay_names) + 1
     ):
         raise ValueError("isolated relay requires a dedicated relay-only agent session")
     if isolated_relay_names:

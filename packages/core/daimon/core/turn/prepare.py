@@ -1134,8 +1134,6 @@ async def bind_session_impl(
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
 
     profile = _admitted_profile(admission)
-    if isolated_relay_names(deps, admission) and profile != "anthropic.managed_agents":
-        raise AdmissionDenied(reason="backend_unsupported")
     scope = admitted_session_scope(admission, tenant_id=tenant_id, session_id="preparation")
     request = ProviderPreparationRequest(
         deps,
@@ -1164,6 +1162,8 @@ async def bind_session_impl(
             raise
 
     if profile != "anthropic.managed_agents":
+        if isolated_relay_names(deps, admission):
+            raise AdmissionDenied(reason="backend_unsupported")
         if (deps.turn_path or load_turn_settings().path) != "mux":
             raise AdmissionDenied(reason="backend_unsupported")
         from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
