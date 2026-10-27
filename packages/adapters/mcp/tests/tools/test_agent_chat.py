@@ -72,6 +72,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BILLING_EXEMPT,
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_CONTEXT_ISOLATED,
     MA_METADATA_KEY_SEALED,
 )
 from daimon.core.github_app_session import prepare_app_access as mint_app_access
@@ -2285,6 +2286,77 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place() -> 
         ("GET", "/v1/sessions/ses_exempt"),
         ("POST", "/v1/sessions/ses_exempt/events"),
     ], f"continue_turn must not rewrite session metadata; saw {requests!r}"
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_continue_turn_refuses_an_owned_context_isolated_session_before_send(
+    isolated: bool,
+) -> None:
+    requests: list[tuple[str, str]] = []
+    metadata = {MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID)}
+    if isolated:
+        metadata[MA_METADATA_KEY_CONTEXT_ISOLATED] = "true"
+    session = ma_session(
+        id="ses_owned",
+        agent_id=_MA_AGENT_ID,
+        environment_id=_ENV_ID,
+        status="idle",
+        metadata=metadata,
+    ).model_dump(mode="json")
+
+    def on_retrieve(request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        return httpx.Response(200, json=session)
+
+    def on_send(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        return _boundary_send_response(request, match)
+
+    router = MARouter()
+    router.add("GET", r"/v1/sessions/([^/]+)", on_retrieve)
+    router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+    if isolated:
+        with pytest.raises(ToolError, match="requires a fresh request"):
+            await _continue_turn_impl(runtime, _auth(), "ses_owned", "more")
+        assert requests == [("GET", "/v1/sessions/ses_owned")]
+    else:
+        result = await _continue_turn_impl(runtime, _auth(), "ses_owned", "more")
+        assert result["handle"] == "ses_owned"
+        assert requests == [
+            ("GET", "/v1/sessions/ses_owned"),
+            ("POST", "/v1/sessions/ses_owned/events"),
+        ]
+
+
+async def test_agent_chat_cannot_read_isolated_source_events() -> None:
+    event_reads: list[str] = []
+    session = ma_session(
+        id="ses_owned",
+        agent_id=_MA_AGENT_ID,
+        environment_id=_ENV_ID,
+        status="idle",
+        metadata={
+            MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID),
+            MA_METADATA_KEY_CONTEXT_ISOLATED: "true",
+        },
+    ).model_dump(mode="json")
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _request, _match: httpx.Response(200, json=session),
+    )
+
+    def events(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        event_reads.append(request.url.path)
+        return httpx.Response(200, json={"data": [], "next_page": None})
+
+    router.add("GET", r"/v1/sessions/([^/]+)/events", events)
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+    with pytest.raises(ToolError, match="transcript is unavailable"):
+        await _list_events_impl(runtime, _auth(), "ses_owned", None, None, None)
+    assert event_reads == []
 
 
 async def test_start_turn_with_bundle_preserves_the_boundary_return_shape(

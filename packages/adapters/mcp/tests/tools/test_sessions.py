@@ -30,6 +30,7 @@ from daimon.adapters.mcp.tools.sessions import (
     _list_sessions_impl,
     register_sessions_tools,
 )
+from daimon.core.defaults.metadata import MA_METADATA_KEY_CONTEXT_ISOLATED
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.turn_origin import render_turn_origin
@@ -104,6 +105,7 @@ def _make_session_payload(
     agent_id: str = "ag_a",
     status: str = "idle",
     account_id: str | None = None,
+    context_isolated: bool = False,
 ) -> dict[str, Any]:
     """A session payload with ``status`` overridden after validated construction:
     the SDK's Literal cannot carry a novel value, even though its response-parsing
@@ -113,7 +115,14 @@ def _make_session_payload(
     payload = ma_session(
         id=session_id,
         agent_id=agent_id,
-        metadata={"daimon_account": account_id} if account_id else {},
+        metadata=(
+            {
+                "daimon_account": account_id,
+                **({MA_METADATA_KEY_CONTEXT_ISOLATED: "true"} if context_isolated else {}),
+            }
+            if account_id
+            else {}
+        ),
     ).model_dump(mode="json")
     payload["status"] = status
     return payload
@@ -203,7 +212,10 @@ async def test_get_session_admits_novel_status_string_through_fastmcp() -> None:
     )
 
 
-async def test_list_session_events_admits_thread_status_events_through_fastmcp() -> None:
+@pytest.mark.parametrize("context_isolated", [False, True])
+async def test_list_session_events_admits_thread_status_events_through_fastmcp(
+    context_isolated: bool,
+) -> None:
     """list_session_events must not output-validation-error on a
     session.thread_status_idle event — a variant the pinned SDK's
     discriminated union does not model.
@@ -223,6 +235,7 @@ async def test_list_session_events_admits_thread_status_events_through_fastmcp()
     }
 
     router = MARouter()
+    event_reads: list[str] = []
     router.add(
         "GET",
         r"/v1/agents",
@@ -242,17 +255,24 @@ async def test_list_session_events_admits_thread_status_events_through_fastmcp()
         lambda _r, _m: httpx.Response(
             200,
             json=_make_session_payload(
-                session_id="ses_1", agent_id="ag_a", account_id=str(account_id)
+                session_id="ses_1",
+                agent_id="ag_a",
+                account_id=str(account_id),
+                context_isolated=context_isolated,
             ),
         ),
     )
+    def events(request: httpx.Request, _match: object) -> httpx.Response:
+        event_reads.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={"data": [_make_thread_idle_event_raw()], "next_page": None},
+        )
+
     router.add(
         "GET",
         r"/v1/sessions/([^/]+)/events",
-        lambda _r, _m: httpx.Response(
-            200,
-            json={"data": [_make_thread_idle_event_raw()], "next_page": None},
-        ),
+        events,
     )
     client = build_fake_anthropic(router.dispatch)
     app = _sessions_mcp_app(client, token, claims)
@@ -263,6 +283,9 @@ async def test_list_session_events_admits_thread_status_events_through_fastmcp()
 
     payload = result.get("result", result)
     assert isinstance(payload, dict), f"unexpected tools/call shape: {result!r}"
+    if context_isolated:
+        assert payload.get("isError") and event_reads == []
+        return
     assert not payload.get("isError"), (
         f"list_session_events must not output-validation-error on a "
         f"thread_status_idle event; got {payload!r}"
@@ -272,6 +295,7 @@ async def test_list_session_events_admits_thread_status_events_through_fastmcp()
     assert "session.thread_status_idle" in types, (
         f"the thread_status_idle event must survive in the page; got types {types!r}"
     )
+    assert event_reads == ["/v1/sessions/ses_1/events"]
 
 
 async def test_list_sessions_returns_only_tenant_scoped_sessions() -> None:
@@ -454,6 +478,52 @@ async def test_list_session_events_returns_page_envelope() -> None:
     assert result.next_page == "p2", "should forward SDK next_page cursor unchanged"
     item: SessionEventOut = result.items[0]
     assert item.id == "sevt_1", "event id should round-trip through SDK parse"
+
+
+async def test_isolated_session_metadata_is_visible_but_events_are_not() -> None:
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    event_reads: list[str] = []
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda _r, _m: list_response(
+            [
+                ma_agent(
+                    id="ag_a",
+                    name="demo",
+                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=ma_session(
+                id="ses_1",
+                agent_id="ag_a",
+                metadata={
+                    "daimon_account": str(account_id),
+                    MA_METADATA_KEY_CONTEXT_ISOLATED: "true",
+                },
+            ).model_dump(mode="json"),
+        ),
+    )
+
+    def events(request: httpx.Request, _match: object) -> httpx.Response:
+        event_reads.append(request.url.path)
+        return httpx.Response(200, json={"data": [], "next_page": None})
+
+    router.add("GET", r"/v1/sessions/([^/]+)/events", events)
+    runtime = _runtime(build_fake_anthropic(router.dispatch))
+    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    assert (await _get_session_impl(runtime, auth, "ses_1")).id == "ses_1"
+    with pytest.raises(ToolError, match="transcript is unavailable"):
+        await _list_session_events_impl(runtime, auth, "ses_1", None, None, None)
+    assert event_reads == []
 
 
 ORIGIN_ID = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"

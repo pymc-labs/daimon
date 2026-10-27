@@ -29,6 +29,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
+    require_session_content_access,
     require_session_outside_seals,
     session_belongs_to_caller,
     sessions_outside_seals,
@@ -226,9 +227,10 @@ async def _list_session_events_impl(
     order: Literal["asc", "desc"] | None,
     origin_context_id: str | None = None,
 ) -> Page[SessionEventOut]:
-    await _verify_caller_owns_session(
+    source = await _verify_caller_owns_session(
         runtime, auth, session_id, origin_context_id=origin_context_id
     )
+    require_session_content_access(source)
     list_kwargs: dict[str, Any] = {}
     if page is not None:
         list_kwargs["page"] = page

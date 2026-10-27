@@ -23,7 +23,10 @@ import pytest
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.defaults.metadata import MA_METADATA_KEY_PRIVATE_DM
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_CONTEXT_ISOLATED,
+    MA_METADATA_KEY_PRIVATE_DM,
+)
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.rule_views import routine_origin
@@ -211,6 +214,19 @@ async def test_an_admin_continues_their_own_unsealed_hub_conversation(hub: _Hub)
 
     assert not result.get("isError"), result
     assert hub.sent == ["ses_headless"]
+
+
+async def test_hub_lists_isolated_session_but_refuses_its_events(hub: _Hub) -> None:
+    hub.add_session("ses_isolated", **{MA_METADATA_KEY_CONTEXT_ISOLATED: "true"})
+    hub.add_session("ses_ordinary")
+
+    listed = await hub.call("list_my_sessions")
+    assert "ses_isolated" in str(listed) and "ses_ordinary" in str(listed)
+    assert not (await hub.call("get_session", handle="ses_isolated")).get("isError")
+    isolated = await hub.call("list_events", handle="ses_isolated")
+    ordinary = await hub.call("list_events", handle="ses_ordinary")
+    assert isolated.get("isError") and _TOPIC not in str(isolated)
+    assert not ordinary.get("isError") and _TOPIC in str(ordinary)
 
 
 async def test_a_member_never_reads_a_sealed_conversation_from_the_hub(hub: _Hub) -> None:

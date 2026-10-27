@@ -84,6 +84,7 @@ class TurnDeps:
     github_app_id: str | None
     github_app_private_key: str | None
     public_url: str | None
+    isolated_relay_names: frozenset[str] = frozenset()
     agent_github_app: GithubAppSettings | None = None
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
@@ -202,6 +203,9 @@ def build_turn_deps(
         resolver_cache=resolver_cache,
         defaults_root=settings.defaults_root,
         mcp=settings.mcp,
+        isolated_relay_names=frozenset(
+            server.name for server in settings.mcp_identity.servers if server.isolate_context
+        ),
         billing_config=billing_config,
         markup=settings.billing.markup,
         fernet=fernet,
