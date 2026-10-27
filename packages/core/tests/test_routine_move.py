@@ -252,7 +252,10 @@ def test_export_seed_fallback_never_hides_historical_unknown_claim():
         [row(seeded_after=NOW, last_fired_at=NOW)], exported_at=NOW
     )
     assert not document["final"]
-    assert "historical fire" in " ".join(document["not_final_reasons"])
+    assert document["not_final_reasons"] == [
+        f"{document['routines'][0]['internal_routine_id']}: claimed fire has no recorded completion",
+        f"{document['routines'][0]['internal_routine_id']}: fired slot and claim time are incomplete",
+    ]
 
 
 @pytest.mark.parametrize("shift", [-60, 60])

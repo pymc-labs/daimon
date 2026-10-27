@@ -366,6 +366,12 @@ async def _save_routine_edit(
     transaction, so the owner cannot carry an opt-in over to a new agent,
     prompt or destination.
     """
+    if "enabled" in values:
+        values.update(
+            handback_paused_at=None,
+            handback_enabled=None,
+            handback_next_fire_at=None,
+        )
     material_changed = any(
         key in values and values[key] != getattr(current, key) for key in _SANDBOX_MATERIAL
     )
@@ -869,9 +875,6 @@ async def resume_routine(
         {
             "enabled": True,
             "next_fire_at": nxt,
-            "handback_paused_at": None,
-            "handback_enabled": None,
-            "handback_next_fire_at": None,
         },
         expected_updated_at=expected_updated_at,
     )

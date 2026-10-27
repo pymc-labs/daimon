@@ -132,8 +132,6 @@ def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) 
             reasons.append(f"{label}: claimed fire has no recorded completion")
         if row.delivery_status in ("pending", "claimed"):
             reasons.append(f"{label}: delivery is {row.delivery_status}")
-        if row.last_fired_at is not None and row.last_fired_slot is None:
-            reasons.append(f"{label}: historical fire has no recorded slot")
         if (row.last_fired_slot is None) != (row.last_fired_at is None):
             reasons.append(f"{label}: fired slot and claim time are incomplete")
         if row.delivery_status == "delivered" and row.delivered_at is None:

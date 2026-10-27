@@ -313,11 +313,10 @@ Migration `0151_routine_claimed_slot` backfills only a first line exactly matchi
 `internal-routine-import-v1:<uuid>` in `trigger_message` (LF or CRLF); similarly named tags,
 suffixes and tags on later lines do not count. Duplicate imports within a team
 refuse the migration rather than choosing a match. Later prompt edits preserve
-this stored identity. Today only the migration sets it; no command sets
-`internal_routine_id` for later imports.
-Routines imported after this migration must explicitly set `internal_routine_id`
-when they are imported; a prompt tag alone no longer links a new routine, and
-seed refuses it until that dedicated identity is set. Seed refuses both missing and ambiguous matches, and never
+this stored identity. `create_routine` accepts `internal_routine_id`, but no
+importer in this repository sets it yet. Routines imported later cannot be seeded
+until an importer supplies that dedicated identity; a prompt tag alone no longer
+links a new routine. Seed refuses both missing and ambiguous matches, and never
 matches a Daimon routine UUID against the input.
 
 The command prints T, Daimon's cron/timezone, the first slot strictly after T (computed in the routine's

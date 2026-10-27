@@ -449,3 +449,56 @@ async def test_seed_claim_handback_export_preserves_next_unrun_slot(db_session):
         == next_run
     )
     assert datetime.fromisoformat(result["resume_after"]) > claimed.last_fired_slot
+
+
+async def test_user_enabled_edits_reset_handback_and_recapture_off(db_session):
+    from daimon.core.stores.routine_move import pause_for_handback
+    from daimon.core.stores.routines import update_routine
+
+    tid, rows, entries = await setup(db_session, count=1)
+    rid = rows[0].id
+    ids = [rows[0].internal_routine_id]
+    await seed_routines(db_session, entries, tenant_id=tid, now=NOW, apply=True)
+    await pause_for_handback(
+        db_session, tenant_id=tid, internal_routine_ids=ids, now=NOW, apply=True
+    )
+    captured = await get_routine(db_session, rid, tenant_id=tid)
+    assert captured.handback_enabled is True
+    # MCP's update tool uses this store entry point rather than resume_routine.
+    enabled = await update_routine(db_session, rid, tenant_id=tid, enabled=True)
+    assert enabled.enabled
+    assert enabled.handback_paused_at is None
+    assert enabled.handback_enabled is None and enabled.handback_next_fire_at is None
+    await pause_routine(db_session, rid, tenant_id=tid)
+    paused = await get_routine(db_session, rid, tenant_id=tid)
+    assert paused.handback_paused_at is None
+    assert paused.handback_enabled is None and paused.handback_next_fire_at is None
+    again = NOW + timedelta(minutes=1)
+    await pause_for_handback(
+        db_session, tenant_id=tid, internal_routine_ids=ids, now=again, apply=True
+    )
+    stored = await get_routine(db_session, rid, tenant_id=tid)
+    assert stored.handback_paused_at == again
+    assert stored.handback_enabled is False
+    assert stored.handback_next_fire_at is None
+    exported = routine_rollback_document([stored], exported_at=again)
+    assert exported["final"]
+    assert exported["routines"][0]["enabled"] is False
+    assert exported["routines"][0]["expected_next_run"] is None
+
+
+async def test_plain_pause_clears_an_existing_handback(db_session):
+    from daimon.core.stores.routine_move import pause_for_handback
+
+    tid, rows, entries = await setup(db_session, count=1)
+    await seed_routines(db_session, entries, tenant_id=tid, now=NOW, apply=True)
+    await pause_for_handback(
+        db_session,
+        tenant_id=tid,
+        internal_routine_ids=[rows[0].internal_routine_id],
+        now=NOW,
+        apply=True,
+    )
+    paused = await pause_routine(db_session, rows[0].id, tenant_id=tid)
+    assert paused.handback_paused_at is None
+    assert paused.handback_enabled is None and paused.handback_next_fire_at is None
