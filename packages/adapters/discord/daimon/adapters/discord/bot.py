@@ -2567,6 +2567,7 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     channel_id=str(thread_id),
                     thread_id=str(thread_id),
+                    alertable=False,
                 )
                 log.info(
                     "turn.skipped.concurrency_shed",
@@ -4574,6 +4575,7 @@ class DaimonBot(commands.Bot):
             tenant_id=tenant_id,
             platform="discord",
             channel_id=str(message.channel.id),
+            alertable=not unprompted,
         ):
             async with contextlib.AsyncExitStack() as origins:
                 return await self._orchestrate_observed(

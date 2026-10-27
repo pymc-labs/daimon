@@ -285,6 +285,7 @@ source_modules = [
     "daimon.core.provider_keys",
     "daimon.core.purge",
     "daimon.core.reader_agent",
+    "daimon.core.release",
     "daimon.core.reports",
     "daimon.core.roster",
     "daimon.core.routine_delivery",

@@ -677,6 +677,7 @@ jobs:
           file: Dockerfile
           tags: ${{ steps.tags.outputs.daimon }}
           push: true
+          build-args: DAIMON_RELEASE=${{ github.sha }}
           provenance: false
           sbom: false
           cache-from: type=gha,scope=daimon

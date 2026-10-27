@@ -212,7 +212,7 @@ async def run_one_tick(
             await _record_fire_error(sm, row.id, "scheduler_shutdown", None)
             raise
         finally:
-            observation.finish(reason=TerminationReason.UNKNOWN)
+            observation.finish(reason=TerminationReason.UNKNOWN, fallback=True)
             try:
                 async with sm() as session, session.begin():
                     await skip_slots_during_fire(
