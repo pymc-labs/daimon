@@ -131,6 +131,7 @@ class SessionSnapshot(BaseModel):
             "github_repo_script_resource_id",
             "mcp_hold",
             "memory_scope",
+            "context_isolated",
         ):
             if not data.get(name):
                 data.pop(name, None)
@@ -185,6 +186,9 @@ class SessionSnapshot(BaseModel):
     # Kept apart from `memory_store_id` so the scope is known even when the
     # store failed to provision and nothing mounted.
     memory_scope: str | None = None
+    # A signed source required this session to be single-request execution.
+    # Keep the immutable source boundary even if the agent's config changes.
+    context_isolated: bool = False
 
     # Mutable axis — a difference here can be applied to the live session.
     tools_sha256: str
@@ -492,6 +496,9 @@ def _snapshot_from_session(
         memory_read_only=memory_read_only,
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
+        # Keep this module import-cycle-free: defaults imports session domain,
+        # which imports SessionSnapshot during startup.
+        context_isolated=metadata.get("daimon_context_isolated") == "true",
         tools_sha256=hash_tools(agent.tools),
         mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
         env_sha256=env_sha256,

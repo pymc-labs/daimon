@@ -6,14 +6,16 @@ import logging
 from unittest.mock import patch
 
 import pytest
-from daimon.adapters.mcp.server import create_mcp_app
+from daimon.adapters.mcp.server import create_mcp_app  # pyright: ignore[reportUnknownVariableType]
 from daimon.core.config import (
     AnthropicSettings,
     ArtifactsSettings,
     DatabaseSettings,
     DiscordSettings,
+    McpIdentitySettings,
     McpSettings,
     Settings,
+    SignedIdentityServer,
 )
 from daimon.core.errors import BootstrapError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -79,6 +81,25 @@ def test_factory_rejects_short_jwt_secret() -> None:
         create_mcp_app(settings=settings)
 
 
+def test_factory_requires_identity_signer_only_on_mcp_service() -> None:
+    settings = _settings(
+        jwt_secret=SecretStr("a" * 32),
+        public_url=HttpUrl("https://x/mcp"),
+    )
+    settings.mcp_identity = McpIdentitySettings(
+        servers=[
+            SignedIdentityServer(
+                name="signed-source",
+                url="https://source.example.test/mcp",
+                issuer="daimon-test",
+                audience="https://source.example.test",
+            )
+        ]
+    )
+    with pytest.raises(BootstrapError, match="DAIMON_MCP_IDENTITY__SIGNING_KEY"):
+        create_mcp_app(settings=settings)
+
+
 def test_factory_accepts_valid_settings() -> None:
     settings = _settings(
         jwt_secret=SecretStr("a" * 32),
@@ -94,10 +115,10 @@ async def test_factory_builds_one_process_scoped_artifact_store() -> None:
         public_url=HttpUrl("https://x/mcp"),
     )
     settings.artifacts = ArtifactsSettings(
-        endpoint_url="https://bucket.example.test",
+        endpoint_url=HttpUrl("https://bucket.example.test"),
         bucket="private-artifacts",
-        access_key_id="access-key",
-        secret_access_key="secret-key",
+        access_key_id=SecretStr("access-key"),
+        secret_access_key=SecretStr("secret-key"),
     )
 
     with patch("daimon.adapters.mcp.server.build_artifact_store") as build_store:

@@ -58,6 +58,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
     MA_METADATA_KEY_BUDGET_CHANNEL,
+    MA_METADATA_KEY_CONTEXT_ISOLATED,
     MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_TENANT,
 )
@@ -79,8 +80,9 @@ from daimon.core.github_app_session import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
-from daimon.core.mcp_identity import RelayBinding, identity_relay_urls
+from daimon.core.mcp_identity import RelayBinding, identity_relay_urls, relay_url
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
+from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
     create_relay_vault,
@@ -512,6 +514,7 @@ async def create_session(
     model_override: str | None = None,
     system_override: str | None = None,
     relay_session_key: uuid.UUID | None = None,
+    isolated_relay_names: frozenset[str] = frozenset(),
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -641,9 +644,63 @@ async def create_session(
     scope = session_scope(
         tenant_id=tenant_id, account_id=account_id, call_site="sessions:create_session"
     )
+    isolation_public_url = (
+        str(mcp_settings.public_url)
+        if mcp_settings is not None and mcp_settings.public_url is not None
+        else None
+    )
+    if isolated_relay_names and (
+        relay_session_key is None
+        or account_id is None
+        or extra_resources
+        or isolation_public_url is None
+        or frozenset(server.name for server in agent.mcp_servers)
+        != isolated_relay_names | {"daimon-mcp"}
+        or len(agent.mcp_servers) != len(isolated_relay_names) + 1
+        or any(
+            canonical_mcp_url(server.url)
+            != canonical_mcp_url(
+                isolation_public_url
+                if server.name == "daimon-mcp"
+                else relay_url(isolation_public_url, server.name)
+            )
+            for server in agent.mcp_servers
+        )
+        or any(
+            (
+                tool.type == "mcp_toolset"
+                and tool.mcp_server_name not in isolated_relay_names | {"daimon-mcp"}
+            )
+            or tool.type not in {"mcp_toolset", "agent_toolset_20260401"}
+            for tool in agent.tools
+        )
+        or sum(tool.type == "agent_toolset_20260401" for tool in agent.tools) != 1
+        or any(
+            tool.type == "agent_toolset_20260401"
+            and any(
+                config.name not in {"bash", "read", "edit", "grep", "glob", "write"}
+                for config in tool.configs or []
+            )
+            for tool in agent.tools
+        )
+        or frozenset(
+            tool.mcp_server_name for tool in agent.tools if tool.type == "mcp_toolset"
+        )
+        != isolated_relay_names | {"daimon-mcp"}
+        or sum(tool.type == "mcp_toolset" for tool in agent.tools)
+        != len(isolated_relay_names) + 1
+    ):
+        raise ValueError("isolated relay requires a dedicated relay-only agent session")
+    if isolated_relay_names:
+        assert isolation_public_url is not None
     resource_agent = agent
     app_mode = False
-    if tenant_id is not None and agent_uuid is not None and session_factory is not None:
+    if (
+        not isolated_relay_names
+        and tenant_id is not None
+        and agent_uuid is not None
+        and session_factory is not None
+    ):
         app_mode = await _session_app_mode(
             session_factory, tenant_id=tenant_id, agent_id=agent_uuid
         )
@@ -756,12 +813,18 @@ async def create_session(
                 agent_id=agent_uuid,
                 jwt_secret=mcp_settings.jwt_secret.get_secret_value().encode(),
                 relay_urls=relay_urls,
-                relay=RelayBinding(agent_name=agent.name, session_key=relay_session_key),
+                relay=RelayBinding(
+                    agent_name=agent.name,
+                    session_key=relay_session_key,
+                    isolated=bool(isolated_relay_names),
+                ),
                 now=dt.datetime.now(dt.UTC),
                 scope=scope,
                 slack_turn_context_id=slack_turn_context_id,
                 hold=hold,
             )
+        if isolated_relay_names and relay_vault_id is None:
+            raise ValueError("isolated relay credential is unavailable")
 
         # External MCP servers are attached to the AGENT, so every caller who
         # mentions it gets the toolset — but MA resolves each server's credential
@@ -771,7 +834,7 @@ async def create_session(
         # whole turn at MCP init. Not degrade-not-block: see
         # mirror_credentials_into_vault.
         credential_vault_id = caller_vault_id if app_mode else vault_id
-        if _agent_mcp_mirror_required(
+        if not isolated_relay_names and _agent_mcp_mirror_required(
             vault_available=credential_vault_id is not None,
             account_id=account_id,
             tenant_id=tenant_id,
@@ -809,7 +872,12 @@ async def create_session(
         resources: list[Resource] = list(extra_resources)
         app_access: AppSessionAccess | None = None
         provisional_session_id = f"pending:{uuid.uuid4()}"
-        if tenant_id is not None and agent_uuid is not None and session_factory is not None:
+        if (
+            not isolated_relay_names
+            and tenant_id is not None
+            and agent_uuid is not None
+            and session_factory is not None
+        ):
             mount = await upload_env_and_mount(
                 anthropic,
                 session_factory,
@@ -942,6 +1010,15 @@ async def create_session(
             public_url=public_url,
             confirmed_tools=confirmed_tools,
         )
+        if isolated_relay_names:
+            tools = [
+                tool
+                for tool in tools
+                if tool.type == "mcp_toolset" and tool.mcp_server_name in isolated_relay_names
+            ]
+            servers = [server for server in servers if server.name in isolated_relay_names]
+            if frozenset(server.name for server in servers) != isolated_relay_names:
+                raise ValueError("isolated relay server is unavailable")
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
         if (
@@ -951,6 +1028,7 @@ async def create_session(
             or channel_skills
             or model_override is not None
             or system_override is not None
+            or isolated_relay_names
         ):
             overrides: BetaManagedAgentsAgentWithOverridesParams = {
                 "type": "agent_with_overrides",
@@ -972,7 +1050,9 @@ async def create_session(
                 overrides["model"] = model_override
             if system_override is not None:
                 overrides["system"] = system_override
-            if channel_skills:
+            if isolated_relay_names:
+                overrides["skills"] = []
+            elif channel_skills:
                 # A full replacement too: the agent's own at the versions it pins.
                 overrides["skills"] = [
                     cast(BetaManagedAgentsSkillParams, skill.model_dump(mode="json"))
@@ -993,6 +1073,8 @@ async def create_session(
             billing_exempt=billing_exempt,
             budget_channel_id=budget_channel_id,
         )
+        if isolated_relay_names:
+            metadata[MA_METADATA_KEY_CONTEXT_ISOLATED] = "true"
         if slack_turn_context_id is not None:
             metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)
         elif private_dm_id is not None:
@@ -1075,16 +1157,42 @@ async def create_session(
                 metadata=metadata if metadata else None,
                 # The relay vault goes first: `turn.prepare` records the last
                 # mounted vault as the session's Daimon one.
-                vault_ids=[
-                    mounted
-                    for mounted in (relay_vault_id, caller_vault_id, vault_id)
-                    if mounted is not None
-                ]
+                vault_ids=(
+                    [relay_vault_id]
+                    if isolated_relay_names and relay_vault_id is not None
+                    else [
+                        mounted
+                        for mounted in (relay_vault_id, caller_vault_id, vault_id)
+                        if mounted is not None
+                    ]
+                )
                 or None,
                 resources=resources if resources else None,
             )
             try:
                 created = await create()
+                if isolated_relay_names and (
+                    frozenset(server.name for server in created.agent.mcp_servers)
+                    != isolated_relay_names
+                    or len(created.agent.mcp_servers) != len(isolated_relay_names)
+                    or any(
+                        canonical_mcp_url(server.url)
+                        != canonical_mcp_url(
+                            relay_url(cast(str, isolation_public_url), server.name)
+                        )
+                        for server in created.agent.mcp_servers
+                    )
+                    or any(
+                        tool.type != "mcp_toolset"
+                        or tool.mcp_server_name not in isolated_relay_names
+                        for tool in created.agent.tools
+                    )
+                    or created.agent.skills
+                    or (created.metadata or {}).get(MA_METADATA_KEY_CONTEXT_ISOLATED) != "true"
+                    or created.resources
+                    or created.vault_ids != [relay_vault_id]
+                ):
+                    raise ValueError("provider did not honor isolated session configuration")
             except anthropic_pkg.BadRequestError as error:
                 unresolved = unresolved_skill_id(error)
                 if unresolved is None:
@@ -1148,7 +1256,7 @@ async def create_session(
                     )
             return created
         except BaseException:
-            if created is not None and app_mode:
+            if created is not None and (app_mode or isolated_relay_names):
                 await archive_session_record(
                     anthropic,
                     created.id,

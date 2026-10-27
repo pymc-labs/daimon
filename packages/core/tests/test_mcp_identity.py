@@ -157,9 +157,19 @@ def test_relay_urls_are_only_this_deployments_relay() -> None:
 
 def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:
     key = uuid.uuid4()
-    for binding in (RelayBinding("Helper", key), RelayBinding("Helper")):
+    for binding in (
+        RelayBinding("Helper", key),
+        RelayBinding("Helper"),
+        RelayBinding("Helper", key, isolated=True),
+    ):
         assert parse_relay_claim(binding.claim()) == binding, "a binding reads back"
-    for bad in ("x", {}, {"agent_name": "Helper", "extra": "1"}, {"agent_name": ""}):
+    for bad in (
+        "x",
+        {},
+        {"agent_name": "Helper", "extra": "1"},
+        {"agent_name": "Helper", "isolated": "true"},
+        {"agent_name": ""},
+    ):
         with pytest.raises(ValueError):
             parse_relay_claim(bad)
 
@@ -201,7 +211,7 @@ def test_matching_turn_picks_the_calling_sessions_thread() -> None:
     )
 
 
-def test_settings_parse_servers_and_require_a_key() -> None:
+def test_settings_parse_servers_without_distributing_the_signing_key() -> None:
     servers = json.dumps(
         [
             {
@@ -215,8 +225,9 @@ def test_settings_parse_servers_and_require_a_key() -> None:
     seed = encode_seed(generate_signing_key())
     settings = McpIdentitySettings.model_validate({"servers": servers, "signing_key": seed})
     assert [server.name for server in settings.servers] == ["tools"], "JSON servers parse"
-    with pytest.raises(ValidationError, match="SIGNING_KEY"):
-        McpIdentitySettings.model_validate({"servers": servers})
+    worker = McpIdentitySettings.model_validate({"servers": servers})
+    assert [server.name for server in worker.servers] == ["tools"]
+    assert worker.signing_key is None
     with pytest.raises(ValidationError) as raised:
         McpIdentitySettings.model_validate({"signing_key": "nope"})
     assert "nope" not in str(raised.value), "a bad key is never echoed"

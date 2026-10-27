@@ -87,6 +87,7 @@ from daimon.adapters.mcp.tools._ctx import (
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
     admin_readable_legacy_sessions,
+    require_session_content_access,
     require_session_outside_seals,
     session_belongs_to_caller,
     sessions_outside_seals,
@@ -100,6 +101,7 @@ from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
+    MA_METADATA_KEY_CONTEXT_ISOLATED,
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_NAME,
 )
@@ -763,6 +765,8 @@ async def _continue_turn_impl(
     """
     require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
+    if (session.metadata or {}).get(MA_METADATA_KEY_CONTEXT_ISOLATED) == "true":
+        raise ToolError("This conversation requires a fresh request. Start a new turn.")
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)
@@ -1045,6 +1049,7 @@ async def _list_events_impl(
     turn's reply and completion signal. ``on_read`` is as for ``_get_session_impl``.
     """
     session = await _verify_agent_owns_session(runtime, auth, handle)
+    require_session_content_access(session)
     if on_read is not None:
         await on_read(session)
     list_kwargs: dict[str, Any] = {}
