@@ -1172,9 +1172,13 @@ belongs to. There is no Teams login yet.
 
 Each platform's mount needs its own OAuth app, plus `DAIMON_HUB__*`,
 `DAIMON_CRYPTO__KEYS` (login state is encrypted at rest) and
-`DAIMON_MCP__PUBLIC_URL` (the mounts derive their public base URL from it).
-Register these redirect URIs on the OAuth apps, where `{origin}` is
-`DAIMON_MCP__PUBLIC_URL` without the trailing `/mcp`:
+`DAIMON_MCP__PUBLIC_URL` or `DAIMON_HUB__PUBLIC_URL` (the origin the mounts
+are served from). Set `DAIMON_HUB__PUBLIC_URL` when coding agents reach the
+mounts on a different hostname from the one in `DAIMON_MCP__PUBLIC_URL`;
+changing `DAIMON_MCP__PUBLIC_URL` instead re-points every agent's stored MCP
+credential. Register these redirect URIs on the OAuth apps, where `{origin}` is
+`DAIMON_HUB__PUBLIC_URL`, or `DAIMON_MCP__PUBLIC_URL` without the trailing
+`/mcp` when that is unset:
 
 - Slack: `{origin}/slack/auth/callback`
 - Discord: `{origin}/discord/auth/callback`

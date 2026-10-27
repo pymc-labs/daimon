@@ -190,7 +190,7 @@ async def test_mount_hub_apps_requires_a_public_url(
     key = Fernet.generate_key()
     hub = _discord_hub(signing_key=key.decode())
     app = Starlette()
-    with pytest.raises(BootstrapError, match="DAIMON_MCP__PUBLIC_URL"):
+    with pytest.raises(BootstrapError, match="DAIMON_HUB__PUBLIC_URL or DAIMON_MCP__PUBLIC_URL"):
         mount_hub_apps(
             app,
             settings=_settings(hub, public_url=None),
@@ -225,3 +225,27 @@ async def test_mount_hub_apps_adds_mount_and_root_well_known_routes(
     assert "/.well-known/oauth-protected-resource/discord/mcp" in paths, (
         f"resource metadata route missing: {paths!r}"
     )
+
+
+async def test_hub_public_url_sets_the_login_issuer_apart_from_mcp_public_url(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    key = Fernet.generate_key()
+    hub = _discord_hub(signing_key=key.decode())
+    hub.public_url = HttpUrl("https://login.example.com")
+    app = Starlette()
+    mount_hub_apps(
+        app,
+        settings=_settings(hub),
+        runtime=_runtime(sessionmaker),
+        sessionmaker=sessionmaker,
+        billing_config=None,
+        fernet=MultiFernet([Fernet(key)]),
+    )
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        auth = await c.get("/.well-known/oauth-authorization-server/discord")
+        resource = await c.get("/.well-known/oauth-protected-resource/discord/mcp")
+
+    assert auth.json()["issuer"] == "https://login.example.com/discord", auth.text
+    assert resource.json()["resource"] == "https://login.example.com/discord/mcp", resource.text

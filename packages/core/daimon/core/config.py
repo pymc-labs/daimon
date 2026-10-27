@@ -448,8 +448,8 @@ class HubSettings(BaseModel):
         default=None,
         description=(
             "Slack OAuth app client ID for the /slack/mcp login mount. Register "
-            "<DAIMON_MCP__PUBLIC_URL origin>/slack/auth/callback as a redirect "
-            "URL on the Slack app."
+            "<hub origin>/slack/auth/callback as a redirect URL on the Slack app "
+            "(see public_url)."
         ),
     )
     slack_client_secret: SecretStr | None = Field(
@@ -460,13 +460,24 @@ class HubSettings(BaseModel):
         default=None,
         description=(
             "Discord OAuth app client ID for the /discord/mcp login mount. "
-            "Register <DAIMON_MCP__PUBLIC_URL origin>/discord/auth/callback as a "
-            "redirect URI on the Discord app."
+            "Register <hub origin>/discord/auth/callback as a redirect URI on the "
+            "Discord app (see public_url)."
         ),
     )
     discord_client_secret: SecretStr | None = Field(
         default=None,
         description="Discord OAuth app client secret for the /discord/mcp login mount.",
+    )
+    public_url: HttpUrl | None = Field(
+        default=None,
+        description=(
+            "Origin the login mounts are served from, e.g. https://mcp.example.com. "
+            "It becomes the OAuth issuer and callback base, so it must be the "
+            "address coding agents connect to. Unset, the mounts use the origin "
+            "of DAIMON_MCP__PUBLIC_URL. Set it to give the mounts a public "
+            "hostname without moving the agents' /mcp endpoint, whose URL is "
+            "stored in every agent's credential vault."
+        ),
     )
     allowed_client_redirect_uris: list[str] = Field(
         default=[
