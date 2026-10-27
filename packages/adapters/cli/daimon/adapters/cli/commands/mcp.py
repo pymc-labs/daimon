@@ -7,6 +7,7 @@ Subcommands:
   * url                — prints DAIMON_MCP__PUBLIC_URL.
   * janitor            — find and optionally archive orphan daimon-mcp:* vaults.
   * sweep-credentials  — delete+recreate stale is_admin creds (defense-in-depth).
+  * identity-keygen, identity-public-key — the key for signed MCP caller identities.
 
 No `serve` subcommand; deployment invokes uvicorn against
 `daimon.adapters.mcp.server:create_mcp_app` directly.
@@ -15,6 +16,7 @@ No `serve` subcommand; deployment invokes uvicorn against
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import typer
 from daimon.adapters.cli.commands.mcp_tokens import register_token_commands
@@ -27,6 +29,14 @@ from daimon.core.errors import ConfigError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_cli_mcp_token
 from daimon.core.mcp_credential_sweep import sweep_stale_admin_credentials
+from daimon.core.mcp_identity import (
+    SigningKey,
+    encode_seed,
+    generate_signing_key,
+    load_signing_key,
+    public_jwk,
+    public_pem,
+)
 from daimon.core.mcp_vault_janitor import archive_orphan_mcp_vaults
 from daimon.core.stores.identity import get_or_create_cli_principal
 from rich.console import Console
@@ -328,3 +338,29 @@ async def mcp_sweep_credentials(*, rt: CliRuntime, console: Console, apply: bool
         console.print(summary)
     if report.failures:
         raise StoreError(f"{len(report.failures)} vaults failed; see per-vault report and retry.")
+
+
+@mcp_app.command("identity-keygen")
+def mcp_identity_keygen_command() -> None:
+    """Make an Ed25519 key for signed MCP caller identities and print both halves.
+
+    Store the first line as a secret; register the public key with each server.
+    """
+    _print_identity_key(generate_signing_key(), with_private=True)
+
+
+@mcp_app.command("identity-public-key")
+def mcp_identity_public_key_command() -> None:
+    """Print the public half of DAIMON_MCP_IDENTITY__SIGNING_KEY."""
+    key = load_settings().mcp_identity.signing_key
+    if key is None:
+        typer.echo("DAIMON_MCP_IDENTITY__SIGNING_KEY is unset.", err=True)
+        raise typer.Exit(code=1)
+    _print_identity_key(load_signing_key(key.get_secret_value()), with_private=False)
+
+
+def _print_identity_key(key: SigningKey, *, with_private: bool) -> None:
+    if with_private:
+        typer.echo(f"DAIMON_MCP_IDENTITY__SIGNING_KEY={encode_seed(key)}")
+    typer.echo(f"Public key (JWK): {json.dumps(public_jwk(key))}")
+    typer.echo(public_pem(key).rstrip())
