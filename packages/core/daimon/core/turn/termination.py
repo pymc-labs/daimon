@@ -123,7 +123,6 @@ USER_VISIBLE_FAILURES = frozenset(
         TerminationReason.CONNECTION_LOST,
         TerminationReason.SESSION_TERMINATED,
         TerminationReason.MCP_DEGRADED_EMPTY,
-        TerminationReason.INTERRUPT_TIMEOUT,
         TerminationReason.RETRYING_UNSETTLED,
         TerminationReason.RATE_LIMITED,
         TerminationReason.CEILING,
@@ -131,14 +130,13 @@ USER_VISIBLE_FAILURES = frozenset(
         TerminationReason.RECOVERY_FAILED,
         TerminationReason.REDUCER_BUG,
         TerminationReason.SESSION_PREPARATION_FAILED,
-        TerminationReason.SESSION_AGENT_MISMATCH,
-        TerminationReason.MISSING_CONFIG,
         TerminationReason.ADMISSION_CONCURRENCY_SHED,
         TerminationReason.UNKNOWN,
     }
 )
 """Ends where the user was left without the answer they asked for and the
-fault is ours or upstream's. Each is logged once as `turn.user_failure`."""
+fault is ours or upstream's. Each is logged once as `turn.user_failure`, except
+for a turn nobody asked for, a command-line run, or a boundary's catch-all."""
 
 NOT_USER_FAILURES = frozenset(
     {
@@ -148,6 +146,12 @@ NOT_USER_FAILURES = frozenset(
         TerminationReason.REFUSED,
         TerminationReason.REQUIRES_ACTION,
         TerminationReason.SESSION_BUSY,
+        # The user asked to stop; MA only failed to confirm in time.
+        TerminationReason.INTERRUPT_TIMEOUT,
+        # A setup state: the user gets the "not set up" notice and an admin fixes it.
+        TerminationReason.MISSING_CONFIG,
+        # The expected hand-over flow (like SESSION_BUSY), not a fault.
+        TerminationReason.SESSION_AGENT_MISMATCH,
         TerminationReason.ADMISSION_BALANCE_DEPLETED,
         TerminationReason.ADMISSION_CAP_EXCEEDED,
         TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,

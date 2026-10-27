@@ -2088,12 +2088,18 @@ These events carry only identifiers, counts and durations, never message text:
 | `runtime.started` | info | `process`, `release`: once per process start |
 | `runtime.health` | info | `process` and the window's measurements, every `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S` seconds |
 | `scheduler.tick_completed` | info | `duration_ms`: after a finished scheduler tick, at most once a minute |
-| `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `release`, `turn_id`, `tenant_id`: once for a turn that ended without the answer (an upstream error, a lost connection, a missing configuration, the turn ceiling, an unclassified failure, a queue-full shed) |
+| `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `release`, `turn_id`, `tenant_id`: once for a turn that ended without the answer (an upstream error, a lost connection, a session ended early, the turn ceiling, a failed recovery, a queue-full shed, an unclassified failure); a line also carries `rid` when the turn has one |
 
-`turn.user_failure` is never logged for a completed turn, a stop the user asked for, a
-refusal by the model, or an admission refusal such as an empty balance. The
-reasons that count are `USER_VISIBLE_FAILURES` in `daimon.core.turn.termination`;
-a new `TerminationReason` must be placed in that set or in `NOT_USER_FAILURES`.
+`turn.user_failure` is never logged for a completed turn, a stop the user asked for
+(including one Managed Agents did not confirm in time), a refusal by the model, an
+admission refusal such as an empty balance, a missing setup (the user gets the "not
+set up" notice), or a session handed to another agent. It is also never logged for a
+turn nobody asked for (an unprompted reply), a command-line run, or an MCP dispatch
+or routine fire that returned without ending the turn itself: those still record
+their outcome row. The reasons that count are `USER_VISIBLE_FAILURES` in
+`daimon.core.turn.termination`; a new `TerminationReason` must be placed in that set
+or in `NOT_USER_FAILURES`. An exception that Python cannot raise to any caller (from a finalizer, say)
+is logged as `process.unraisable_exception` at error.
 
 `release` is the commit the image was built from, set by the `DAIMON_RELEASE`
 build argument (the deploy workflow passes the full commit SHA). An image built

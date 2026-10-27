@@ -44,7 +44,7 @@ from daimon.core.stores.turn_outcomes import OutcomeRecord, list_for_tenant
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, MissingTurnConfigError
-from daimon.core.turn.outcomes import drain_outcomes
+from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.slots import holding, wait_for_slot
 from daimon.core.turn.state import TextBlock, TurnState
@@ -1075,6 +1075,30 @@ async def test_an_unprompted_turn_stays_silent_when_refused_or_without_its_threa
     with patch.object(TeamsApp, "_history", AsyncMock(return_value=None)), patched_turns() as turns:
         await teams._participate(_unprompted_reply(), TENANT)
     assert sender.activities == [] and turns == []
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_only_a_turn_somebody_asked_for_logs_a_user_failure(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    teams = _app(db_session_factory, FakeSender())
+
+    async def _fails(
+        self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID, **_: object
+    ) -> None:
+        outcome = current_outcome.get()
+        assert outcome is not None
+        outcome.finish(reason=TerminationReason.UPSTREAM)
+
+    with patch.object(TeamsApp, "_run_turn_observed", _fails):
+        with structlog.testing.capture_logs() as unprompted_logs:
+            await teams._participate(_unprompted_reply(), TENANT)
+        with structlog.testing.capture_logs() as mention_logs:
+            await teams._orchestrate(make_inbound(), TENANT)
+    await drain_outcomes()
+
+    assert [e for e in unprompted_logs if e["event"] == "turn.user_failure"] == []
+    assert [e["reason"] for e in mention_logs if e["event"] == "turn.user_failure"] == ["upstream"]
 
 
 async def test_an_owner_of_the_admin_team_gets_the_admin_role(

@@ -33,6 +33,7 @@ from daimon.core.observability import (
     install_log_redaction,
     redact_log_event,
     redact_rendered,
+    set_unraisable_logger,
 )
 
 _SEVERITY = {
@@ -142,12 +143,28 @@ def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
     _log_uncaught(args.exc_value.with_traceback(args.exc_traceback))
 
 
+def _log_unraisable(unraisable: sys.UnraisableHookArgs) -> None:
+    """One `process.unraisable_exception` line: where it happened (redacted by the
+    chain) and the structured exception."""
+    where = f"{unraisable.err_msg or 'Exception ignored in'}: {unraisable.object!r}"
+    exc_info = (
+        (unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback)
+        if unraisable.exc_value is not None
+        else None
+    )
+    structlog.get_logger().error(
+        "process.unraisable_exception", where=where[:500], exc_info=exc_info
+    )
+
+
 def install_excepthooks() -> None:
     """Log an uncaught exception, in the main thread or any other, as a critical
-    `process.uncaught_exception` line. The hooks only log: the interpreter still
-    exits the way it would have. Idempotent."""
+    `process.uncaught_exception` line, and an unraisable one (a failing `__del__`,
+    a callback in a finalizer) as `process.unraisable_exception` at error. The
+    hooks only log: the interpreter still exits the way it would have. Idempotent."""
     sys.excepthook = _excepthook
     threading.excepthook = _threading_excepthook
+    set_unraisable_logger(_log_unraisable)
 
 
 def _use_formatter_on_uvicorn_handlers(formatter: logging.Formatter) -> None:
@@ -168,14 +185,15 @@ class _CurrentStderrHandler(logging.StreamHandler):  # pyright: ignore[reportMis
         return sys.stderr
 
 
-def _use_json_instead_of_rich_handlers(formatter: logging.Formatter) -> None:
+def _use_json_instead_of_other_handlers(formatter: logging.Formatter) -> None:
     """fastmcp prints its records, tracebacks included, through rich handlers on
-    a logger that does not propagate; swap them for one JSON stderr handler."""
+    a logger that does not propagate; swap any handler that is not already JSON
+    for one JSON stderr handler."""
     fastmcp_logger = logging.getLogger("fastmcp")
-    rich = [h for h in fastmcp_logger.handlers if type(h).__module__.startswith("rich.")]
-    if not rich:
+    others = [h for h in fastmcp_logger.handlers if not isinstance(h.formatter, JsonLineFormatter)]
+    if not others:
         return
-    for handler in rich:
+    for handler in others:
         fastmcp_logger.removeHandler(handler)
     replacement = _CurrentStderrHandler()
     replacement.setFormatter(formatter)
@@ -193,5 +211,5 @@ def configure_logging(level: str) -> None:
     formatter = json_line_formatter()
     install_log_redaction(formatter=formatter)
     _use_formatter_on_uvicorn_handlers(formatter)
-    _use_json_instead_of_rich_handlers(formatter)
+    _use_json_instead_of_other_handlers(formatter)
     install_excepthooks()

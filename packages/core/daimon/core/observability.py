@@ -50,6 +50,7 @@ import logging
 import re
 import sys
 import traceback
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -1046,7 +1047,23 @@ def _redacting_handle(self: logging.Handler, record: logging.LogRecord) -> bool 
     return _handler_handle(self, redacted)
 
 
+_unraisable_logger: Callable[[sys.UnraisableHookArgs], None] | None = None
+
+
+def set_unraisable_logger(logger: Callable[[sys.UnraisableHookArgs], None] | None) -> None:
+    """Have the unraisable-exception hook hand the exception to `logger` (the JSON
+    chain's) instead of printing redacted text; `None` restores the text."""
+    global _unraisable_logger
+    _unraisable_logger = logger
+
+
 def _redacting_unraisablehook(unraisable: sys.UnraisableHookArgs) -> None:
+    if _unraisable_logger is not None:
+        try:
+            _unraisable_logger(unraisable)
+            return
+        except Exception:
+            pass
     exc = unraisable.exc_value
     trace = (
         "".join(traceback.format_exception(type(exc), exc, unraisable.exc_traceback))

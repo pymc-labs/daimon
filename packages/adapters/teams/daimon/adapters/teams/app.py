@@ -1135,6 +1135,7 @@ class TeamsApp:
                 platform="teams",
                 channel_id=trigger.channel_id,
                 thread_id=trigger.thread_id,
+                alertable=False,
             )
             log.info(
                 "turn.skipped.concurrency_shed",
@@ -1393,6 +1394,7 @@ class TeamsApp:
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
                 origin="chat" if continuation is None else "handoff",
+                alertable=not inbound.unprompted,
             ):
                 await self._run_turn_observed(
                     inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation

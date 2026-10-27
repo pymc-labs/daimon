@@ -53,11 +53,14 @@ def restoring_structlog_config() -> Iterator[None]:
         yield
     finally:
         # `configure_logging` also installs the uncaught-exception hooks, and a
-        # service's shutdown marks every later line; neither outlives the test.
+        # service's shutdown marks every later line; none of that outlives the test.
         sys.excepthook, threading.excepthook = saved_hooks
         logging_setup = sys.modules.get("daimon.core.logging_setup")
         if logging_setup is not None:
             logging_setup.clear_shutting_down()
+        observability = sys.modules.get("daimon.core.observability")
+        if observability is not None:
+            observability.set_unraisable_logger(None)
         if not was_configured:
             structlog.reset_defaults()
         elif structlog.get_config() != saved:

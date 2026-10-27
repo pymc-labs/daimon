@@ -9,6 +9,7 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.core.config import load_settings
+from daimon.core.release import current_release
 from daimon.core.runtime_health import (
     current_turn_counts,
     log_health_once,
@@ -96,6 +97,7 @@ async def test_runtime_started_is_logged_once_per_entry_with_process_and_release
     monkeypatch: pytest.MonkeyPatch, interval_s: float
 ) -> None:
     monkeypatch.setenv("DAIMON_RELEASE", "abc123")
+    current_release.cache_clear()
     engine = create_async_engine("postgresql+asyncpg://test:test@localhost/test")
     try:
         with capture_logs() as logs:
@@ -103,6 +105,7 @@ async def test_runtime_started_is_logged_once_per_entry_with_process_and_release
                 await asyncio.sleep(0.05)
     finally:
         await engine.dispose()
+    current_release.cache_clear()
     started = [entry for entry in logs if entry["event"] == "runtime.started"]
     assert started == [
         {

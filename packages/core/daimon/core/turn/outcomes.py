@@ -96,6 +96,9 @@ class TurnObservation:
     """Admitted profile displayed only for explicitly configured neutral turns."""
     progress_plans: bool = field(default=False, kw_only=True)
     """Progress plans resolved on for this turn: its card draws the agent's plan."""
+    alertable: bool = field(default=True, kw_only=True)
+    """False for a turn nobody asked for (an unprompted reply): its failure is
+    recorded in the outcome row but never logged as `turn.user_failure`."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     _started: float = field(default_factory=time.monotonic)
@@ -227,8 +230,13 @@ class TurnObservation:
         error: BaseException | None = None,
         reason: TerminationReason | None = None,
         recovered: bool = False,
+        fallback: bool = False,
     ) -> None:
-        """Schedule once, without DB I/O or awaiting network/pool availability."""
+        """Schedule once, without DB I/O or awaiting network/pool availability.
+
+        `fallback` marks the catch-all finish of a boundary whose body returned
+        without ending the turn itself (an MCP dispatch, a skipped routine fire):
+        the `unknown` outcome is recorded, but it is not a failed answer."""
         if self._finished:
             return
         self._finished = True
@@ -238,7 +246,12 @@ class TurnObservation:
             or termination_reason(error or (state.error if state else None))
         )
         terminal_error = error or (state.error if state else None)
-        if resolved in USER_VISIBLE_FAILURES:
+        if (
+            resolved in USER_VISIBLE_FAILURES
+            and self.alertable
+            and not fallback
+            and self.platform != "cli"
+        ):
             log.warning(
                 "turn.user_failure",
                 platform=self.platform,
@@ -360,9 +373,12 @@ def observe_turn(
     channel_id: str | None = None,
     thread_id: str | None = None,
     origin: TurnContext = "chat",
+    alertable: bool = True,
 ) -> Iterator[TurnObservation]:
     """Whole-turn boundary, including failures between core pipeline stages."""
-    observation = TurnObservation(sm, tenant_id, platform, channel_id, thread_id, origin)
+    observation = TurnObservation(
+        sm, tenant_id, platform, channel_id, thread_id, origin, alertable=alertable
+    )
     with observation.activate():
         try:
             yield observation
@@ -371,7 +387,7 @@ def observe_turn(
             raise
         finally:
             # Normal driver paths already provided their exact terminal reason.
-            observation.finish(reason=TerminationReason.UNKNOWN)
+            observation.finish(reason=TerminationReason.UNKNOWN, fallback=True)
 
 
 def record_refusal(
@@ -382,8 +398,9 @@ def record_refusal(
     channel_id: str,
     thread_id: str | None = None,
     reason: TerminationReason = TerminationReason.ADMISSION_CONCURRENCY_SHED,
+    alertable: bool = True,
 ) -> None:
     observation = current_outcome.get() or TurnObservation(
-        sm, tenant_id, platform, channel_id, thread_id
+        sm, tenant_id, platform, channel_id, thread_id, alertable=alertable
     )
     observation.finish(reason=reason)

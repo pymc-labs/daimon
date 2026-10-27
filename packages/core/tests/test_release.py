@@ -1,10 +1,18 @@
 """The release stamp is the image's commit when baked in, else the package version."""
 
+from collections.abc import Iterator
 from importlib.metadata import version
 
 import pytest
 from daimon.core.config import load_settings
 from daimon.core.release import current_release
+
+
+@pytest.fixture(autouse=True)
+def fresh_release() -> Iterator[None]:
+    current_release.cache_clear()
+    yield
+    current_release.cache_clear()
 
 
 def test_baked_release_wins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -30,3 +38,12 @@ def test_settings_ignore_the_release_variable(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     settings = load_settings(_env_file=None)
     assert not hasattr(settings, "release")
+
+
+def test_release_is_read_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_RELEASE", "first")
+    assert current_release() == "first"
+    monkeypatch.setenv("DAIMON_RELEASE", "second")
+    assert current_release() == "first"
+    current_release.cache_clear()
+    assert current_release() == "second"

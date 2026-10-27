@@ -8,6 +8,7 @@ import logging
 import sys
 import threading
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 import structlog
@@ -19,7 +20,7 @@ from daimon.core.logging_setup import (
     json_line_formatter,
     mark_shutting_down,
 )
-from daimon.core.observability import install_log_redaction
+from daimon.core.observability import install_log_redaction, set_unraisable_logger
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +30,7 @@ def isolated_process_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     clear_shutting_down()
     yield
     clear_shutting_down()
+    set_unraisable_logger(None)
     structlog.reset_defaults()
 
 
@@ -237,3 +239,88 @@ def test_configure_logging_renders_library_output_and_uvicorn_as_json(
     assert uvicorn_record["logger"] == "uvicorn.access"
     assert uvicorn_record["severity"] == "INFO"
     assert "abcdefghijklmnopqrstuvwxyz0123456789" not in uvicorn_stream.getvalue()
+
+
+def _unraisable(
+    exc_type: type[BaseException],
+    exc: BaseException,
+    tb: object,
+    message: str,
+    obj: object,
+) -> sys.UnraisableHookArgs:
+    return SimpleNamespace(  # pyright: ignore[reportReturnType]  # the real type cannot be built
+        exc_type=exc_type, exc_value=exc, exc_traceback=tb, err_msg=message, object=obj
+    )
+
+
+def test_an_unraisable_exception_is_one_structured_line_with_a_redacted_where(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    install_log_redaction()
+    configure_logging("INFO")
+    secret = "sk-ant-api03-" + "a1B2c3D4e5F6" * 4
+
+    class Holder:
+        def __repr__(self) -> str:
+            return f"<Holder api_key={secret}>"
+
+    try:
+        raise ValueError(f"cleanup failed, token={secret}")
+    except ValueError as exc:
+        sys.unraisablehook(
+            _unraisable(*(type(exc), exc, exc.__traceback__, "Exception ignored in", Holder()))
+        )
+
+    captured = capsys.readouterr()
+    (line,) = captured.out.splitlines()
+    assert captured.err == ""
+    record = json.loads(line)
+    assert record["event"] == "process.unraisable_exception"
+    assert record["level"] == "error"
+    assert record["severity"] == "ERROR"
+    assert str(record["where"]).startswith("Exception ignored in: <Holder")
+    assert record["exception"][0]["exc_type"] == "ValueError"
+    assert secret not in line
+
+
+def test_the_unraisable_hook_prints_redacted_text_until_the_json_chain_is_configured(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    install_log_redaction()
+    set_unraisable_logger(None)
+    try:
+        raise ValueError("cleanup failed")
+    except ValueError as exc:
+        sys.unraisablehook(
+            _unraisable(*(type(exc), exc, exc.__traceback__, "Exception ignored in", None))
+        )
+
+    err = capfd.readouterr().err
+    assert "Exception ignored in" in err and "ValueError" in err
+    assert err.count("\n") > 1, "the console form stays multi-line"
+
+
+def test_any_non_json_handler_on_the_fastmcp_logger_is_replaced(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fastmcp_logger = logging.getLogger("fastmcp")
+    saved, saved_propagate = fastmcp_logger.handlers[:], fastmcp_logger.propagate
+    plain = logging.StreamHandler(io.StringIO())
+    fastmcp_logger.handlers[:] = [plain]
+    try:
+        configure_logging("INFO")
+        configure_logging("INFO")  # a second call leaves the JSON handler alone
+        assert plain not in fastmcp_logger.handlers
+        assert len(fastmcp_logger.handlers) == 1
+        try:
+            raise OSError("closed")
+        except OSError:
+            logging.getLogger("fastmcp.server.server").exception("Error calling tool 'x'")
+    finally:
+        fastmcp_logger.handlers[:] = saved
+        fastmcp_logger.propagate = saved_propagate
+
+    (line,) = capsys.readouterr().err.splitlines()
+    record = json.loads(line)
+    assert record["event"] == "Error calling tool 'x'"
+    assert record["exception"][0]["exc_type"] == "OSError"
