@@ -15,9 +15,11 @@ of them (the cutover), with a dry run.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
-from datetime import UTC, datetime
-from typing import Annotated, Literal
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Annotated, Literal, cast
 
 import httpx
 import structlog
@@ -35,6 +37,12 @@ from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.routine_move import (
+    RoutineFreshnessSettings,
+    RoutineSeedEntry,
+    routine_rollback_document,
+    seed_scheduler_action,
+)
 from daimon.core.routine_sandbox import (
     SandboxPin,
     SandboxPinUnavailable,
@@ -45,6 +53,7 @@ from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.core.stores.routine_move import rollback_rows, seed_routines
 from daimon.core.stores.routines import (
     DM_SANDBOX_REFUSAL,
     PIN_UNAVAILABLE_REFUSAL,
@@ -56,7 +65,9 @@ from daimon.core.stores.routines import (
     validate_dm_source,
 )
 from daimon.core.stores.tenants import get_tenant
+from pydantic import JsonValue, ValidationError
 from rich.console import Console
+from sqlalchemy import text
 
 _log = structlog.get_logger(__name__)
 
@@ -394,3 +405,144 @@ async def run_sandbox_tools(
     console.print(
         f"Sandbox tools {state} for {len(pending)} routine(s); {len(ids) - len(pending)} unchanged."
     )
+
+
+def read_seed_entries(path: Path) -> list[RoutineSeedEntry]:
+    """Refuse every malformed entry before opening a database transaction."""
+    try:
+        payload = cast(JsonValue, json.loads(path.read_text()))
+    except (OSError, ValueError) as exc:
+        raise UserFacingError(f"Cannot read seed JSON: {exc}") from exc
+    if not isinstance(payload, list) or not payload:
+        raise UserFacingError("Seed JSON must be a nonempty array of routine entries.")
+    entries: list[RoutineSeedEntry] = []
+    errors: list[str] = []
+    for index, item in enumerate(payload):
+        label = (
+            item.get("internal_routine_id", f"entry {index + 1}")
+            if isinstance(item, dict)
+            else f"entry {index + 1}"
+        )
+        try:
+            entries.append(RoutineSeedEntry.model_validate(item))
+        except ValidationError as exc:
+            errors.append(
+                f"{label}: "
+                + "; ".join(
+                    f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in exc.errors()
+                )
+            )
+    if errors:
+        raise UserFacingError("\n".join(errors) + "\nNothing was changed.")
+    return entries
+
+
+@routines_app.command("seed-first-run")
+def seed_first_run_command(
+    file: Annotated[Path, typer.Option("--file", help="JSON array of routine handover entries.")],
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Apply the entire validated batch.")
+    ] = False,
+) -> None:
+    """Operator only: preview (default) or atomically seed paused, never-fired routines.
+
+    Database credentials confer operator authority, as for sandbox-tools.
+    Reads DAIMON_SCHEDULER__MAX_AGE_S for the scheduler preview.
+    """
+    entries = read_seed_entries(file)
+    settings = load_settings()
+    max_age = timedelta(seconds=RoutineFreshnessSettings().max_age_s)
+    console = Console(highlight=False)
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            await run_seed_first_run(
+                rt=rt,
+                console=console,
+                tenant_id=tenant,
+                entries=entries,
+                apply=apply,
+                max_age=max_age,
+            )
+
+    asyncio.run(run())
+
+
+async def run_seed_first_run(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    tenant_id: uuid.UUID,
+    entries: list[RoutineSeedEntry],
+    apply: bool,
+    max_age: timedelta,
+    now: datetime | None = None,
+) -> None:
+    now = now or datetime.now(UTC)
+    try:
+        async with rt.sessionmaker.begin() as session:
+            planned = await seed_routines(
+                session, entries, tenant_id=tenant_id, now=now, apply=apply
+            )
+    except StoreError as exc:
+        raise UserFacingError(str(exc)) from exc
+    seeds = {entry.internal_routine_id: entry.last_completed_slot for entry in entries}
+    for row, slot in planned:
+        assert row.internal_routine_id is not None
+        action = seed_scheduler_action(row, slot, now=now, max_age=max_age)
+        console.print(
+            f"{row.internal_routine_id}: T={seeds[row.internal_routine_id].isoformat()} "
+            f"cron={row.cron_expr} "
+            f"tz={row.timezone} first_slot={slot.isoformat()} policy={row.catch_up_policy} "
+            f"freshness_seconds={max_age.total_seconds():g}: {action}",
+            markup=False,
+        )
+    console.print("Applied atomically." if apply else "Dry run: nothing written.")
+
+
+@routines_app.command("export-rollback")
+def export_rollback_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    internal_ids: Annotated[
+        list[uuid.UUID] | None, typer.Option("--id", help="Internal routine id; may be repeated.")
+    ] = None,
+    ids_file: Annotated[
+        Path | None, typer.Option("--ids-file", help="JSON array of internal routine ids.")
+    ] = None,
+    output: Annotated[Path | None, typer.Option("--output")] = None,
+) -> None:
+    """Operator only: export a read-only rollback snapshot for one tenant.
+
+    With no filters, includes every routine in the tenant. Pause routines and
+    drain executions and deliveries before relying on final=true.
+    """
+    if ids_file is not None:
+        if internal_ids:
+            raise UserFacingError("Use either --id or --ids-file.")
+        try:
+            payload = cast(JsonValue, json.loads(ids_file.read_text()))
+            if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+                raise ValueError("expected a JSON array of routine ids")
+            internal_ids = [uuid.UUID(item) for item in payload if isinstance(item, str)]
+        except (OSError, ValueError) as exc:
+            raise UserFacingError(f"Cannot read routine ids: {exc}") from exc
+    settings = load_settings()
+
+    async def run() -> str:
+        async with build_runtime(settings) as rt:
+            try:
+                async with rt.sessionmaker.begin() as session:
+                    await session.execute(text("SET TRANSACTION READ ONLY"))
+                    rows = await rollback_rows(
+                        session, tenant_id=tenant, internal_routine_ids=internal_ids
+                    )
+            except StoreError as exc:
+                raise UserFacingError(str(exc)) from exc
+        return json.dumps(routine_rollback_document(rows, exported_at=datetime.now(UTC)), indent=2)
+
+    rendered = asyncio.run(run()) + "\n"
+    if output is not None:
+        output.write_text(rendered)
+    else:
+        typer.echo(rendered, nl=False)

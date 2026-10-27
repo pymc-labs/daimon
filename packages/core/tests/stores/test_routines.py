@@ -333,6 +333,8 @@ async def test_claim_due_fireable_picks_routine_in_window(
     assert after_claim.next_fire_at is not None, "step 2 recompute must repopulate next_fire_at"
     assert after_claim.next_fire_at > now, "recomputed next_fire_at must be in the future"
     assert after_claim.last_fired_at == now, "claim must stamp last_fired_at"
+    assert claimed[0].last_fired_slot == now - timedelta(minutes=1)
+    assert after_claim.last_fired_slot == now - timedelta(minutes=1)
 
 
 async def test_claim_excludes_too_old_or_future(

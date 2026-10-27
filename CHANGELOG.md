@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Record each routine's claimed scheduled slot and completion evidence for safe
+  handover. Add operator `daimon routines seed-first-run` (dry run by default,
+  atomic apply), keyed by tenant-unique internal ids and checked against the
+  source next run, and read-only `export-rollback` with claimed-slot or seed-T
+  watermarks, delivery state and explicit finality. Refuse resuming already enabled routines so a
+  seeded first slot cannot be overwritten by a repeated resume.
+
 - Fixed Discord fleet rendering losing verified invoker roles and replacing ordinary
   tool-free answers with a fleet-unavailable notice. Fleet results still require current authorization.
 
