@@ -45,7 +45,9 @@ MAX_BODY_BYTES = 4 * 1024 * 1024
 #: Gap allowed between bytes of a POST answer, a tool call's SSE stream included.
 POST_READ_TIMEOUT = 300.0
 #: Open connections per server, so one slow server cannot hold every socket.
-MAX_CONNECTIONS = 20
+MAX_CONNECTIONS = 100
+#: Wait for a free connection; past it the caller is told to retry (503).
+POOL_TIMEOUT = 5.0
 _REQUEST_HEADERS = (
     "accept",
     "content-type",
@@ -60,7 +62,7 @@ def build_relay_clients(servers: Iterable[SignedIdentityServer]) -> dict[str, ht
     """One bounded client per server; the caller closes them on shutdown."""
     return {
         server.name: httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, read=POST_READ_TIMEOUT),
+            timeout=httpx.Timeout(30.0, read=POST_READ_TIMEOUT, pool=POOL_TIMEOUT),
             limits=httpx.Limits(
                 max_connections=MAX_CONNECTIONS, max_keepalive_connections=MAX_CONNECTIONS // 2
             ),
@@ -192,13 +194,16 @@ def build_identity_relay_route(
             content=body,
             # A GET is the server's standing SSE stream, quiet between events.
             timeout=(
-                httpx.Timeout(30.0, read=None)
+                httpx.Timeout(30.0, read=None, pool=POOL_TIMEOUT)
                 if request.method == "GET"
                 else httpx.USE_CLIENT_DEFAULT
             ),
         )
         try:
             response = await http.send(upstream, stream=True)
+        except httpx.PoolTimeout:
+            log.warning("mcp_identity.relay_busy", server=server.name)
+            return Response(status_code=503, headers={"retry-after": "5"})
         except httpx.HTTPError as err:
             log.warning(
                 "mcp_identity.relay_failed", server=server.name, error_type=type(err).__name__

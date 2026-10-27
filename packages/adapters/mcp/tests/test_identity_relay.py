@@ -42,13 +42,16 @@ SERVER = SignedIdentityServer(
 
 
 class _Upstream:
-    def __init__(self, *, down: bool = False) -> None:
+    def __init__(self, *, down: bool = False, busy: bool = False) -> None:
         self.requests: list[httpx.Request] = []
         self.down = down
+        self.busy = busy
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.down:
             raise httpx.ConnectError("refused", request=request)
+        if self.busy:
+            raise httpx.PoolTimeout("no free connection", request=request)
         self.requests.append(request)
         return httpx.Response(
             200,
@@ -275,11 +278,15 @@ async def test_unknown_server_and_bad_credentials_never_reach_a_server(
     assert upstream.requests == [], "nothing was forwarded"
 
 
-async def test_unreachable_server_is_a_bad_gateway(
+async def test_unreachable_server_is_a_bad_gateway_and_a_full_pool_a_retry(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     person = await _person(db_session_factory)
     token, _ = await _chat_session(db_session_factory, person, "thread-1")
     async with _relay(db_session_factory, _Upstream(down=True), generate_signing_key()) as client:
-        response = await _call(client, token)
-    assert response.status_code == 502, "a server that cannot be reached is a 502"
+        down = await _call(client, token)
+    async with _relay(db_session_factory, _Upstream(busy=True), generate_signing_key()) as client:
+        busy = await _call(client, token)
+    assert down.status_code == 502, "a server that cannot be reached is a 502"
+    assert busy.status_code == 503, "every connection to the server is in use"
+    assert busy.headers["retry-after"] == "5", "the caller is told when to retry"
