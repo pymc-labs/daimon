@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Remote MCP servers can verify who is calling (`DAIMON_MCP_IDENTITY__SERVERS`, off by default).**
+  A server listed there is attached to an agent at `<root>/mcp-identity/<name>`. Daimon forwards
+  each request with `Authorization: Bearer` and a two-minute EdDSA token signed with
+  `DAIMON_MCP_IDENTITY__SIGNING_KEY`. The token names the agent and the workspace and, for a
+  person's turn on Discord, Slack or Teams, who asked and the channel and message. The key stays in
+  the MCP service and never reaches the sandbox. `daimon mcp identity-keygen` makes a key and
+  prints the public half for the server. Migration 0145 records the platform channel and message on
+  turn origins. Self-hosted harness, GPT and Gemini agents are not covered yet.
 - The Claude Code plugin now defaults to `https://daimon-mcp.pymc-labs.com`, the hosted deployment's MCP address. The old default, `daimon.decision.ai`, is the website and has no MCP server, so the plugin could not log in without `DAIMON_MCP_URL`. A new `DAIMON_HUB__PUBLIC_URL` serves the Discord and Slack login mounts from their own hostname without changing `DAIMON_MCP__PUBLIC_URL`, which every agent's stored MCP credential points at. Unset, the mounts use the `DAIMON_MCP__PUBLIC_URL` origin as before.
 - Plainer words in a few places. The operator key list reads "id label: scopes, expires date" instead of joining the parts with " · ", and a Discord approval card says "Only the requester may answer. It expires in …" as one sentence
 - An agent can have several owners, and an owner can manage GitHub for their own agent. An admin adds or removes extra owners with `daimon agents owner add` and `daimon agents owner remove` (`owner show` lists them; migration 0143 adds the table). An owner of an agent can now connect repos to it with Connect GitHub (any repo their GitHub account shows them on the installation; the agent gets write access), remove any repo from it, and choose its working repo, from chat, `/github connect` and the agent's repos panel. They cannot connect a repo for the whole server, add owners, or touch another agent, and an owner is never made an admin by doing so. The Connect GitHub button on a card in a thread now shows its link only to the person who asked, an admin or an owner of that agent; anyone else is told whom to ask. The Connect page no longer says people need their own GitHub permission to use connected repos.

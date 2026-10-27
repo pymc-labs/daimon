@@ -1349,6 +1349,39 @@ wrong or rotated secret, a redirect URI or scope it does not accept), the
 sign-in page tells the person to ask the operator, and the reason is logged
 as `mcp_oauth.callback_failed` or `mcp_oauth.authorization_declined`.
 
+### Servers that verify who is calling
+
+A remote MCP server can ask Daimon to sign, on every request, which agent is
+calling, the workspace and, for a person's turn, who asked and the channel
+and message the turn comes from. Daimon signs on its own side, so the key
+never reaches the agent's sandbox.
+
+1. Run `daimon mcp identity-keygen`. Store the printed
+   `DAIMON_MCP_IDENTITY__SIGNING_KEY` line as a secret on the MCP service and
+   give the server the public key (JWK or PEM). `daimon mcp
+   identity-public-key` prints it again from the stored key.
+2. List the server in `DAIMON_MCP_IDENTITY__SERVERS` with the issuer and
+   audience it gave you:
+
+```bash
+DAIMON_MCP_IDENTITY__SERVERS='[{"name": "tools", "url": "https://tools.example.com/mcp",
+  "issuer": "<issuer id>", "audience": "https://tools.example.com"}]'
+```
+
+3. Add `<root>/mcp-identity/tools` to the agent's MCP servers in place of the
+   server's own URL, with no token. Daimon gives the agent its own credential
+   for that URL and forwards each request to the server with
+   `Authorization: Bearer <EdDSA JWT>`, valid for two minutes.
+
+The token carries `iss`, `aud`, `iat`, `exp`, `agent`, `agent_name`, `ws`
+(`<platform>:<workspace id>`), and, when a person asked, `sub`
+(`<platform>:<user id>`), `channel` (the thread for a reply in one) and `msg`
+(the Discord message id, Slack `ts` or Teams activity id). A claim Daimon
+does not know is left out. When the same person has two turns with the same
+agent running at once, neither names the person. Only agents on Anthropic
+Managed Agents reach the relay; self-hosted harness, GPT and Gemini agents
+do not yet.
+
 ## Backup and disaster recovery
 
 Use managed Postgres with point-in-time recovery for production. Set a recovery
