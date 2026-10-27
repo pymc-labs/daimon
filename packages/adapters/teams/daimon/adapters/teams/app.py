@@ -1760,6 +1760,8 @@ class TeamsApp:
             is_setup=config.thread_binding_kind == "setup",
             sender_foreign=inbound.is_foreign,
             shared_channel=admission.shared_channel,
+            platform_channel_id=inbound.conversation_id,
+            platform_message_id=None if inbound.from_form else inbound.activity_id,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"
