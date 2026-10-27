@@ -228,7 +228,10 @@ def mcp_janitor_command(
 
 async def mcp_janitor(*, rt: CliRuntime, console: Console, apply: bool) -> None:
     report = await archive_orphan_mcp_vaults(
-        rt.anthropic, session_factory=rt.sessionmaker, dry_run=not apply
+        rt.anthropic,
+        session_factory=rt.sessionmaker,
+        now=dt.datetime.now(dt.UTC),
+        dry_run=not apply,
     )
     table = Table(show_header=True, header_style="bold")
     for col in ("vault_id", "status"):

@@ -207,7 +207,8 @@ only while that row is live and its thread has one active turn origin (the
 origin now records the platform channel and message). Routines, agent chat,
 replaced sessions and foreign senders name nobody. It then signs an EdDSA token
 with `daimon.core.mcp_identity` and streams the request to the server and the
-answer back. The signing key stays in the MCP service.
+answer back. The signing key stays in the MCP service. The scheduler archives
+a relay vault once no live session mounts it (`mcp_vault_janitor.py`).
 
 ## MCP browser pages
 
