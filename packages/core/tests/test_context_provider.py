@@ -26,6 +26,7 @@ from daimon.core.context_provider import (
 from daimon.core.stores import context_providers
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .context_card_stub import Card, FixtureProvider
 
@@ -834,8 +835,32 @@ async def test_config_isolation_overrides_and_human_admin_only(db_session) -> No
     ).enabled
 
 
-@pytest.mark.fresh_schema
-async def test_migration_rls_isolation_and_with_check_for_non_bypass_role(db_engine) -> None:
+async def test_warmup_configs_returns_both_live_tenants_and_excludes_archived(db_session) -> None:
+    tenants = [
+        await make_tenant(db_session, workspace_id=name)
+        for name in ("warm-one", "warm-two", "warm-archived")
+    ]
+    configs = [
+        ProviderConfig(endpoint=f"https://provider-{index}.invalid/mcp", enabled=True)
+        for index in range(3)
+    ]
+    for tenant, config in zip(tenants, configs, strict=True):
+        await context_providers.set_provider(
+            db_session,
+            tenant_id=tenant.id,
+            config=config,
+            actor=Subject(is_admin=True),
+            set_by="admin",
+        )
+    await db_session.execute(
+        text("UPDATE tenants SET archived_at = now() WHERE id = :id"),
+        {"id": tenants[2].id},
+    )
+    loaded = await context_providers.warmup_configs(db_session)
+    assert {config.endpoint for config in loaded} == {config.endpoint for config in configs[:2]}
+
+
+async def _install_context_binding_rls(connection) -> None:
     # Exercise the actual migration, since fixture metadata creation does not install policies.
     migration_path = (
         Path(__file__).parents[1] / "alembic/versions/0149_context_provider_bindings.py"
@@ -843,16 +868,21 @@ async def test_migration_rls_isolation_and_with_check_for_non_bypass_role(db_eng
     spec = importlib.util.spec_from_file_location("context_binding_migration", migration_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    await connection.execute(text("DROP TABLE context_provider_bindings"))
+
+    def migrate(sync):
+        with Operations.context(MigrationContext.configure(sync)):
+            module.upgrade()
+
+    await connection.run_sync(migrate)
+
+
+@pytest.mark.fresh_schema
+async def test_migration_rls_isolation_and_with_check_for_non_bypass_role(db_engine) -> None:
     role = "context_probe_" + uuid.uuid4().hex
     tenant_one, tenant_two = uuid.uuid4(), uuid.uuid4()
     async with db_engine.begin() as connection:
-        await connection.execute(text("DROP TABLE context_provider_bindings"))
-
-        def migrate(sync):
-            with Operations.context(MigrationContext.configure(sync)):
-                module.upgrade()
-
-        await connection.run_sync(migrate)
+        await _install_context_binding_rls(connection)
         await connection.execute(text(f'CREATE ROLE "{role}" NOLOGIN NOBYPASSRLS'))
         schema = await connection.scalar(text("SELECT current_schema()"))
         await connection.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"'))
@@ -907,6 +937,59 @@ async def test_migration_rls_isolation_and_with_check_for_non_bypass_role(db_eng
             assert (
                 await connection.scalar(text("SELECT count(*) FROM context_provider_bindings")) == 0
             )
+    finally:
+        async with db_engine.begin() as connection:
+            await connection.execute(text(f'DROP OWNED BY "{role}"'))
+            await connection.execute(text(f'DROP ROLE "{role}"'))
+
+
+@pytest.mark.fresh_schema
+async def test_warmup_configs_reads_both_tenants_under_rls(db_engine) -> None:
+    role = "context_warmup_" + uuid.uuid4().hex
+    tenants = [uuid.uuid4(), uuid.uuid4()]
+    configs = [
+        ProviderConfig(endpoint=f"https://warm-{index}.invalid/mcp", enabled=True)
+        for index in range(2)
+    ]
+    async with db_engine.begin() as connection:
+        await _install_context_binding_rls(connection)
+        for tenant, config in zip(tenants, configs, strict=True):
+            await connection.execute(
+                text(
+                    "INSERT INTO tenants (id, platform, external_id) VALUES (:id, 'discord', :ext)"
+                ),
+                {"id": tenant, "ext": str(tenant)},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO context_provider_bindings (tenant_id, config, updated_by) "
+                    "VALUES (:id, CAST(:config AS jsonb), 'test')"
+                ),
+                {"id": tenant, "config": config.model_dump_json()},
+            )
+        await connection.execute(text(f'CREATE ROLE "{role}" NOLOGIN NOSUPERUSER NOBYPASSRLS'))
+        schema = await connection.scalar(text("SELECT current_schema()"))
+        await connection.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"'))
+        await connection.execute(
+            text(f'GRANT SELECT ON tenants, context_provider_bindings TO "{role}"')
+        )
+    try:
+        async with db_engine.begin() as connection:
+            await connection.execute(text(f'SET LOCAL ROLE "{role}"'))
+            await connection.execute(text("SELECT set_config('daimon.tenant_id', '', true)"))
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM tenants WHERE id IN (:one, :two)"),
+                    {"one": tenants[0], "two": tenants[1]},
+                )
+                == 2
+            )
+            assert (
+                await connection.scalar(text("SELECT count(*) FROM context_provider_bindings")) == 0
+            )
+            async with AsyncSession(bind=connection) as session:
+                loaded = await context_providers.warmup_configs(session)
+            assert {config.endpoint for config in loaded} == {config.endpoint for config in configs}
     finally:
         async with db_engine.begin() as connection:
             await connection.execute(text(f'DROP OWNED BY "{role}"'))
@@ -1193,3 +1276,446 @@ def test_context_place_type_is_required() -> None:
     payload.pop("place_type")
     with pytest.raises(ValueError):
         ContextRequest.model_validate(payload)
+
+
+class WarmClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.ticks: asyncio.Queue[None] = asyncio.Queue()
+        self.waiting: asyncio.Queue[None] = asyncio.Queue()
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        assert seconds == 20
+        self.waiting.put_nowait(None)
+        await self.ticks.get()
+
+    async def ready(self) -> None:
+        await asyncio.wait_for(self.waiting.get(), 1)
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+        self.ticks.put_nowait(None)
+
+    async def tick(self, count: int = 1) -> None:
+        for _ in range(count):
+            self.advance(20)
+            await self.ready()
+
+
+@pytest.fixture
+def warm_clock(monkeypatch):
+    from daimon.core import context_provider as module
+
+    clock = WarmClock()
+    monkeypatch.setattr(module, "_keepwarm_now", clock.monotonic)
+    monkeypatch.setattr(module, "_keepwarm_sleep", clock.sleep)
+    return clock
+
+
+async def test_keepwarm_preconnect_refresh_idle_and_same_pool(warm_clock, monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": "context",
+                    "result": {"structuredContent": {"status": "empty"}},
+                },
+            )
+        return httpx.Response(503, content=b"unavailable", headers={"set-cookie": "secret=bad"})
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    original_client = provider.client
+    config = ProviderConfig(
+        endpoint="https://provider.invalid:8443/mcp?secret=hidden",
+        enabled=True,
+        bearer_env="DAIMON_CONTEXT_00000000000000000000000000000001_KEY",
+    )
+    configs = [
+        config,
+        config,
+        ProviderConfig(endpoint="http://skip.invalid", enabled=True),
+        ProviderConfig(endpoint="https://disabled.invalid", enabled=False),
+    ]
+    loads = 0
+
+    async def load():
+        nonlocal loads
+        loads += 1
+        return list(configs)
+
+    owner = ContextProviders(provider=provider)
+    with mock.patch.dict("os.environ", {}, clear=True):
+        owner.start(load)
+        owner.start(load)  # Exactly one task per owner.
+        await warm_clock.ready()
+    assert [(r.method, str(r.url)) for r in requests] == [
+        ("GET", "https://provider.invalid:8443/health")
+    ]
+    assert provider.client is original_client
+    assert "authorization" not in requests[0].headers
+    assert "cookie" not in requests[0].headers
+    assert requests[0].content == b""
+    monkeypatch.setenv(config.bearer_env, "test-key")
+    await warm_clock.tick(9)
+    assert len(requests) == 1
+    assert loads == 1  # Idle ticks do not re-read the database.
+    await provider(config, REQUEST)
+    assert requests[-1].headers["authorization"] == "Bearer test-key"
+    assert "cookie" not in requests[-1].headers
+    await warm_clock.tick(9)
+    assert len(requests) == 2  # Recent turn suppresses the ping.
+    assert loads == 2
+    await warm_clock.tick()
+    assert requests[-1].method == "GET"
+    assert "authorization" not in requests[-1].headers
+    configs[:] = [ProviderConfig(endpoint="https://new.invalid/other", enabled=True)]
+    await warm_clock.tick()
+    assert str(requests[-1].url) == "https://new.invalid/health"
+    configs.clear()
+    count = len(requests)
+    await warm_clock.tick(10)
+    assert loads == 4
+    assert len(requests) == count
+    await owner.aclose()
+    assert provider._keepwarm_task.done()
+    assert provider.client.is_closed
+
+
+async def test_keepwarm_failures_logged_and_retried(warm_clock) -> None:
+    attempts = 0
+    loads = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectError("private server details")
+
+    async def load():
+        nonlocal loads
+        loads += 1
+        if loads == 1:
+            raise RuntimeError("private database details")
+        return [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    with mock.patch("daimon.core.context_provider.log") as logger:
+        provider.start(load)
+        await warm_clock.ready()
+        warm_clock.advance(20)
+        await warm_clock.ready()
+        await warm_clock.tick(10)
+        assert attempts == 2
+        assert logger.warning.call_count == 3
+        assert "private" not in repr(logger.mock_calls)
+    await provider.aclose()
+
+
+async def test_keepwarm_close_cancels_inflight_ping() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return httpx.Response(200)
+
+    async def load():
+        return [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    provider.start(load)
+    await asyncio.wait_for(started.wait(), 1)
+    await asyncio.wait_for(provider.aclose(), 1)
+    assert cancelled.is_set()
+    assert provider.client.is_closed
+
+
+@pytest.mark.parametrize("phase", ["load", "ping"])
+async def test_keepwarm_timeout_is_bounded_and_swallowed(monkeypatch, warm_clock, phase) -> None:
+    from daimon.core import context_provider as module
+
+    monkeypatch.setattr(module, "KEEPWARM_TIMEOUT_SECONDS", 0.01)
+
+    async def handle(request):
+        await asyncio.Event().wait()
+
+    async def load():
+        if phase == "load":
+            await asyncio.Event().wait()
+        return [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    with mock.patch.object(module, "log") as logger:
+        provider.start(load)
+        await warm_clock.ready()
+        logger.warning.assert_called_once_with(
+            "context_provider.keepwarm_failed", error_class="TimeoutError"
+        )
+    await provider.aclose()
+
+
+async def test_provider_trace_logs_one_safe_timing_record(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from daimon.core import context_provider as module
+
+    monotonic = mock.Mock(side_effect=[0, 0, 0.002, 0.002, 0.009, 0.009, 0.020, 0.020])
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=monotonic))
+    monkeypatch.setattr(module, "_keepwarm_now", monotonic)
+
+    async def handle(request):
+        trace = request.extensions["trace"]
+        for phase in [
+            "connection.connect_tcp",
+            "connection.start_tls",
+            "http11.receive_response_headers",
+        ]:
+            await trace(phase + ".started", {"headers": "private bearer"})
+            await trace(phase + ".complete", {"return_value": "private text"})
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": "context",
+                "result": {"structuredContent": {"status": "empty"}},
+            },
+        )
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    with mock.patch.object(module, "log") as logger:
+        await provider(
+            ProviderConfig(endpoint="https://provider.invalid/mcp?private=secret"), REQUEST
+        )
+        logger.info.assert_called_once()
+        args, fields = logger.info.call_args
+        assert args == ("context_provider.timing",)
+        assert fields["new_connection"] is True
+        assert fields["connect_ms"] == 2
+        assert fields["tls_ms"] == 7
+        assert fields["headers_ms"] == 11
+        assert fields["dns_ms"] is None
+        assert fields["connect_includes_dns"] is True
+        assert "private" not in repr(logger.mock_calls)
+    await provider.aclose()
+
+
+async def test_runtime_start_loads_bindings_in_owned_transaction(warm_clock) -> None:
+    from types import SimpleNamespace
+
+    from daimon.core.turn.deps import TurnDeps
+
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(204)
+
+    session = object()
+    transaction = mock.MagicMock()
+    transaction.__aenter__ = mock.AsyncMock(return_value=session)
+    transaction.__aexit__ = mock.AsyncMock()
+    sessionmaker = mock.Mock()
+    sessionmaker.begin.return_value = transaction
+    owner = ContextProviders(provider=McpProvider(httpx.MockTransport(handle)))
+    deps = SimpleNamespace(sessionmaker=sessionmaker, context_providers=owner)
+    with mock.patch.object(
+        context_providers, "warmup_configs", new_callable=mock.AsyncMock
+    ) as load:
+        load.return_value = [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+        TurnDeps.start_context_providers(deps)
+        # Synchronous startup only schedules work.
+        load.assert_not_awaited()
+        await warm_clock.ready()
+        load.assert_awaited_once_with(session)
+        transaction.__aexit__.assert_awaited_once()
+        assert str(requests[0].url) == "https://provider.invalid/health"
+    await owner.aclose()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_provider_trace_reused_connection_or_failure_logs_once(fails) -> None:
+    from daimon.core import context_provider as module
+
+    def handle(request):
+        if fails:
+            raise httpx.ConnectError("secret error")
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": "context",
+                "result": {"structuredContent": {"status": "empty"}},
+            },
+        )
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    config = ProviderConfig(endpoint="https://provider.invalid/mcp")
+    with mock.patch.object(module, "log") as logger:
+        if fails:
+            with pytest.raises(httpx.ConnectError):
+                await provider(config, REQUEST)
+        else:
+            await provider(config, REQUEST)
+        logger.info.assert_called_once()
+        assert logger.info.call_args.kwargs["new_connection"] is False
+        assert logger.info.call_args.kwargs["connect_ms"] == 0
+        assert logger.info.call_args.kwargs["tls_ms"] == 0
+        assert "secret" not in repr(logger.mock_calls)
+    await provider.aclose()
+
+
+@pytest.mark.parametrize("status", [302, 500])
+async def test_keepwarm_drains_health_body_without_following_redirects(warm_clock, status) -> None:
+    consumed = []
+    closed = asyncio.Event()
+    requests = []
+
+    class HealthBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for chunk in (b"one", b"two"):
+                consumed.append(chunk)
+                yield chunk
+
+        async def aclose(self):
+            closed.set()
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(
+            status, headers={"location": "https://other.invalid"}, stream=HealthBody()
+        )
+
+    async def load():
+        return [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    provider.start(load)
+    await warm_clock.ready()
+    assert consumed == [b"one", b"two"]
+    assert closed.is_set()
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://provider.invalid/health"
+    await provider.aclose()
+
+
+async def test_invalid_provider_endpoint_still_logs_one_timing_record() -> None:
+    from daimon.core import context_provider as module
+
+    provider = McpProvider(httpx.MockTransport(lambda _: httpx.Response(200)))
+    with mock.patch.object(module, "log") as logger:
+        with pytest.raises(httpx.InvalidURL):
+            await provider(ProviderConfig(endpoint="https://provider.invalid:invalid/mcp"), REQUEST)
+        logger.info.assert_called_once()
+        assert logger.info.call_args.args == ("context_provider.timing",)
+    await provider.aclose()
+
+
+async def test_keepwarm_bad_rows_and_endpoints_do_not_block_good_origin(warm_clock) -> None:
+    from daimon.core import context_provider as module
+
+    good = ProviderConfig(endpoint="https://good.invalid/mcp", enabled=True)
+    bad_endpoint = good.model_copy(update={"endpoint": "https://bad.invalid:abc/mcp"})
+    session = mock.AsyncMock()
+    session.scalars.side_effect = [
+        [TENANT],
+        [{"enabled": True, "endpoint": 123}, bad_endpoint.model_dump(), good.model_dump()],
+    ]
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(204)
+
+    async def load():
+        return await context_providers.warmup_configs(session)
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    logger = mock.Mock()
+    with (
+        mock.patch.object(module, "log", logger),
+        mock.patch.object(context_providers.structlog, "get_logger", return_value=logger),
+    ):
+        provider.start(load)
+        await warm_clock.ready()
+        assert [str(request.url) for request in requests] == ["https://good.invalid/health"]
+        assert logger.warning.call_args_list == [
+            mock.call("context_provider.keepwarm_skipped", error_class="ValidationError"),
+            mock.call("context_provider.keepwarm_skipped", error_class="InvalidURL"),
+        ]
+    await provider.aclose()
+
+
+async def test_keepwarm_empty_successful_load_is_cached(warm_clock) -> None:
+    load = mock.AsyncMock(return_value=[])
+    provider = McpProvider(httpx.MockTransport(lambda _: pytest.fail("no origins to ping")))
+    provider.start(load)
+    await warm_clock.ready()
+    await warm_clock.tick(9)
+    assert load.await_count == 1
+    await warm_clock.tick()
+    assert load.await_count == 2
+    await provider.aclose()
+
+
+async def test_keepwarm_caps_health_body_and_closes_stream(warm_clock) -> None:
+    consumed = 0
+    closed = asyncio.Event()
+
+    class LargeBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            nonlocal consumed
+            for _ in range(10000):
+                consumed += 1024
+                yield b"x" * 1024
+
+        async def aclose(self):
+            closed.set()
+
+    async def load():
+        return [ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)]
+
+    provider = McpProvider(httpx.MockTransport(lambda _: httpx.Response(200, stream=LargeBody())))
+    provider.start(load)
+    await warm_clock.ready()
+    assert consumed == 4096
+    assert closed.is_set()
+    await provider.aclose()
+
+
+async def test_keepwarm_failed_reload_still_pings_cached_origins_on_same_tick(warm_clock) -> None:
+    from daimon.core import context_provider as module
+
+    config = ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)
+    load = mock.AsyncMock(side_effect=[[config], RuntimeError("private database details")])
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(204)
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    with mock.patch.object(module, "log") as logger:
+        provider.start(load)
+        await warm_clock.ready()
+        assert len(requests) == 1
+        await warm_clock.tick(9)
+        assert load.await_count == 1
+        assert len(requests) == 1
+        await warm_clock.tick()
+        assert load.await_count == 2
+        assert len(requests) == 2  # Ping occurs on the failed reload tick, at 200s.
+        logger.warning.assert_called_once_with(
+            "context_provider.keepwarm_failed", error_class="RuntimeError"
+        )
+    await provider.aclose()

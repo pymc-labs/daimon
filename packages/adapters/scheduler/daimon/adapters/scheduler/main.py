@@ -1631,6 +1631,8 @@ async def run(
             log.debug("scheduler.signal_handler_unavailable", signal=sig.name)
 
     try:
+        if not args.once:
+            dm_turn_deps.start_context_providers()
         if args.once:
             await run_one_tick(
                 now=datetime.now(UTC),
@@ -1740,6 +1742,7 @@ async def run(
         dm_turn_deps.running_turns.begin_shutdown()
         await long_jobs.close()
         await dispatcher.close()
+        await dm_turn_deps.context_providers.aclose()
         health_server.close()
         await health_server.wait_closed()
         try:

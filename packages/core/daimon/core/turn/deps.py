@@ -6,7 +6,8 @@ dependency the pre-turn sequence needs that does NOT vary per turn -- the
 per-turn values (tenant_id, platform, external_user_id, channel_id, now) are
 passed as separate arguments instead.
 
-No I/O in this module; `build_turn_deps` derives the bundle from settings.
+`build_turn_deps` derives the bundle without I/O. Runtime owners explicitly
+start and close background context-provider connections.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from daimon.core.config import (
     TurnSettings,
     load_turn_settings,
 )
-from daimon.core.context_provider import ContextProviders
+from daimon.core.context_provider import ContextProviders, ProviderConfig
 from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_credentials import build_multifernet
@@ -141,6 +142,16 @@ class TurnDeps:
     # read, and the ones the provider refused (`create_ma_session`).
     platform_skill_memory: PlatformSkillMemory = field(default_factory=PlatformSkillMemory)
     context_providers: ContextProviders = field(default_factory=ContextProviders)
+
+    def start_context_providers(self) -> None:
+        """Schedule pre-connect/config refresh on the runtime's event loop."""
+        from daimon.core.stores.context_providers import warmup_configs
+
+        async def load() -> list[ProviderConfig]:
+            async with self.sessionmaker.begin() as session:
+                return await warmup_configs(session)
+
+        self.context_providers.start(load)
 
     @property
     def backend_selection_enabled(self) -> bool:

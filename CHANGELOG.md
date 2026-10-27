@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delivery consistency before declaring a final export. Repeated resume replies
   plainly without replacing a seeded first run.
 
+- Pre-connect pre-turn context provider pools at runtime startup and keep idle HTTPS origins warm with unauthenticated health requests.
+
 - Fixed Discord fleet rendering losing verified invoker roles and replacing ordinary
   tool-free answers with a fleet-unavailable notice. Fleet results still require current authorization.
 

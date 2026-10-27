@@ -349,6 +349,7 @@ async def build_runtime(
         # shared builder's minimum capacity contract.
         owner_engine = build_engine(str(settings.database.url), pool_size=1, max_overflow=3)
         try:
+            turn_deps.start_context_providers()
             async with hold_worker_owner(
                 owner_engine, owner_key=owner_key, ownership_lost=ownership_lost
             ) as gateway_lease:
@@ -373,6 +374,7 @@ async def build_runtime(
                     turn_deps.running_turns.begin_shutdown()
                     await owned_fleet_ports.close()
             finally:
+                await turn_deps.context_providers.aclose()
                 await drain_outcomes()
                 await drain_budget_notices()
                 await owner_engine.dispose()

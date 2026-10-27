@@ -7,6 +7,7 @@ import math
 import os
 import time
 import uuid
+from asyncio import sleep as _keepwarm_sleep
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from ssl import SSLContext
+from time import monotonic as _keepwarm_now
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -25,6 +27,11 @@ log = structlog.get_logger(__name__)
 MAX_RESPONSE_BYTES = 65_536
 # Expire idle connections before the provider's 300-second keep-alive.
 KEEPALIVE_EXPIRY_SECONDS = 240
+KEEPWARM_IDLE_SECONDS = 200
+KEEPWARM_TICK_SECONDS = 20
+KEEPWARM_TIMEOUT_SECONDS = 5.0
+KEEPWARM_REFRESH_TICKS = 10
+KEEPWARM_MAX_RESPONSE_BYTES = 4096
 TURN_CEILING_SECONDS = 0.2
 FIRST_CALL_CEILING_SECONDS = 0.4
 DETACHED_CALL_TIMEOUT_SECONDS = 5.0
@@ -106,10 +113,57 @@ def _ssl_context() -> SSLContext:
     return httpx.create_ssl_context(trust_env=False)
 
 
+def _origin(endpoint: str) -> httpx.URL:
+    url = httpx.URL(endpoint)
+    return httpx.URL(scheme=url.scheme, host=url.host, port=url.port)
+
+
+@dataclass
+class _CallTiming:
+    starts: dict[str, float] = field(default_factory=dict[str, float])
+    durations: dict[str, float] = field(default_factory=dict[str, float])
+    new_connection: bool = False
+
+    async def trace(self, event: str, info: dict[str, Any]) -> None:
+        # Consume event names only: info can contain headers and credentials.
+        phase, _, edge = event.rpartition(".")
+        if phase not in {
+            "connection.connect_tcp",
+            "connection.start_tls",
+            "http11.receive_response_headers",
+            "http2.receive_response_headers",
+        }:
+            return
+        now = time.monotonic()
+        if edge == "started":
+            self.starts[phase] = now
+            self.new_connection |= phase == "connection.connect_tcp"
+        elif edge in {"complete", "failed"} and phase in self.starts:
+            self.durations[phase] = (now - self.starts.pop(phase)) * 1000
+
+    def log(self) -> None:
+        log.info(
+            "context_provider.timing",
+            # httpcore's connect_tcp includes resolution; its trace does not
+            # expose DNS separately. Null avoids claiming unmeasured DNS is zero.
+            dns_ms=None,
+            connect_ms=round(self.durations.get("connection.connect_tcp", 0.0), 3),
+            connect_includes_dns=True,
+            tls_ms=round(self.durations.get("connection.start_tls", 0.0), 3),
+            headers_ms=round(
+                sum(v for k, v in self.durations.items() if k.endswith("receive_response_headers")),
+                3,
+            ),
+            new_connection=self.new_connection,
+        )
+
+
 class McpProvider:
     """Stateless MCP tools/call with bounded JSON or SSE replies."""
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._last_traffic: dict[httpx.URL, float] = {}
+        self._keepwarm_task: asyncio.Task[None] | None = None
         # The imported constructor isolates this owner from other transports' overrides.
         self.client = AsyncClient(
             transport=transport,
@@ -124,10 +178,99 @@ class McpProvider:
             cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
         )
 
+    def start(self, load: Callable[[], Awaitable[list[ProviderConfig]]]) -> None:
+        """Start one best-effort owner; startup never waits on network or the DB."""
+        if self._keepwarm_task is None and not self.client.is_closed:
+            self._keepwarm_task = asyncio.create_task(self._keepwarm(load))
+
+    async def _keepwarm(self, load: Callable[[], Awaitable[list[ProviderConfig]]]) -> None:
+        origins: set[httpx.URL] = set()
+        refresh_in = 0
+        while True:
+            if refresh_in == 0:
+                refresh_in = KEEPWARM_REFRESH_TICKS
+                try:
+                    async with asyncio.timeout(KEEPWARM_TIMEOUT_SECONDS):
+                        configs = await load()
+                    refreshed: set[httpx.URL] = set()
+                    for config in configs:
+                        try:
+                            config = ProviderConfig.model_validate(config)
+                            if config.enabled and httpx.URL(config.endpoint).scheme == "https":
+                                refreshed.add(_origin(config.endpoint))
+                        except Exception as error:
+                            log.warning(
+                                "context_provider.keepwarm_skipped",
+                                error_class=type(error).__name__,
+                            )
+                    origins = refreshed
+                    self._last_traffic = {
+                        origin: touched
+                        for origin, touched in self._last_traffic.items()
+                        if origin in origins
+                    }
+                except Exception as error:
+                    log.warning(
+                        "context_provider.keepwarm_failed", error_class=type(error).__name__
+                    )
+                    if not origins:
+                        refresh_in = 0
+            await asyncio.gather(
+                *(
+                    self._ping(origin)
+                    for origin in origins
+                    if _keepwarm_now() - self._last_traffic.get(origin, -math.inf)
+                    >= KEEPWARM_IDLE_SECONDS
+                )
+            )
+            refresh_in = max(0, refresh_in - 1)
+            await _keepwarm_sleep(KEEPWARM_TICK_SECONDS)
+
+    async def _ping(self, origin: httpx.URL) -> None:
+        try:
+            self._last_traffic[origin] = _keepwarm_now()
+            async with asyncio.timeout(KEEPWARM_TIMEOUT_SECONDS):
+                # No config/credential resolution or destination data on health requests.
+                async with self.client.stream(
+                    "GET",
+                    origin.copy_with(path="/health"),
+                    timeout=KEEPWARM_TIMEOUT_SECONDS,
+                ) as reply:
+                    read = 0
+                    async for chunk in reply.aiter_bytes(chunk_size=KEEPWARM_MAX_RESPONSE_BYTES):
+                        read += len(chunk)
+                        if read >= KEEPWARM_MAX_RESPONSE_BYTES:
+                            break
+                    log.debug("context_provider.keepwarm", status=reply.status_code)
+        except Exception as error:
+            log.warning("context_provider.keepwarm_failed", error_class=type(error).__name__)
+        finally:
+            self._last_traffic[origin] = _keepwarm_now()
+
     async def aclose(self) -> None:
+        if self._keepwarm_task is not None:
+            self._keepwarm_task.cancel()
+            await asyncio.gather(self._keepwarm_task, return_exceptions=True)
         await self.client.aclose()
 
     async def __call__(self, config: ProviderConfig, request: ContextRequest) -> ContextResponse:
+        timing = _CallTiming()
+        try:
+            origin = _origin(config.endpoint)
+            self._last_traffic[origin] = _keepwarm_now()
+            try:
+                return await self._call(config, request, timing)
+            finally:
+                self._last_traffic[origin] = _keepwarm_now()
+        finally:
+            timing.log()
+
+    async def _call(
+        self,
+        config: ProviderConfig,
+        request: ContextRequest,
+        timing: _CallTiming,
+    ) -> ContextResponse:
         if httpx.URL(config.endpoint).scheme != "https":
             raise ValueError("provider endpoint must use HTTPS")
         if config.bearer_env and not config.bearer_env.startswith(
@@ -153,6 +296,7 @@ class McpProvider:
             headers=headers,
             json=body,
             timeout=DETACHED_CALL_TIMEOUT_SECONDS,
+            extensions={"trace": timing.trace},
         ) as reply:
             reply.raise_for_status()
             raw = bytearray()
@@ -258,6 +402,17 @@ class ContextProviders:
         self._detached: set[asyncio.Future[Any]] = set()
         self.max_sessions = max_sessions
         self.sessions: OrderedDict[tuple[uuid.UUID, str, str, str], SessionContext] = OrderedDict()
+
+    def start(self, load: Callable[[], Awaitable[list[ProviderConfig]]]) -> None:
+        if isinstance(self.provider, McpProvider):
+            self.provider.start(load)
+
+    async def aclose(self) -> None:
+        for task in self._detached:
+            task.cancel()
+        await asyncio.gather(*self._detached, return_exceptions=True)
+        if isinstance(self.provider, McpProvider):
+            await self.provider.aclose()
 
     @asynccontextmanager
     async def turn(
