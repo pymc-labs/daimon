@@ -3076,6 +3076,8 @@ class SlackApp:
                     role=Role.ADMIN if is_admin else Role.USER,
                     sender_foreign=admission.hold is not None and admission.hold.client,
                     shared_channel=admission.shared_channel,
+                    platform_channel_id=channel,
+                    platform_message_id=str(event.get("ts") or "") or None,
                 ) as origin:
                     outcome = await run_prepared_turn(
                         self.runtime.turn_deps,
@@ -3607,6 +3609,7 @@ class SlackApp:
                 sender_foreign=follow_admission.hold is not None and follow_admission.hold.client,
                 shared_channel=follow_admission.shared_channel,
                 is_setup=follow_admission.config.thread_binding_kind == "setup",
+                platform_channel_id=channel,
             ) as follow_origin:
                 await run_prepared_turn(
                     self.runtime.turn_deps,

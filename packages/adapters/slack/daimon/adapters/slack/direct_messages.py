@@ -353,6 +353,7 @@ async def handle_direct_message(
             route_key=route_key,
             external_user_id=user_id,
             message_id=message_id,
+            platform_channel_id=channel_id,
             expected_scope_id=conversation.scope_id,
             text=content,
             role=role,
