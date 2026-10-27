@@ -30,6 +30,8 @@ async def create_origin(
     sender_foreign: bool,
     shared_channel: bool,
     is_setup: bool = False,
+    platform_channel_id: str | None = None,
+    platform_message_id: str | None = None,
 ) -> TurnOriginRow:
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
@@ -49,6 +51,8 @@ async def create_origin(
         configuration_target_name=configuration_target_name,
         role=role.value,
         expires_at=expires_at,
+        platform_channel_id=platform_channel_id,
+        platform_message_id=platform_message_id,
     )
     session.add(origin)
     await session.flush()

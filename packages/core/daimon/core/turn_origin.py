@@ -153,6 +153,8 @@ async def turn_origin(
     is_setup: bool = False,
     message_text: str | None = None,
     queued_message: bool = False,
+    platform_channel_id: str | None = None,
+    platform_message_id: str | None = None,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -166,6 +168,9 @@ async def turn_origin(
     thread (`resolve_pending_skill_adds`). None for a turn no message started.
     `queued_message` means the message arrived during another turn in this
     thread. It runs as a turn, but cannot settle a skill-add preview.
+    `platform_channel_id` and `platform_message_id` are the platform's own ids for
+    where the turn's message can be read and the message itself, exactly as its API
+    takes them; signed MCP caller identities name them. None when unknown.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -186,6 +191,8 @@ async def turn_origin(
             is_setup=is_setup,
             sender_foreign=sender_foreign,
             shared_channel=shared_channel,
+            platform_channel_id=platform_channel_id,
+            platform_message_id=platform_message_id,
         )
         if message_text is not None:
             if not queued_message:

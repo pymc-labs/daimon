@@ -1150,6 +1150,8 @@ class TurnOriginRow(BaseModel):
     expires_at: datetime
     sender_foreign: bool = False
     shared_channel: bool = False
+    platform_channel_id: str | None = None
+    platform_message_id: str | None = None
 
 
 class _Facts(BaseModel):
