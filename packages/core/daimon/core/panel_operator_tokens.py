@@ -124,7 +124,10 @@ async def revoke_panel_operator_token(
 
 
 def operator_token_line(row: McpTokenRow) -> str:
-    """One listing line: short id, label, scopes and expiry. Never the token."""
+    """One listing line: short id, label, scopes and expiry. Never the token.
+
+    The id comes first so it survives the platforms' option-length cuts."""
     expires = row.expires_at.date().isoformat() if row.expires_at else "never"
     label = row.label or "no label"
-    return f"{str(row.jti)[:8]} · {label} · {', '.join(sorted(row.scopes))} · expires {expires}"
+    scopes = ", ".join(sorted(row.scopes))
+    return f"{str(row.jti)[:8]} {label}: {scopes}, expires {expires}"
