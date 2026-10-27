@@ -112,7 +112,7 @@ from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.stores.domain import Role, RoutineRow, ThreadSessionRow
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
     LiveMcpAppSession,
@@ -829,6 +829,10 @@ _last_app_access_checks: dict[str, datetime] = {}
 # Session id -> (consecutive failures, earliest next attempt). A failing refresh
 # mints fresh tokens each attempt, so retries back off from 1 to 30 minutes.
 _app_refresh_failures: dict[str, tuple[int, datetime]] = {}
+# MA session id -> why its refresh stopped. A session MA reports archived or gone is
+# never refreshed again; the turn path replaces it on the next message. In memory
+# only, so a restart gives each one more attempt before it is retired again.
+_app_refresh_retired: dict[str, str] = {}
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
 # A turn running continuously for longer than this is treated as abandoned and
@@ -847,6 +851,41 @@ def _record_refresh_failure(session_id: str, now: datetime) -> None:
     count = _app_refresh_failures.get(session_id, (0, now))[0] + 1
     delay = min(_REFRESH_BACKOFF_START * 2 ** min(count - 1, 5), _REFRESH_BACKOFF_MAX)
     _app_refresh_failures[session_id] = (count, now + delay)
+
+
+def _dead_session_refresh_reason(error: BaseException) -> str | None:
+    """Name the failure when MA says the session is archived or gone, else None.
+
+    Only these two messages count. Any other 400 or 404 (a vault or resource not
+    found, say), auth, rate limit, server and network errors stay retryable.
+    """
+    message = str(error).lower()
+    if isinstance(error, anthropic.BadRequestError) and "archived session" in message:
+        return "session_archived"
+    if isinstance(error, anthropic.NotFoundError) and "session not found" in message:
+        return "session_not_found"
+    return None
+
+
+async def _ma_session_confirmed_gone(
+    anthropic_client: AsyncAnthropic, mapping: ThreadSessionRow, session_id: str
+) -> bool:
+    """True only when MA itself shows the session archived, terminated or missing."""
+    try:
+        record = await retrieve_session_record(
+            anthropic_client,
+            session_id,
+            scope=session_scope(
+                tenant_id=mapping.tenant_id,
+                account_id=mapping.account_id,
+                call_site="scheduler:refresh_github_app_sessions",
+            ),
+        )
+    except anthropic.NotFoundError:
+        return True
+    except Exception:
+        return False
+    return record.archived_at is not None or record.status == "terminated"
 
 
 async def _retire_mcp_app_session(
@@ -885,6 +924,8 @@ async def _refresh_github_app_sessions(
         live = await list_live_app_sessions(session)
     for candidate in live:
         session_id = candidate.mapping.ma_session_id
+        if session_id in _app_refresh_retired:
+            continue
         due_for_expiry = candidate.expires_at is None or candidate.expires_at <= now + timedelta(
             minutes=15
         )
@@ -989,8 +1030,20 @@ async def _refresh_github_app_sessions(
                     )
             _last_app_access_checks[session_id] = now
             _app_refresh_failures.pop(session_id, None)
-        except Exception:
+        except Exception as error:
             _last_app_access_checks[session_id] = now
+            reason = _dead_session_refresh_reason(error)
+            if reason is not None and await _ma_session_confirmed_gone(
+                anthropic_client, candidate.mapping, session_id
+            ):
+                _app_refresh_retired[session_id] = reason
+                _app_refresh_failures.pop(session_id, None)
+                log.info(
+                    "scheduler.github_app_session_refresh.retired",
+                    session_id=session_id,
+                    reason=reason,
+                )
+                continue
             _record_refresh_failure(session_id, now)
             log.exception("scheduler.github_app_session_refresh.failed", session_id=session_id)
     async with sm() as session:
@@ -1120,7 +1173,12 @@ async def _refresh_github_app_sessions(
             item.session_id
             for item in await list_live_mcp_app_sessions(session, now=now, include_expired=True)
         )
-    for state in (_last_app_access_checks, _app_refresh_failures, _mcp_running_since):
+    for state in (
+        _last_app_access_checks,
+        _app_refresh_failures,
+        _app_refresh_retired,
+        _mcp_running_since,
+    ):
         for session_id in set(state) - tracked:
             del state[session_id]
 
