@@ -187,9 +187,9 @@ class McpProvider:
         origins: set[httpx.URL] = set()
         refresh_in = 0
         while True:
-            try:
-                if refresh_in == 0:
-                    refresh_in = KEEPWARM_REFRESH_TICKS
+            if refresh_in == 0:
+                refresh_in = KEEPWARM_REFRESH_TICKS
+                try:
                     async with asyncio.timeout(KEEPWARM_TIMEOUT_SECONDS):
                         configs = await load()
                     refreshed: set[httpx.URL] = set()
@@ -209,18 +209,20 @@ class McpProvider:
                         for origin, touched in self._last_traffic.items()
                         if origin in origins
                     }
-                await asyncio.gather(
-                    *(
-                        self._ping(origin)
-                        for origin in origins
-                        if _keepwarm_now() - self._last_traffic.get(origin, -math.inf)
-                        >= KEEPWARM_IDLE_SECONDS
+                except Exception as error:
+                    log.warning(
+                        "context_provider.keepwarm_failed", error_class=type(error).__name__
                     )
+                    if not origins:
+                        refresh_in = 0
+            await asyncio.gather(
+                *(
+                    self._ping(origin)
+                    for origin in origins
+                    if _keepwarm_now() - self._last_traffic.get(origin, -math.inf)
+                    >= KEEPWARM_IDLE_SECONDS
                 )
-            except Exception as error:
-                log.warning("context_provider.keepwarm_failed", error_class=type(error).__name__)
-                if not origins:
-                    refresh_in = 0
+            )
             refresh_in = max(0, refresh_in - 1)
             await _keepwarm_sleep(KEEPWARM_TICK_SECONDS)
 

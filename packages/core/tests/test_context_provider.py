@@ -26,6 +26,7 @@ from daimon.core.context_provider import (
 from daimon.core.stores import context_providers
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .context_card_stub import Card, FixtureProvider
 
@@ -859,8 +860,7 @@ async def test_warmup_configs_returns_both_live_tenants_and_excludes_archived(db
     assert {config.endpoint for config in loaded} == {config.endpoint for config in configs[:2]}
 
 
-@pytest.mark.fresh_schema
-async def test_migration_rls_isolation_and_with_check_for_non_bypass_role(db_engine) -> None:
+async def _install_context_binding_rls(connection) -> None:
     # Exercise the actual migration, since fixture metadata creation does not install policies.
     migration_path = (
         Path(__file__).parents[1] / "alembic/versions/0149_context_provider_bindings.py"
@@ -868,16 +868,21 @@ async def test_migration_rls_isolation_and_with_check_for_non_bypass_role(db_eng
     spec = importlib.util.spec_from_file_location("context_binding_migration", migration_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    await connection.execute(text("DROP TABLE context_provider_bindings"))
+
+    def migrate(sync):
+        with Operations.context(MigrationContext.configure(sync)):
+            module.upgrade()
+
+    await connection.run_sync(migrate)
+
+
+@pytest.mark.fresh_schema
+async def test_migration_rls_isolation_and_with_check_for_non_bypass_role(db_engine) -> None:
     role = "context_probe_" + uuid.uuid4().hex
     tenant_one, tenant_two = uuid.uuid4(), uuid.uuid4()
     async with db_engine.begin() as connection:
-        await connection.execute(text("DROP TABLE context_provider_bindings"))
-
-        def migrate(sync):
-            with Operations.context(MigrationContext.configure(sync)):
-                module.upgrade()
-
-        await connection.run_sync(migrate)
+        await _install_context_binding_rls(connection)
         await connection.execute(text(f'CREATE ROLE "{role}" NOLOGIN NOBYPASSRLS'))
         schema = await connection.scalar(text("SELECT current_schema()"))
         await connection.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"'))
@@ -932,6 +937,59 @@ async def test_migration_rls_isolation_and_with_check_for_non_bypass_role(db_eng
             assert (
                 await connection.scalar(text("SELECT count(*) FROM context_provider_bindings")) == 0
             )
+    finally:
+        async with db_engine.begin() as connection:
+            await connection.execute(text(f'DROP OWNED BY "{role}"'))
+            await connection.execute(text(f'DROP ROLE "{role}"'))
+
+
+@pytest.mark.fresh_schema
+async def test_warmup_configs_reads_both_tenants_under_rls(db_engine) -> None:
+    role = "context_warmup_" + uuid.uuid4().hex
+    tenants = [uuid.uuid4(), uuid.uuid4()]
+    configs = [
+        ProviderConfig(endpoint=f"https://warm-{index}.invalid/mcp", enabled=True)
+        for index in range(2)
+    ]
+    async with db_engine.begin() as connection:
+        await _install_context_binding_rls(connection)
+        for tenant, config in zip(tenants, configs, strict=True):
+            await connection.execute(
+                text(
+                    "INSERT INTO tenants (id, platform, external_id) VALUES (:id, 'discord', :ext)"
+                ),
+                {"id": tenant, "ext": str(tenant)},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO context_provider_bindings (tenant_id, config, updated_by) "
+                    "VALUES (:id, CAST(:config AS jsonb), 'test')"
+                ),
+                {"id": tenant, "config": config.model_dump_json()},
+            )
+        await connection.execute(text(f'CREATE ROLE "{role}" NOLOGIN NOSUPERUSER NOBYPASSRLS'))
+        schema = await connection.scalar(text("SELECT current_schema()"))
+        await connection.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"'))
+        await connection.execute(
+            text(f'GRANT SELECT ON tenants, context_provider_bindings TO "{role}"')
+        )
+    try:
+        async with db_engine.begin() as connection:
+            await connection.execute(text(f'SET LOCAL ROLE "{role}"'))
+            await connection.execute(text("SELECT set_config('daimon.tenant_id', '', true)"))
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM tenants WHERE id IN (:one, :two)"),
+                    {"one": tenants[0], "two": tenants[1]},
+                )
+                == 2
+            )
+            assert (
+                await connection.scalar(text("SELECT count(*) FROM context_provider_bindings")) == 0
+            )
+            async with AsyncSession(bind=connection) as session:
+                loaded = await context_providers.warmup_configs(session)
+            assert {config.endpoint for config in loaded} == {config.endpoint for config in configs}
     finally:
         async with db_engine.begin() as connection:
             await connection.execute(text(f'DROP OWNED BY "{role}"'))
@@ -1632,4 +1690,32 @@ async def test_keepwarm_caps_health_body_and_closes_stream(warm_clock) -> None:
     await warm_clock.ready()
     assert consumed == 4096
     assert closed.is_set()
+    await provider.aclose()
+
+
+async def test_keepwarm_failed_reload_still_pings_cached_origins_on_same_tick(warm_clock) -> None:
+    from daimon.core import context_provider as module
+
+    config = ProviderConfig(endpoint="https://provider.invalid/mcp", enabled=True)
+    load = mock.AsyncMock(side_effect=[[config], RuntimeError("private database details")])
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(204)
+
+    provider = McpProvider(httpx.MockTransport(handle))
+    with mock.patch.object(module, "log") as logger:
+        provider.start(load)
+        await warm_clock.ready()
+        assert len(requests) == 1
+        await warm_clock.tick(9)
+        assert load.await_count == 1
+        assert len(requests) == 1
+        await warm_clock.tick()
+        assert load.await_count == 2
+        assert len(requests) == 2  # Ping occurs on the failed reload tick, at 200s.
+        logger.warning.assert_called_once_with(
+            "context_provider.keepwarm_failed", error_class="RuntimeError"
+        )
     await provider.aclose()
