@@ -553,10 +553,10 @@ def token_card(
     *, agent_name: str, cli: str, mcp_json: str, jti: str, channel_id: str | None = None
 ) -> AdaptiveCard:
     """The minted token, shown once inside a dialog, with a Revoke button."""
-    revoke = SubmitAction(title="🗑 Revoke this token", data=SubmitData(TOKEN_DIALOG, {"jti": jti}))
+    revoke = SubmitAction(title="🗑 Revoke this key", data=SubmitData(TOKEN_DIALOG, {"jti": jti}))
     lines = [
         _text(f"Use {agent_name} from your coding tools", bold=True),
-        _text("Copy the setup below now. The token is shown only once.", spacing="Medium"),
+        _text("Copy this now: the key is shown only once. It acts as you.", spacing="Medium"),
     ]
     if channel_id is not None:
         bound = f"It runs in {channel_id}, with that channel's rules and budget."

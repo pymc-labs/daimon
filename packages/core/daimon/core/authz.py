@@ -327,6 +327,9 @@ class Request:
     # The agent is the one answering the caller's own chat turn (host-verified from the
     # turn's credential, never a model-supplied id).
     answering: bool = False
+    # MINT_CODING_TOKEN: the subject owns the target agent, read live by the caller
+    # (`daimon.core.agent_ownership.owns_agent`), never from a panel snapshot.
+    owned_by_caller: bool = False
 
 
 #: What a client requester may never do, whatever its place or surface.
@@ -623,7 +626,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if subject.is_admin else _deny("admin_required")
 
     if req.action is Action.MINT_CODING_TOKEN:
-        return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
+        # A server admin, or the owner of this agent (the key then acts as the owner,
+        # never as an admin). Never an agent key, never a client (refused earlier).
+        may_mint = subject.is_admin or req.owned_by_caller
+        return ALLOW if may_mint and not subject.via_agent_key else _deny("admin_required")
 
     if req.action is Action.POST:
         # A caller with no agent (the CLI, an operator token) is input: only
@@ -880,6 +886,7 @@ def authorize(
     approved: bool = False,
     hold: TurnHold | None = None,
     answering: bool = False,
+    owned_by_caller: bool = False,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -905,6 +912,7 @@ def authorize(
             approved=approved,
             hold=hold,
             answering=answering,
+            owned_by_caller=owned_by_caller,
         ),
     )
 

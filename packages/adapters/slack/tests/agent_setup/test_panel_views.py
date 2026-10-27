@@ -22,6 +22,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_ADD_SKILL,
     ACTION_AVATAR_CHANGE,
     ACTION_AVATAR_RESET,
+    ACTION_CODING_KEYS,
     ACTION_CODING_TOOLS,
     ACTION_EXPAND_CONNECTIONS,
     ACTION_EXPAND_KEYS,
@@ -474,7 +475,11 @@ def test_details_avatar_row_and_admin_controls() -> None:
 
 
 def _details_action_ids(
-    details: AgentDetails, *, is_admin: bool, coding_tools_available: bool = True
+    details: AgentDetails,
+    *,
+    is_admin: bool,
+    coding_tools_available: bool = True,
+    viewer_owns: bool = False,
 ) -> list[str]:
     view = build_details_view(
         details,
@@ -483,6 +488,7 @@ def _details_action_ids(
         coding_tools_available=coding_tools_available,
         channel_id=_CHANNEL_ID,
         attribution=None,
+        viewer_owns=viewer_owns,
     )
     return [
         element["action_id"]
@@ -499,6 +505,16 @@ def test_details_offers_a_member_neither_add_skill_nor_coding_tools() -> None:
     assert ACTION_ADD_SKILL not in member and ACTION_CODING_TOOLS not in member
     assert ACTION_ADD_SKILL in admin and ACTION_CODING_TOOLS in admin, "an admin keeps both"
     assert "agent_setup__conversation" in member, "a member can still open setup to ask"
+
+
+def test_details_offers_the_agents_owner_coding_tools_and_keys_but_not_add_skill() -> None:
+    owner = _details_action_ids(_details(is_admin=False), is_admin=False, viewer_owns=True)
+    member = _details_action_ids(_details(is_admin=False), is_admin=False)
+    admin = _details_action_ids(_details(), is_admin=True)
+    assert ACTION_CODING_TOOLS in owner and ACTION_CODING_KEYS in owner
+    assert ACTION_ADD_SKILL not in owner, "adding a skill stays an admin change"
+    assert ACTION_CODING_TOOLS not in member and ACTION_CODING_KEYS not in member
+    assert ACTION_CODING_TOOLS in admin and ACTION_CODING_KEYS in admin
 
 
 def test_details_hides_the_unconfigured_coding_tools_note_from_a_member() -> None:

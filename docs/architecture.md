@@ -748,8 +748,12 @@ as the place of the key's turns (`mcp_place`) and as the read origin, nowhere
 else, and re-decides both at the moment of action; the rule is read right
 before a session is created, and a conversation opened before its channel's
 readers were limited can be read but not continued. Keys minted anywhere else
-are unchanged. A server admin mints anywhere (`authorize(MINT_CODING_TOKEN)`, through
-`authorize_coding_token`).
+are unchanged. A server admin mints anywhere, and an agent's owner mints for that
+agent (`authorize(MINT_CODING_TOKEN)`, through `authorize_coding_token`, which takes
+the live ownership fact). The key's row is marked `purpose = 'coding'`, and the MCP
+verifier then requires, on every request, that its account still be an admin by
+stored role or own the key's agent; report and in-session credentials are other
+purposes and are not held to that. See [Permissions](permissions.md#coding-keys).
 
 ```bash
 daimon channels rule set discord GUILD_ID CHANNEL_ID --readers own --writers own \

@@ -41,6 +41,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_chat_mcp_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_owners import set_owner
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.asgi import call_mcp_tool
@@ -785,14 +786,23 @@ async def _bearer(world: _World, role: Role) -> str:
     await world.db.commit()
     world.add_session("ses_headless")
     world.sessions["ses_headless"]["metadata"]["daimon_account"] = str(account.id)
+    agent_id = derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT)
     async with world.sessionmaker.begin() as session:
+        # A coding key is held to its holder owning the agent (or being an admin).
+        await set_owner(
+            session,
+            tenant_id=world.tenant_id,
+            agent_id=agent_id,
+            owner_account_id=account.id,
+            source="admin_assigned",
+        )
         return await mint_agent_mcp_token(
             session,
             account_id=account.id,
             tenant_id=world.tenant_id,
             secret=_SECRET,
             now=dt.datetime.now(dt.UTC),
-            agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
+            agent_id=agent_id,
             label=None,
         )
 

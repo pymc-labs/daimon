@@ -186,6 +186,7 @@ source_modules = [
     "daimon.core.channel_skills",
     "daimon.core.channel_tidy",
     "daimon.core.checkpoint_prompt",
+    "daimon.core.coding_keys",
     "daimon.core.config",
     "daimon.core.confirmation",
     "daimon.core.constants",

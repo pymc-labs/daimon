@@ -1138,7 +1138,17 @@ async def test_registered_chat_catalogue_matches_source_without_expanding_agent_
     request, plan, _, _, _, posts, runtime_token, *_ = full
     secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
     now = request.now()
+    from daimon.core.stores.agent_owners import set_owner
+
     async with request.deps.sessionmaker.begin() as db:
+        # An external agent key is held to its maker owning the agent (or being an admin).
+        await set_owner(
+            db,
+            tenant_id=request.tenant_id,
+            agent_id=plan.source_agent_id,
+            owner_account_id=request.admission.account_id,
+            source="admin_assigned",
+        )
         external = await mint_agent_mcp_token(
             db,
             account_id=request.admission.account_id,

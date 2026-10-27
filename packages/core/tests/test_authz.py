@@ -219,6 +219,51 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         _deny("admin_required"),
     ),
     (
+        "owner of the agent mints for it, bound inside a pin",
+        PINNED,
+        {
+            "subject": MEMBER,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+            "owned_by_caller": True,
+        },
+        ALLOW,
+    ),
+    (
+        "owner of the agent mints unbound",
+        TenantAccessPolicy(),
+        {
+            "subject": MEMBER,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "owned_by_caller": True,
+        },
+        ALLOW,
+    ),
+    (
+        "a client never mints, even owning the agent",
+        PINNED,
+        {
+            "subject": Subject(is_admin=False, platform_user_id="U_CLIENT", client=True),
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "owned_by_caller": True,
+        },
+        _deny("client_requester"),
+    ),
+    (
+        "an agent key never mints, even for the agent's owner",
+        PINNED,
+        {
+            "subject": Subject(is_admin=False, platform_user_id="U_MEM", via_agent_key=True),
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "owned_by_caller": True,
+        },
+        _deny("admin_required"),
+    ),
+    (
         "server admin mints unbound, as before",
         PINNED,
         {"subject": ADMIN, "action": Action.MINT_CODING_TOKEN, "agent": ACME},

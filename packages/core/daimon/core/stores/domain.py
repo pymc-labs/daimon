@@ -1022,6 +1022,10 @@ class WizardSessionRow(BaseModel):
 McpTokenKind = Literal["agent", "operator", "cli"]
 #: What a registered credential runs on, when not an ordinary chat/CLI/operator token.
 McpTokenSurface = Literal["provider_turn"]
+#: What an agent-kind credential was made for: a key a person made from an agent's
+#: "coding tools" button, a published report's seam token, or a short-lived internal
+#: credential (an in-session chat credential, a provider turn's).
+McpTokenPurpose = Literal["coding", "report", "internal"]
 """An agent-scoped key, a scoped operator token, or a CLI token."""
 
 
@@ -1052,6 +1056,8 @@ class McpTokenRow(BaseModel):
     channel_id: str | None = None
     # `provider_turn`: minted for an OpenAI/Gemini turn, which has no confirmation card.
     surface: McpTokenSurface | None = None
+    # What the credential was made for (see `McpToken.purpose`); None for operator and CLI tokens.
+    purpose: McpTokenPurpose | None = None
 
 
 class FileUploadRow(BaseModel):

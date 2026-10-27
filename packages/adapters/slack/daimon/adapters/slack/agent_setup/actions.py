@@ -64,10 +64,11 @@ from daimon.adapters.slack.agent_policy import (
     refuse_unless_allowed_for_agent_name,
     refuse_unless_pin_allows,
 )
-from daimon.adapters.slack.agent_setup import github_repos as github_repos_view
 from daimon.adapters.slack.agent_setup import (
+    coding_keys,
     panel_views,
 )
+from daimon.adapters.slack.agent_setup import github_repos as github_repos_view
 from daimon.adapters.slack.agent_setup.channel_environment import (
     ENVIRONMENT_NEED_ADMIN_MESSAGE,
     load_environment_picker,
@@ -126,6 +127,7 @@ from daimon.core.agent_identity import (
     identity_enabled_for,
     resolve_agent_identity,
 )
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.authz import build_subject
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
@@ -423,6 +425,9 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         github_repos_view.ACTION_BACK,
         github_repos_view.ACTION_CONNECT_LINK,
         panel_views.ACTION_CODING_TOOLS,
+        panel_views.ACTION_CODING_KEYS,
+        panel_views.ACTION_REVOKE_CODING_KEY,
+        coding_keys.ACTION_BACK,
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_BACKEND_SELECT,
         panel_views.ACTION_BACKEND_CONFIRM,
@@ -639,8 +644,14 @@ async def load_details_view(
     meta: PanelMetadata,
     agent_name: str,
     is_admin: bool,
+    viewer_user_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Build the Details view for `agent_name`, or None when it is gone."""
+    """Build the Details view for `agent_name`, or None when it is gone.
+
+    `viewer_user_id` is the reader, when known: an owner of the agent is offered the
+    coding-tool buttons an admin is. It only decides what to offer; every click
+    checks again.
+    """
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,
@@ -668,6 +679,17 @@ async def load_details_view(
             session,
             tenant_id=tenant_id,
             account_ids=[details.created_by_account_id] if details.created_by_account_id else [],
+        )
+        viewer_owns = (
+            not is_admin
+            and viewer_user_id is not None
+            and await owns_agent(
+                session,
+                tenant_id=tenant_id,
+                ma_agent_id=details.ma_agent_id,
+                platform="slack",
+                platform_user_id=viewer_user_id,
+            )
         )
         avatar_url: str | None = None
         if (
@@ -714,6 +736,7 @@ async def load_details_view(
         ),
         backend_options=backend_options,
         backend_selection=backend_selection,
+        viewer_owns=viewer_owns,
     )
     return view
 
@@ -995,6 +1018,17 @@ async def _dispatch_panel_action(
         )
         return
 
+    if await coding_keys.handle(
+        runtime,
+        client,
+        payload,
+        action=action,
+        meta=meta,
+        team_id=team_id,
+        user_id=user_id,
+    ):
+        return
+
     if await handle_github_repos(
         runtime,
         client,
@@ -1083,7 +1117,12 @@ async def _dispatch_panel_action(
         if not agent_name:
             return
         details_view = await load_details_view(
-            runtime, tenant_id=tenant_id, meta=meta, agent_name=agent_name, is_admin=is_admin
+            runtime,
+            tenant_id=tenant_id,
+            meta=meta,
+            agent_name=agent_name,
+            is_admin=is_admin,
+            viewer_user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(
@@ -1144,6 +1183,7 @@ async def _dispatch_panel_action(
             meta=meta.toggled(expansion),
             agent_name=agent_name,
             is_admin=is_admin,
+            viewer_user_id=user_id,
         )
         if details_view is None:
             stale_view = await load_agents_view(

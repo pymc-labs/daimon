@@ -110,6 +110,9 @@ class PanelState:
     default_mcp_url: str | None = None
     is_admin: bool = False
     can_manage_github_agents: bool = False
+    # MA ids of the agents the panel's user owned when their Details last loaded. Shows
+    # an owner the buttons only owners get; each click reads ownership again.
+    owned_agent_ids: set[str] = dataclasses.field(default_factory=set[str])
     guild_id: int = 0
     channel_id: int = 0
     # Resolved invocation-channel name (no leading #), for the cascade-ladder field

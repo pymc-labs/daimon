@@ -235,6 +235,34 @@ per person and thread, across agents. A newer preview replaces the previous
 one. The confirmation names the agent and skill; a replaced preview must be
 previewed and confirmed again before it can be added.
 
+## Coding keys
+
+**Use from your coding tools** on an agent's Details makes a key that lets Claude
+Code or another coding tool talk to that one agent. A server (or workspace) admin
+can make one for any agent. So can the agent's **owner**, for that agent only; a
+member who owns nothing, and a client or other-organisation principal, cannot.
+Teams still offers it to admins only.
+
+The key acts as the person who made it. An owner's key starts sessions that run
+on the owner's own chat credential: their ordinary member powers, never an
+admin's. Its holder sees only the agent-chat tools (`ask`, `start_turn`, the
+session tools and the agent's own files). Turns are billed to, and capped for,
+the owner's account.
+
+Every request with the key re-checks who made it: they must still be an admin
+(by the role Daimon last stored for them) or still own that agent. Removing
+someone as owner, or demoting an admin, stops their keys on the next request.
+Leaving the server does not by itself revoke a key: an admin removes them as
+owner. A session already running keeps its one-hour credential until it ends.
+An admin's key lasts 90 days; an owner's lasts 30.
+
+**Coding keys** on Details (Discord and Slack) lists an agent's live keys: who
+made each, when it was made and ends, and whether it runs in one channel. Never
+the token, which is shown once when the key is made. An owner sees and revokes
+only their own keys for that agent; an admin sees and revokes every key for it.
+Anyone else is told no. Revoking stops the key on its next request. The Revoke
+button on the new-key message still works too.
+
 ## Publishing
 
 A turn whose admission would refuse `PUBLISH` gets its session's publish

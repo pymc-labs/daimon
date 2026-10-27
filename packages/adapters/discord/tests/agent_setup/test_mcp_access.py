@@ -791,7 +791,7 @@ def test_render_mcp_config_puts_a_blank_line_between_lines(channel_id: str | Non
     paragraphs = content.split("\n\n")
     head = [
         "**Use expert-bot from your coding tools**",
-        "Copy the setup below now. The token is shown only once.",
+        "Copy this now: the key is shown only once. It acts as you.",
     ]
     if channel_id is not None:
         head.append("It runs in <#555>, with that channel's rules and budget.")
