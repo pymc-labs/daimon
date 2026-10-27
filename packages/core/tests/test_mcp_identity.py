@@ -15,6 +15,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import (
     IdentityClaims,
     IdentityTokenCache,
+    RelayBinding,
     SigningKey,
     SigningKeyError,
     TurnPlace,
@@ -24,6 +25,7 @@ from daimon.core.mcp_identity import (
     identity_relay_urls,
     load_signing_key,
     matching_turn,
+    parse_relay_claim,
     public_jwk,
     public_pem,
     relay_url,
@@ -111,8 +113,11 @@ def test_person_turn_claims_name_platform_ids(
 def test_turn_without_a_person_omits_sub_and_msg() -> None:
     payload = _decode_with(_claims("discord", "123", "456", None))
     assert "sub" not in payload and "msg" not in payload, "no person, no sub or msg"
-    assert "channel" not in payload and "agent_name" not in payload, "unknown claims omitted"
+    assert "channel" not in payload, "unknown claims omitted"
     assert payload["ws"] == "discord:456", "the workspace is still named"
+    assert (payload["agent"], payload["agent_name"]) == ("agent-1", "Helper"), (
+        "a call outside a turn still names the agent"
+    )
 
 
 def test_continuation_without_a_message_keeps_channel_and_omits_msg() -> None:
@@ -145,17 +150,26 @@ def test_relay_urls_are_only_this_deployments_relay() -> None:
     found = identity_relay_urls(
         [relay + "/", "https://tools.example.com/mcp", PUBLIC_URL], public_url=PUBLIC_URL
     )
-    assert found == (relay,), "only the relay needs Daimon's credential"
+    assert found == (relay + "/",), "only the relay, kept exactly as attached"
 
 
-def _origin(tenant_id: uuid.UUID, ma_agent_id: str) -> TurnOriginRow:
+def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:
+    key = uuid.uuid4()
+    for binding in (RelayBinding("Helper", key), RelayBinding("Helper")):
+        assert parse_relay_claim(binding.claim()) == binding, "a binding reads back"
+    for bad in ("x", {}, {"agent_name": "Helper", "extra": "1"}, {"agent_name": ""}):
+        with pytest.raises(ValueError):
+            parse_relay_claim(bad)
+
+
+def _origin(tenant_id: uuid.UUID, ma_agent_id: str, thread_id: str = "2") -> TurnOriginRow:
     return TurnOriginRow(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
         account_id=uuid.uuid4(),
         platform="discord",
         parent_channel_id="1",
-        thread_id="2",
+        thread_id=thread_id,
         responder_ma_agent_id=ma_agent_id,
         responder_name="Helper",
         configuration_target_ma_agent_id=None,
@@ -166,17 +180,23 @@ def _origin(tenant_id: uuid.UUID, ma_agent_id: str) -> TurnOriginRow:
     )
 
 
-def test_matching_turn_names_none_when_two_turns_share_the_agent() -> None:
+def test_matching_turn_picks_the_calling_sessions_thread() -> None:
     tenant = uuid.uuid4()
     agent = derive_agent_uuid(tenant_id=tenant, ma_agent_id="agent_a")
     one = _origin(tenant, "agent_a")
-    other = _origin(tenant, "agent_b")
-    assert matching_turn([one, other], tenant_id=tenant, agent_id=agent) == one, (
-        "a turn with another agent does not compete"
+    elsewhere = _origin(tenant, "agent_a", thread_id="9")
+    other_agent = _origin(tenant, "agent_b")
+    origins = [one, elsewhere, other_agent]
+    assert matching_turn(origins, tenant_id=tenant, agent_id=agent, thread_id="2") == one, (
+        "the same agent's turn in another thread does not compete"
     )
-    assert matching_turn([one, _origin(tenant, "agent_a")], tenant_id=tenant, agent_id=agent) is (
-        None
-    ), "two turns with the same agent are not guessed between"
+    assert matching_turn(origins, tenant_id=tenant, agent_id=agent, thread_id="9") == elsewhere, (
+        "each thread's session finds its own turn"
+    )
+    queued = [one, _origin(tenant, "agent_a")]
+    assert matching_turn(queued, tenant_id=tenant, agent_id=agent, thread_id="2") is None, (
+        "two turns in one thread are not guessed between"
+    )
 
 
 def test_settings_parse_servers_and_require_a_key() -> None:
@@ -199,3 +219,9 @@ def test_settings_parse_servers_and_require_a_key() -> None:
         McpIdentitySettings.model_validate({"signing_key": "nope"})
     assert "nope" not in str(raised.value), "a bad key is never echoed"
     assert McpIdentitySettings.model_validate({"servers": ""}).servers == [], "blank is off"
+    limited = json.loads(servers)
+    limited[0]["workspaces"] = ["discord:1"]
+    (server,) = McpIdentitySettings.model_validate(
+        {"servers": json.dumps(limited), "signing_key": seed}
+    ).servers
+    assert server.workspaces == frozenset({"discord:1"}), "a workspace allowlist parses"

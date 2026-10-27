@@ -1,4 +1,4 @@
-"""The caller vault carries Daimon's chat credential to an agent's identity relay URLs."""
+"""A session's own relay vault carries its session-bound credential to the identity relays."""
 
 from __future__ import annotations
 
@@ -11,12 +11,18 @@ from typing import Any
 import httpx
 import jwt as pyjwt
 from anthropic import AsyncAnthropic
-from daimon.core.mcp_identity import encode_seed, generate_signing_key, relay_url
+from daimon.core.mcp_identity import (
+    RELAY_CLAIM,
+    RelayBinding,
+    encode_seed,
+    generate_signing_key,
+    relay_url,
+)
 from daimon.core.mcp_vault import (
     RELAY_METADATA_KEY,
     chat_mcp_credential,
-    ensure_agent_mcp_vault,
-    refresh_agent_mcp_vault,
+    create_relay_vault,
+    refresh_mounted_mcp_vaults,
 )
 from daimon.testing.factories import make_account, make_tenant
 from mux.contracts.ids import Scope
@@ -24,6 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 PUBLIC_URL = "https://daimon.example.com/mcp"
 RELAY = relay_url(PUBLIC_URL, "tools")
+OTHER = relay_url(PUBLIC_URL, "Other/")
+SCOPE = Scope.legacy_host_authorized(call_site="test")
 NOW = dt.datetime(2026, 10, 1, tzinfo=dt.UTC)
 SECRET = b"s" * 32
 
@@ -40,9 +48,23 @@ class _Vault:
         (cred,) = [c for c in self.creds if c["auth"]["mcp_server_url"] == url]
         return cred
 
+    def vault(self) -> dict[str, Any]:
+        return {
+            "id": "vlt_1",
+            "type": "vault",
+            "display_name": self.display_name,
+            "metadata": {},
+            "archived_at": None,
+            "created_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:00:00Z",
+        }
+
     def handler(self) -> Callable[[httpx.Request], httpx.Response]:
         def handle(req: httpx.Request) -> httpx.Response:
             path = req.url.path
+            if path == "/v1/vaults" and req.method == "POST":
+                self.display_name = json.loads(req.content)["display_name"]
+                return httpx.Response(200, json=self.vault())
             if path == "/v1/vaults" and req.method == "GET":
                 vault: dict[str, Any] = {
                     "id": "vlt_1",
@@ -74,6 +96,8 @@ class _Vault:
                 self.creds.append(cred)
                 self.writes.append(("create", body))
                 return httpx.Response(200, json=cred)
+            if path == "/v1/vaults/vlt_1" and req.method == "GET":
+                return httpx.Response(200, json=self.vault())
             if path.startswith("/v1/vaults/vlt_1/credentials/") and req.method == "POST":
                 (cred,) = [c for c in self.creds if c["id"] == path.rsplit("/", 1)[-1]]
                 cred["metadata"] = body.get("metadata") or {}
@@ -97,89 +121,109 @@ async def _account(factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:
     return account.id
 
 
-async def _chat_cred(
-    factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID, agent_id: uuid.UUID, url: str
-) -> dict[str, Any]:
-    async with factory() as db, db.begin():
-        payload = await chat_mcp_credential(
-            db, account_id=account_id, agent_id=agent_id, jwt_secret=SECRET,
-            public_url=url, now=NOW,
-        )  # fmt: skip
-    return {
-        "id": f"vcrd_{uuid.uuid4().hex[:6]}",
-        "type": "vault_credential",
-        "vault_id": "vlt_1",
-        "metadata": payload["metadata"],
-        "created_at": "2026-10-01T00:00:00Z",
-        "updated_at": "2026-10-01T00:00:00Z",
-        "auth": payload["auth"],
-    }
+def _signed(cred: dict[str, Any]) -> dict[str, Any]:
+    return pyjwt.decode(
+        cred["auth"]["token"], SECRET, algorithms=["HS256"], options={"verify_exp": False}
+    )
 
 
-async def test_fresh_vault_gets_a_relay_copy_of_the_chat_credential(
-    db_session_factory: async_sessionmaker[AsyncSession],
+async def _refresh(
+    factory: async_sessionmaker[AsyncSession],
+    vault: _Vault,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    *,
+    relay_urls: tuple[str, ...],
+    now: dt.datetime,
 ) -> None:
-    account_id, agent_id = await _account(db_session_factory), uuid.uuid4()
-    main = await _chat_cred(db_session_factory, account_id, agent_id, PUBLIC_URL)
-    vault = _Vault(f"daimon-mcp:{account_id}:{agent_id}", [main])
-    seed = encode_seed(generate_signing_key())
-
-    await ensure_agent_mcp_vault(
-        _client(vault), account_id=account_id, agent_id=agent_id, jwt_secret=SECRET,
-        public_url=PUBLIC_URL, now=NOW, session_factory=db_session_factory,
-        relay_urls=(RELAY,),
+    await refresh_mounted_mcp_vaults(
+        _client(vault), vault_ids=["vlt_1"], account_id=account_id, agent_id=agent_id,
+        jwt_secret=SECRET, public_url=PUBLIC_URL, now=now, session_factory=factory,
+        scope=SCOPE, relay_urls=relay_urls,
     )  # fmt: skip
 
-    main_now, relay = vault.by_url(PUBLIC_URL), vault.by_url(RELAY)
-    assert relay["auth"]["token"] == main_now["auth"]["token"], "the relay copy is the same token"
-    assert relay["metadata"][RELAY_METADATA_KEY] == "true", "the copy is marked as a relay copy"
-    assert relay["metadata"]["daimon_chat_jti"] == main_now["metadata"]["daimon_chat_jti"], (
-        "both slots record the same registered jti"
+
+async def _relay_vault(
+    factory: async_sessionmaker[AsyncSession], binding: RelayBinding, *urls: str
+) -> tuple[_Vault, uuid.UUID, uuid.UUID]:
+    account_id, agent_id = await _account(factory), uuid.uuid4()
+    vault = _Vault("unused")
+    await create_relay_vault(
+        _client(vault), session_factory=factory, account_id=account_id, agent_id=agent_id,
+        jwt_secret=SECRET, relay_urls=urls, relay=binding, now=NOW, scope=SCOPE,
+    )  # fmt: skip
+    return vault, account_id, agent_id
+
+
+async def test_relay_vault_holds_one_session_bound_credential_per_relay_url(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    key = uuid.uuid4()
+    seed = encode_seed(generate_signing_key())
+    vault, account_id, agent_id = await _relay_vault(
+        db_session_factory, RelayBinding("Helper", key), RELAY, OTHER
     )
-    assert pyjwt.get_unverified_header(relay["auth"]["token"])["alg"] == "HS256", (
+    assert vault.display_name == f"daimon-relay:{account_id}:{agent_id}", "its own vault"
+    first, second = vault.by_url(RELAY), vault.by_url(OTHER)
+    assert first["auth"]["token"] == second["auth"]["token"], "one credential serves each relay"
+    assert first["metadata"][RELAY_METADATA_KEY] == "true", "the credential is marked"
+    assert _signed(first)[RELAY_CLAIM] == {"agent_name": "Helper", "session": str(key)}, (
+        "the session's binding is signed into the credential"
+    )
+    assert pyjwt.get_unverified_header(first["auth"]["token"])["alg"] == "HS256", (
         "the runtime only ever holds Daimon's own chat token, never an identity token"
     )
     assert seed not in json.dumps(vault.creds), "no signing key reaches the vault"
 
 
-async def test_refresh_without_relay_urls_keeps_an_existing_copy_in_step(
+async def test_headless_relay_credential_names_no_session(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    account_id, agent_id = await _account(db_session_factory), uuid.uuid4()
-    main = await _chat_cred(db_session_factory, account_id, agent_id, PUBLIC_URL)
-    stale = await _chat_cred(db_session_factory, account_id, agent_id, RELAY)
-    stale["metadata"][RELAY_METADATA_KEY] = "true"
-    vault = _Vault(f"daimon-mcp:{account_id}:{agent_id}", [main, stale])
-
-    await refresh_agent_mcp_vault(
-        _client(vault), vault_id="vlt_1", account_id=account_id, agent_id=agent_id,
-        jwt_secret=SECRET, public_url=PUBLIC_URL, now=NOW,
-        session_factory=db_session_factory,
-        scope=Scope.legacy_host_authorized(call_site="test"),
-    )  # fmt: skip
-
-    assert vault.by_url(RELAY)["auth"]["token"] == vault.by_url(PUBLIC_URL)["auth"]["token"], (
-        "a copy on an older token is re-minted with the main credential"
+    vault, _, _ = await _relay_vault(db_session_factory, RelayBinding("Helper"), RELAY)
+    assert _signed(vault.by_url(RELAY))[RELAY_CLAIM] == {"agent_name": "Helper"}, (
+        "a routine's credential binds no session, so the relay names no person for it"
     )
 
 
-async def test_fresh_main_and_matching_copy_write_nothing(
+async def test_refresh_keeps_the_binding_and_adds_a_relay_attached_since(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    account_id, agent_id = await _account(db_session_factory), uuid.uuid4()
-    main = await _chat_cred(db_session_factory, account_id, agent_id, PUBLIC_URL)
-    copy = {
-        **main,
-        "id": "vcrd_copy",
-        "metadata": {**main["metadata"], RELAY_METADATA_KEY: "true"},
-        "auth": {**main["auth"], "mcp_server_url": RELAY},
-    }
-    vault = _Vault(f"daimon-mcp:{account_id}:{agent_id}", [main, copy])
+    key = uuid.uuid4()
+    vault, account_id, agent_id = await _relay_vault(
+        db_session_factory, RelayBinding("Helper", key), RELAY
+    )
+    old = vault.by_url(RELAY)["auth"]["token"]
 
-    await ensure_agent_mcp_vault(
-        _client(vault), account_id=account_id, agent_id=agent_id, jwt_secret=SECRET,
-        public_url=PUBLIC_URL, now=NOW, session_factory=db_session_factory,
-        relay_urls=(RELAY,),
+    await _refresh(
+        db_session_factory, vault, account_id, agent_id, relay_urls=(RELAY, OTHER),
+        now=NOW + dt.timedelta(minutes=20),
     )  # fmt: skip
 
-    assert vault.writes == [], "a fresh credential and its copy are left alone"
+    renewed, added = vault.by_url(RELAY), vault.by_url(OTHER)
+    assert renewed["auth"]["token"] != old, "a credential near expiry is re-minted"
+    assert added["auth"]["token"] == renewed["auth"]["token"], "the new relay gets the same one"
+    assert _signed(added)[RELAY_CLAIM]["session"] == str(key), "the binding survives a refresh"
+
+
+async def test_fresh_relay_vault_and_other_vaults_are_left_alone(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    vault, account_id, agent_id = await _relay_vault(
+        db_session_factory, RelayBinding("Helper", uuid.uuid4()), RELAY
+    )
+    writes = len(vault.writes)
+    await _refresh(db_session_factory, vault, account_id, agent_id, relay_urls=(RELAY,), now=NOW)
+    assert len(vault.writes) == writes, "a fresh, complete relay vault is not rewritten"
+
+    async with db_session_factory() as db, db.begin():
+        payload = await chat_mcp_credential(
+            db, account_id=account_id, agent_id=agent_id, jwt_secret=SECRET,
+            public_url=PUBLIC_URL, now=NOW,
+        )  # fmt: skip
+    shared = _Vault("shared", [{**payload, "id": "vcrd_main", "type": "vault_credential",
+        "vault_id": "vlt_1", "created_at": "2026-10-01T00:00:00Z",
+        "updated_at": "2026-10-01T00:00:00Z"}])  # fmt: skip
+    await _refresh(db_session_factory, shared, account_id, agent_id, relay_urls=(RELAY,), now=NOW)
+    assert [cred["auth"]["mcp_server_url"] for cred in shared.creds] == [PUBLIC_URL], (
+        "the caller's shared vault never gets a relay credential"
+    )

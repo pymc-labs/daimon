@@ -269,8 +269,12 @@ async def apply_update_ops(
         and mcp.public_url is not None
         and mcp.jwt_secret is not None
     ):
+        relay_urls = identity_relay_urls(
+            (server.url for server in agent.mcp_servers), public_url=str(mcp.public_url)
+        )
         mounted_vaults = (snapshot.vault_id,)
-        if snapshot.github_mode == "app":
+        # A session's relay vault is mounted beside its Daimon one, never recorded.
+        if snapshot.github_mode == "app" or relay_urls:
             live = await retrieve_session_record(anthropic, session_id, scope=scope)
             mounted_vaults = tuple(dict.fromkeys(live.vault_ids))
         await refresh_mounted_mcp_vaults(
@@ -283,9 +287,7 @@ async def apply_update_ops(
             now=now,
             session_factory=sessionmaker,
             scope=scope,
-            relay_urls=identity_relay_urls(
-                (server.url for server in agent.mcp_servers), public_url=str(mcp.public_url)
-            ),
+            relay_urls=relay_urls,
         )
 
     for op in ops:

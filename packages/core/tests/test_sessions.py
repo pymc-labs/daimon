@@ -2703,3 +2703,57 @@ def _make_env(
 ) -> BetaEnvironment:
     """An environment with this file's defaults — no DB needed."""
     return ma_environment(id=anthropic_id, name=name)
+
+
+async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_last(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The relay credential never shares the caller's vault, so it can name the session."""
+    relay = "https://mcp.example.com/mcp-identity/tools"
+    agent = ma_agent(
+        id="ag_relay",
+        name="Helper",
+        model="claude-opus-4-7",
+        mcp_servers=[{"name": "tools", "type": "url", "url": relay}],
+    )
+    created_relay = AsyncMock(return_value="vlt_relay")
+    monkeypatch.setattr(
+        "daimon.core.sessions.ensure_agent_mcp_vault", AsyncMock(return_value="vlt_caller")
+    )
+    monkeypatch.setattr("daimon.core.sessions.create_relay_vault", created_relay)
+    bodies: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_relay",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    key = uuid.uuid4()
+    await create_session(
+        build_fake_anthropic_http(_handler),
+        agent=agent,
+        environment=_make_env(),
+        account_id=uuid.uuid4(),
+        agent_uuid=uuid.uuid4(),
+        mcp_settings=McpSettings(
+            jwt_secret=SecretStr("x" * 32), public_url=HttpUrl("https://mcp.example.com/mcp")
+        ),
+        session_factory=db_session_factory,
+        relay_session_key=key,
+    )
+
+    assert bodies[0]["vault_ids"] == ["vlt_caller", "vlt_relay"], (
+        "the relay vault is mounted after the caller's, which the snapshot records"
+    )
+    call = created_relay.await_args
+    assert call is not None and call.kwargs["relay_urls"] == (relay,), "the attached relay URL"
+    assert call.kwargs["relay"].session_key == key, "the credential names the mapping row"
+    assert call.kwargs["relay"].agent_name == "Helper", "and the agent"

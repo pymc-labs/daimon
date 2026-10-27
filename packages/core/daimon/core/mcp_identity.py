@@ -1,9 +1,12 @@
 """Signed caller identity for remote MCP servers that opt in.
 
 An opted-in server is attached to an agent at Daimon's relay URL
-(`<app root>/mcp-identity/<name>`). The relay verifies the turn's Daimon
-credential, then forwards each request to the server with a compact EdDSA JWS
-naming the agent, the workspace and, for a person's turn, who asked and where.
+(`<app root>/mcp-identity/<name>`). Each session reaches it with a credential of
+its own, from a vault only that session mounts, whose signed `RELAY_CLAIM`
+names the session's `thread_sessions` row (none for a routine or any other
+session no person's turn is bound to). The relay verifies it, then forwards each
+request to the server with a compact EdDSA JWS naming the agent, the workspace
+and, when that very session is running a person's turn, who asked and where.
 The server can then apply that person's own permissions.
 
 The Ed25519 key lives only in the process serving the relay: the model runtime
@@ -18,10 +21,10 @@ import base64
 import binascii
 import uuid
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Final
+from typing import Final, cast
 
 import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
@@ -32,6 +35,8 @@ from daimon.core.stores.domain import TurnOriginRow
 
 #: Relay path under the app root; the server's configured name follows it.
 RELAY_PATH: Final = "/mcp-identity"
+#: Signed chat-credential claim binding a relay credential to one session.
+RELAY_CLAIM: Final = "daimon_relay"
 #: Servers accept at most 300 s between iat and exp; 120 s leaves room for skew.
 TOKEN_TTL: Final = timedelta(seconds=120)
 #: A cached token is re-signed once it has less than this left.
@@ -112,10 +117,44 @@ def relay_url(public_url: str, name: str) -> str:
 
 
 def identity_relay_urls(server_urls: Iterable[str], *, public_url: str) -> tuple[str, ...]:
-    """The attached URLs that are this deployment's relay, which need its credential."""
+    """The attached URLs that are this deployment's relay, which need its credential.
+
+    Kept exactly as attached: the managed runtime matches a credential to a server
+    by its URL string, so a canonical form could miss.
+    """
     base = relay_base(public_url)
-    found = {canonical_mcp_url(url) for url in server_urls}
-    return tuple(sorted(url for url in found if url.startswith(base)))
+    return tuple(sorted({url for url in server_urls if canonical_mcp_url(url).startswith(base)}))
+
+
+@dataclass(frozen=True)
+class RelayBinding:
+    """What a session's relay credential signs: the agent's name and, for a
+    session that serves a person's turns, its `thread_sessions` row id."""
+
+    agent_name: str
+    session_key: uuid.UUID | None = None
+
+    def claim(self) -> dict[str, str]:
+        value = {"agent_name": self.agent_name}
+        if self.session_key is not None:
+            value["session"] = str(self.session_key)
+        return value
+
+
+def parse_relay_claim(raw: object) -> RelayBinding:
+    """The binding a `RELAY_CLAIM` value names. Raises `ValueError` for any other shape."""
+    if not isinstance(raw, Mapping):
+        raise ValueError("relay claim is not an object")
+    claim = cast("Mapping[str, object]", raw)
+    name, key = claim.get("agent_name"), claim.get("session")
+    if (
+        not set(claim) <= {"agent_name", "session"}
+        or not isinstance(name, str)
+        or not name
+        or not (key is None or isinstance(key, str))
+    ):
+        raise ValueError("relay claim has the wrong shape")
+    return RelayBinding(agent_name=name, session_key=None if key is None else uuid.UUID(key))
 
 
 @dataclass(frozen=True)
@@ -171,21 +210,23 @@ def caller_claims(
     platform: str,
     workspace_id: str | None,
     platform_user_id: str | None,
-    agent_name: str | None,
+    agent_name: str,
     place: TurnPlace | None,
 ) -> IdentityClaims:
     """Claims for one relayed request.
 
-    `place` is None when no single person's turn could be matched (a routine, or
-    two turns of the same person and agent at once): the token then names no
-    person and no message, rather than guessing one.
+    `place` is the turn the calling session itself is running, or None: a
+    routine or other headless session, a session no longer the thread's live
+    one, two turns at once in that session, or a sender from another
+    organisation. The token then names no person and no message rather than
+    guess; it still names the agent.
     """
     person = place is not None and bool(platform_user_id)
     return IdentityClaims(
         iss=issuer,
         aud=audience,
         agent=agent_id,
-        agent_name=agent_name if place is not None else None,
+        agent_name=agent_name,
         sub=f"{platform}:{platform_user_id}" if person else None,
         ws=f"{platform}:{workspace_id}" if workspace_id else None,
         channel=place.channel_id if place is not None else None,
@@ -244,18 +285,19 @@ class IdentityTokenCache:
 
 
 def matching_turn(
-    origins: Iterable[TurnOriginRow], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    origins: Iterable[TurnOriginRow], *, tenant_id: uuid.UUID, agent_id: uuid.UUID, thread_id: str
 ) -> TurnOriginRow | None:
-    """The one running turn of this caller with this agent, or None.
+    """The one running turn of this caller with this agent in the calling session's
+    thread, or None.
 
-    The managed runtime authenticates the relay with the caller's credential for
-    the agent, shared by all of that caller's sessions with it. Two such turns at
-    once cannot be told apart, so neither is named.
+    Two such turns at once (a message queued behind another) cannot be told
+    apart, so neither is named.
     """
     found = [
         origin
         for origin in origins
-        if derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=origin.responder_ma_agent_id)
+        if origin.thread_id == thread_id
+        and derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=origin.responder_ma_agent_id)
         == agent_id
     ]
     return found[0] if len(found) == 1 else None

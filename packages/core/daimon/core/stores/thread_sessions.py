@@ -325,8 +325,11 @@ async def create_thread_session(
     transfer_file_id: str | None = None,
     transfer_kind: TransferKind | None = None,
     seal_ids: frozenset[str] | None = None,
+    id: _uuid.UUID | None = None,
 ) -> ThreadSessionRow:
     """Insert a new thread-session mapping row and return the Pydantic domain type.
+
+    `id` is the row's id when the caller had to name it before the session existed.
 
     account_id is the calling user's account and is persisted on the row so that
     get_live_thread_session can scope future lookups to the same caller.
@@ -365,6 +368,8 @@ async def create_thread_session(
     }
     if created_at is not None:
         kwargs["created_at"] = created_at
+    if id is not None:
+        kwargs["id"] = id
     orm = ThreadSession(**kwargs)
     session.add(orm)
     await session.flush()
