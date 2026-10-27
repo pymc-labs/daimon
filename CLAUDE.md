@@ -13,6 +13,20 @@ Keep one logical change per PR, fill in the `## Summary` and `## Checklist`
 sections of the PR template, and make `pytest`, `pyright`, `ruff` and
 `lint-imports` pass locally before asking for review.
 
+## User-facing text
+
+Anything a person reads in Discord, Slack or Teams (cards, buttons, refusals,
+notices, tool results the model relays) is dumb simple:
+
+- One line for what is happening, one line for what to do.
+- A button over prose; never ask someone to type what a button can do.
+- Everyday words, the same on every platform: no internal terms, no " · " separators.
+- A refusal names who can help ("Ask an admin or an owner").
+
+`tests/parity/test_plain_words.py` and `tests/parity/test_plain_words_parity.py`
+enforce the words and the separators; Daimon's own prompt carries the setup part
+(`defaults/agents/daimon.yaml`).
+
 ## Documentation to update
 
 Two pages are generated from the code and verified in CI, so editing them by
