@@ -393,9 +393,7 @@ class _McpAccessView(ExpiringView, discord.ui.View):
             )
         if row is None:
             log.info("agent_setup.mcp_access.revoke.already_revoked", jti=str(self._jti))
-            await interaction.response.send_message(
-                "That key was already revoked.", ephemeral=True
-            )
+            await interaction.response.send_message("That key was already revoked.", ephemeral=True)
             await self._audit_revoke(interaction, outcome="error", reason="already_revoked")
             return
         log.info("agent_setup.mcp_access.revoke.done", jti=str(self._jti))
