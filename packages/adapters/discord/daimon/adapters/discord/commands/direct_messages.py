@@ -268,6 +268,7 @@ class DirectMessageCog(commands.Cog):
                         expected_scope_id=conversation.scope_id,
                         text=message.content,
                         role=role,
+                        platform_channel_id=str(message.channel.id),
                     )
             finally:
                 ticket.release()
