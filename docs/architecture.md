@@ -2066,6 +2066,40 @@ The operator command `daimon usage turns` queries tenant-scoped rows and channel
 origin summaries without upstream requests. See [billing](billing.md#per-turn-usage-telemetry)
 for unknown-cost and historical-row semantics.
 
+### Log lines
+
+Discord, Slack, Teams, the scheduler and MCP write one JSON line per log record, so
+a log shipper never has to stitch lines together. Records from libraries
+(discord.py, asyncio, uvicorn, anything using the standard `logging` module) take
+the same shape as Daimon's own: `event` is the message, with `logger`, `level`,
+`timestamp` and, when the record carries an exception, a structured `exception`
+list instead of a printed traceback. Every line has a `severity` (`DEBUG`, `INFO`,
+`WARNING`, `ERROR` or `CRITICAL`; `exception` logs are `ERROR`). Once a process
+receives SIGTERM or SIGINT, every later line also has `shutting_down: true`, so
+the noise of a stop can be told from a fault. An exception that escapes the main
+thread or any other thread is logged as `process.uncaught_exception` at critical,
+and the process exits as it would have. Redaction applies to every line. The
+command-line tool keeps its own console output.
+
+These events carry only identifiers, counts and durations, never message text:
+
+| `event` | Level | Fields |
+| --- | --- | --- |
+| `runtime.started` | info | `process`, `release`: once per process start |
+| `runtime.health` | info | `process` and the window's measurements, every `DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S` seconds |
+| `scheduler.tick_completed` | info | `duration_ms`: after a finished scheduler tick, at most once a minute |
+| `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `release`, `turn_id`, `tenant_id`: once for a turn that ended without the answer (an upstream error, a lost connection, a missing configuration, the turn ceiling, an unclassified failure, a queue-full shed) |
+
+`turn.user_failure` is never logged for a completed turn, a stop the user asked for, a
+refusal by the model, or an admission refusal such as an empty balance. The
+reasons that count are `USER_VISIBLE_FAILURES` in `daimon.core.turn.termination`;
+a new `TerminationReason` must be placed in that set or in `NOT_USER_FAILURES`.
+
+`release` is the commit the image was built from, set by the `DAIMON_RELEASE`
+build argument (the deploy workflow passes the full commit SHA). An image built
+without it reports the `daimon-core` package version. The same value is stored
+as `turn_outcomes.release` and is Sentry's release.
+
 ### Security audit trail
 
 Authenticated requests through the main JWT MCP application (`tools/call` and

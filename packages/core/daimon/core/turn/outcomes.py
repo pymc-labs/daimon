@@ -11,7 +11,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from importlib.metadata import version
 
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
@@ -26,10 +25,15 @@ from daimon.core.pricing import (
     uncached_input_tokens,
     unreported_cache_writes,
 )
+from daimon.core.release import current_release
 from daimon.core.runtime_health import track_turn
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn.termination import (
+    USER_VISIBLE_FAILURES,
+    TerminationReason,
+    termination_reason,
+)
 from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from daimon.core.usage_compat import event_observation
 from mux.contracts.usage import UsageObservation
@@ -42,7 +46,6 @@ _MAX_PENDING = 256
 # The writer is detached from the turn, so a short checkout burst can be
 # tolerated without delaying the user. Keep a bound for a wedged database.
 _WRITE_TIMEOUT_S = 10.0
-_RELEASE = version("daimon-core")
 current_outcome: ContextVar[TurnObservation | None] = ContextVar("turn_outcome", default=None)
 
 
@@ -235,6 +238,17 @@ class TurnObservation:
             or termination_reason(error or (state.error if state else None))
         )
         terminal_error = error or (state.error if state else None)
+        if resolved in USER_VISIBLE_FAILURES:
+            log.warning(
+                "turn.user_failure",
+                platform=self.platform,
+                reason=resolved.value,
+                error_class=type(terminal_error).__name__ if terminal_error else None,
+                origin=self.origin,
+                release=current_release(),
+                turn_id=str(self.id),
+                tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
+            )
         samples = list(self._samples.values())
         if any(
             accounting_mode_for(sample.usage.session.provider).settles_natively
@@ -281,7 +295,7 @@ class TurnObservation:
             duration_ms=max(0, int((time.monotonic() - self._started) * 1000)),
             recovered=recovered,
             error_class=type(terminal_error).__name__ if terminal_error else None,
-            release=_RELEASE,
+            release=current_release(),
             usage_refs=[
                 self._usage[(sample.usage.session.id, sample.usage.id)] for sample in samples
             ],
