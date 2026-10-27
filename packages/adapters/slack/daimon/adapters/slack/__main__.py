@@ -19,7 +19,7 @@ from daimon.adapters.slack.boot_sweep import run_boot_sweep
 from daimon.adapters.slack.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.health import start_liveness_responder
-from daimon.core.logging_setup import configure_logging
+from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.observability import init_sentry
 from daimon.core.runtime_health import runtime_health
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
@@ -68,6 +68,7 @@ async def main() -> None:
         _bg_tasks: set[asyncio.Task[None]] = set()
 
         def _on_signal() -> None:
+            mark_shutting_down()
             if app.draining:  # re-entry guard: second signal is a no-op
                 return
             task: asyncio.Task[None] = asyncio.create_task(_shutdown(app, client, stop))

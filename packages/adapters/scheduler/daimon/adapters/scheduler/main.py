@@ -25,6 +25,7 @@ import contextlib
 import functools
 import signal
 import sys
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -69,7 +70,7 @@ from daimon.core.github_issued_token_sweep import sweep_closed_github_issued_tok
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
-from daimon.core.logging_setup import configure_logging
+from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     ResolverCache,
@@ -1284,6 +1285,28 @@ async def _repeat_until_stopped(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
 
+_TICK_LOG_INTERVAL_S = 60.0
+
+
+def _tick_progress(
+    tick: Callable[[], Awaitable[None]], *, clock: Callable[[], float] = time.monotonic
+) -> Callable[[], Awaitable[None]]:
+    """`tick` that logs `scheduler.tick_completed` after a tick that finished,
+    at most once per minute (the first always). A tick that raises logs nothing."""
+    last_logged: float | None = None
+
+    async def step() -> None:
+        nonlocal last_logged
+        started = clock()
+        await tick()
+        now = clock()
+        if last_logged is None or now - last_logged >= _TICK_LOG_INTERVAL_S:
+            last_logged = now
+            log.info("scheduler.tick_completed", duration_ms=int((now - started) * 1000))
+
+    return step
+
+
 async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None]]) -> None:
     """One usage pass for `--once`, honouring the same switch as the loop."""
     if not enabled:
@@ -1323,7 +1346,9 @@ async def _run_loops(
                     _repeat_until_stopped(usage_sweep, interval_s=interval_s, stop_event=stop_event)
                 )
             )
-        await _repeat_until_stopped(tick, interval_s=interval_s, stop_event=stop_event)
+        await _repeat_until_stopped(
+            _tick_progress(tick), interval_s=interval_s, stop_event=stop_event
+        )
         for task in background:
             task.cancel()
 
@@ -1424,9 +1449,14 @@ async def run(
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+
+    def on_signal() -> None:
+        mark_shutting_down()
+        stop_event.set()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, on_signal)
         except NotImplementedError:
             # Signal handlers aren't available on every platform (e.g. Windows
             # ProactorEventLoop). Tests / non-Unix runs proceed without them.

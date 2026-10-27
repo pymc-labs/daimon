@@ -102,7 +102,7 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.logging_setup import configure_logging
+from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
 from daimon.core.operator_tokens import scope_tag
@@ -396,6 +396,7 @@ def create_mcp_app(
             ):
                 yield
         finally:
+            mark_shutting_down()
             try:
                 pass
             finally:
