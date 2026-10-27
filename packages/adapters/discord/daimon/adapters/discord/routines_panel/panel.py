@@ -227,6 +227,7 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     check_tenant=True,
                 )
                 refusals = {
+                    "already_running": "This routine is already running.",
                     "gone": "This routine no longer exists.",
                     "wrong_tenant": "This routine is from another server.",
                     "not_owner": ("Only its creator or a server admin can pause it."),

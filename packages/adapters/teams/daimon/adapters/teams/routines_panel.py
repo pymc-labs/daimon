@@ -143,6 +143,8 @@ class RoutinesPanel:
                         now=lambda: datetime.now(UTC),
                     )
                     if result != "changed":
+                        if result == "already_running":
+                            return toast("This routine is already running.")
                         return toast(GONE if result == "gone" else NOT_OWNER)
                 else:
                     row = await store.get_routine(session, routine_id, tenant_id=tenant_id)

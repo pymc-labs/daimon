@@ -88,3 +88,17 @@ async def test_cli_preview_and_apply(db_session_factory):
     assert "roll forward unrun under skip" in rendered
     assert "Dry run: nothing written." in rendered
     assert "Applied atomically." in rendered
+
+
+def test_empty_ids_file_is_refused_before_opening_runtime(tmp_path, monkeypatch):
+    from daimon.adapters.cli.commands import routines
+
+    path = tmp_path / "ids.json"
+    path.write_text("[]")
+
+    def unexpected_settings():
+        raise AssertionError("empty selection reached runtime setup")
+
+    monkeypatch.setattr(routines, "load_settings", unexpected_settings)
+    with pytest.raises(UserFacingError, match="nonempty"):
+        routines.export_rollback_command(tenant=uuid.uuid4(), ids_file=path)

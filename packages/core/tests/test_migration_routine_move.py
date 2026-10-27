@@ -19,7 +19,7 @@ async def upgrade_from_previous(session):
         text(
             "ALTER TABLE routines DROP CONSTRAINT uq_routines_tenant_internal_id, "
             "DROP COLUMN internal_routine_id, DROP COLUMN seeded_after, "
-            "DROP COLUMN last_fired_slot, DROP COLUMN last_finished_at"
+            "DROP COLUMN last_fired_slot, DROP COLUMN last_finished_at, DROP COLUMN last_finished_claim_at"
         )
     )
     path = Path(__file__).parents[1] / "alembic/versions/0151_routine_claimed_slot.py"
@@ -39,9 +39,10 @@ async def upgrade_from_previous(session):
 @pytest.mark.fresh_schema
 async def test_exact_tag_backfill_and_tenant_unique_identity(db_session):
     tenant = await make_tenant(db_session)
-    first, second = uuid.uuid4(), uuid.uuid4()
+    first, second, crlf = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     prompts = [
         (f"internal-routine-import-v1:{first}\nPrompt", first),
+        (f"internal-routine-import-v1:{crlf}\r\nPrompt", crlf),
         (f"internal-routine-import-v1:{str(second).upper()}", second),
         (f"prefix internal-routine-import-v1:{uuid.uuid4()}", None),
         (f"internal-routine-import-v1:{uuid.uuid4()} suffix", None),

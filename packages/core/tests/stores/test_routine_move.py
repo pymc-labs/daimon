@@ -69,7 +69,7 @@ async def test_seed_dry_run_then_apply_and_resume_refuses(db_session_factory):
             assert stored.enabled
             assert stored.seeded_after == entries[0].last_completed_slot
             assert stored.next_fire_at == NOW - timedelta(hours=1)
-            with pytest.raises(StoreError, match="already enabled"):
+            with pytest.raises(StoreError, match="already running"):
                 await resume_routine(session, row.id, tenant_id=tid, now=NOW)
 
 
@@ -171,7 +171,7 @@ async def test_export_works_in_read_only_transaction(db_session_factory):
 async def test_export_filters_refuse_cross_tenant(db_session):
     tid, rows, _ = await setup(db_session)
     other_tid, _, _ = await setup(db_session, count=1)
-    with pytest.raises(StoreError, match="no routine in this tenant"):
+    with pytest.raises(StoreError, match="no Daimon routine has this id in the selected team"):
         await rollback_rows(
             db_session, tenant_id=other_tid, internal_routine_ids=[rows[0].internal_routine_id]
         )
@@ -201,6 +201,7 @@ async def test_completion_is_claim_fenced_even_when_content_revision_changes(db_
     await record_result(db_session, rid, tail="obsolete result", error=None, expected_row=claimed)
     stored = await get_routine(db_session, rid, tenant_id=tid)
     assert stored.last_result_tail is None
+    assert stored.last_finished_claim_at == claim_now
     assert stored.last_finished_at >= claim_now
     completed_at = stored.last_finished_at
     # An older private turn must not mark a later claim finished either.
@@ -215,6 +216,9 @@ async def test_completion_is_claim_fenced_even_when_content_revision_changes(db_
     await record_result(db_session, rid, tail=None, error="old", expected_private=claimed)
     stored = await get_routine(db_session, rid, tenant_id=tid)
     assert stored.last_finished_at == completed_at
+    assert stored.last_finished_claim_at == claim_now
+    document = routine_rollback_document([stored], exported_at=NOW)
+    assert any("older scheduler" in reason for reason in document["not_final_reasons"])
 
 
 @pytest.mark.fresh_schema
@@ -234,3 +238,79 @@ async def test_several_matches_refuse_the_entire_batch(db_session):
     with pytest.raises(StoreError, match="several routines match"):
         await seed_routines(db_session, entries[:1], tenant_id=tid, now=NOW, apply=True)
     assert not (await get_routine(db_session, rows[0].id, tenant_id=tid)).enabled
+
+
+@pytest.mark.parametrize("selection", [[], None, "missing"])
+async def test_export_refuses_empty_selection(db_session, selection):
+    tenant = await make_tenant(db_session)
+    ids = [uuid.uuid4()] if selection == "missing" else selection
+    with pytest.raises(StoreError, match="at least one|No routines matched|no Daimon routine"):
+        await rollback_rows(db_session, tenant_id=tenant.id, internal_routine_ids=ids)
+
+
+@pytest.mark.parametrize("rival", ["seed", "resume"])
+async def test_two_sessions_seeding_and_resuming_cannot_both_succeed(
+    db_engine, db_clean, monkeypatch, rival
+):
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy.sql.dml import Update
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        tid, rows, entries = await setup(session, count=1)
+    locked, competing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def first_seed():
+        async with factory.begin() as session:
+            scalar = session.scalar
+
+            async def held_write(statement, *args, **kwargs):
+                if isinstance(statement, Update):
+                    locked.set()
+                    await release.wait()
+                return await scalar(statement, *args, **kwargs)
+
+            monkeypatch.setattr(session, "scalar", held_write)
+            await seed_routines(session, entries, tenant_id=tid, now=NOW, apply=True)
+
+    async def competitor():
+        async with factory.begin() as session:
+            if rival == "seed":
+                scalars = session.scalars
+
+                async def waiting_read(statement, *args, **kwargs):
+                    competing.set()
+                    return await scalars(statement, *args, **kwargs)
+
+                monkeypatch.setattr(session, "scalars", waiting_read)
+                await seed_routines(session, entries, tenant_id=tid, now=NOW, apply=True)
+            else:
+                execute = session.execute
+
+                async def waiting_write(statement, *args, **kwargs):
+                    if isinstance(statement, Update):
+                        competing.set()
+                    return await execute(statement, *args, **kwargs)
+
+                monkeypatch.setattr(session, "execute", waiting_write)
+                await resume_routine(session, rows[0].id, tenant_id=tid, now=NOW)
+
+    first = asyncio.create_task(first_seed())
+    second = None
+    try:
+        await asyncio.wait_for(locked.wait(), 10)
+        second = asyncio.create_task(competitor())
+        await asyncio.wait_for(competing.wait(), 10)
+        assert not first.done() and not second.done()
+    finally:
+        release.set()
+        tasks = [first] if second is None else [first, second]
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 10)
+    assert results[0] is None
+    assert isinstance(results[1], StoreError)
+    async with factory() as session:
+        stored = await get_routine(session, rows[0].id, tenant_id=tid)
+        assert stored.enabled and stored.next_fire_at == entries[0].internal_next_run
+        assert stored.seeded_after == entries[0].last_completed_slot

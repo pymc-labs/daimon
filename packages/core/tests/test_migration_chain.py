@@ -216,7 +216,13 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         if (
             kind == "column"
             and name
-            in {"last_fired_slot", "last_finished_at", "seeded_after", "internal_routine_id"}
+            in {
+                "last_fired_slot",
+                "last_finished_at",
+                "last_finished_claim_at",
+                "seeded_after",
+                "internal_routine_id",
+            }
             and expected != HEAD
         ):
             return False

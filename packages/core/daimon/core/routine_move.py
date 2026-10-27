@@ -68,6 +68,7 @@ def seed_first_slot(entry: RoutineSeedEntry, row: RoutineRow, *, now: datetime) 
             row.last_fired_at,
             row.last_fired_slot,
             row.last_finished_at,
+            row.last_finished_claim_at,
             row.delivery_status,
             row.delivered_at,
             row.delivery_payload,
@@ -82,7 +83,7 @@ def seed_first_slot(entry: RoutineSeedEntry, row: RoutineRow, *, now: datetime) 
     slot = next_slot_at_or_after(row.cron_expr, row.timezone, entry.last_completed_slot)
     if slot != entry.internal_next_run:
         raise ValueError(
-            f"first OS slot {slot.isoformat()} differs from internal_next_run "
+            f"first Daimon slot {slot.isoformat()} differs from internal_next_run "
             f"{entry.internal_next_run.isoformat()}"
         )
     return slot
@@ -104,6 +105,8 @@ def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) 
     Claims count as fired even if execution fails. Older claims without slot
     evidence cannot provide a safe watermark and prevent a final export.
     """
+    if not rows:
+        raise ValueError("Select at least one routine to export.")
     reasons: list[str] = []
     entries: list[dict[str, Any]] = []
 
@@ -117,6 +120,12 @@ def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) 
         in_flight = (
             row.last_fired_at is not None or row.last_fired_slot is not None
         ) and row.last_finished_at is None
+        if row.last_finished_at is not None and (
+            row.last_fired_at is None or row.last_finished_claim_at != row.last_fired_at
+        ):
+            reasons.append(
+                f"{label}: claim and completion records disagree; an older scheduler may have run"
+            )
         if row.enabled:
             reasons.append(f"{label}: routine is enabled")
         if in_flight:

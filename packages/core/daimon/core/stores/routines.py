@@ -29,7 +29,7 @@ from daimon.core._models import (
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.cron import next_slot_at_or_after
-from daimon.core.errors import StoreError
+from daimon.core.errors import RoutineAlreadyRunning, StoreError
 from daimon.core.permissions import limiting_ids_at
 from daimon.core.routine_files import OUTBOX_FILES, PREFIX, plain_payload
 from daimon.core.stores.access_policy import load_access_policy
@@ -861,7 +861,7 @@ async def resume_routine(
     if row is None:
         return None
     if row.enabled:
-        raise StoreError("Routine is already enabled; pause it before resuming.")
+        raise RoutineAlreadyRunning("This routine is already running.")
     nxt = next_slot_at_or_after(row.cron_expr, row.timezone, now)
     return await _save_routine_edit(
         session,
@@ -965,7 +965,11 @@ async def record_result(
             Routine.tenant_id == fired_row.tenant_id,
             Routine.last_fired_at == fired_row.last_fired_at,
         )
-    await session.execute(completion.values(last_finished_at=datetime.now(UTC)))
+    await session.execute(
+        completion.values(
+            last_finished_at=datetime.now(UTC), last_finished_claim_at=Routine.last_fired_at
+        )
+    )
     await session.flush()
 
 
@@ -1215,6 +1219,7 @@ async def claim_due_fireable(
             last_fired_at=now,
             last_fired_slot=Routine.next_fire_at,
             last_finished_at=None,
+            last_finished_claim_at=None,
         )
         .returning(Routine)
         .execution_options(synchronize_session=False)

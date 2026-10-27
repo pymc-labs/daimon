@@ -514,7 +514,7 @@ def export_rollback_command(
 ) -> None:
     """Operator only: export a read-only rollback snapshot for one tenant.
 
-    With no filters, includes every routine in the tenant. Pause routines and
+    With no filters, includes every routine in the team. Pause routines and
     drain executions and deliveries before relying on final=true.
     """
     if ids_file is not None:
@@ -522,8 +522,12 @@ def export_rollback_command(
             raise UserFacingError("Use either --id or --ids-file.")
         try:
             payload = cast(JsonValue, json.loads(ids_file.read_text()))
-            if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
-                raise ValueError("expected a JSON array of routine ids")
+            if (
+                not isinstance(payload, list)
+                or not payload
+                or not all(isinstance(item, str) for item in payload)
+            ):
+                raise ValueError("expected a nonempty JSON array of routine ids")
             internal_ids = [uuid.UUID(item) for item in payload if isinstance(item, str)]
         except (OSError, ValueError) as exc:
             raise UserFacingError(f"Cannot read routine ids: {exc}") from exc

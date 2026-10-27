@@ -37,7 +37,7 @@ async def seed_routines(
         select(Tenant).where(Tenant.id == tenant_id, Tenant.archived_at.is_(None))
     )
     if tenant is None:
-        raise StoreError("Select an active tenant. Nothing was changed.")
+        raise StoreError("Select an active team. Nothing was changed.")
     statement = (
         select(Routine)
         .where(Routine.tenant_id == tenant_id, Routine.internal_routine_id.in_(ids))
@@ -53,7 +53,11 @@ async def seed_routines(
     for entry in entries:
         matches = rows.get(entry.internal_routine_id, [])
         if len(matches) != 1:
-            reason = "no routine in this tenant" if not matches else "several routines match"
+            reason = (
+                "no Daimon routine has this id in the selected team"
+                if not matches
+                else "several routines match"
+            )
             errors.append(f"{entry.internal_routine_id}: {reason}")
             continue
         row = matches[0]
@@ -101,6 +105,8 @@ async def rollback_rows(
     """One SELECT gives a consistent snapshot without locks or database writes."""
     statement = select(Routine).where(Routine.tenant_id == tenant_id).order_by(Routine.id)
     if internal_routine_ids is not None:
+        if not internal_routine_ids:
+            raise StoreError("Select at least one routine to export.")
         if len(set(internal_routine_ids)) != len(internal_routine_ids):
             raise StoreError("Duplicate routine id in rollback selection.")
         statement = statement.where(Routine.internal_routine_id.in_(internal_routine_ids))
@@ -114,6 +120,11 @@ async def rollback_rows(
         missing = set(internal_routine_ids) - {row.internal_routine_id for row in rows}
         if missing:
             raise StoreError(
-                "\n".join(f"{rid}: no routine in this tenant" for rid in sorted(missing))
+                "\n".join(
+                    f"{rid}: no Daimon routine has this id in the selected team"
+                    for rid in sorted(missing)
+                )
             )
+    if not rows:
+        raise StoreError("No routines matched the export selection.")
     return rows

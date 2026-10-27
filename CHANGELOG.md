@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Close routine handover review gaps: record failures after claim checks, detect
+  old-scheduler claims with a completion fence, refuse empty rollback exports,
+  accept CRLF import tags, and reply plainly to already-running resume requests.
+
 - Record each routine's claimed scheduled slot and completion evidence for safe
   handover. Add operator `daimon routines seed-first-run` (dry run by default,
   atomic apply), keyed by tenant-unique internal ids and checked against the

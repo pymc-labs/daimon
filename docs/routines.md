@@ -275,9 +275,9 @@ claimed run; catch-up applies to slots still pending in `next_fire_at`.
 
 ### Moving routines into Daimon and rolling back
 
-Use the operator CLI with deployment database credentials. First pause the source
-scheduler and drain its runs; take each routine's last **completed scheduled slot**
-T from the source. Keep the matching Daimon routines paused and never fired.
+Use the operator CLI with database credentials. Before moving from the internal
+bot to Daimon OS, pause the internal bot's scheduler and drain its runs; take each
+routine's last **completed scheduled slot** T from the internal bot. Keep the matching Daimon routines paused and never fired.
 The seed command is a dry run unless `--apply` is given:
 
 ```sh
@@ -308,13 +308,16 @@ source loop stopped and no execution running; omit source-disabled routines so
 they remain paused. T means the last attempted slot, including failed, timed-out
 or cancelled runs; slots coalesced during a run are not owed.
 
-Identity uses the dedicated `internal_routine_id` UUID, unique within each tenant.
+Identity uses the dedicated `internal_routine_id` UUID, unique within each team.
 Migration `0151_routine_claimed_slot` backfills only a first line exactly matching
-`internal-routine-import-v1:<uuid>` in `trigger_message`; similarly named tags,
-suffixes and tags on later lines do not count. Duplicate imports within a tenant
+`internal-routine-import-v1:<uuid>` in `trigger_message` (LF or CRLF); similarly named tags,
+suffixes and tags on later lines do not count. Duplicate imports within a team
 refuse the migration rather than choosing a match. Later prompt edits preserve
-this stored identity. Seed refuses both missing and ambiguous matches, and never
-matches an OS routine UUID against the input.
+this stored identity. Today only the migration populates it automatically.
+Routines imported after this migration must explicitly set `internal_routine_id`
+when they are imported; a prompt tag alone no longer links a new routine, and
+seed refuses it until that dedicated identity is set. Seed refuses both missing and ambiguous matches, and never
+matches a Daimon routine UUID against the input.
 
 The command prints T, Daimon's cron/timezone, the first slot strictly after T (computed in the routine's
 zone), the catch-up policy and freshness window, and one of: `wait`, `fire next tick`,
@@ -327,7 +330,7 @@ freshness. Review every skipped-slot warning before applying.
 Apply locks and validates the whole file, then stores T in `seeded_after` and
 sets `next_fire_at` and `enabled=true` together per routine in one transaction.
 A refusal writes nothing for the entire batch. Refusals include duplicate or unknown ids, ids outside
-`--tenant`, enabled routines, any OS fire or delivery evidence, and cron/timezone
+`--tenant`, enabled routines, any Daimon fire or delivery evidence, and cron/timezone
 mismatches. An already enabled routine cannot be resumed again: pause it first.
 An ordinary resume of a paused routine schedules after now; use the seed command
 for the initial move so it starts strictly after T.
@@ -336,19 +339,21 @@ For rollback, pause the Daimon routines, drain their executions and outbox, then
 export a read-only snapshot:
 
 ```sh
-daimon routines export-rollback --tenant TENANT_UUID --output rollback.json
+daimon routines export-rollback --tenant TENANT_UUID --ids-file moved-ids.json --output rollback.json
 daimon routines export-rollback --tenant TENANT_UUID --id INTERNAL_ROUTINE_UUID
 # Or select a JSON array of internal UUID strings:
 daimon routines export-rollback --tenant TENANT_UUID --ids-file ids.json
 ```
 
-Without filters the export includes all routines in the tenant; without `--output`
-it writes JSON to stdout. The document has `format_version`, `exported_at`, `final`,
+Pass the moved internal ids with `--ids-file` for a handback. An unfiltered
+export includes every routine in the team, including native Daimon routines;
+any enabled routine in that selection prevents finality. Empty id files and
+selections matching no routines are refused. Without `--output`, JSON goes to stdout. The document has `format_version`, `exported_at`, `final`,
 `not_final_reasons`, and a `routines` array. Each entry contains
-`internal_routine_id` (null for routines not imported), the OS `routine_id`,
+`internal_routine_id` (null for routines not imported), Daimon's `routine_id`,
 `agent_name`, `cron_expr`, `timezone`, `enabled`, `last_fired_slot`, `last_fired_at`,
 `in_flight`, `delivery_status`, `delivered_at`, and `resume_after`. All exported
-timestamps are UTC. Filters use internal ids; omitting filters includes all tenant rows.
+timestamps are UTC. Filters use internal ids; omitting filters includes all team rows.
 
 `resume_after` is the latest **claimed slot**, never the claim wall time. A claim
 counts even if execution fails or delivery is skipped: it may have had effects.
@@ -362,11 +367,29 @@ Use only `final=true` for handback: the source computes its next slot strictly
 after `resume_after`, restores its enabled flag from `enabled`, and leaves
 pending/claimed delivery to the operator.
 
-`last_finished_at` is cleared at each claim and records completion separately
-from result content, fenced by claim time, so an edited destination rejecting the
-result still counts as finished.
+`last_finished_at` and `last_finished_claim_at` are cleared at each claim.
+Completion records its wall time and the exact claim time it completed, separately
+from result content, so an edited destination rejecting the result still counts
+as finished. Exceptions while checking spending caps or routine configuration
+after claiming record a failure and completion rather than leaving an open claim.
 `in_flight` means a claim has no completion recorded for it. A crash or a legacy
-claim without completion evidence conservatively remains in flight. The export is
+claim without completion evidence conservatively remains in flight. If the
+scheduler has stopped and left such a claim open, its slot is already included
+in `resume_after`; never rerun that slot to recover its output. The open question
+is whether that execution's output was delivered. Check the run logs and the
+destination, then have the database operator reconcile completion and delivery
+for that exact claim before relying on a final export. Preserve its claimed-slot
+watermark. This also applies if writing a failure result timed out.
+
+An image reverted to a scheduler older than migration 0151 can update claim time
+without updating the recorded slot or completion fence. If claim time differs
+from the completion's recorded claim time, export is non-final with an older-
+scheduler warning, even when old completion/output fields are present. That
+watermark may be stale: recover the actual claimed slot before handback, rather
+than treating a completed delivery as proof the slot record is current. The
+export format remains unchanged.
+
+The export is
 non-final if any selected routine is enabled, in flight, has pending/claimed delivery,
 or has a historical fire without a recorded slot. Only paused, drained routines
 can produce a final snapshot. Finality describes this single database snapshot;

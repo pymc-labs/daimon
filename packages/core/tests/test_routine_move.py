@@ -157,12 +157,21 @@ def test_freshness_setting_reads_scheduler_env(monkeypatch: pytest.MonkeyPatch) 
         ({}, True),
         ({"enabled": True}, False),
         ({"last_fired_at": NOW, "last_fired_slot": NOW}, False),
-        ({"last_fired_at": NOW, "last_fired_slot": NOW, "last_finished_at": NOW}, True),
+        (
+            {
+                "last_fired_at": NOW,
+                "last_fired_slot": NOW,
+                "last_finished_at": NOW,
+                "last_finished_claim_at": NOW,
+            },
+            True,
+        ),
         (
             {
                 "last_fired_at": NOW,
                 "last_fired_slot": NOW,
                 "last_finished_at": NOW - timedelta(seconds=1),
+                "last_finished_claim_at": NOW,
             },
             True,
         ),
@@ -242,3 +251,28 @@ def test_export_seed_fallback_never_hides_historical_unknown_claim():
     )
     assert not document["final"]
     assert "historical fire" in " ".join(document["not_final_reasons"])
+
+
+@pytest.mark.parametrize("shift", [-60, 60])
+def test_old_scheduler_claim_after_new_completion_is_never_final(shift):
+    previous_claim = NOW - timedelta(hours=1)
+    claimed_at = previous_claim + timedelta(seconds=shift)
+    document = routine_rollback_document(
+        [
+            row(
+                last_fired_slot=previous_claim,
+                last_fired_at=claimed_at,
+                last_finished_at=previous_claim + timedelta(seconds=5),
+                last_finished_claim_at=previous_claim,
+            )
+        ],
+        exported_at=NOW,
+    )
+    assert not document["final"]
+    assert "older scheduler" in " ".join(document["not_final_reasons"])
+    assert document["routines"][0]["resume_after"] == previous_claim.isoformat()
+
+
+def test_empty_export_cannot_be_final():
+    with pytest.raises(ValueError, match="at least one"):
+        routine_rollback_document([], exported_at=NOW)
