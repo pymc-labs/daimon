@@ -1073,11 +1073,11 @@ async def create_session(
                 agent=agent_argument,
                 environment_id=environment.id,
                 metadata=metadata if metadata else None,
-                # The relay vault goes last: the first mounted vault is the one a
-                # snapshot records as the session's Daimon credential.
+                # The relay vault goes first: `turn.prepare` records the last
+                # mounted vault as the session's Daimon one.
                 vault_ids=[
                     mounted
-                    for mounted in (caller_vault_id, vault_id, relay_vault_id)
+                    for mounted in (relay_vault_id, caller_vault_id, vault_id)
                     if mounted is not None
                 ]
                 or None,

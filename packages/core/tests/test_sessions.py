@@ -2705,7 +2705,7 @@ def _make_env(
     return ma_environment(id=anthropic_id, name=name)
 
 
-async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_last(
+async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_first(
     monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -2750,8 +2750,8 @@ async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_last(
         relay_session_key=key,
     )
 
-    assert bodies[0]["vault_ids"] == ["vlt_caller", "vlt_relay"], (
-        "the relay vault is mounted after the caller's, which the snapshot records"
+    assert bodies[0]["vault_ids"] == ["vlt_relay", "vlt_caller"], (
+        "the relay vault goes first; the snapshot records the last, the caller's"
     )
     call = created_relay.await_args
     assert call is not None and call.kwargs["relay_urls"] == (relay,), "the attached relay URL"
