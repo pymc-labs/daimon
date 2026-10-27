@@ -4108,6 +4108,7 @@ class DaimonBot(commands.Bot):
             platform="discord",
             parent_channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
+            platform_channel_id=row.thread_id,
             responder_ma_agent_id=str(agent.id),
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
@@ -5164,6 +5165,10 @@ class DaimonBot(commands.Bot):
             is_setup=admission.config.thread_binding_kind == "setup",
             message_text=message.content,
             queued_message=content_override is not None,
+            # A thread opened from this message lives beside it: the message
+            # stays readable in the channel it was posted in.
+            platform_channel_id=str(message.channel.id),
+            platform_message_id=str(message.id),
         )
         prepared_origin = None
 

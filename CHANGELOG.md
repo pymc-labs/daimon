@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Remote MCP servers can verify who is calling (`DAIMON_MCP_IDENTITY__SERVERS`, off by default).**
+  A server listed there is attached to an agent at `<root>/mcp-identity/<name>`. Daimon forwards
+  each request with `Authorization: Bearer` and a two-minute EdDSA token signed with
+  `DAIMON_MCP_IDENTITY__SIGNING_KEY`. The token names the agent and the workspace and, for a
+  person's turn on Discord, Slack or Teams, who asked and the channel and message; routines and
+  agent chat name no person. An optional `workspaces` list limits a server to some workspaces. The key stays in
+  the MCP service and never reaches the sandbox. `daimon mcp identity-keygen` makes a key and
+  prints the public half for the server. Migration 0145 records the platform channel and message on
+  turn origins. Self-hosted harness, GPT and Gemini agents are not covered yet.
 - The scheduler stops retrying GitHub token refresh for a session that Managed Agents has archived or deleted. It logs `scheduler.github_app_session_refresh.retired` once per session per scheduler process, instead of an error every few minutes. The next message in that thread replaces the session as before, and every other refresh failure keeps its backoff and error log.
 - Logs are one JSON line per record in every service. Messages from libraries (discord.py, asyncio, uvicorn and others) used to print multi-line tracebacks that a log shipper split apart; they now carry `event`, `logger`, `level` and a structured `exception` like Daimon's own lines. Every line also has a `severity` (`DEBUG` to `CRITICAL`), and lines written after a stop signal have `shutting_down: true`. An uncaught exception logs `process.uncaught_exception` at critical. New events: `runtime.started` (once per start, with `process` and `release`), `scheduler.tick_completed` (with `duration_ms`, at most once a minute) and `turn.user_failure` (a warning with `platform`, `reason`, `error_class`, `origin`, `release`, `turn_id` and `tenant_id` when a turn ends without an answer; never for completed, stopped, refused or not-set-up turns, turns nobody asked for, or command-line runs). An exception ignored during cleanup logs `process.unraisable_exception`. `release` is the commit the image was built from: the deploy workflow now passes it as the `DAIMON_RELEASE` build argument, and `turn_outcomes.release` and Sentry use it, falling back to the `daimon-core` version for images built without it. The CLI output is unchanged.
 - The Claude Code plugin now defaults to `https://daimon-mcp.pymc-labs.com`, the hosted deployment's MCP address. The old default, `daimon.decision.ai`, is the website and has no MCP server, so the plugin could not log in without `DAIMON_MCP_URL`. A new `DAIMON_HUB__PUBLIC_URL` serves the Discord and Slack login mounts from their own hostname without changing `DAIMON_MCP__PUBLIC_URL`, which every agent's stored MCP credential points at. Unset, the mounts use the `DAIMON_MCP__PUBLIC_URL` origin as before.

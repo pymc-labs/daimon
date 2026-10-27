@@ -78,6 +78,7 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
+from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
@@ -770,6 +771,28 @@ async def _sweep_github_issued_tokens(
         await sweep_closed_github_issued_tokens(sm, now=current)
     except SQLAlchemyError:
         log.exception("scheduler.github_issued_token_sweep.failed")
+
+
+# Each run lists every vault, and live sessions once a relay vault is old enough.
+_RELAY_VAULT_ARCHIVE_INTERVAL = timedelta(minutes=10)
+_last_relay_vault_archive: dict[str, datetime] = {}
+
+
+async def _archive_idle_relay_vaults(
+    client: AsyncAnthropic, *, now: datetime | None = None
+) -> None:
+    """Archive relay vaults no live session mounts, at most once per interval.
+    Boundary catch: a failure must not kill the scheduler loop; the next run retries.
+    """
+    current = now or datetime.now(UTC)
+    last = _last_relay_vault_archive.get("started")
+    if last is not None and current - last < _RELAY_VAULT_ARCHIVE_INTERVAL:
+        return
+    _last_relay_vault_archive["started"] = current
+    try:
+        await archive_idle_relay_vaults(client, now=current)
+    except (anthropic.APIError, ValueError):
+        log.exception("scheduler.relay_vault_archive.failed")
 
 
 async def _sweep_github_app_tokens(
@@ -1488,6 +1511,7 @@ async def run(
             await _sweep_mcp_tokens(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
                 client, sm, settings=settings, fernet=push_resync_fernet
@@ -1524,6 +1548,7 @@ async def run(
             await _sweep_mcp_tokens(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
                 client, sm, settings=settings, fernet=push_resync_fernet

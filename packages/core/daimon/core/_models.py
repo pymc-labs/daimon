@@ -2572,6 +2572,9 @@ class TurnOrigin(Base):
     shared_channel: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # The platform's ids for the turn's message: where it can be read, and the message.
+    platform_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SharedChannel(Base):

@@ -195,6 +195,21 @@ The last three are trust boundaries rather than tidiness: a service that
 cannot import `daimon` cannot hold the Anthropic key or a database
 credential, whatever a future contributor is tempted to do inside it.
 
+## Signed caller identity
+
+A remote MCP server listed in `DAIMON_MCP_IDENTITY__SERVERS` is reached
+through the MCP adapter, not directly. The agent is given
+`<root>/mcp-identity/<name>` (`identity_relay.py`). Each session of that agent
+mounts its own relay vault (`create_relay_vault` in `mcp_vault.py`), holding a
+Daimon chat credential per relay URL that also names the session's
+`thread_sessions` row. The relay verifies that credential and names the person
+only while that row is live and its thread has one active turn origin (the
+origin now records the platform channel and message). Routines, agent chat,
+replaced sessions and foreign senders name nobody. It then signs an EdDSA token
+with `daimon.core.mcp_identity` and streams the request to the server and the
+answer back. The signing key stays in the MCP service. The scheduler archives
+a relay vault once no live session mounts it (`mcp_vault_janitor.py`).
+
 ## MCP browser pages
 
 Discord, Slack and Teams share the native message draft reducer in

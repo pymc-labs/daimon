@@ -327,6 +327,9 @@ class CreatedSession:
     # The admission as decided again right before `sessions.create`.
     admission: Admission | None = None
     seal_ids: frozenset[str] = frozenset()
+    # The id its mapping row is written under, chosen before the session exists
+    # so the session's signed-identity relay credential can name it.
+    mapping_id: uuid.UUID = field(default_factory=uuid.uuid4)
 
 
 async def create_ma_session(
@@ -425,6 +428,8 @@ async def create_ma_session(
         excluded_repo_urls = access.excluded_repo_urls
         delivered_app_access = access
 
+    mapping_id = uuid.uuid4()
+
     async def create(skills: tuple[MaSkill, ...]) -> BetaManagedAgentsSession:
         return await create_session(
             deps.anthropic,
@@ -467,6 +472,7 @@ async def create_ma_session(
             on_app_access=capture_app_access,
             channel_skills=skills,
             system_override=system_for_platform(admission.agent.system, platform),
+            relay_session_key=mapping_id,
         )
 
     while True:
@@ -557,6 +563,7 @@ async def create_ma_session(
             snapshot=snapshot,
             admission=admission,
             seal_ids=frozenset(seal),
+            mapping_id=mapping_id,
         )
     except BaseException:
         from daimon.core.turn.run import (
@@ -608,6 +615,7 @@ async def insert_mapping(
     snapshot = created.snapshot
     row = await create_thread_session(
         db,
+        id=created.mapping_id,
         tenant_id=tenant_id,
         platform=platform,
         thread_id=thread_id,

@@ -79,9 +79,11 @@ from daimon.core.github_app_session import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
+from daimon.core.mcp_identity import RelayBinding, identity_relay_urls
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
+    create_relay_vault,
     ensure_agent_mcp_vault,
     hold_agent_vault_lock,
 )
@@ -92,7 +94,7 @@ from daimon.core.memory_resource import (
     memory_instructions,
     memory_scope,
 )
-from daimon.core.mux_compat import agent_spec, source_environment_record
+from daimon.core.mux_compat import agent_spec, archive_vault, source_environment_record
 from daimon.core.session_ports_compat import (
     archive_session_record,
     create_session_record,
@@ -509,6 +511,7 @@ async def create_session(
     channel_skills: Sequence[MaSkill] = (),
     model_override: str | None = None,
     system_override: str | None = None,
+    relay_session_key: uuid.UUID | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -549,6 +552,12 @@ async def create_session(
 
     ``system_override`` replaces the system prompt the same way, for a platform
     whose variant differs from the agent's own (`daimon.core.platform_system`).
+
+    An agent attached to a signed-identity relay (`daimon.core.mcp_identity`) gets a
+    vault of this session's own for it (`create_relay_vault`), whatever caller.
+    ``relay_session_key`` is the `thread_sessions` row a person's chat session will
+    be recorded under, which the relay reads to find the turn the session runs;
+    without it (a routine, any headless caller) the relay names no person.
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -656,6 +665,7 @@ async def create_session(
     )
     vault_id: str | None = None
     caller_vault_id: str | None = None
+    relay_vault_id: str | None = None
     try:
         if app_mode:
             assert tenant_id is not None and agent_uuid is not None and session_factory is not None
@@ -726,6 +736,31 @@ async def create_session(
                 slack_turn_context_id=slack_turn_context_id,
                 hold=hold,
                 scope=scope,
+            )
+
+        relay_urls = (
+            ()
+            if mcp_settings is None or mcp_settings.public_url is None
+            else identity_relay_urls(
+                (server.url for server in agent.mcp_servers),
+                public_url=str(mcp_settings.public_url),
+            )
+        )
+        if relay_urls and (caller_vault_id or vault_id) is not None and account_id is not None:
+            assert agent_uuid is not None and session_factory is not None
+            assert mcp_settings is not None and mcp_settings.jwt_secret is not None
+            relay_vault_id = await create_relay_vault(
+                anthropic,
+                session_factory=session_factory,
+                account_id=account_id,
+                agent_id=agent_uuid,
+                jwt_secret=mcp_settings.jwt_secret.get_secret_value().encode(),
+                relay_urls=relay_urls,
+                relay=RelayBinding(agent_name=agent.name, session_key=relay_session_key),
+                now=dt.datetime.now(dt.UTC),
+                scope=scope,
+                slack_turn_context_id=slack_turn_context_id,
+                hold=hold,
             )
 
         # External MCP servers are attached to the AGENT, so every caller who
@@ -1038,15 +1073,14 @@ async def create_session(
                 agent=agent_argument,
                 environment_id=environment.id,
                 metadata=metadata if metadata else None,
-                vault_ids=(
-                    [caller_vault_id, vault_id]
-                    if caller_vault_id is not None and vault_id is not None
-                    else [vault_id]
-                    if vault_id is not None
-                    else [caller_vault_id]
-                    if caller_vault_id is not None
-                    else None
-                ),
+                # The relay vault goes first: `turn.prepare` records the last
+                # mounted vault as the session's Daimon one.
+                vault_ids=[
+                    mounted
+                    for mounted in (relay_vault_id, caller_vault_id, vault_id)
+                    if mounted is not None
+                ]
+                or None,
                 resources=resources if resources else None,
             )
             try:
@@ -1128,6 +1162,8 @@ async def create_session(
     except BaseException:
         if app_mode and vault_id is not None:
             await archive_app_vault(anthropic, vault_id=vault_id, scope=scope)
+        if relay_vault_id is not None:
+            await archive_vault(anthropic, relay_vault_id, scope=scope)
         raise
 
 

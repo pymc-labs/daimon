@@ -25,6 +25,7 @@ typo is silent — check the spelling here.
 - [Ops](#ops)
 - [MCP Server](#mcp-server)
 - [MCP OAuth](#mcp-oauth)
+- [MCP Identity](#mcp-identity)
 - [Hub](#hub)
 - [Agent Identity](#agent-identity)
 - [Environment](#environment)
@@ -379,6 +380,34 @@ A sign-in uses an entry only when its MCP server is listed and its authorization
 is on that host; it then also asks for offline_access when the authorization server
 offers it. Every other sign-in registers a client dynamically. Default: [] (always
 register).
+
+## MCP Identity
+
+Read from `daimon.core.config.McpIdentitySettings`. Prefix `DAIMON_MCP_IDENTITY__`.
+
+### `DAIMON_MCP_IDENTITY__SIGNING_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Ed25519 private key that signs caller identities for the servers in
+DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte seed.
+Generate one with `daimon mcp identity-keygen`, which also prints the public key to
+register with each server. Read only by the mcp service.
+
+### `DAIMON_MCP_IDENTITY__SERVERS`
+
+`list[SignedIdentityServer]` · optional · default unset
+
+Remote MCP servers that opt in to signed identity. A JSON array; each entry has name
+(lowercase letters, digits and dashes), url (the server's https MCP endpoint), issuer
+(the issuer id the server gave you), audience (the server's base URL) and optionally
+workspaces, the only workspaces whose agents may use it, each
+"&lt;platform&gt;:&lt;workspace id&gt;" (for example "discord:&lt;guild id&gt;";
+default: every workspace). Attach such a server to an agent at &lt;app root&gt;/mcp-
+identity/&lt;name&gt; instead of its own URL: Daimon forwards each request with a short-
+lived EdDSA token naming the agent, the workspace and, for a person's turn, who asked,
+the channel and the message. Requires DAIMON_MCP_IDENTITY__SIGNING_KEY. Default: []
+(off).
 
 ## Hub
 

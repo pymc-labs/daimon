@@ -352,8 +352,12 @@ async def reply_to_dm(
     text: str,
     role: Role,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
+    platform_channel_id: str | None = None,
 ) -> str | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
+
+    `platform_channel_id` is the DM channel as the platform's API names it, recorded
+    on the turn's origin with `message_id`.
 
     A duplicate delivery returns None. The adapter verifies live membership
     and supplies the current role before entering; stored admin roles never
@@ -466,6 +470,8 @@ async def reply_to_dm(
                 role=role,
                 sender_foreign=admission.hold is not None and admission.hold.client,
                 shared_channel=admission.shared_channel,
+                platform_channel_id=platform_channel_id,
+                platform_message_id=message_id if platform_channel_id is not None else None,
             ) as origin,
         ):
             user_message = f"{render_turn_origin(origin)}\n{context}\n\n{text}"

@@ -49,6 +49,7 @@ SECTION_TITLES: dict[str, str] = {
     "log": "Logging",
     "mcp": "MCP Server",
     "mcp_oauth": "MCP OAuth",
+    "mcp_identity": "MCP Identity",
     "discord": "Discord",
     "slack": "Slack",
     "github": "GitHub",

@@ -40,6 +40,7 @@ from daimon.core.authz import (
     build_turn_place,
 )
 from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
+from daimon.core.mcp_identity import RELAY_CLAIM, RelayBinding
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
 from daimon.core.stores.domain import McpTokenPurpose, McpTokenRow, McpTokenSurface
@@ -123,6 +124,7 @@ def mint_jwt(
     chat_agent_id: uuid.UUID | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
     hold: TurnHold | None = None,
+    relay: RelayBinding | None = None,
     anthropic_disabled: bool = False,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
@@ -146,6 +148,8 @@ def mint_jwt(
       DM session credentials. Readers require the matching live tenant/account row.
     - ``hold`` signs the channel a held turn is kept to (`daimon.core.mcp_hold`).
       The MCP server honours it only when the registry row names the same channel.
+    - ``relay`` binds a signed-identity relay credential to its session
+      (`daimon.core.mcp_identity.RelayBinding`); only the relay reads it.
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
       Omitted when ``False`` to keep non-admin tokens minimal. Note: the MCP
       admin gate only trusts ``is_admin`` when the token also carries ``internal=True``
@@ -153,7 +157,7 @@ def mint_jwt(
       Discord vault token's baked
       ``is_admin`` claim alone never elevates a non-admin caller.
     """
-    claims: dict[str, str | int | bool | dict[str, str | bool]] = {
+    claims: dict[str, str | int | bool | dict[str, str | bool] | dict[str, str]] = {
         "sub": str(account_id),
         "iat": int(now.timestamp()),
     }
@@ -172,6 +176,8 @@ def mint_jwt(
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
     if hold is not None:
         claims[HOLD_CLAIM] = hold_claim(hold)
+    if relay is not None:
+        claims[RELAY_CLAIM] = relay.claim()
     if anthropic_disabled:
         claims["anthropic_disabled"] = True
     if is_admin:
@@ -215,6 +221,7 @@ async def mint_chat_mcp_token(
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
     hold: TurnHold | None = None,
+    relay: RelayBinding | None = None,
     ttl: dt.timedelta = CHAT_TOKEN_TTL,
     anthropic_disabled: bool = False,
 ) -> tuple[str, uuid.UUID, dt.datetime]:
@@ -264,6 +271,7 @@ async def mint_chat_mcp_token(
         now=now,
         slack_turn_context_id=slack_turn_context_id,
         hold=hold,
+        relay=relay,
         jti=jti,
         expires_at=expires_at,
     )

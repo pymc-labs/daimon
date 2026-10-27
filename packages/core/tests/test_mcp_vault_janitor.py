@@ -10,17 +10,23 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
+from daimon.core import mcp_vault_janitor
 from daimon.core.mcp_vault_janitor import (
+    archive_idle_relay_vaults,
     archive_orphan_mcp_vaults,
     partition_orphan_vault_ids,
 )
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+NOW = dt.datetime(2026, 5, 1, 12, tzinfo=dt.UTC)
 
-def _vault(vault_id: str, display_name: str) -> BetaManagedAgentsVault:
+
+def _vault(
+    vault_id: str, display_name: str, *, created_at: dt.datetime | None = None
+) -> BetaManagedAgentsVault:
     """Inline construction so SDK field drift breaks the test, per testing guidelines."""
-    now = dt.datetime(2026, 5, 1, tzinfo=dt.UTC)
+    now = created_at or dt.datetime(2026, 5, 1, tzinfo=dt.UTC)
     return BetaManagedAgentsVault(
         id=vault_id,
         type="vault",
@@ -135,7 +141,7 @@ async def test_archive_orphan_dry_run_lists_but_does_not_mutate(
 
     client = _make_client(httpx.MockTransport(handler))
     report = await archive_orphan_mcp_vaults(
-        client, session_factory=db_session_factory, dry_run=True
+        client, session_factory=db_session_factory, now=NOW, dry_run=True
     )
 
     assert report.orphan_vault_ids == ["vlt_orphan"], "must identify the orphan"
@@ -177,7 +183,7 @@ async def test_archive_orphan_apply_archives_only_orphans(
 
     client = _make_client(httpx.MockTransport(handler))
     report = await archive_orphan_mcp_vaults(
-        client, session_factory=db_session_factory, dry_run=False
+        client, session_factory=db_session_factory, now=NOW, dry_run=False
     )
 
     assert sorted(report.orphan_vault_ids) == ["vlt_orphan_a", "vlt_orphan_b"]
@@ -185,3 +191,31 @@ async def test_archive_orphan_apply_archives_only_orphans(
     assert sorted(archived_ids) == ["vlt_orphan_a", "vlt_orphan_b"], (
         "must archive exactly the orphan vaults — not the live one, not the unrelated one"
     )
+
+
+async def test_relay_vaults_no_live_session_mounts_are_archived_after_the_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def relay(vault_id: str, age: dt.timedelta) -> dict[str, Any]:
+        name = f"daimon-relay:{uuid.uuid4()}:{uuid.uuid4()}"
+        return _vault(vault_id, name, created_at=NOW - age).model_dump(mode="json")
+
+    hour, minute = dt.timedelta(hours=1), dt.timedelta(minutes=1)
+    listed = [relay("vlt_idle", hour), relay("vlt_mounted", hour), relay("vlt_new", minute)]
+    listed.append(_vault("vlt_mcp", f"daimon-mcp:{uuid.uuid4()}").model_dump(mode="json"))
+    archived: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            return httpx.Response(200, json={"data": listed, "has_more": False})
+        if req.method == "POST" and req.url.path.endswith("/archive"):
+            archived.append(req.url.path.split("/")[-2])
+            return httpx.Response(200, json=listed[0])
+        raise AssertionError(f"unexpected call: {req.method} {req.url}")
+
+    async def mounted(client: AsyncAnthropic, *, scope: object) -> frozenset[str]:
+        return frozenset({"vlt_mounted"})
+
+    monkeypatch.setattr(mcp_vault_janitor, "mounted_live_vault_ids", mounted)
+    idle = await archive_idle_relay_vaults(_make_client(httpx.MockTransport(handler)), now=NOW)
+    assert idle == archived == ["vlt_idle"], "only an old relay vault no live session mounts"
