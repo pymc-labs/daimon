@@ -127,7 +127,19 @@ jobs:
             gcloud compute ssh ${{ vars.LANES_HOST }} --zone "$ZONE" \
               --tunnel-through-iap --command="$1"
           }
-          lane_ssh "$refresh" >/dev/null 2>&1
+          # Only use this helper for operations safe to repeat after any failure.
+          retry() {
+            local attempt rc
+            for attempt in 1 2 3; do
+              if "$@"; then return 0; else rc=$?; fi
+              if (( attempt == 3 )); then return "$rc"; fi
+              sleep 3
+            done
+          }
+          if ! retry lane_ssh "$refresh" >/dev/null 2>&1; then
+            echo 'Lane host CLI refresh failed after 3 attempts' >&2
+            exit 1
+          fi
           if [[ "$ACTION" == deploy ]]; then
             # The host CLI owns .env and records this compose for reset/redeploy.
             # Render only the image variable; never interpolate lane secrets here.
@@ -136,16 +148,39 @@ jobs:
             grep -qF "image: $DAIMON_NOTEBOOK_IMAGE" "$RUNNER_TEMP/compose.lane.yml" || {
               echo 'notebook image not rendered' >&2; exit 1;
             }
-            gcloud compute scp "$RUNNER_TEMP/compose.lane.yml" "$HOST:$remote" \
-              --project="$PROJECT" --zone="$ZONE" --tunnel-through-iap --quiet
+            if ! retry gcloud compute scp "$RUNNER_TEMP/compose.lane.yml" "$HOST:$remote" \
+              --project="$PROJECT" --zone="$ZONE" --tunnel-through-iap --quiet >/dev/null 2>&1; then
+              echo 'Lane compose copy failed after 3 attempts' >&2
+              exit 1
+            fi
             printf -v command '%q ' sudo lane deploy "$LANE" --image "$DAIMON_LANE_IMAGE" \
               --sha "$SHA" --compose "$remote" --actor "$ACTOR" --run-url "$RUN_URL"
           else
             printf -v command '%q ' sudo lane "$ACTION" "$LANE"
           fi
+          # Mark remote execution before running the safely quoted lane command.
+          command="echo lane-remote-started >&2; $command"
           # The host owns full deployment logs. This public workflow prints no
           # remote output, including failure output from older host CLI versions.
-          if ! lane_ssh "$command" >/dev/null 2>"$RUNNER_TEMP/lane.err"; then
+          lane_action() {
+            local attempt rc
+            for attempt in 1 2 3; do
+              if lane_ssh "$command" >/dev/null 2>"$RUNNER_TEMP/lane.err"; then
+                return 0
+              else
+                rc=$?
+              fi
+              # Remote stderr can mimic an authentication refusal. Once the
+              # sentinel appears, never replay a possibly started lane action.
+              if (( attempt == 3 || rc != 255 )) ||
+                grep -qxF 'lane-remote-started' "$RUNNER_TEMP/lane.err" ||
+                ! grep -qE '^[^[:space:]]+@[^[:space:]]+: Permission denied \(publickey\)\.$' "$RUNNER_TEMP/lane.err"; then
+                return "$rc"
+              fi
+              sleep 3
+            done
+          }
+          if ! lane_action; then
             # Only the host CLI's fixed-format messages are safe to show here.
             grep -E '^(missing enabled secret version: lane-[a-z0-9-]+|secret access failed: lane-[a-z0-9-]+|unknown lane: [a-z0-9-]+|lane [a-z0-9-]+ is busy|no recorded deployment|invalid sha|image does not match lane and SHA|service=[a-z0-9_-]+ state=[a-z]+ exit=[0-9-]+ restarts=[0-9]+)$' \
               "$RUNNER_TEMP/lane.err" >&2 || true
@@ -161,7 +196,16 @@ jobs:
             gcloud compute ssh ${{ vars.LANES_HOST }} --zone "$ZONE" \
               --tunnel-through-iap --command="$1"
           }
-          raw=$(lane_ssh "$command" 2>/dev/null) || raw='{}'
+          retry() {
+            local attempt rc
+            for attempt in 1 2 3; do
+              # Discard partial output from failed status reads.
+              if raw=$(lane_ssh "$command" 2>/dev/null); then return 0; else rc=$?; fi
+              if (( attempt == 3 )); then return "$rc"; fi
+              sleep 3
+            done
+          }
+          retry || raw='{}'
           # State JSON also carries run_url and other metadata; allow only the
           # fields approved for public Actions summaries.
           safe=$(jq -ce '{sha: (.sha // ""), image: (.image // ""),

@@ -14,6 +14,12 @@ From the **Dev lane** GitHub Actions workflow, select that branch and dispatch `
 
 Each lane uses its own environment and repository variables for deployment. The host keeps the lane's secrets in a root-owned `.env` file. Normal lane services publish no container ports; the optional preview fixture below binds a loopback port.
 
+The workflow retries the host CLI refresh, Compose SCP copy and status summary
+up to three attempts, three seconds apart. Lane actions (including deploy and reset)
+retry only an SSH public-key authentication refusal (exit 255) with no remote-start
+sentinel in stderr. The sentinel is emitted before the lane command starts. Other
+failures stop immediately to avoid repeating a deployment or reset. Full remote output stays private; only fixed-format errors are printed.
+
 ## Preview notebook host (row 52)
 
 `preview-notebook` is a dedicated, optional standalone host, disabled by default.
