@@ -220,7 +220,7 @@ def shape_texts(deck):
             result[element["objectId"]] = "".join(
                 item.get("textRun", {}).get("content", "")
                 for item in element["shape"].get("text", {}).get("textElements", [])
-            ).rstrip("\n")
+            )
         for child in element.get("elementGroup", {}).get("children", []):
             walk(child)
 

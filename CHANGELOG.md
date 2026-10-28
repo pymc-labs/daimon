@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Replace whitespace-only Slides text by deleting it before insertion, including
+  newline-only shapes; genuinely empty shapes still skip deletion.
+
 - Limit Toggl corrections to stopped entries attributed by workspace Reports in
   an explicit 365-day UTC date window. Remove timer-stop support; refuse missing
   targets, including running entries and very recent edits affected by Reports lag.

@@ -182,7 +182,7 @@ def test_copy_without_folder_uses_shared_accounts_root_not_template_folder(workf
     assert result["deck_id"] == "new_copy"
 
 
-@pytest.mark.parametrize("elements", [[], [{"textRun": {"content": "\n"}}]])
+@pytest.mark.parametrize("elements", [[], [{"paragraphMarker": {}}]])
 def test_set_text_fills_empty_placeholder_without_delete(workflow, deck, elements):
     deck["slides"][0]["pageElements"][0]["shape"]["text"] = {"textElements": elements}
     requests = workflow.operations("set-text", {"texts": {"shape_one": "Filled"}}, deck)
@@ -218,3 +218,15 @@ def test_clearing_already_empty_shape_does_not_send_batch(workflow, deck, fake_a
         lambda *_: api,
     )
     assert len(api.calls) == 1 and "no changes" in result["review"]
+
+
+@pytest.mark.parametrize("content", ["\n", " \n", "\t\n", "\n\n"])
+def test_set_text_deletes_whitespace_only_content_before_inserting(workflow, deck, content):
+    deck["slides"][0]["pageElements"][0]["shape"]["text"] = {
+        "textElements": [{"textRun": {"content": content}}]
+    }
+    requests = workflow.operations("set-text", {"texts": {"shape_one": "Filled"}}, deck)
+    assert requests == [
+        {"deleteText": {"objectId": "shape_one", "textRange": {"type": "ALL"}}},
+        {"insertText": {"objectId": "shape_one", "insertionIndex": 0, "text": "Filled"}},
+    ]
