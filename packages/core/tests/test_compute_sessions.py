@@ -582,13 +582,15 @@ async def test_lost_start_restart_and_overdue_tasks_are_reported_never_rerun(db_
         for _, _, args in fake.calls
     )
     assert len(await wakes_for(sm, owner)) == 3
-    starts = [
-        args
+    # The lost start failed before reaching the machine (the fake records no call)
+    # and its retry returned the existing row, so only the other two ever started.
+    started = [
+        args["command"].splitlines()[0].split()[-1]
         for _, _, args in fake.calls
         if isinstance(args.get("command"), str)
         and args["command"].startswith("# daimon-task start")
     ]
-    assert len(starts) == 3
+    assert sorted(started) == sorted([restarted.id.hex, overdue.id.hex])
 
 
 async def test_owner_reading_the_end_gets_no_second_report_and_outages_wait(db_engine, db_clean):
