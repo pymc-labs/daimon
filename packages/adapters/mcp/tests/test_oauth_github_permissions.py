@@ -19,7 +19,6 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp import oauth_github
 from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
-from daimon.core._models import GitHubAppInstallation
 from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
@@ -33,15 +32,17 @@ from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminAttestationUnavailable
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import agent_owners, github_access, github_connect
+from daimon.core.stores import agent_owners, github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import get_account_with_tenant, set_role
 from daimon.core.stores.domain import AccountIdentityRow, Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.factories import (
     make_account,
+    make_github_app_installation,
     make_platform_principal,
     make_tenant,
     mark_principal_foreign,
+    set_github_installation_snapshot,
 )
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -800,14 +801,13 @@ async def test_owner_save_new_repo_with_stale_installation_coverage(
         # The last reconciliation saw no repos, but GitHub now lists this repo
         # to the signer and reports a healthy, write-capable installation.
         async with editor.sessionmaker.begin() as session:
-            installation = GitHubAppInstallation(
+            await make_github_app_installation(
+                session,
                 installation_id=org.installation_id,
                 account_login=org.login,
                 repo_full_names=[],
                 github_repo_full_names=[],
-                app="github_app",
             )
-            session.add(installation)
 
         hidden, page = await editor.page()
         assert "alpha/repo-101" in page
@@ -831,15 +831,13 @@ async def test_newer_installation_refresh_during_save_requires_reload(
     async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
         initial_refresh = datetime.now(UTC) - timedelta(minutes=1)
         async with editor.sessionmaker.begin() as session:
-            session.add(
-                GitHubAppInstallation(
-                    installation_id=org.installation_id,
-                    account_login=org.login,
-                    repo_full_names=["alpha/repo-101"],
-                    github_repo_full_names=["alpha/repo-101"],
-                    github_refreshed_at=initial_refresh,
-                    app="github_app",
-                )
+            await make_github_app_installation(
+                session,
+                installation_id=org.installation_id,
+                account_login=org.login,
+                repo_full_names=["alpha/repo-101"],
+                github_repo_full_names=["alpha/repo-101"],
+                github_refreshed_at=initial_refresh,
             )
         hidden, page = await editor.page()
         assert "alpha/repo-101" in page
@@ -852,10 +850,12 @@ async def test_newer_installation_refresh_during_save_requires_reload(
             installations = await original_installations(*args, **kwargs)
             if kwargs.get("before_repo_fetch") is not None:
                 async with editor.sessionmaker.begin() as session:
-                    installation = await session.get(GitHubAppInstallation, org.installation_id)
-                    assert installation is not None
-                    installation.github_repo_full_names = []
-                    installation.github_refreshed_at = initial_refresh + timedelta(seconds=1)
+                    await set_github_installation_snapshot(
+                        session,
+                        installation_id=org.installation_id,
+                        repo_full_names=[],
+                        refreshed_at=initial_refresh + timedelta(seconds=1),
+                    )
                 refresh_completed = True
             return installations
 
@@ -866,10 +866,12 @@ async def test_newer_installation_refresh_during_save_requires_reload(
         assert "The agent's repos changed. Reload and try again." in html.unescape(response.text)
         assert await editor.grants() == {}
         async with editor.sessionmaker() as session:
-            installation = await session.get(GitHubAppInstallation, org.installation_id)
+            installation = await github_app_installations.get(
+                session, installation_id=org.installation_id
+            )
             status, _ = await github_connect.invitation_status(session, hidden["invitation"])
         assert installation is not None
-        assert installation.github_repo_full_names == []
+        assert installation.github_repo_full_names == ()
         assert status == "active"
 
 

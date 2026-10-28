@@ -23,6 +23,7 @@ from daimon.core._models import (
     Account,
     AgentMemoryStore,
     CliPrincipal,
+    GitHubAppInstallation,
     PlatformPrincipal,
     PrincipalLink,
     SecurityAuditEvent,
@@ -61,6 +62,7 @@ from daimon.core.stores.domain import (
     ChannelBudgetRow,
     CliPrincipalRow,
     ContinuationReason,
+    GitHubAppInstallationRow,
     McpTokenRow,
     Platform,
     PlatformPrincipalRow,
@@ -215,6 +217,44 @@ async def mark_principal_foreign(
         .where(PlatformPrincipal.account_id == account_id)
         .values(foreign_home_id=home_id)
     )
+    await session.flush()
+
+
+async def make_github_app_installation(
+    session: AsyncSession,
+    *,
+    installation_id: int,
+    account_login: str,
+    repo_full_names: list[str],
+    github_repo_full_names: list[str] | None,
+    github_refreshed_at: datetime | None = None,
+) -> GitHubAppInstallationRow:
+    """Seed an App installation with a known reconciliation snapshot."""
+    row = GitHubAppInstallation(
+        installation_id=installation_id,
+        account_login=account_login,
+        repo_full_names=repo_full_names,
+        github_repo_full_names=github_repo_full_names,
+        github_refreshed_at=github_refreshed_at,
+        app="github_app",
+    )
+    session.add(row)
+    await session.flush()
+    return GitHubAppInstallationRow.model_validate(row)
+
+
+async def set_github_installation_snapshot(
+    session: AsyncSession,
+    *,
+    installation_id: int,
+    repo_full_names: list[str],
+    refreshed_at: datetime,
+) -> None:
+    """Inject a completed refresh between an adapter's network call and save."""
+    row = await session.get(GitHubAppInstallation, installation_id)
+    assert row is not None
+    row.github_repo_full_names = repo_full_names
+    row.github_refreshed_at = refreshed_at
     await session.flush()
 
 
