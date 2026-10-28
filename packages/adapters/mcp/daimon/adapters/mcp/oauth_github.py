@@ -361,7 +361,6 @@ def _error(
         title=message,
         body_html=(
             f'<div class="gh-status-icon">{icon("triangle-alert")}</div>'
-            f'<p class="gh-status-line">{html.escape(message)}</p>'
             f'<p class="gh-action-line">{html.escape(action)}</p>' + retry
         ),
         status=status,
@@ -1898,7 +1897,12 @@ def _github_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
 
 
-async def _installations(client: httpx.AsyncClient, token: str) -> list[_Installation]:
+async def _installations(
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    before_repo_fetch: Callable[[int], Awaitable[None]] | None = None,
+) -> list[_Installation]:
     raw = await list_github_pages(client, "/user/installations", token, "installations")
     result: list[_Installation] = []
     for item in raw:
@@ -1911,6 +1915,8 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
         last_page_full = False
         fetch_state: Literal["ok", "error"] = "ok"
         if parsed.suspended_at is None:
+            if before_repo_fetch is not None:
+                await before_repo_fetch(installation_id)
             try:
                 for page in range(1, 21):
                     response = await client.get(
@@ -2398,9 +2404,28 @@ def build_oauth_github_routes(
                 repo.repo_id for repo in agent_repos if repo.status == "active"
             )
         token = decrypt_token(fernet, flow.encrypted_user_token)
+        observed_refreshes: dict[int, datetime | None] = {}
+
+        async def remember_installation_refresh(installation_id: int) -> None:
+            # Capture before GitHub's list request so a newer reconciliation
+            # cannot be overwritten by the positive evidence from this save.
+            async with sessionmaker() as session:
+                installation = await github_app_installations.get(
+                    session, installation_id=installation_id
+                )
+                observed_refreshes[installation_id] = (
+                    installation.github_refreshed_at if installation is not None else None
+                )
+
         try:
             async with factory() as client, asyncio.timeout(_INSTALLATIONS_DEADLINE_SECONDS):
-                installations = await _installations(client, token)
+                installations = await _installations(
+                    client,
+                    token,
+                    before_repo_fetch=remember_installation_refresh
+                    if request.method == "POST"
+                    else None,
+                )
         except (httpx.HTTPError, ValueError, KeyError, TypeError, TimeoutError):
             used = await successful_page(state, cookie, invitation_hash)
             if used is not None:
@@ -2642,6 +2667,7 @@ def build_oauth_github_routes(
                         return _error(
                             "You can no longer manage this agent.", 403, retry_confirm_url
                         )
+            save_stage = "check_authority"
             try:
                 async with sessionmaker.begin() as session:
                     await session.execute(sql_text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
@@ -2659,12 +2685,14 @@ def build_oauth_github_routes(
                     )
                     if not manages:
                         return _error("You can no longer manage this agent.", 403)
+                    save_stage = "lock_requests"
                     prelocked_request_ids = await lock_confirmed_request_repos(
                         session,
                         tenant_id=invitation.tenant_id,
                         approved_by_account_id=invitation.requester_account_id,
                         extra_repo_ids={repo.repo_id for repo in repos},
                     )
+                    save_stage = "confirm"
                     saved = await github_connect.confirm(
                         session,
                         state=state,
@@ -2675,6 +2703,7 @@ def build_oauth_github_routes(
                         expected_agent_snapshot=snapshot,
                     )
                     if saved:
+                        save_stage = "record_installations"
                         for detail in sorted(details, key=lambda item: item.installation_id):
                             await github_app_installations.upsert_github_app(
                                 session,
@@ -2684,6 +2713,14 @@ def build_oauth_github_routes(
                                 account_type=detail.account_type,
                                 repository_selection=detail.repository_selection,
                                 suspended_at=detail.suspended_at,
+                                freshly_verified_repos=github_app_installations.VerifiedInstallationRepos(
+                                    names=[
+                                        repo.full_name
+                                        for repo in repos
+                                        if repo.installation_id == detail.installation_id
+                                    ],
+                                    refreshed_at=observed_refreshes[detail.installation_id],
+                                ),
                             )
                             await enqueue_reconciliation(
                                 session,
@@ -2693,6 +2730,7 @@ def build_oauth_github_routes(
                                 deleted=False,
                                 now=datetime.now(UTC),
                             )
+                        save_stage = "remove_grants"
                         for repo_id in removed_ids:
                             await github_access.remove_grant(
                                 session,
@@ -2702,6 +2740,7 @@ def build_oauth_github_routes(
                                 changed_by_account_id=invitation.requester_account_id,
                             )
                         if repos:
+                            save_stage = "check_agent"
                             await github_connect.require_app_eligible_agent(
                                 session,
                                 tenant_id=invitation.tenant_id,
@@ -2718,6 +2757,7 @@ def build_oauth_github_routes(
                             }
                             for repo in repos:
                                 existing = existing_grants.get(repo.repo_id)
+                                save_stage = "stage_grant"
                                 await github_access.stage_grant(
                                     session,
                                     tenant_id=invitation.tenant_id,
@@ -2731,6 +2771,7 @@ def build_oauth_github_routes(
                                     agent_name=invitation.agent_name,
                                     repo_lock_held=True,
                                 )
+                        save_stage = "set_working_repo"
                         if working_choice != "keep":
                             selected_name = (
                                 None if working_id is None else visible[working_id].full_name
@@ -2753,6 +2794,7 @@ def build_oauth_github_routes(
                                 agent_name=invitation.agent_name,
                             )
                         if repos:
+                            save_stage = "finish_requests"
                             resumed_requests = await finish_confirmed_requests(
                                 session,
                                 tenant_id=invitation.tenant_id,
@@ -2763,6 +2805,7 @@ def build_oauth_github_routes(
                                 await github_connect.queue_connect_followup(
                                     session, invitation=invitation, repos=repos
                                 )
+                        save_stage = "audit"
                         await append_event(
                             session,
                             tenant_id=invitation.tenant_id,
@@ -2776,7 +2819,10 @@ def build_oauth_github_routes(
                             reason="agent repos saved",
                             github_repo_ids=selected_ids + removed_ids,
                         )
-            except github_connect.StaleAgentReposError:
+            except (
+                github_connect.StaleAgentReposError,
+                github_app_installations.StaleInstallationSnapshotError,
+            ):
                 return _error(
                     "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
                 )
@@ -2801,9 +2847,17 @@ def build_oauth_github_routes(
                 raise
             except github_connect.PinnedAgentConnectionError:
                 return _error(github_connect.PINNED_AGENT_MESSAGE)
-            except ValueError:
+            except ValueError as exc:
+                # Log only bounded diagnostic fields; exceptions can contain repo
+                # names, credentials, or other private request data.
+                _log.error(
+                    "github_connect.save_failed",
+                    extra={"stage": save_stage, "error_type": type(exc).__name__},
+                )
                 return _error(
-                    "This change could not be saved. Reload and try again.", 400, retry_confirm_url
+                    "Your changes weren't saved.",
+                    500,
+                    action="Return to your chat and ask an admin for help.",
                 )
             if not saved:
                 used = await successful_page(state, cookie, invitation_hash)
@@ -2968,6 +3022,14 @@ def build_oauth_github_routes(
                                 account_type=detail.account_type,
                                 repository_selection=detail.repository_selection,
                                 suspended_at=detail.suspended_at,
+                                freshly_verified_repos=github_app_installations.VerifiedInstallationRepos(
+                                    names=[
+                                        repo.full_name
+                                        for repo in repos
+                                        if repo.installation_id == detail.installation_id
+                                    ],
+                                    refreshed_at=observed_refreshes[detail.installation_id],
+                                ),
                             )
                             await enqueue_reconciliation(
                                 session,
@@ -3003,6 +3065,8 @@ def build_oauth_github_routes(
                             reason="confirmed",
                             github_repo_ids=[repo.repo_id for repo in repos],
                         )
+            except github_app_installations.StaleInstallationSnapshotError:
+                return _error("GitHub access changed while saving.", 409, retry_confirm_url)
             except github_connect.PinnedAgentConnectionError:
                 await revoke_user_token(token)
                 return _error(github_connect.PINNED_AGENT_MESSAGE)

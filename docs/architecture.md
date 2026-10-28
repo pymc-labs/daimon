@@ -981,6 +981,10 @@ the tenant-confirmed Connect set and the
 latest complete GitHub installation snapshot. Until the first refresh, the
 confirmed set applies. A GitHub-confirmed uninstall or suspension disables
 coverage; later refreshes can restore it when the repo is still confirmed.
+A Connect save can add the selected repos freshly verified through GitHub to
+the cached coverage set. It preserves unlisted repos and never clears an
+uninstall or suspension. When a populated cache has been refreshed since the
+save began listing GitHub repos, the save returns 409 without changing grants.
 The refresh never adds repos to the tenant-confirmed set.
 The browser repo editor lists installations per owner, with at most 20 pages
 (2,000 repos) per owner. A failed owner's list is isolated from the others.
@@ -993,6 +997,9 @@ repos missing from the person's verified GitHub listing show as hidden rows and
 can only be removed. A capped owner list explains its 2,000-repo limit without
 revealing names of unlisted grants. A picker save changes only the submitted
 grants; it leaves other grants in place even when their authorization is stale.
+Unexpected save validation failures return 500 with one explanation and an
+action to ask an admin for help. Logs record the save stage and exception type
+without exception text or setup credentials.
 The synthetic browser layout and interaction check is manual:
 `uv run --with playwright==1.58.0 python scripts/check_github_picker.py`.
 If token minting returns 403, 404, or 422 for a repository group, that group's

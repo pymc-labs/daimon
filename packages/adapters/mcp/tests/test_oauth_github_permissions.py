@@ -8,8 +8,9 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Literal
+from typing import Any, Literal
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
@@ -31,15 +32,17 @@ from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminAttestationUnavailable
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import agent_owners, github_access, github_connect
+from daimon.core.stores import agent_owners, github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import get_account_with_tenant, set_role
 from daimon.core.stores.domain import AccountIdentityRow, Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.factories import (
     make_account,
+    make_github_app_installation,
     make_platform_principal,
     make_tenant,
     mark_principal_foreign,
+    set_github_installation_snapshot,
 )
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -784,6 +787,128 @@ async def test_an_owner_saves_repos_for_their_agent_without_being_a_platform_adm
             )
         assert account is not None and account.role == Role.USER, "an owner is never promoted"
         assert [repo.scope for repo in repos] == ["agent"], "an owner's repos are agent-scoped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requester", ["admin", "owner"])
+async def test_owner_save_new_repo_with_stale_installation_coverage(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    requester: Literal["admin", "owner"],
+) -> None:
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org], requester=requester) as editor:
+        # The last reconciliation saw no repos, but GitHub now lists this repo
+        # to the signer and reports a healthy, write-capable installation.
+        async with editor.sessionmaker.begin() as session:
+            await make_github_app_installation(
+                session,
+                installation_id=org.installation_id,
+                account_login=org.login,
+                repo_full_names=[],
+                github_repo_full_names=[],
+            )
+
+        hidden, page = await editor.page()
+        assert "alpha/repo-101" in page
+        response = await editor.save(hidden, repo="101", working="101")
+        assert response.status_code == 200
+        assert await editor.grants() == {101: "write"}
+        async with editor.sessionmaker() as session:
+            repos = await github_access.list_agent_repos(
+                session, tenant_id=editor.tenant_id, agent_id=editor.agent_id
+            )
+            status, _ = await github_connect.invitation_status(session, hidden["invitation"])
+        assert len(repos) == 1 and repos[0].is_working_repo
+        assert status == "used"
+
+
+@pytest.mark.asyncio
+async def test_newer_installation_refresh_during_save_requires_reload(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
+        initial_refresh = datetime.now(UTC) - timedelta(minutes=1)
+        async with editor.sessionmaker.begin() as session:
+            await make_github_app_installation(
+                session,
+                installation_id=org.installation_id,
+                account_login=org.login,
+                repo_full_names=["alpha/repo-101"],
+                github_repo_full_names=["alpha/repo-101"],
+                github_refreshed_at=initial_refresh,
+            )
+        hidden, page = await editor.page()
+        assert "alpha/repo-101" in page
+
+        original_installations = oauth_github._installations  # pyright: ignore[reportPrivateUsage]
+        refresh_completed = False
+
+        async def refresh_after_repo_fetch(*args: Any, **kwargs: Any) -> object:
+            nonlocal refresh_completed
+            installations = await original_installations(*args, **kwargs)
+            if kwargs.get("before_repo_fetch") is not None:
+                async with editor.sessionmaker.begin() as session:
+                    await set_github_installation_snapshot(
+                        session,
+                        installation_id=org.installation_id,
+                        repo_full_names=[],
+                        refreshed_at=initial_refresh + timedelta(seconds=1),
+                    )
+                refresh_completed = True
+            return installations
+
+        monkeypatch.setattr(oauth_github, "_installations", refresh_after_repo_fetch)
+        response = await editor.save(hidden, repo="101")
+        assert refresh_completed
+        assert response.status_code == 409
+        assert "The agent's repos changed. Reload and try again." in html.unescape(response.text)
+        assert await editor.grants() == {}
+        async with editor.sessionmaker() as session:
+            installation = await github_app_installations.get(
+                session, installation_id=org.installation_id
+            )
+            status, _ = await github_connect.invitation_status(session, hidden["invitation"])
+        assert installation is not None
+        assert installation.github_repo_full_names == ()
+        assert status == "active"
+
+
+@pytest.mark.asyncio
+async def test_unexpected_grant_value_error_is_private_and_not_retried(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
+        hidden, _ = await editor.page()
+        secret_error = "private repo/token sentinel"
+        monkeypatch.setattr(
+            github_access, "stage_grant", AsyncMock(side_effect=ValueError(secret_error))
+        )
+        response = await editor.save(hidden, repo="101")
+        assert response.status_code == 500
+        assert html.unescape(response.text).count("<h1>Your changes weren't saved.</h1>") == 1
+        assert "Return to your chat and ask an admin for help." in response.text
+        assert "Try again" not in response.text
+        assert "new setup link" not in response.text
+        assert secret_error not in response.text
+        assert secret_error not in caplog.text
+        failures = [
+            record
+            for record in caplog.records
+            if record.getMessage() == "github_connect.save_failed"
+        ]
+        assert len(failures) == 1
+        assert vars(failures[0])["stage"] == "stage_grant"
+        assert vars(failures[0])["error_type"] == "ValueError"
+        assert secret_error not in str(failures)
+        assert await editor.grants() == {}
+        async with editor.sessionmaker() as session:
+            status, _ = await github_connect.invitation_status(session, hidden["invitation"])
+        assert status == "active"
 
 
 @pytest.mark.asyncio

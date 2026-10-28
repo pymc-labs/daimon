@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- GitHub setup can save newly available repos even when Daimon has an older cached repo list. Error pages show the explanation once, and unexpected save failures ask for help instead of sending you through another sign-in.
+
 - **Remote MCP servers can verify who is calling (`DAIMON_MCP_IDENTITY__SERVERS`, off by default).**
   A server listed there is attached to an agent at `<root>/mcp-identity/<name>`. Daimon forwards
   each request with `Authorization: Bearer` and a two-minute EdDSA token signed with
