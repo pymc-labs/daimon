@@ -10,17 +10,30 @@ operator's dedicated `workspace-writer` agent; do not add shared credentials to
 default Daimon. Every user of a bound agent can mint its tokens and use their
 scopes directly. Script refusals do not restrict arbitrary sandbox code.
 
-Call `get_cli_token("gcloud")`; pass its short-lived token directly to script
-stdin without printing it, placing it in argv, or persisting it. Google tokens
-require operator deployment domain-wide delegation and an agent binding; ordinary
-chat carries the needed signed identity. If missing, report the operator setup
-error; never request a refresh token or run `gws auth`.
+Call `get_cli_token("gcloud")`; the token lasts about one hour. Its tool result
+enters model context and the session transcript. The literal token in the bash
+tool command also passes through the transcript and may appear in the shell's
+own command arguments. This route does not keep tokens out of transcripts.
+The script itself reads stdin, does not accept a token argument, and redacts
+errors. Do not echo the token or persist it to a file. Google tokens require
+operator domain-wide delegation and an agent binding; ordinary chat carries the
+signed identity. Missing setup is an operator error; never request a refresh
+token or run `gws auth`.
 
-Write non-secret request JSON to a working file, then run
-`python3 <this-skill>/scripts/workspace_write.py <request.json>` with the token
-on stdin. This script uses Python's standard library. Never put request files
-or credentials in `/mnt/session/outputs`. Read [references/requests.md](references/requests.md)
-for operation schemas. There is no generic command, raw URL or HTTP passthrough.
+Write non-secret request JSON to a working file. Replace the script/request
+paths and token placeholder below with the actual values from this task. Use a
+quoted heredoc delimiter so the shell does not expand token characters:
+
+```bash
+python3 /path/to/workspace-write/scripts/workspace_write.py /root/work/request.json <<'DAIMON_GOOGLE_ACCESS_TOKEN'
+PASTE_EXACT_GET_CLI_TOKEN_RESULT_HERE
+DAIMON_GOOGLE_ACCESS_TOKEN
+```
+
+This passes the token to the script's stdin, not its argv. Python standard
+library only. Never put request files or credentials in `/mnt/session/outputs`.
+Read [references/requests.md](references/requests.md) for schemas. There is no
+generic command, raw URL or HTTP passthrough.
 
 Respect the requested recipients, resources and changes. Missing targets are an
 error; never infer “my” from the shared identity. Sharing, permission changes,

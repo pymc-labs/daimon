@@ -59,7 +59,7 @@ def plan(request):
                 "Name one parent folder",
             )
             identifier(body["parents"][0])
-        return "https://www.googleapis.com", "POST", "/drive/v3/files", body
+        return "https://www.googleapis.com", "POST", "/drive/v3/files?supportsAllDrives=true", body
     if operation in ("drive-copy", "drive-rename"):
         fields(body, ("name",), ("name",))
         text(body["name"])
@@ -68,7 +68,7 @@ def plan(request):
         return (
             "https://www.googleapis.com",
             "POST" if suffix else "PATCH",
-            f"/drive/v3/files/{target}{suffix}",
+            f"/drive/v3/files/{target}{suffix}?supportsAllDrives=true",
             body,
         )
     if operation == "docs-create":
@@ -97,10 +97,14 @@ def plan(request):
         fields(
             body,
             ("summary", "description", "start", "end", "location", "attendees"),
-            ("summary", "start", "end"),
+            ("summary", "start", "end") if operation == "calendar-create" else (),
         )
-        text(body["summary"])
+        require(body, "Name at least one Calendar field to update")
+        if "summary" in body:
+            text(body["summary"])
         for bound in ("start", "end"):
+            if bound not in body:
+                continue
             fields(body[bound], ("date", "dateTime", "timeZone"))
             require(
                 ("date" in body[bound]) != ("dateTime" in body[bound]), "Supply date or dateTime"

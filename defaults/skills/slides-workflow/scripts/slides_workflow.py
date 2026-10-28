@@ -212,6 +212,24 @@ def box(body):
     }
 
 
+def shape_texts(deck):
+    result = {}
+
+    def walk(element):
+        if "shape" in element:
+            result[element["objectId"]] = "".join(
+                item.get("textRun", {}).get("content", "")
+                for item in element["shape"].get("text", {}).get("textElements", [])
+            ).rstrip("\n")
+        for child in element.get("elementGroup", {}).get("children", []):
+            walk(child)
+
+    for slide in deck.get("slides", []):
+        for element in slide.get("pageElements", []):
+            walk(element)
+    return result
+
+
 def operations(operation, body, deck):
     if operation == "batch":
         fields(body, ("requests",), ("requests",))
@@ -222,12 +240,14 @@ def operations(operation, body, deck):
             isinstance(body["texts"], dict) and body["texts"], "Expected shape ID to text mapping"
         )
         _, _, shapes = inspect_deck(deck)
+        existing_text = shape_texts(deck)
         result = []
         for target, value in body["texts"].items():
             require(
                 target in shapes and isinstance(value, str), "Unknown text shape or non-string text"
             )
-            result.append({"deleteText": {"objectId": target, "textRange": {"type": "ALL"}}})
+            if existing_text.get(target):
+                result.append({"deleteText": {"objectId": target, "textRange": {"type": "ALL"}}})
             if value:
                 result.append(
                     {"insertText": {"objectId": target, "insertionIndex": 0, "text": value}}
@@ -341,9 +361,13 @@ def run(request, token, api_factory=Api, download=thumbnail, save=save_png):
         # Explicitly select My Drive rather than inheriting a template folder.
         folder = body.get("folder_id")
         if folder is None:
-            folder = drive.request("GET", "/drive/v3/files/root?fields=id")["id"]
+            folder = drive.request("GET", "/drive/v3/files/root?fields=id&supportsAllDrives=true")[
+                "id"
+            ]
         payload = {"name": title, "parents": [identifier(folder)]}
-        result = drive.request("POST", f"/drive/v3/files/{source}/copy", payload)
+        result = drive.request(
+            "POST", f"/drive/v3/files/{source}/copy?supportsAllDrives=true", payload
+        )
         return {
             "deck_id": result["id"],
             "review": "incomplete: edit and render before reporting done",
@@ -369,7 +393,10 @@ def run(request, token, api_factory=Api, download=thumbnail, save=save_png):
                 "files": files,
                 "review": "rendered; visually inspect PNGs before reporting done",
             }
-        requests = validate_batch(operations(operation, body, deck), deck)
+        planned = operations(operation, body, deck)
+        if operation == "set-text" and not planned:
+            return {"deck_id": deck_id, "review": "no changes; target shapes were already empty"}
+        requests = validate_batch(planned, deck)
         revision = deck.get("revisionId")
         require(revision, "Missing revision ID; refresh deck before writing")
         result = api.request(

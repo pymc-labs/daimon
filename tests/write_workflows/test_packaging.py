@@ -74,3 +74,28 @@ def test_optional_agents_have_skills_but_default_has_no_workflow_credentials():
         assert skills <= {reference.skill_id for reference in spec.skills}
     defaults = load_agent_specs(ROOT / "defaults" / "agents")
     assert not ({spec.name for spec in defaults} & set(expected))
+
+
+def test_all_four_packaged_runtimes_are_byte_identical():
+    root = ROOT / "defaults" / "skills"
+    canonical = (root / "workspace-write" / "scripts" / "workflow_io.py").read_bytes()
+    for name in ("slides-workflow", "toggl-edits", "image-workflow"):
+        assert (root / name / "scripts" / "workflow_io.py").read_bytes() == canonical
+
+
+def test_runtime_check_fails_when_expected_skill_folder_is_missing(tmp_path, monkeypatch, capsys):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "sync_workflow_runtime", ROOT / "scripts" / "sync_workflow_runtime.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    source = tmp_path / "workspace-write" / "scripts" / "workflow_io.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("# synthetic runtime\n")
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(module, "SOURCE", source)
+    monkeypatch.setattr("sys.argv", ["sync_workflow_runtime.py", "--check"])
+    assert module.main() == 1
+    assert "missing skill scripts folder: slides-workflow/scripts" in capsys.readouterr().out

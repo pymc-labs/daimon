@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Support Shared Drives and partial Calendar patches in sandbox writes; fill empty
+  Slides placeholders without deleting absent text. Check packaged runtime copies
+  for drift and missing folders, and document audience controls and token transcript exposure.
+
 - Fix Toggl shared-account edits by resolving ownership and timing through
   workspace Reports v3 filtered by entry ID and explicitly named member, rather
   than a key-owner-only lookup. Refuse incomplete or ambiguous report evidence.

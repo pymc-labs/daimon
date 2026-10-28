@@ -35,7 +35,11 @@ def test_template_copy_keeps_destination_explicit_and_reports_created_id(workflo
         lambda *_: api,
     )
     assert api.calls == [
-        ("POST", "/drive/v3/files/template/copy", {"name": "Disposable", "parents": ["folder"]})
+        (
+            "POST",
+            "/drive/v3/files/template/copy?supportsAllDrives=true",
+            {"name": "Disposable", "parents": ["folder"]},
+        )
     ]
     assert result["deck_id"] == "new_deck" and "incomplete" in result["review"]
 
@@ -173,6 +177,44 @@ def test_copy_without_folder_uses_shared_accounts_root_not_template_folder(workf
         "synthetic",
         lambda *_: api,
     )
-    assert api.calls[0] == ("GET", "/drive/v3/files/root?fields=id", None)
+    assert api.calls[0] == ("GET", "/drive/v3/files/root?fields=id&supportsAllDrives=true", None)
     assert api.calls[1][2]["parents"] == ["shared_root"]
     assert result["deck_id"] == "new_copy"
+
+
+@pytest.mark.parametrize("elements", [[], [{"textRun": {"content": "\n"}}]])
+def test_set_text_fills_empty_placeholder_without_delete(workflow, deck, elements):
+    deck["slides"][0]["pageElements"][0]["shape"]["text"] = {"textElements": elements}
+    requests = workflow.operations("set-text", {"texts": {"shape_one": "Filled"}}, deck)
+    assert requests == [
+        {"insertText": {"objectId": "shape_one", "insertionIndex": 0, "text": "Filled"}}
+    ]
+
+
+def test_set_text_replaces_existing_grouped_shape_text(workflow, deck):
+    deck["slides"][0]["pageElements"] = [
+        {
+            "objectId": "group",
+            "elementGroup": {
+                "children": [
+                    {
+                        "objectId": "nested",
+                        "shape": {"text": {"textElements": [{"textRun": {"content": "Old\n"}}]}},
+                    }
+                ]
+            },
+        }
+    ]
+    requests = workflow.operations("set-text", {"texts": {"nested": "New"}}, deck)
+    assert requests[0] == {"deleteText": {"objectId": "nested", "textRange": {"type": "ALL"}}}
+    assert requests[1]["insertText"]["text"] == "New"
+
+
+def test_clearing_already_empty_shape_does_not_send_batch(workflow, deck, fake_api):
+    api = fake_api([deck])
+    result = workflow.run(
+        {"operation": "set-text", "deck_id": "explicit", "body": {"texts": {"shape_one": ""}}},
+        "synthetic",
+        lambda *_: api,
+    )
+    assert len(api.calls) == 1 and "no changes" in result["review"]

@@ -160,3 +160,41 @@ def test_cli_redacts_unexpected_provider_exception(workflow, tmp_path, monkeypat
 
     assert workflow_io.main(fail, "google") == 1
     assert "synthetic-secret" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("operation", ["drive-copy", "drive-rename", "drive-create"])
+def test_drive_mutations_opt_into_shared_drive_support(workflow, operation):
+    request = {"operation": operation, "body": {"name": "Updated"}}
+    if operation != "drive-create":
+        request["target"] = "shared_drive_file"
+    assert workflow.plan(request)[2].endswith("?supportsAllDrives=true")
+
+
+def test_calendar_patch_never_resends_unmentioned_fields(workflow, fake_api):
+    api = fake_api([{"id": "event"}])
+    workflow.run(
+        {
+            "operation": "calendar-update",
+            "target": {"calendar_id": "primary", "event_id": "event"},
+            "body": {"location": "New room"},
+        },
+        "synthetic",
+        lambda *_: api,
+    )
+    assert api.calls == [
+        ("PATCH", "/calendar/v3/calendars/primary/events/event", {"location": "New room"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "operation,body", [("calendar-update", {}), ("calendar-create", {"location": "Room"})]
+)
+def test_calendar_refuses_empty_patch_and_incomplete_create(workflow, operation, body):
+    with pytest.raises(workflow.Failure):
+        workflow.plan(
+            {
+                "operation": operation,
+                "target": {"calendar_id": "primary", "event_id": "event"},
+                "body": body,
+            }
+        )

@@ -16,8 +16,9 @@ def main() -> int:
     data = SOURCE.read_bytes()
     for name in ("slides-workflow", "toggl-edits", "image-workflow"):
         folder = ROOT / name / "scripts"
-        if not folder.exists():
-            continue
+        if not folder.is_dir():
+            print(f"missing skill scripts folder: {folder.relative_to(ROOT)}")
+            return 1
         target = folder / SOURCE.name
         if args.check:
             if not target.is_file() or target.read_bytes() != data:

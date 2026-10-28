@@ -22,4 +22,8 @@ result as `CLOUDSDK_AUTH_ACCESS_TOKEN` before running the CLI.
   `agent_id`. Calls without either identity fail closed. A Google binding and
   deployment domain-wide delegation are required; report missing setup to the operator.
 
-Google mints a short-lived impersonated token. Never print it.
+Google mints a short-lived impersonated token (about one hour). The returned
+token enters model context and the session transcript; shell commands containing
+it also enter that transcript and may be shell command arguments. Do not echo
+or persist it. The workspace-write and slides-workflow skills show a quoted
+heredoc that keeps the token out of the script’s own argv and files.

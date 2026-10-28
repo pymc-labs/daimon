@@ -294,7 +294,9 @@ Pillow in custom sandbox images.
 Sandbox I/O helpers are packaged with each workflow, with one canonical source at
 `defaults/skills/workspace-write/scripts/workflow_io.py`. After changing it run
 `uv run python scripts/sync_workflow_runtime.py`; `--check` verifies the packaged
-copies remain identical. Each skill is independently deliverable.
+copies remain identical and fails if an expected skill folder is missing. A
+packaging test checks that all four runtime copies are byte-identical. Each skill
+is independently deliverable.
 
 `toggl-edits` packages narrow Toggl Track operations for an operator-created
 `time-editor` agent with `TOGGL_API_TOKEN` collected through `request_agent_key`.
@@ -304,8 +306,9 @@ and administration are refused. Stop uses workspace PUT with the current UTC
 stop time and elapsed duration. A 403 identifies the shared token owner’s required
 workspace administrator/access permission. Bulk partial results identify successful
 and failed entries without retrying. All users of this agent can use the shared key;
-it must not be attached to default Daimon. Vendor permission acceptance requires a
-disposable entry owned by a named member different from the key owner.
+it must not be attached to default Daimon. Ownership lookup uses workspace-scoped
+Reports v3 search filtered by entry IDs and the explicitly named member, not a
+key-owner-only `/me` lookup. Missing or ambiguous report rows refuse all writes.
 
 `image-workflow` supports OpenAI image generation and local-reference edits using
 `gpt-image-2` or `gpt-image-1.5`. It requires `OPENAI_API_KEY` on an operator-created
@@ -325,3 +328,30 @@ with explicit scopes and deployment domain-wide delegation; use `request_agent_k
 for `TOGGL_API_TOKEN` on time-editor and `OPENAI_API_KEY` on image-maker. Keep default
 Daimon unbound and without these shared keys. The skill library’s existing per-file
 content hashes update for changed skill bytes; no static fingerprint is maintained.
+
+Audience controls are platform-specific; a separate agent name is not an access
+restriction:
+
+- Discord: `AgentRule.invoker_role_ids` restricts invocation to current holders
+  of the configured Discord roles, including admins. Role-gated agents deny
+  routines.
+- Slack and Teams have no per-user agent gate. Admins must route these agents
+  only to private channels with restricted membership and use `runs_in` to limit
+  the channels in which they run. Every permitted channel participant can use
+  the agent's shared credentials.
+- CLI `--agent NAME` is unchecked at the agent level. Local CLI access must be
+  limited to trusted operators.
+- Fleet grants can bypass channel routing by spawning the credential holder as
+  a worker. Keep these agents out of grants whose `worker_agents` is `"any"` and
+  out of explicit worker-agent lists for other roots. Narrow the grant to
+  uncredentialed workers rather than allowing any agent.
+- Outside the Discord invoker-role gate, routines are not technically blocked
+  on these agents; only skill guidance forbids unattended writes. Operators
+  must not configure such routines.
+
+Google tokens enter the transcript as tool results and again in literal shell
+handoff commands, and last about one hour. The skills show a quoted heredoc;
+the scripts receive stdin and do not store tokens in their own argv or files.
+Drive copy/rename and template-copy/get support Shared Drives. Calendar updates
+accept any nonempty subset of supported fields; creates require summary/start/end.
+Slides text replacement skips deletion when a placeholder is already empty.

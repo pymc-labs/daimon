@@ -58,3 +58,22 @@ Opt-in agent specs live in `agents-optional/workspace-writer.yaml`,
 applying the default skill library, create each with `daimon agents create <path>`.
 They are not auto-created and carry no credentials. Restrict their audience before
 binding Google or collecting keys; every user of an agent can use its credentials.
+
+Audience restrictions must match the platform. On Discord, configure
+`AgentRule.invoker_role_ids` for the permitted roles (admins are checked too;
+role-gated agents deny routines). Slack and Teams have no per-user agent gate:
+route credential holders only to private channels with restricted membership,
+and limit channel reach with `runs_in`. CLI `--agent NAME` is unchecked, so
+only trusted operators should have local CLI access. Keep credential holders
+out of fleet grants with `worker_agents: "any"` and out of explicit worker-agent
+lists for other roots. Outside the Discord role gate, no runtime rule prevents
+routines on these agents; the skill's unattended-write prohibition is guidance.
+Do not configure those routines.
+
+Google tokens last about one hour; their handoff passes through the session
+transcript. Workspace and Slides skills provide exact quoted heredocs that send the
+token on script stdin; the scripts do not accept token arguments or save tokens.
+Workspace Drive operations and template copying opt into Shared Drive support.
+Toggl ownership preflight uses workspace Reports v3 rather than a key-owner-only
+read. `sync_workflow_runtime.py --check` fails on missing skill folders, and tests
+enforce byte-identical runtime copies.
