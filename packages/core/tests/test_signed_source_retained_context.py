@@ -13,6 +13,10 @@ from typing import Any
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
 from anthropic.types.beta.beta_managed_agents_mcp_toolset import BetaManagedAgentsMCPToolset
+from anthropic.types.beta.beta_managed_agents_multiagent import BetaManagedAgentsMultiagent
+from anthropic.types.beta.beta_managed_agents_session_multiagent_coordinator import (
+    BetaManagedAgentsSessionMultiagentCoordinator,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_agent_mcp_tool_result_event import (
     BetaManagedAgentsAgentMCPToolResultEvent,
 )
@@ -23,6 +27,7 @@ from daimon.core import sessions
 from daimon.core.config import McpSettings
 from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CONTEXT_ISOLATED
+from daimon.core.errors import SessionRetired
 from daimon.core.mcp_identity import relay_url
 from daimon.core.specs import AgentSpec, dump_agent_spec
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -31,11 +36,12 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.prepare import PreparedTurn, bind_session, isolated_relay_names
+from daimon.core.turn.run import _replace_dead_session  # pyright: ignore[reportPrivateUsage]
 from daimon.core.workspace_transfer import WorkspaceTransferRunner
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from pydantic import HttpUrl, SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .test_session_preparation import (
     _NOW,  # pyright: ignore[reportPrivateUsage]
@@ -129,7 +135,7 @@ async def test_relay_url_variants_enter_isolated_admission(
     assert transport.creates == 0
 
 
-@pytest.mark.parametrize("provider_fault", ["server", "skill", "marker"])
+@pytest.mark.parametrize("provider_fault", ["server", "skill", "marker", "multiagent"])
 async def test_revoked_source_result_is_absent_from_next_isolated_session(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -243,6 +249,14 @@ async def test_revoked_source_result_is_absent_from_next_isolated_session(
             )
         if provider_fault == "skill":
             changed = created.agent.model_copy(update={"skills": [skill]})
+        elif provider_fault == "multiagent":
+            changed = created.agent.model_copy(
+                update={
+                    "multiagent": BetaManagedAgentsSessionMultiagentCoordinator(
+                        type="coordinator", agents=[]
+                    )
+                }
+            )
         else:
             other = created.agent.mcp_servers[0].model_copy(
                 update={"name": "transcript", "url": public_url}
@@ -425,3 +439,122 @@ async def test_isolated_agent_with_another_tool_route_is_refused(
             now=lambda: _NOW,
         )
     assert transport.creates == 0
+
+
+async def test_isolated_agent_with_a_coordinator_roster_is_refused(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A roster brings other agents' tools and skills that overrides cannot clear."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    public_url = "https://daimon.example/mcp"
+    source, _skill = _source_agent(public_url)
+    agent = source.model_copy(
+        update={"multiagent": BetaManagedAgentsMultiagent(type="coordinator", agents=[])}
+    )
+    _register(transport.state, agent)
+    deps = replace(
+        _deps(db_session_factory, transport),
+        mcp=McpSettings(public_url=HttpUrl(public_url), jwt_secret=SecretStr("x" * 32)),
+        public_url=public_url,
+        isolated_relay_names=frozenset({"signed-source"}),
+    )
+    with pytest.raises(ValueError, match="dedicated relay-only agent"):
+        await bind_session(
+            deps,
+            _admission(account=account, agent=agent),
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-1",
+            session_account_id=account.id,
+            reuse_existing=True,
+            now=lambda: _NOW,
+        )
+    assert transport.creates == 0, "no session is created for a coordinator agent"
+
+
+@pytest.mark.parametrize("case", ["adopt_live_isolated", "replace_without_replay"])
+async def test_recovery_never_adopts_or_replays_an_isolated_session(
+    db_session: AsyncSession,
+    db_committing_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """Another request's session is not adopted, and no isolated transcript is replayed."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    transport = _Transport()
+    public_url = "https://daimon.example/mcp"
+    agent, skill = _source_agent(public_url)
+    _register(transport.state, agent)
+    transport.state.ma.agents[agent.id]["skills"] = [skill.model_dump(mode="json")]
+    deps = replace(
+        _deps(factory, transport),
+        mcp=McpSettings(public_url=HttpUrl(public_url), jwt_secret=SecretStr("x" * 32)),
+        public_url=public_url,
+        isolated_relay_names=frozenset({"signed-source"}),
+    )
+
+    async def fake_vault(*_args: object, **_kwargs: object) -> str:
+        return "vlt_caller"
+
+    async def fake_relay_vault(*_args: object, **_kwargs: object) -> str:
+        return "vlt_relay"
+
+    async def fake_archive_vault(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(sessions, "ensure_agent_mcp_vault", fake_vault)
+    monkeypatch.setattr(sessions, "create_relay_vault", fake_relay_vault)
+    monkeypatch.setattr(sessions, "archive_vault", fake_archive_vault)
+    admission = _admission(account=account, agent=agent)
+
+    async def prepare() -> PreparedTurn:
+        prepared = await bind_session(
+            deps,
+            admission,
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            thread_id="thread-1",
+            session_account_id=account.id,
+            reuse_existing=True,
+            now=lambda: _NOW,
+        )
+        assert isinstance(prepared, PreparedTurn)
+        return prepared
+
+    first = await prepare()
+    assert first.mapping_id is not None, "a bound turn carries its mapping"
+    if case == "adopt_live_isolated":
+        second = await prepare()
+        assert second.mapping_id != first.mapping_id
+    creates = transport.creates
+    recover = _replace_dead_session(
+        deps,
+        first,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        dead_session_id=first.ma_session_id,
+        dead_mapping_id=first.mapping_id,
+    )
+    if case == "adopt_live_isolated":
+        with pytest.raises(SessionRetired):
+            await recover
+        assert transport.creates == creates, "the live isolated session is not adopted"
+        return
+    replacement = await recover
+    assert not replacement.adopted and replacement.previous_session is None, (
+        "no isolated transcript is replayed into the successor"
+    )
+    assert replacement.transfer_kind == "history"
+    assert not transport.paths("GET", f"/v1/sessions/{first.ma_session_id}/events"), (
+        "the dead isolated transcript is never read"
+    )

@@ -654,6 +654,9 @@ async def create_session(
         or account_id is None
         or extra_resources
         or isolation_public_url is None
+        # A coordinator roster brings other agents' tools, servers and skills,
+        # and `agent_with_overrides` cannot clear it.
+        or agent.multiagent is not None
         or frozenset(server.name for server in agent.mcp_servers)
         != isolated_relay_names | {"daimon-mcp"}
         or len(agent.mcp_servers) != len(isolated_relay_names) + 1
@@ -1185,6 +1188,7 @@ async def create_session(
                         for tool in created.agent.tools
                     )
                     or created.agent.skills
+                    or created.agent.multiagent is not None
                     or (created.metadata or {}).get(MA_METADATA_KEY_CONTEXT_ISOLATED) != "true"
                     or created.resources
                     or created.vault_ids != [relay_vault_id]
