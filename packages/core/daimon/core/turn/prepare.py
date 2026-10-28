@@ -42,7 +42,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 )
 from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
-from daimon.core.config import load_turn_settings
+from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
@@ -685,6 +685,11 @@ async def create_ma_session(
             # person and may carry that person's own memory.
             personal_memory=True,
             tool_safety=deps.tool_safety,
+            legacy_memory_servers=(
+                get_repo_memory_settings(deps).legacy_mcp_server_names
+                if get_repo_memory_settings(deps).enabled
+                else ()
+            ),
             asks_before_publishing=admission.asks_before_publishing,
             confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
             daimon_rule_tools=admission.daimon_rule_tools,

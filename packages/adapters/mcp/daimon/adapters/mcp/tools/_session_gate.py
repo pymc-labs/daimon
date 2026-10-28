@@ -17,6 +17,7 @@ from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.channel_backend import backend_selection_enabled
+from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import backend_switch_tools
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
@@ -230,6 +231,11 @@ async def _recorded_as_gated(
                     asks_before_publishing=asks_before_publishing,
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
+                    legacy_memory_servers=(
+                        get_repo_memory_settings(runtime.settings).legacy_mcp_server_names
+                        if get_repo_memory_settings(runtime.settings).enabled
+                        else ()
+                    ),
                 )
                 if pre_watch:
                     # Policy-on sessions add watch gates implicitly too. Rebuild

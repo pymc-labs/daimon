@@ -13,6 +13,7 @@ workers only persist a subset of newly generated snapshots.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
@@ -30,6 +31,7 @@ from daimon.core.config import (
     McpSettings,
     MicrosoftAccountsSettings,
     NotebookSettings,
+    RepoMemorySettings,
     Settings,
     SlackSettings,
     TurnSettings,
@@ -38,7 +40,7 @@ from daimon.core.scope import DeploymentDefault
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from syrupy.assertion import SnapshotAssertion
 
 # Tool names whose absence would mean a whole registration group silently
@@ -56,6 +58,8 @@ _MUST_CONTAIN = {
     "sync_skills",
     "set_agent_default",
     "update_agent",
+    "repo_memory_save",
+    "repo_memory_delete",
 }
 
 
@@ -70,8 +74,10 @@ def _fully_configured_settings() -> Settings:
     registers — a partially-configured Settings would silently omit tools,
     which is the exact partial-truth failure this test exists to catch."""
     return Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
         turn=TurnSettings(path="mux", channel_backends=True, agent_backends=True),
         fleet=FleetSettings(enabled=True),
+        repo_memory=RepoMemorySettings(enabled=True),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(
@@ -128,6 +134,16 @@ def _normalize_snapshot_value[T](value: T) -> T:
         items = cast(list[object], value)
         return cast(T, [_normalize_snapshot_value(item) for item in items])
     return value
+
+
+@pytest.fixture
+async def sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Registry introspection constructs an engine but never opens a connection."""
+    engine = create_async_engine("postgresql+asyncpg://placeholder:placeholder@localhost/unused")
+    try:
+        yield async_sessionmaker(engine)
+    finally:
+        await engine.dispose()
 
 
 async def test_rendered_tool_schema_matches_snapshot(

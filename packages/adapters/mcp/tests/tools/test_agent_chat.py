@@ -2638,6 +2638,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "origin_seal_ids",
         "personal_memory",
         "before_create",
+        "legacy_memory_servers",
     }, f"the non-bundle path must keep passing its full argument set; got {sorted(call_kwargs)!r}"
     assert call_kwargs["app_session_unmapped"] is True
     assert call_kwargs["personal_memory"] is False, (

@@ -2246,6 +2246,36 @@ class LongJobsSettings(BaseModel):
     )
 
 
+class RepoMemorySettings(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable native repository memory tools and turn injection after a verified import."
+        ),
+    )
+    legacy_mcp_server_names: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Legacy MCP server names whose repo_memory_list and repo_memory_view tools "
+            "are disabled in sessions when native repository memory is enabled. "
+            "Set these before cutover so the agent sees one memory source."
+        ),
+    )
+
+    @field_validator("legacy_mcp_server_names")
+    @classmethod
+    def _legacy_names(cls, names: tuple[str, ...]) -> tuple[str, ...]:
+        if "daimon-mcp" in names:
+            raise ValueError("The native daimon-mcp server cannot be a legacy memory server.")
+        return names
+
+
+def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
+    """Absent or undeclared settings keep the optional feature disabled."""
+    value = getattr(settings, "repo_memory", None)
+    return value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
+
+
 class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
@@ -2332,6 +2362,7 @@ class Settings(BaseSettings):
     teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
+    repo_memory: RepoMemorySettings = Field(default_factory=RepoMemorySettings)
     microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)

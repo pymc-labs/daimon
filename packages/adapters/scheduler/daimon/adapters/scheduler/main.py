@@ -54,7 +54,12 @@ from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_sessions import ComputeSessions
-from daimon.core.config import DirectMessagePolicy, Settings, load_settings
+from daimon.core.config import (
+    DirectMessagePolicy,
+    Settings,
+    get_repo_memory_settings,
+    load_settings,
+)
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
@@ -801,6 +806,7 @@ async def _build_fire(
             on_state=final_state.append,
             on_session=output_sessions.append,
             mcp_settings=settings.mcp,
+            repo_memory=get_repo_memory_settings(settings),
             account_id=account_id,
             usage_record_factory=usage_record_factory,
             tenant_id=row.tenant_id,

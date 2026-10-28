@@ -11,6 +11,7 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
+from daimon.core.config import RepoMemorySettings
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -36,6 +37,7 @@ AGENT = ma_agent(
 def _runtime() -> McpRuntime:
     settings = SimpleNamespace(
         tool_safety=POLICY,
+        repo_memory=RepoMemorySettings(),
         mcp=SimpleNamespace(public_url="https://mcp.example/mcp"),
         turn=SimpleNamespace(),
         microsoft_accounts=SimpleNamespace(configured=False),
@@ -269,4 +271,57 @@ async def test_pre_watch_card_compatibility_requires_the_exact_scoped_target_gat
         reported_tools_sha256="out-of-band"
         if tamper == "reported_tools"
         else hash_tools(AGENT.tools),
+    )
+
+
+async def test_recorded_suppression_still_proves_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = ma_agent(
+        id="agent",
+        tools=[
+            *AGENT.tools,
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "legacy",
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+                "configs": [],
+            },
+        ],
+        mcp_servers=[
+            *AGENT.mcp_servers,
+            {
+                "name": "legacy",
+                "type": "url",
+                "url": "https://mcp.example/legacy",
+            },
+        ],
+    )
+    monkeypatch.setattr(_session_gate, "retrieve_agent", AsyncMock(return_value=agent))
+    monkeypatch.setattr(
+        _session_gate,
+        "daimon_rule_tools_for",
+        AsyncMock(return_value=frozenset()),
+    )
+    runtime = _runtime()
+    runtime.settings.repo_memory = RepoMemorySettings(
+        enabled=True, legacy_mcp_server_names=("legacy",)
+    )
+    recorded = hash_tools(
+        session_tools(
+            agent,
+            frozenset(),
+            tool_safety=POLICY,
+            public_url="https://mcp.example/mcp",
+            asks_before_publishing=True,
+            legacy_memory_servers=("legacy",),
+        )
+    )
+    assert await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        AUTH,
+        cast(Any, SimpleNamespace(effective_config=SimpleNamespace(tools_sha256=recorded))),
+        tool_name="publish_report",
+        ma_agent_id="agent",
+        reported_tools_sha256=hash_tools(agent.tools),
     )

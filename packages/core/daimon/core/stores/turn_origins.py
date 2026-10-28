@@ -159,6 +159,7 @@ async def bind_origin_session(
     origin_id: uuid.UUID,
     chat_session_id: str | None,
     human_invocation: bool | None = None,
+    memory_read_only: bool | None = None,
     attended: bool | None = None,
     lease: Lease | None = None,
 ) -> None:
@@ -177,7 +178,12 @@ async def bind_origin_session(
             .where(TurnOrigin.chat_session_id == chat_session_id, TurnOrigin.id != origin_id)
             .values(chat_session_id=None)
         )
-    values: dict[str, Any] = {"chat_session_id": chat_session_id}
+    values: dict[str, Any] = {
+        "chat_session_id": chat_session_id,
+    }
+    # Native runtimes rebind the signed grant without changing its admission stamp.
+    if chat_session_id is None or memory_read_only is not None:
+        values["memory_read_only"] = memory_read_only if chat_session_id is not None else None
     if attended is not None:
         values["attended"] = TurnOrigin.attended & attended
     if human_invocation is not None:

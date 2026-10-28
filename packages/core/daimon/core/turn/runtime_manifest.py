@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_
 from uuid import UUID
 
 import structlog
+from daimon.core.config import get_repo_memory_settings
 from daimon.core.errors import DaimonError, TurnError
 from daimon.core.neutral_resources import (
     AgentFleetGrant,
@@ -1650,6 +1651,11 @@ async def capture_preparation_source(
         fernet=request.deps.fernet,
         channel_skills=request.admission.channel_skills,
         tool_safety=request.deps.tool_safety,
+        legacy_memory_servers=(
+            get_repo_memory_settings(request.deps).legacy_mcp_server_names
+            if get_repo_memory_settings(request.deps).enabled
+            else ()
+        ),
         asks_before_publishing=request.admission.asks_before_publishing,
         mcp_settings=request.deps.mcp,
         agent_github_app=request.deps.agent_github_app,

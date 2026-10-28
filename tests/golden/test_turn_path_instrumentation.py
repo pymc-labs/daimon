@@ -6,6 +6,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from daimon.core.config import RepoMemorySettings
 from daimon.testing.effect_recorder import database_metadata
 from runner import SCENARIOS, replay
 from sqlalchemy import insert
@@ -15,11 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 async def test_controls_are_forwarded_without_erasing_semantic_kwargs() -> None:
     turn = AsyncMock(name="run_turn", return_value=None)
     backend, scope, session_ref = object(), object(), object()
+    repo_memory = RepoMemorySettings()
     await turn(
         path="mux",
         backend=backend,
         scope=scope,
         session_ref=session_ref,
+        repo_memory=repo_memory,
         session_id="sess_probe",
         user_message="Literal /notes/file_alpha",
         model_id="caller-model",
@@ -31,6 +34,7 @@ async def test_controls_are_forwarded_without_erasing_semantic_kwargs() -> None:
     assert turn.call_args.kwargs["scope"] is scope
     assert turn.call_args.kwargs["session_ref"] is session_ref
     assert turn.call_args.kwargs["path"] == "mux"
+    assert turn.call_args.kwargs["repo_memory"] is repo_memory
 
 
 @pytest.mark.parametrize("lease_count", (0, 1, 3))

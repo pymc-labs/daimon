@@ -9,7 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add optional owner-isolated Fly sessions with approved launch/extension, inline bash, file tools and automatic lease cleanup. Launches are disabled by default. Cleanup runs on its own scheduler loop and isolates failures per machine; foreign callers are refused.
 
+- Preserve trusted turn controls and disabled repository-memory defaults when
+  runtime settings are partial.
+
 - Support operator-configured Google authorized-user credentials for matching agent bindings alongside service-account delegation.
+
+- Keep legacy repository-memory readers suppressed during in-place session updates
+  and confirmation checks. Preserve origin restrictions on native-runtime rebinds,
+  inject repository state only on the first successful turn or a state change, and
+  reject invalid or reserved slugs in offline memory imports.
 
 - Replace whitespace-only Slides text by deleting it before insertion, including
   newline-only shapes; genuinely empty shapes still skip deletion.
@@ -39,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add a sandbox Workspace write skill using short-lived Google tokens on a dedicated
   bound agent, with explicit operations and redacted errors. Correct CLI auth
   guidance for ordinary chat identity.
+
+- Add opt-in repository memory shared across agents, creator-only personal directives,
+  four native `repo_memory_*` tools, bounded turn injection, legacy reader suppression
+  and an offline importer. Bound working repositories use their live App grant without
+  requiring each person to link GitHub. Restricted conversations cannot save or delete.
 
 - Add slot-safe routine handover with claimed-slot and completion evidence,
   stable internal ids, atomic `seed-first-run` and `pause-for-handback` operator

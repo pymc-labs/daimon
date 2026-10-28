@@ -8219,6 +8219,147 @@
         'type': 'object',
       }),
     }),
+    'repo_memory_delete': dict({
+      'description': '''
+        Forget a memory by slug only when the person explicitly asks.
+        <blank line>
+        Deletes from the bound working repo. Anyone using the repo can delete
+        shared entries; only the creator can delete a personal directive.
+        Restricted conversations and routines refuse. Use this reply's origin_context_id.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'name': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'name',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'repo_memory_list': dict({
+      'description': '''
+        List repository memories: shared entries and your own personal directives.
+        <blank line>
+        Omit repo for the agent's bound working repository. Reading another
+        granted repo requires your linked GitHub account's read access.
+        Use this reply's origin_context_id. Routine callers cannot use this tool.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'repo': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'repo_memory_save': dict({
+      'description': '''
+        Remember information for the bound working repository across sessions.
+        <blank line>
+        Save only at the person's request. References appear in a catalog;
+        directives are standing rules included in turns, within a size budget.
+        Personal preferences use kind=directive, scope=user. Other people cannot
+        see them. Shared entries can be updated by anyone using this repo.
+        Titles become slugs (64 characters); re-saving a slug replaces content
+        and cannot change scope. Restricted conversations and routines refuse.
+        Use this reply's origin_context_id. Do not put repo memories in MA files.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'body': dict({
+            'type': 'string',
+          }),
+          'kind': dict({
+            'default': 'reference',
+            'enum': list([
+              'reference',
+              'directive',
+            ]),
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'scope': dict({
+            'default': 'repo',
+            'enum': list([
+              'repo',
+              'user',
+            ]),
+            'type': 'string',
+          }),
+          'title': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'title',
+          'body',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'repo_memory_view': dict({
+      'description': '''
+        Read a repository memory's full body by its listed slug.
+        <blank line>
+        Omit repo for the working repository; another repo requires personal
+        GitHub read access. Use this reply's origin_context_id.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'name': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'repo': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'name',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'request_agent_backend_switch': dict({
       'description': '''
         Preview a requested agent backend switch, then Confirm in this chat.

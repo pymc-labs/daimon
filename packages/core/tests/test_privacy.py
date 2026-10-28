@@ -896,6 +896,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Shared setup binding attribution uses SET NULL on creator erasure;
             # deleting the conversation would destroy other participants' work.
             "thread_agent_bindings",
+            # delete_account explicitly removes this person's user-scope directives;
+            # shared entries belong to the repo and retain content with attribution
+            # severed by ON DELETE SET NULL. Never erase other participants' memories.
+            "repo_memory",
             # Active-turn authority is ephemeral, carries no conversation content,
             # and is automatically erased by accounts.id ON DELETE CASCADE.
             # The store tests verify this; it needs no separately reported category.

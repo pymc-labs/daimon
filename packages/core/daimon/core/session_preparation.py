@@ -44,6 +44,7 @@ import structlog
 from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
+from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
@@ -941,6 +942,11 @@ async def _prepare_session_for_turn_locked(
             fernet=deps.fernet,
             recorded=recorded,
             tool_safety=deps.tool_safety,
+            legacy_memory_servers=(
+                get_repo_memory_settings(deps).legacy_mcp_server_names
+                if get_repo_memory_settings(deps).enabled
+                else ()
+            ),
             public_url=deps.public_url,
             requires_chat_session=(
                 admission.shared_owner is None
@@ -1187,6 +1193,11 @@ async def _prepare_session_for_turn_locked(
                 confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
                 daimon_rule_tools=admission.daimon_rule_tools,
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
+                legacy_memory_servers=(
+                    get_repo_memory_settings(deps).legacy_mcp_server_names
+                    if get_repo_memory_settings(deps).enabled
+                    else ()
+                ),
             )
 
         if isinstance(decision, ReuseAsIs):

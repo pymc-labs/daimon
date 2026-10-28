@@ -1758,3 +1758,49 @@ async def test_headless_role_gated_target_is_refused_before_session_creation(
         await client.close()
     assert created == []
     assert sent == []
+
+
+async def test_routine_receives_shared_repo_memory_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    run_turn: RunTurn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    import daimon.core.repo_memory as memory
+    from daimon.core.config import RepoMemorySettings
+
+    await db_session.commit()
+    prefix = AsyncMock(return_value="<repo_memory_state>Shared rule</repo_memory_state>\n")
+    monkeypatch.setattr(memory, "turn_memory_prefix", prefix)
+    events: list[BetaManagedAgentsSessionEvent] = [
+        BetaManagedAgentsAgentMessageEvent(
+            id="msg",
+            type="agent.message",
+            processed_at=_NOW,
+            content=[BetaManagedAgentsTextBlock(type="text", text="done")],
+        ),
+        BetaManagedAgentsSessionStatusIdleEvent(
+            id="idle",
+            type="session.status_idle",
+            processed_at=_NOW,
+            stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
+        ),
+    ]
+    sent: list[dict[str, Any]] = []
+    client = _build_client(events, send_capture=sent)
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        origin="routine",
+        session_factory=db_session_factory,
+        repo_memory=RepoMemorySettings(enabled=True),
+    )
+    prefix.assert_awaited_once()
+    assert prefix.await_args.kwargs["account_id"] is None, (
+        "a routine never adopts its owner's directives"
+    )
+    assert "Shared rule" in sent[0]["events"][0]["content"][0]["text"]

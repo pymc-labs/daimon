@@ -2248,6 +2248,43 @@ Uncommitted workspace files are not transferred on this restricted replacement.
 Memory content is managed directly by the MA memory store. This safeguard does not
 add per-memory author/origin records or rollback tooling.
 
+### Repository memory
+
+With `repo_memory.enabled` (off by default), repository memories live in the
+`repo_memory` Postgres table, keyed by tenant, GitHub repository id and title slug.
+They are shared across agents using that repository, independently of MA memory stores.
+`repo_memory_list`, `repo_memory_view`, `repo_memory_save` and `repo_memory_delete`
+use a verified signed conversation origin and the responder's live App working-repo grant.
+The administrator-approved working repo needs no personal GitHub link. An alternate
+`repo=` read requires both an active agent grant and the caller's linked GitHub read access.
+
+Anyone using the bound repo can replace or delete a shared entry. Personal directives
+(`kind=directive`, `scope=user`) are visible and mutable only by their creator; a save
+cannot change an entry's scope. Titles produce slugs up to 64 characters; re-saving
+replaces content and warns if another title occupied that slug. References are catalog
+pointers; directives include their bodies in the turn prefix. The common turn path uses
+one indexed query, returning at most 512 entries and 40 KB of projected content; the
+escaped prefix has a hard 48 KB UTF-8 budget. Overflow is marked for explicit retrieval; an oversized directive becomes a pointer
+to its full body rather than a partial instruction.
+Repository state follows the trusted turn controls. The first turn receives the rendered state; subsequent turns receive it only when
+that state changes. The same query reads the last delivered hash by tenant, provider
+and session in `repo_memory_sessions`. A successful turn records the new hash; failed turns can retry it, and
+replacement sessions receive a fresh copy from the same turn’s state read. Empty state supersedes earlier saved
+rules. No reference bodies are preloaded.
+
+Both mutations refuse restricted, held, foreign and memory-read-only conversations,
+including personal saves. Unknown or unattended origins refuse all four tools.
+Shared sessions never inject a speaker's personal directives.
+Held/foreign turns receive no repository-memory prefix. Routines receive only shared
+state for their authorized working repo and cannot invoke the tools. Reviewed facts in
+the dedicated reviewed-memory repository belong in Git/PRs rather than reference entries.
+Account erasure deletes personal directives; shared entries retain content with attribution removed.
+
+Before enabling native memory, import and verify existing entries and configure
+`repo_memory.legacy_mcp_server_names`. Session tool overrides disable only those servers'
+`repo_memory_list` and `repo_memory_view`, so the model uses one native source.
+Retire old sessions at cutover. There is no fallback to a stale legacy list after a native write.
+
 ### Shared and personal memory
 
 An agent has three kinds of memory store (`packages/core/daimon/core/memory_resource.py`):

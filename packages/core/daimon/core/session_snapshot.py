@@ -55,6 +55,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_server_url import session_mcp_url
 from daimon.core.model_presets import model_choice_id
+from daimon.core.repo_memory_tools import suppress_legacy_readers
 from daimon.core.tool_safety import (
     ToolSafetyPolicy,
     heal_reserved_server,
@@ -537,6 +538,7 @@ def session_tools(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    legacy_memory_servers: tuple[str, ...] = (),
 ) -> Sequence[MaTool]:
     """The tools a session for this caller runs: the visible ones, tool safety applied,
     and the publish tools asking first when the turn's agent may not publish freely.
@@ -560,6 +562,9 @@ def session_tools(
         confirmed_tools=confirmed_tools,
         daimon_rule_tools=daimon_rule_tools,
     )
+    payload = gated if gated is not None else [tool.model_dump(mode="json") for tool in visible]
+    if legacy_memory_servers:
+        return _TOOLS.validate_python(suppress_legacy_readers(payload, legacy_memory_servers))
     return visible if gated is None else _TOOLS.validate_python(gated)
 
 
@@ -614,6 +619,7 @@ def desired_snapshot(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    legacy_memory_servers: tuple[str, ...] = (),
     mcp_hold: str | None = None,
     memory_scope: str | None = None,
     repo_mount_path: str | None = None,
@@ -677,6 +683,7 @@ def desired_snapshot(
                 asks_before_publishing=asks_before_publishing,
                 confirmed_tools=confirmed_tools,
                 daimon_rule_tools=daimon_rule_tools,
+                legacy_memory_servers=legacy_memory_servers,
             )
         ),
         mcp_servers_sha256=hash_mcp_servers(

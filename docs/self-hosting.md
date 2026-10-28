@@ -1961,3 +1961,20 @@ browser notebook access are not provided.
 
 Account erasure cascades the Fly registration and its conversation metadata; the
 scheduler deletes the remaining tagged machine as an orphan on a later sweep.
+
+
+## Enabling repository memory
+
+Native repository memory is disabled by default. Apply the database migration first.
+For an existing deployment, freeze legacy memory writes, run the offline importer
+(`scripts/import_repo_memory.py`, whose docstring contains the input formats and
+runbook), and compare the dry-run and applied manifests before switching authority.
+Keep exports and identity maps outside the repository.
+
+Set `DAIMON_REPO_MEMORY__LEGACY_MCP_SERVER_NAMES` to the JSON array of attached legacy
+MCP server names, then enable `DAIMON_REPO_MEMORY__ENABLED` on every participating
+process. Drain and retire existing conversations before starting fresh sessions;
+verify the four native tools show the imported shared and personal entries and legacy
+memory readers are disabled. No personal GitHub link is needed for the bound working repo.
+After native writes begin, rollback requires reconciling those writes before restoring
+legacy readers; toggling the switch alone would restore stale data.

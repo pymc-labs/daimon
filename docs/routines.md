@@ -1030,3 +1030,13 @@ worker deadline is independent of the interactive turn ceiling. Workers retain l
 across heartbeats, and expired launching/running leases are reclaimed by replaying the
 same session. Long-job policy does not enable sandbox tools for routines or other
 unattended entry points.
+
+
+## Repository memory
+
+When native repository memory is enabled, routine turns receive the shared directive
+and reference catalog for the agent's live GitHub App working repository, within the
+turn's memory size budget. They receive no person's private directives. The four
+`repo_memory_*` tools refuse unattended calls, including routine, watch and worker
+executions, so a routine cannot save or delete durable state attributed to its owner.
+Held or foreign conversations do not receive repository memory.
