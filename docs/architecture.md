@@ -2266,7 +2266,7 @@ pointers; directives include their bodies in the turn prefix. The common turn pa
 one indexed query, returning at most 512 entries and 40 KB of projected content; the
 escaped prefix has a hard 48 KB UTF-8 budget. Overflow is marked for explicit retrieval; an oversized directive becomes a pointer
 to its full body rather than a partial instruction.
-The first turn receives the rendered state; subsequent turns receive it only when
+Repository state follows the trusted turn controls. The first turn receives the rendered state; subsequent turns receive it only when
 that state changes. The same query reads the last delivered hash by tenant, provider
 and session in `repo_memory_sessions`. A successful turn records the new hash; failed turns can retry it, and
 replacement sessions receive a fresh copy from the same turn’s state read. Empty state supersedes earlier saved

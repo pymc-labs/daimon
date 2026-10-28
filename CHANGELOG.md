@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add optional owner-isolated Fly sessions with approved launch/extension, inline bash, file tools and automatic lease cleanup. Launches are disabled by default. Cleanup runs on its own scheduler loop and isolates failures per machine; foreign callers are refused.
 
+- Preserve trusted turn controls and disabled repository-memory defaults when
+  runtime settings are partial.
+
 - Support operator-configured Google authorized-user credentials for matching agent bindings alongside service-account delegation.
 
 - Keep legacy repository-memory readers suppressed during in-place session updates

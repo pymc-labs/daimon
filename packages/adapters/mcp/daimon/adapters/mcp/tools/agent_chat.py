@@ -110,6 +110,7 @@ from daimon.core import bundle_handle
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.config import get_repo_memory_settings
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
 from daimon.core.github_app_session import close_headless_app_session
@@ -699,8 +700,8 @@ async def _start_turn_impl(
             app_session_unmapped=True,
             tool_safety=runtime.settings.tool_safety,
             legacy_memory_servers=(
-                runtime.settings.repo_memory.legacy_mcp_server_names
-                if runtime.settings.repo_memory.enabled
+                get_repo_memory_settings(runtime.settings).legacy_mcp_server_names
+                if get_repo_memory_settings(runtime.settings).enabled
                 else ()
             ),
             github_fallback_pat=github_fallback_pat,

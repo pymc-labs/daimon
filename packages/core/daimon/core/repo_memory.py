@@ -10,6 +10,7 @@ from typing import Literal
 from xml.sax.saxutils import escape, quoteattr
 
 from daimon.core.stores.repo_memory import MemoryEntry, record_turn_state, turn_entries
+from mux.profiles import MANAGED_AGENTS
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -154,7 +155,7 @@ async def turn_memory_state(
     account_id: uuid.UUID | None,
     allowed: bool,
     session_id: str | None = None,
-    session_provider: str = "anthropic",
+    session_provider: str = MANAGED_AGENTS.provider,
 ) -> MemoryState:
     if not allowed:
         return MemoryState()
@@ -192,7 +193,7 @@ async def turn_memory_prefix(
     account_id: uuid.UUID | None,
     allowed: bool,
     session_id: str | None = None,
-    session_provider: str = "anthropic",
+    session_provider: str = MANAGED_AGENTS.provider,
 ) -> str:
     return (
         await turn_memory_state(
@@ -212,7 +213,7 @@ async def record_memory_prefix(
     *,
     tenant_id: uuid.UUID,
     session_id: str,
-    session_provider: str = "anthropic",
+    session_provider: str = MANAGED_AGENTS.provider,
     prefix: str,
 ) -> None:
     if not prefix:
@@ -225,3 +226,14 @@ async def record_memory_prefix(
             session_id=session_id,
             sha256=hashlib.sha256(prefix.encode()).hexdigest(),
         )
+
+
+def with_memory_prefix(message: str, memory: str) -> str:
+    """Keep trusted turn controls first when adding saved repository state."""
+    if not memory:
+        return message
+    if message.startswith("<turn_controls>"):
+        controls, end, body = message.partition("</turn_controls>")
+        if end:
+            return controls + end + "\n" + memory + body
+    return memory + "\n" + message

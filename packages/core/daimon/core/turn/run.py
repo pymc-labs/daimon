@@ -27,7 +27,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
-from daimon.core.config import load_turn_settings
+from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
     ToolRuleCardReference,
@@ -48,7 +48,12 @@ from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.mux_compat import legacy_call
-from daimon.core.repo_memory import MemoryState, record_memory_prefix, turn_memory_state
+from daimon.core.repo_memory import (
+    MemoryState,
+    record_memory_prefix,
+    turn_memory_state,
+    with_memory_prefix,
+)
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
@@ -1024,13 +1029,15 @@ async def _repo_memory_state(
     origin: TurnContext,
     unattended: bool,
 ) -> MemoryState:
-    if not deps.repo_memory.enabled:
+    if not get_repo_memory_settings(deps).enabled:
         return MemoryState()
     return await turn_memory_state(
         deps.sessionmaker,
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id),
-        session_provider=prepared.session_ref.provider if prepared.session_ref else "anthropic",
+        session_provider=prepared.session_ref.provider
+        if prepared.session_ref
+        else MANAGED_AGENTS.provider,
         session_id=prepared.ma_session_id,
         # Shared conversations never acquire one speaker's private directives.
         account_id=(
@@ -1189,7 +1196,7 @@ async def run_prepared_turn_impl(
         unattended=unattended,
     )
     repo_memory = memory_state.prefix
-    prefix = context + plans + repo_memory + prepared.continuity.user_prefix
+    prefix = context + plans + prepared.continuity.user_prefix
     if prepared.admission.model_fell_back:
         prefix += MODEL_FALLBACK_NOTICE
 
@@ -1751,7 +1758,9 @@ async def run_prepared_turn_impl(
                             ),
                             anthropic=deps.anthropic,
                             session_id=ma_session_id,
-                            user_message=_with_prefix(prefix, user_message),
+                            user_message=_with_prefix(
+                                prefix, with_memory_prefix(user_message, repo_memory)
+                            ),
                             lifecycle=first_attempt,
                             cancel=cancel,
                             render_interval_s=render_interval_s,
@@ -1781,7 +1790,7 @@ async def run_prepared_turn_impl(
                                 session_id=ma_session_id,
                                 session_provider=prepared.session_ref.provider
                                 if prepared.session_ref
-                                else "anthropic",
+                                else MANAGED_AGENTS.provider,
                                 prefix=repo_memory,
                             )
                         if delivery is not None:
@@ -1916,7 +1925,7 @@ async def run_prepared_turn_impl(
             # died. What goes instead is this loss's own framing -- daimon's
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
-            reseeded_message = _with_prefix(plans + loss_user_prefix, await reseed_user_message())
+            reseeded_message = await reseed_user_message()
             # A replacement needs the full state even if the old session already
             # had it. Reuse this turn's single read, only for the same principal
             # and repo-binding agent under an equally eligible admission.
@@ -1958,7 +1967,11 @@ async def run_prepared_turn_impl(
                         ),
                         anthropic=deps.anthropic,
                         session_id=new_session_id,
-                        user_message=context + recovery_memory + reseeded_message,
+                        user_message=context
+                        + _with_prefix(
+                            plans + loss_user_prefix,
+                            with_memory_prefix(reseeded_message, recovery_memory),
+                        ),
                         lifecycle=new_lifecycle,
                         cancel=fresh_cancel,
                         render_interval_s=render_interval_s,
@@ -1986,7 +1999,7 @@ async def run_prepared_turn_impl(
                             deps.sessionmaker,
                             tenant_id=tenant_id,
                             session_id=new_session_id,
-                            session_provider="anthropic",
+                            session_provider=MANAGED_AGENTS.provider,
                             prefix=recovery_memory,
                         )
             finally:

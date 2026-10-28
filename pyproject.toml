@@ -306,6 +306,8 @@ source_modules = [
     "daimon.core.purge",
     "daimon.core.reader_agent",
     "daimon.core.reports",
+    "daimon.core.repo_memory",
+    "daimon.core.repo_memory_tools",
     "daimon.core.roster",
     "daimon.core.routine_delivery",
     "daimon.core.routine_sandbox",

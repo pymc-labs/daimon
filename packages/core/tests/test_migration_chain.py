@@ -83,7 +83,7 @@ ADMINS_HEAD = "0148_daimon_admins"
 ROUTINES_HEAD = "0151_routine_claimed_slot"
 
 
-HEAD = "0152_compute_sessions"
+HEAD = "0153_repo_memory_state"
 
 
 CHAIN = [
@@ -107,6 +107,8 @@ CHAIN = [
     "0149_context_provider_bindings",
     "0150_origin_human_invocation",
     ROUTINES_HEAD,
+    "0152_compute_sessions",
+    "0152_repo_memory",
     HEAD,
 ]
 
@@ -124,6 +126,8 @@ SANDBOX_COLUMNS = {
 
 TABLES = {
     "compute_sessions",
+    "repo_memory",
+    "repo_memory_sessions",
     "daimon_admins",
     "context_provider_bindings",
     "selfhosted_agents",
@@ -195,7 +199,12 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     if expected not in (LONG_JOBS_HEAD, ADMINS_HEAD, HEAD):
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
     if expected != HEAD:
-        compared_tables = compared_tables - {"context_provider_bindings", "compute_sessions"}
+        compared_tables = compared_tables - {
+            "context_provider_bindings",
+            "compute_sessions",
+            "repo_memory",
+            "repo_memory_sessions",
+        }
     if expected not in (ADMINS_HEAD, HEAD):
         compared_tables = compared_tables - {"daimon_admins"}
     if expected not in (
@@ -249,7 +258,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return getattr(getattr(obj, "table", None), "name", None) != "turn_origins"
         if (
             kind == "column"
-            and name == "human_invocation"
+            and name in {"human_invocation", "memory_read_only"}
             and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
             and expected != HEAD
         ):

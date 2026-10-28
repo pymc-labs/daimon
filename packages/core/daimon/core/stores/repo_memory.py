@@ -8,6 +8,7 @@ from typing import Literal
 
 from daimon.core._models import Account, RepoMemory, RepoMemorySession
 from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
+from mux.profiles import MANAGED_AGENTS
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
@@ -115,7 +116,7 @@ async def turn_entries(
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
     session_id: str | None = None,
-    session_provider: str = "anthropic",
+    session_provider: str = MANAGED_AGENTS.provider,
 ) -> tuple[str, list[tuple[str, str, str, str, str]], str | None]:
     """One indexed query: live working grant, scoped confirmation and bounded catalog.
 

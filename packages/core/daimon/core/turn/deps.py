@@ -33,6 +33,7 @@ from daimon.core.config import (
     RepoMemorySettings,
     Settings,
     TurnSettings,
+    get_repo_memory_settings,
     load_turn_settings,
 )
 from daimon.core.context_provider import ContextProviders, ProviderConfig
@@ -212,7 +213,7 @@ def build_turn_deps(
             else None
         ),
         direct_message_policies=settings.direct_message_policies,
-        repo_memory=settings.repo_memory,
+        repo_memory=get_repo_memory_settings(settings),
         anthropic=anthropic,
         messages=anthropic,
         turn_runtime_factory=build_channel_runtime,

@@ -11,6 +11,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.core.config import get_repo_memory_settings
 from daimon.core.github_app_session import REQUESTER_CACHE, effective_app_grant_view
 from daimon.core.github_requester_access import linked_permissions
 from daimon.core.ma_identity import derive_agent_uuid
@@ -36,7 +37,7 @@ async def resolve_repo(
     repo: str | None = None,
     write: bool = False,
 ) -> AuthorizedRepo:
-    if not runtime.settings.repo_memory.enabled:
+    if not get_repo_memory_settings(runtime.settings).enabled:
         raise ToolError("Native repository memory is disabled.")
     if auth.routine_id is not None or auth.execution_id is not None or auth.is_external_agent:
         raise ToolError("Repository memory tools need an interactive conversation.")
@@ -156,7 +157,7 @@ async def repo_memory_impl(
 
 
 def register_repo_memory_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    if not runtime.settings.repo_memory.enabled:
+    if not get_repo_memory_settings(runtime.settings).enabled:
         return
 
     @mcp.tool()

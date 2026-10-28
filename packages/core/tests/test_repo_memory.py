@@ -187,3 +187,28 @@ async def test_turn_prefix_is_sent_on_first_turn_and_only_after_a_render_change(
         "one state query on each eligible turn, including unchanged turns"
     )
     assert query.call_args.kwargs["session_id"] == "replacement"
+
+
+def test_settings_are_disabled_for_partial_or_mock_bundles() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from daimon.core.config import RepoMemorySettings, get_repo_memory_settings
+
+    for settings in (SimpleNamespace(), MagicMock(), SimpleNamespace(repo_memory=None)):
+        assert get_repo_memory_settings(settings).enabled is False
+    enabled = RepoMemorySettings(enabled=True, legacy_mcp_server_names=("legacy",))
+    assert get_repo_memory_settings(SimpleNamespace(repo_memory=enabled)) is enabled
+
+
+def test_memory_follows_trusted_controls_and_leaves_disabled_messages_unchanged() -> None:
+    from daimon.core.repo_memory import with_memory_prefix
+
+    controls = '<turn_controls>\n{"origin_context_id":"verified"}\n</turn_controls>'
+    body = "\n<user_query>Question</user_query>"
+    state = "<repo_memory_state>Rule</repo_memory_state>\n"
+    result = with_memory_prefix(controls + body, state)
+    assert result.startswith(controls + "\n" + state)
+    assert result.endswith(body)
+    assert with_memory_prefix(controls + body, "") == controls + body
+    assert with_memory_prefix("Routine prompt", state) == state + "\nRoutine prompt"

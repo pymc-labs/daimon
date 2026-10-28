@@ -21,7 +21,7 @@ from daimon.adapters.cli.sessions_bootstrap import (
     resolve_agent_and_environment,
 )
 from daimon.adapters.cli.tenant import discover_tenant
-from daimon.core.config import load_settings
+from daimon.core.config import get_repo_memory_settings, load_settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import platform_scope
 from daimon.core.session_ports_compat import retrieve_session_record
@@ -105,8 +105,8 @@ async def sessions_create(
         requester_is_headless=True,
         tool_safety=rt.settings.tool_safety,
         legacy_memory_servers=(
-            rt.settings.repo_memory.legacy_mcp_server_names
-            if rt.settings.repo_memory.enabled
+            get_repo_memory_settings(rt.settings).legacy_mcp_server_names
+            if get_repo_memory_settings(rt.settings).enabled
             else ()
         ),
     )

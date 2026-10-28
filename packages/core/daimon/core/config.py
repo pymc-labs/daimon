@@ -2270,6 +2270,12 @@ class RepoMemorySettings(BaseModel):
         return names
 
 
+def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
+    """Absent or undeclared settings keep the optional feature disabled."""
+    value = getattr(settings, "repo_memory", None)
+    return value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
+
+
 class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
