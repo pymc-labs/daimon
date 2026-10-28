@@ -1967,7 +1967,9 @@ session. Polling needs `DAIMON_COMPUTE__DEPLOYMENT_ID` and
 `DAIMON_COMPUTE__SESSION_AUTH_KEY` in the scheduler; it keeps running when launches
 are disabled. A machine restart loses running commands; they are reported as
 stopped unexpectedly, never rerun. Stopping a session ends its commands and
-reports them once.
+reports them once. A command that daemonizes itself (its own `setsid` or
+double fork) survives the overdue-command kill until the machine is deleted
+at lease end.
 
 Account erasure cascades the Fly registration and its conversation metadata; the
 scheduler deletes the remaining tagged machine as an orphan on a later sweep.
