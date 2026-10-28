@@ -16,6 +16,7 @@ typo is silent — check the spelling here.
 ## Contents
 
 - [Core](#core)
+- [Compute](#compute)
 - [Long Jobs](#long-jobs)
 - [Database](#database)
 - [Anthropic](#anthropic)
@@ -130,6 +131,66 @@ process cwd — works for in-repo dev (repo root) and the deployed container lay
 (working dir contains defaults/ at root). Single source of truth shared by the
 scheduler, Discord/Slack adapters, CLI session bootstrap, and MCP routine tools. Do NOT
 add adapter-local defaults_root fields — they invite drift.
+
+## Compute
+
+Read from `daimon.core.config.ComputeSettings`. Prefix `DAIMON_COMPUTE__`.
+
+### `DAIMON_COMPUTE__ENABLED`
+
+`bool` · optional · default `False`
+
+Allow attended owners to launch Fly sessions. Disabling launch does not disable cleanup.
+
+### `DAIMON_COMPUTE__DEPLOYMENT_ID`
+
+`str` · optional · default unset
+
+Stable unique deployment identifier fencing Fly resources. Required to use compute.
+
+### `DAIMON_COMPUTE__API_TOKEN`
+
+`SecretStr | None` · optional · default unset · secret
+
+Fly API token, control plane and scheduler only. Never mounted in compute machines.
+
+### `DAIMON_COMPUTE__ORG_SLUG`
+
+`str` · optional · default unset
+
+Fly organization for this deployment's disposable sessions.
+
+### `DAIMON_COMPUTE__SESSION_AUTH_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Stable control-plane HMAC key deriving per-session MCP tokens. Never mounted on
+machines.
+
+### `DAIMON_COMPUTE__PER_PERSON_SESSIONS`
+
+`int` · optional · default `2`
+
+Maximum active sessions per person within a tenant, including pending deletion.
+
+### `DAIMON_COMPUTE__DEFAULT_IDLE_TTL_HOURS`
+
+`int` · optional · default `24`
+
+Default idle lifetime in hours; bounded by max_ttl_hours.
+
+### `DAIMON_COMPUTE__MAX_TTL_HOURS`
+
+`int` · optional · default `168`
+
+Maximum launch or extension lifetime in hours. No dollar cap or metering is provided.
+
+### `DAIMON_COMPUTE__PROFILES`
+
+`dict[str, ComputeProfile]` · optional · default `{}`
+
+Operator-managed image profiles. Empty means no images can be launched. No environment
+or credentials are copied from template apps.
 
 ## Long Jobs
 

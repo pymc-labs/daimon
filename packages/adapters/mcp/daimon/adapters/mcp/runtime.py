@@ -17,6 +17,7 @@ from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.artifacts import ArtifactStore
+from daimon.core.compute_provider import ComputeProvider
 from daimon.core.config import DiscordSettings, Settings
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
@@ -75,6 +76,7 @@ class McpRuntime:
     gemini_skill_capability: GeminiSkillCapability | None = field(default=None)
 
     membership_resolver: MembershipResolver | None = None
+    compute_provider: ComputeProvider | None = None
 
     def __post_init__(self) -> None:
         if self.membership_resolver is None and isinstance(self.settings.discord, DiscordSettings):

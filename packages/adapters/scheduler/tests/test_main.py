@@ -2266,6 +2266,7 @@ async def test_run_loops_keeps_ticking_while_a_usage_pass_is_in_flight() -> None
         await _run_loops(
             tick=tick,
             usage_sweep=endless_pass,
+            compute_sweep=unittest.mock.AsyncMock(),
             privacy_sweep=unittest.mock.AsyncMock(),
             interval_s=0.01,
             stop_event=stop,
@@ -2295,6 +2296,7 @@ async def test_run_loops_repeats_usage_passes_while_a_tick_is_in_flight() -> Non
         await _run_loops(
             tick=slow_tick,
             usage_sweep=usage_pass,
+            compute_sweep=unittest.mock.AsyncMock(),
             privacy_sweep=unittest.mock.AsyncMock(),
             interval_s=0.01,
             stop_event=stop,
@@ -2318,6 +2320,7 @@ async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
             await _run_loops(
                 tick=tick,
                 usage_sweep=crashing_pass,
+                compute_sweep=unittest.mock.AsyncMock(),
                 privacy_sweep=unittest.mock.AsyncMock(),
                 interval_s=0.01,
                 stop_event=asyncio.Event(),
@@ -2348,6 +2351,7 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
             await _run_loops(
                 tick=crashing_tick,
                 usage_sweep=endless_pass,
+                compute_sweep=unittest.mock.AsyncMock(),
                 privacy_sweep=unittest.mock.AsyncMock(),
                 interval_s=0.01,
                 stop_event=asyncio.Event(),
@@ -2385,6 +2389,7 @@ async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
         await _run_loops(
             tick=tick,
             usage_sweep=unittest.mock.AsyncMock(),
+            compute_sweep=unittest.mock.AsyncMock(),
             privacy_sweep=slow_privacy,
             interval_s=0.01,
             stop_event=stop,
@@ -2950,6 +2955,7 @@ async def test_run_loops_without_a_usage_sweep_still_runs_privacy_deletes() -> N
         await _run_loops(
             tick=tick,
             usage_sweep=None,
+            compute_sweep=unittest.mock.AsyncMock(),
             privacy_sweep=privacy_sweep,
             interval_s=0.01,
             stop_event=stop,

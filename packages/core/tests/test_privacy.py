@@ -900,6 +900,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # and is automatically erased by accounts.id ON DELETE CASCADE.
             # The store tests verify this; it needs no separately reported category.
             "turn_origins",
+            # Owner records cascade with account erasure, including conversation
+            # metadata. Tagged Fly apps then have no registration and are deleted
+            # by the scheduler orphan sweep; OS calls lose their owner authority.
+            "compute_sessions",
             # Who may edit an agent: no content, and ON DELETE CASCADE with
             # accounts.id, after which the agent is admin-only again.
             "agent_owner",

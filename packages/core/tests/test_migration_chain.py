@@ -80,7 +80,10 @@ LONG_JOBS_HEAD = "0147_long_jobs"
 ADMINS_HEAD = "0148_daimon_admins"
 
 
-HEAD = "0151_routine_claimed_slot"
+ROUTINES_HEAD = "0151_routine_claimed_slot"
+
+
+HEAD = "0152_compute_sessions"
 
 
 CHAIN = [
@@ -103,6 +106,7 @@ CHAIN = [
     ADMINS_HEAD,
     "0149_context_provider_bindings",
     "0150_origin_human_invocation",
+    ROUTINES_HEAD,
     HEAD,
 ]
 
@@ -119,6 +123,7 @@ SANDBOX_COLUMNS = {
 
 
 TABLES = {
+    "compute_sessions",
     "daimon_admins",
     "context_provider_bindings",
     "selfhosted_agents",
@@ -190,7 +195,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     if expected not in (LONG_JOBS_HEAD, ADMINS_HEAD, HEAD):
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
     if expected != HEAD:
-        compared_tables = compared_tables - {"context_provider_bindings"}
+        compared_tables = compared_tables - {"context_provider_bindings", "compute_sessions"}
     if expected not in (ADMINS_HEAD, HEAD):
         compared_tables = compared_tables - {"daimon_admins"}
     if expected not in (
@@ -414,8 +419,9 @@ async def test_deployed_upgrade_and_downgrade_paths(
             with pytest.raises(NotImplementedError, match="long-job execution evidence"):
                 command.downgrade(config, RECRUITMENT_HEAD)
             _assert_head(sync, LONG_JOBS_HEAD)
-            command.upgrade(config, "head")
-            _assert_head(sync)
+            # Exercise reversible revisions before the retained Fly evidence.
+            command.upgrade(config, ROUTINES_HEAD)
+            assert sync.scalar(text("SELECT version_num FROM alembic_version")) == ROUTINES_HEAD
             principal = next(
                 col
                 for col in inspect(sync).get_columns("turn_origins")
@@ -430,6 +436,9 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 command.downgrade(config, LONG_JOBS_HEAD)
             _assert_head(sync, ADMINS_HEAD)
             command.upgrade(config, HEAD)
+            _assert_head(sync)
+            with pytest.raises(NotImplementedError, match="Retain compute ownership records"):
+                command.downgrade(config, ROUTINES_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)

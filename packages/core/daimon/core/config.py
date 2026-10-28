@@ -2145,6 +2145,80 @@ class WatchesSettings(BaseModel):
     )
 
 
+class ComputeProfile(BaseModel):
+    image: str = Field(
+        description="Operator-reviewed thin MCP image reference, preferably a digest."
+    )
+    regions: list[str] = Field(default_factory=lambda: ["iad"], description="Allowed Fly regions.")
+    cpu_kind: Literal["shared", "performance"] = Field(
+        default="shared", description="Fly CPU class."
+    )
+    cpus: int = Field(default=2, gt=0, le=16, description="Fixed CPU count for this image profile.")
+    memory_mb: int = Field(default=4096, ge=256, le=131072, description="Fixed RAM in MB.")
+
+
+class ComputeSettings(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Allow attended owners to launch Fly sessions. Disabling launch does not "
+            "disable cleanup."
+        ),
+    )
+    deployment_id: str = Field(
+        default="",
+        description=(
+            "Stable unique deployment identifier fencing Fly resources. Required to use compute."
+        ),
+    )
+    api_token: SecretStr | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Fly API token, control plane and scheduler only. Never mounted in compute machines."
+        ),
+    )
+    org_slug: str = Field(
+        default="", description="Fly organization for this deployment's disposable sessions."
+    )
+    session_auth_key: SecretStr | None = Field(
+        default=None,
+        repr=False,
+        description=(
+            "Stable control-plane HMAC key deriving per-session MCP tokens. Never "
+            "mounted on machines."
+        ),
+    )
+    per_person_sessions: int = Field(
+        default=2,
+        gt=0,
+        description=(
+            "Maximum active sessions per person within a tenant, including pending deletion."
+        ),
+    )
+    default_idle_ttl_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        description="Default idle lifetime in hours; bounded by max_ttl_hours.",
+    )
+    max_ttl_hours: int = Field(
+        default=168,
+        ge=1,
+        le=168,
+        description=(
+            "Maximum launch or extension lifetime in hours. No dollar cap or metering is provided."
+        ),
+    )
+    profiles: dict[str, ComputeProfile] = Field(
+        default_factory=dict,
+        description=(
+            "Operator-managed image profiles. Empty means no images can be launched. "
+            "No environment or credentials are copied from template apps."
+        ),
+    )
+
+
 class LongJobsSettings(BaseModel):
     max_deadline_minutes: int = Field(
         default=70,
@@ -2173,6 +2247,7 @@ class LongJobsSettings(BaseModel):
 
 
 class Settings(BaseSettings):
+    compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     security_audit_retention_days: int = Field(
         default=90,

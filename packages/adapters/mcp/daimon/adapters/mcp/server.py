@@ -50,6 +50,7 @@ from daimon.adapters.mcp.tools import (
     agent_chat,
     agents,
     environments,
+    fly,
     long_jobs,
     routines,
     self_edit,
@@ -565,6 +566,7 @@ def create_mcp_app(
     register_model_tools(mcp, runtime)  # list_models: names, ids and list prices
     routines.register_routines_tools(mcp, runtime)
     long_jobs.register_long_job_tools(mcp, runtime)
+    fly.register_fly_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
     from daimon.adapters.mcp.tools.watches import register_watch_tools
 

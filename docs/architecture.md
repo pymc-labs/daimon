@@ -3027,3 +3027,28 @@ Worker spending-limit MCP tools require a registered personal CLI credential and
 live platform authority. Configuration confirmation cards carry a separate live
 platform check for provider policy, channel-pin clearing and worker limits;
 delegated model/settings and tool-rule checks remain explicit actions.
+
+### Temporary compute sessions
+
+The scheduler runs compute cleanup on its own repeating loop alongside the usage
+sweep. Routine dispatch never awaits it, and there is no total sweep timeout.
+Each Fly request is bounded; inventory failures and timeouts still allow known
+rows to be reconciled. Deleted registrations are excluded from
+the sweep query; tagged resources without a registration are still reaped.
+
+The native `fly_*` MCP tools use a verified attended origin and owner identity to
+register disposable compute in `compute_sessions`. The core service/store fence
+every lookup by tenant and owner plus the originating conversation. Launch and
+extend verify exact approval evidence; current human Discord server admins may
+only emergency-stop, without reading session contents. Operator profiles fix the image
+and machine capacity. File operations and inline bash use the image's
+authenticated thin MCP server; no provider token is mounted in the machine.
+
+The existing scheduler reconciles expiry warnings, interrupted creation, pending
+deletes and deployment-tagged orphans. Registration commits before creation;
+deletion intent commits before provider deletion, which is retried until confirmed.
+Row locks serialize active machine actions and renewal against deletion. Disabling
+new launches does not disable cleanup. The provider port has an in-memory fake and
+HTTP contract tests; it does not depend on chat adapters. Expiry warnings enter
+the existing owner-bound continuation queue. Bash is inline only; this feature
+does not create background tasks or completion wakes.

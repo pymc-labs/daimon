@@ -251,6 +251,11 @@ pause between passes, so a long pass no longer blocks claims. It settles only
 the headless sessions with a pending settle request. Shutdown cancels a pass in
 flight; a session it did not finish keeps its request for the next pass.
 
+Compute cleanup uses its own `_repeat_until_stopped` loop alongside the usage
+sweep, so routine dispatch never waits for Fly inventory or deletion. A sweep
+has no total timeout: large inventories can finish, and inventory failures or
+request timeouts still allow registered machines to be cleaned up.
+
 The per-routine catch-up policy controls downtime recovery:
 
 - **`skip` (default):** preserve the existing freshness window. A slot fires

@@ -1917,3 +1917,47 @@ Harness process cleanup enumerates present `/proc` PIDs, including after PID wra
 If procfs uses hidepid, configure `gid=60002` for the trusted cleanup verifier;
 only that helper receives the exemption group. Multi-session harness mode requires
 `hidepid=2,gid=60002`. Ordinary tool processes do not receive the exemption.
+
+## Temporary Fly compute
+
+Fly sessions are an optional native feature, disabled by default. Configure
+`DAIMON_COMPUTE__ENABLED`, a stable unique `DAIMON_COMPUTE__DEPLOYMENT_ID`,
+`DAIMON_COMPUTE__ORG_SLUG`, `DAIMON_COMPUTE__API_TOKEN` and
+`DAIMON_COMPUTE__SESSION_AUTH_KEY` in the control plane **and scheduler**. Keep the
+same deployment identifier and authentication key across restarts. Give each
+installation its own identifier and Fly organization/token scope. Removing these
+settings before cleanup finishes can leave paid resources behind. Disabling
+launches leaves cleanup enabled and cancels unfinished launch attempts. Running
+sessions retain their existing leases.
+
+Set `DAIMON_COMPUTE__PROFILES` to a JSON map of reviewed image profiles. Each entry
+contains `image`, `regions`, `cpu_kind`, `cpus` and `memory_mb`. For example,
+`{"mmm":{"image":"registry.example/mmm@sha256:REPLACE","regions":["iad"],"cpu_kind":"shared","cpus":2,"memory_mb":4096}}`.
+Images must run the authenticated thin MCP server on port 8080 and implement
+`run_bash`, `write_file`, `read_file` and `list_files`. Use immutable digests and
+images with no baked credentials; do not point this at an arbitrary notebook
+image. Each machine receives only its own `MCP_AUTH_TOKEN`, and uses its own
+private Fly network. Fly API and signing credentials remain in the control plane.
+
+The owner launches, extends and uses a session in its original attended
+conversation. Launch and extension require approval cards. Reads do not renew
+leases; successful commands and writes do. The scheduler warns before expiry,
+marks sessions for deletion, and retries until Fly confirms deletion. Compute
+cleanup repeats on its own scheduler loop, so routine dispatch never waits for
+inventory or deletion. There is no total sweep timeout; individual Fly requests
+are bounded, and inventory errors still allow cleanup of known registrations. Current
+human Discord server admins can emergency-stop a known session without access to
+its files. This admin emergency-stop is Discord-only. Keep the scheduler running
+while any sessions remain.
+
+`DAIMON_COMPUTE__PER_PERSON_SESSIONS`, `DAIMON_COMPUTE__DEFAULT_IDLE_TTL_HOURS` and
+`DAIMON_COMPUTE__MAX_TTL_HOURS` bound concurrent sessions and idle lifetimes. There
+is no compute dollar cap or usage metering. An active session can renew repeatedly;
+provider outages may delay deletion and increase charges. Session disks are
+perishable: export outputs before stopping or expiry. Bash currently runs inline
+with a maximum 40-second timeout; background task handles and completion reports
+are not provided. Image-profile authoring tools, compiler credential injection and
+browser notebook access are not provided.
+
+Account erasure cascades the Fly registration and its conversation metadata; the
+scheduler deletes the remaining tagged machine as an orphan on a later sweep.

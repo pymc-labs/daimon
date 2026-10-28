@@ -4737,3 +4737,50 @@ class ContextProviderBinding(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class ComputeSessionRecord(Base):
+    __tablename__ = "compute_sessions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "request_key", name="uq_compute_request"),
+        UniqueConstraint("app_name", name="uq_compute_app"),
+        CheckConstraint(
+            "state IN ('launching','running','stopping','deleted')", name="ck_compute_state"
+        ),
+        CheckConstraint(
+            "ttl_hours BETWEEN 1 AND 168 AND cpus > 0 AND memory_mb > 0", name="ck_compute_limits"
+        ),
+        Index("ix_compute_owner", "tenant_id", "owner_account_id", "state"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_external_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_metadata: Mapped[dict[str, str]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    extension_keys: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    request_key: Mapped[str] = mapped_column(Text, nullable=False)
+    app_name: Mapped[str] = mapped_column(Text, nullable=False)
+    profile: Mapped[str] = mapped_column(Text, nullable=False)
+    image: Mapped[str] = mapped_column(Text, nullable=False)
+    region: Mapped[str] = mapped_column(Text, nullable=False)
+    cpu_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    cpus: Mapped[int] = mapped_column(Integer, nullable=False)
+    memory_mb: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="launching")
+    machine_id: Mapped[str | None] = mapped_column(Text)
+    ttl_hours: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    warned_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

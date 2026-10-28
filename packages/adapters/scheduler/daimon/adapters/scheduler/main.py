@@ -9,8 +9,8 @@ Imperative shell that:
    the full process lifetime (created via ``engine.connect()``, never via
    ``async_sessionmaker``).
 3. Installs SIGINT/SIGTERM signal handlers via the running event loop.
-4. Loops: every ``tick_interval_s``, awaits ``run_one_tick``; the usage sweep
-   repeats on its own loop at the same interval.
+4. Loops: every ``tick_interval_s``, awaits ``run_one_tick``; the usage and
+   compute sweeps repeat on their own loops at the same interval.
 5. On stop: releases the lock, disposes the engine, exits.
 
 The ``--once`` flag runs a single tick and exits 0. The tick uses
@@ -52,6 +52,8 @@ from daimon.core.authz import (
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_channel
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.compute_fly import FlyComputeProvider
+from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import DirectMessagePolicy, Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -178,6 +180,16 @@ from sqlalchemy.ext.asyncio import (
 )
 
 log = structlog.get_logger(__name__)
+
+
+async def _sweep_compute(compute: ComputeSessions) -> None:
+    # Cleanup is independent of launch enablement and user routines.
+    if not compute.settings.deployment_id or compute.settings.api_token is None:
+        return
+    try:
+        await compute.reconcile()
+    except Exception:
+        log.warning("compute.sweep_retry")
 
 
 async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnection | None:
@@ -1483,14 +1495,16 @@ async def _run_loops(
     tick: Callable[[], Awaitable[None]],
     usage_sweep: Callable[[], Awaitable[None]] | None,
     privacy_sweep: Callable[[], Awaitable[None]],
+    compute_sweep: Callable[[], Awaitable[None]],
     interval_s: float,
     stop_event: asyncio.Event,
 ) -> None:
     """Run ticks and upstream sweeps on separate loops until stopped.
 
     ``usage_sweep=None`` (the sweep is switched off) runs no usage loop; the
-    privacy deletion loop always runs, since a pending erasure must not wait on
-    an unrelated setting.
+    privacy deletion and compute cleanup loops always run, since deletion must
+    not wait on an unrelated setting. Compute inventory may outlast many ticks;
+    it has no total sweep timeout, so growing inventory cannot starve cleanup.
 
     A usage pass settles whole session histories and can outlast many ticks;
     inline, routine claims waited for it. On stop the passes in flight are
@@ -1501,7 +1515,10 @@ async def _run_loops(
         background = [
             loops.create_task(
                 _repeat_until_stopped(privacy_sweep, interval_s=interval_s, stop_event=stop_event)
-            )
+            ),
+            loops.create_task(
+                _repeat_until_stopped(compute_sweep, interval_s=interval_s, stop_event=stop_event)
+            ),
         ]
         if usage_sweep is not None:
             background.append(
@@ -1619,6 +1636,7 @@ async def run(
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
+    compute = ComputeSessions(sm, settings.compute, FlyComputeProvider(settings.compute))
     long_jobs = LongJobExecutor(sm, ManagedLongJobPort(client, sm, settings), settings.long_jobs)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1645,6 +1663,7 @@ async def run(
                 wait_for_completion=True,
             )
             await long_jobs.sweep()
+            await _sweep_compute(compute)
             await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
             await _sweep_privacy_deletes(client, sm)
@@ -1728,6 +1747,7 @@ async def run(
                 tick=tick,
                 usage_sweep=usage_sweep if scheduler_settings.usage_sweep_enabled else None,
                 privacy_sweep=privacy_sweep,
+                compute_sweep=lambda: _sweep_compute(compute),
                 interval_s=scheduler_settings.tick_interval_s,
                 stop_event=stop_event,
             )

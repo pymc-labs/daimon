@@ -16,6 +16,7 @@ def test_mcp_runtime_is_frozen_dataclass_with_required_fields() -> None:
     assert fields == {
         "session_factory",
         "membership_resolver",
+        "compute_provider",
         "client",
         "settings",
         "deployment_default",
@@ -65,6 +66,7 @@ def test_mcp_runtime_optional_fields_default_to_none() -> None:
         ),
         deployment_default=DeploymentDefault(),
     )
+    assert rt.compute_provider is None
     assert rt.gemini_client is None
     assert rt.artifact_store is None
     # The operator's OpenAI resource capability is off unless a host wires it.

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -56,6 +57,12 @@ _MUST_CONTAIN = {
     "set_agent_default",
     "update_agent",
 }
+
+
+@pytest.fixture
+def schema_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """Registration and introspection must not connect to a database."""
+    return async_sessionmaker()
 
 
 def _fully_configured_settings() -> Settings:
@@ -124,7 +131,7 @@ def _normalize_snapshot_value[T](value: T) -> T:
 
 
 async def test_rendered_tool_schema_matches_snapshot(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
     snapshot: SnapshotAssertion,
 ) -> None:
     """The full rendered tool registry — name, description, parameters — is
@@ -133,7 +140,7 @@ async def test_rendered_tool_schema_matches_snapshot(
     network or real key is required."""
     app = create_mcp_app(
         settings=_fully_configured_settings(),
-        sessionmaker=sessionmaker,
+        sessionmaker=schema_sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
         anthropic=build_stub_anthropic(),
     )
@@ -161,7 +168,7 @@ async def test_rendered_tool_schema_matches_snapshot(
 
 
 async def test_rendered_hub_tool_schema_matches_snapshot(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
     snapshot: SnapshotAssertion,
 ) -> None:
     """The hub mounts render a different surface from ``/mcp`` — a smaller tool
@@ -172,7 +179,7 @@ async def test_rendered_hub_tool_schema_matches_snapshot(
     mcp = build_hub_app(
         platform="discord",
         runtime=McpRuntime(
-            session_factory=sessionmaker,
+            session_factory=schema_sessionmaker,
             client=build_stub_anthropic(),
             settings=_fully_configured_settings(),
             deployment_default=DeploymentDefault(environment_name=None),
@@ -227,7 +234,7 @@ def _resolve_ref(schema: dict[str, Any], ref: str) -> dict[str, Any]:
 
 
 async def test_create_environment_exposes_nested_pip_package_list(
-    sessionmaker: async_sessionmaker[AsyncSession],
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """create_environment takes one nested model, and the whole reason a
     prose docstring can be the complete fix for "the model never sets pip
@@ -237,7 +244,7 @@ async def test_create_environment_exposes_nested_pip_package_list(
     just be regenerated around the new (broken) shape."""
     app = create_mcp_app(
         settings=_fully_configured_settings(),
-        sessionmaker=sessionmaker,
+        sessionmaker=schema_sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
         anthropic=build_stub_anthropic(),
     )

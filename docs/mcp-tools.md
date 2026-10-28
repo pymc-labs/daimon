@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 160 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 170 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -222,6 +222,23 @@ Chat configuration over the fleet-grant and tenant-provider service owners.
 | `request_channel_pin_clear` | admin only | Show or clear THIS channel's model-provider pin, with admin confirmation. |
 | `request_fleet_config` | all callers | Change worker spending limits with a personal CLI credential and live platform authority. |
 | `request_provider_allowlist` | admin only | Preview and confirm the server's allowed model providers. |
+
+## `fly`
+
+Native owner-only Fly sessions bound to verified, attended conversation origins.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `fly_extend_session` | all callers | Set your session's expiry to this many hours from now, after owner approval. |
+| `fly_get_session_status` | all callers | Read your session's machine state, capacity and expiry without renewing it. |
+| `fly_launch_session` | all callers | Launch your own temporary Fly machine from an operator image profile. |
+| `fly_list_files` | all callers | List paths and sizes on your session. |
+| `fly_list_sessions` | all callers | List your live sessions in this conversation. |
+| `fly_list_templates` | all callers | List operator image profiles, fixed CPU/RAM and allowed regions. |
+| `fly_read_file` | all callers | Read a file from your session in byte chunks. |
+| `fly_run_bash` | all callers | Run bash inline on your session; return exit code and stdout. |
+| `fly_stop_session` | all callers | Permanently delete a session and its files. |
+| `fly_write_file` | all callers | Write UTF-8 text on your session and renew its idle lease. |
 
 ## `github_app`
 
