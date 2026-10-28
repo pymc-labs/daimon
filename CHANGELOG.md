@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bound agent, with explicit operations and redacted errors. Correct CLI auth
   guidance for ordinary chat identity.
 
+- Add opt-in repository memory shared across agents, creator-only personal directives,
+  four native `repo_memory_*` tools, bounded turn injection, legacy reader suppression
+  and an offline importer. Bound working repositories use their live App grant without
+  requiring each person to link GitHub. Restricted conversations cannot save or delete.
+
 - Add slot-safe routine handover with claimed-slot and completion evidence,
   stable internal ids, atomic `seed-first-run` and `pause-for-handback` operator
   commands, and read-only `export-rollback`. Handback preserves the enabled state

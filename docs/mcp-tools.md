@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 170 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 174 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -409,6 +409,17 @@ Report publishing MCP tools.
 | --- | --- | --- |
 | `delete_report` | all callers | Un-publish a report you published. |
 | `publish_report` | all callers | Publish a report: a page where the named people can read it and ask it questions. |
+
+## `repo_memory`
+
+Repository-scoped persistent memory, authorized by the executing turn.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `repo_memory_delete` | all callers | Forget a memory by slug only when the person explicitly asks. |
+| `repo_memory_list` | all callers | List repository memories: shared entries and your own personal directives. |
+| `repo_memory_save` | all callers | Remember information for the bound working repository across sessions. |
+| `repo_memory_view` | all callers | Read a repository memory's full body by its listed slug. |
 
 ## `routines`
 

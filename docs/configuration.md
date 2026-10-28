@@ -37,6 +37,7 @@ typo is silent — check the spelling here.
 - [Teams](#teams)
 - [GitHub](#github)
 - [GitHub App](#github-app)
+- [Repo Memory](#repo-memory)
 - [Microsoft Accounts](#microsoft-accounts)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
@@ -1022,6 +1023,24 @@ GitHub App client ID for user authorization.
 `SecretStr | None` · optional · default unset · secret
 
 GitHub App client secret for user authorization.
+
+## Repo Memory
+
+Read from `daimon.core.config.RepoMemorySettings`. Prefix `DAIMON_REPO_MEMORY__`.
+
+### `DAIMON_REPO_MEMORY__ENABLED`
+
+`bool` · optional · default `False`
+
+Enable native repository memory tools and turn injection after a verified import.
+
+### `DAIMON_REPO_MEMORY__LEGACY_MCP_SERVER_NAMES`
+
+`tuple[str, ...]` · optional · default unset
+
+Legacy MCP server names whose repo_memory_list and repo_memory_view tools are disabled
+in sessions when native repository memory is enabled. Set these before cutover so the
+agent sees one memory source.
 
 ## Microsoft Accounts
 
