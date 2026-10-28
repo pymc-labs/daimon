@@ -264,3 +264,98 @@ service. Applying defaults does not activate provider writes.
 
 Lead classification reads each discovered source through `lead_intake_read_source`
 before submission; the model receives source text without service credentials.
+
+## Sandbox Workspace writes
+
+The `workspace-write` default skill packages a Python script for explicit Gmail
+send/draft, Drive create/copy/rename, Docs create/text edits and Calendar create/update.
+It uses `get_cli_token("gcloud")` and an operator-bound dedicated agent, such as
+`workspace-writer`. Ordinary chat supplies the signed identity needed by the broker.
+The deployment service-account credential stays server-side; no refresh token is
+mounted. Full Drive scope is required for existing shared files and templates.
+
+Sharing, permission changes, permanent file deletion, Calendar deletion and Drive
+moves are not exposed. Tokens enter on stdin; errors are redacted, writes are not
+retried automatically, and uncertain outcomes need read-back before retrying.
+All users of the bound agent can use its identity directly; these scripts do not
+isolate credentials from sandbox code. Operators must restrict access to that agent
+or workspace and must not bind default Daimon to the shared account. No routine
+is created. Skill scripts participate in the existing content-derived fingerprint.
+
+`slides-workflow` uses the same dedicated Google-bound agent. Copy a named template
+or edit a deck ID named explicitly by the user; no default/recent deck is selected.
+The packaged script supports text, images, slides, deletion and validated styling
+batches with revision checks. It refuses unknown targets and deletion of the final
+slide. Render changed slides to PNG and visually inspect them before reporting
+completion; mutation success alone reports review incomplete. The skill copies no
+credentials and exposes no permission or sharing changes. PNG validation requires
+Pillow in custom sandbox images.
+
+Sandbox I/O helpers are packaged with each workflow, with one canonical source at
+`defaults/skills/workspace-write/scripts/workflow_io.py`. After changing it run
+`uv run python scripts/sync_workflow_runtime.py`; `--check` verifies the packaged
+copies remain identical and fails if an expected skill folder is missing. A
+packaging test checks that all four runtime copies are byte-identical. Each skill
+is independently deliverable.
+
+`toggl-edits` packages narrow Toggl Track operations for an operator-created
+`time-editor` agent with `TOGGL_API_TOKEN` collected through `request_agent_key`.
+Every operation requires an explicit workspace and uniquely resolved member ID
+or email. All target owners are checked before writing; owner/workspace changes
+and administration are refused. Only stopped entries attributed by Reports are
+supported. A 403 identifies the shared token owner’s required
+workspace administrator/access permission. Bulk partial results identify successful
+and failed entries without retrying. All users of this agent can use the shared key;
+it must not be attached to default Daimon. Ownership lookup uses workspace-scoped
+Reports v3 search filtered by entry IDs and the explicitly named member, not a
+key-owner-only `/me` lookup. Every search supplies YYYY-MM-DD bounds from today
+minus 365 days through today, selected in UTC. Older entries are refused. Missing
+or ambiguous report rows refuse all writes; running entries and very recent edits
+(Reports lag) are unsupported. Running timers must be stopped in Toggl itself:
+a shared key cannot verify their owner through Reports.
+
+`image-workflow` supports OpenAI image generation and local-reference edits using
+`gpt-image-2` or `gpt-image-1.5`. It requires `OPENAI_API_KEY` on an operator-created
+`image-maker` agent and Pillow in the sandbox. Each call generates one bounded PNG,
+validates it and writes a unique file under `/mnt/session/outputs` for attachment.
+It refuses remote references, symlinks, oversized images and custom output paths.
+There is no automatic paid retry. Google’s retired Gemini Imagen route is explicitly
+refused; no Gemini key is needed. All users of image-maker can spend its project key.
+
+Optional agent specs for `workspace-writer`, `time-editor` and `image-maker` live
+in `defaults/agents-optional/`. Run `daimon defaults apply` to deliver skills, then
+`daimon agents create defaults/agents-optional/<name>.yaml` to opt into an agent.
+These specs contain no credentials and do not auto-attach keys or Google bindings.
+Operators must restrict their audience before binding Google or collecting keys.
+Use `daimon agents bind-google workspace-writer <shared-email> --scopes <scope>...`
+with explicit scopes and deployment domain-wide delegation; use `request_agent_key`
+for `TOGGL_API_TOKEN` on time-editor and `OPENAI_API_KEY` on image-maker. Keep default
+Daimon unbound and without these shared keys. The skill library’s existing per-file
+content hashes update for changed skill bytes; no static fingerprint is maintained.
+
+Audience controls are platform-specific; a separate agent name is not an access
+restriction:
+
+- Discord: `AgentRule.invoker_role_ids` restricts invocation to current holders
+  of the configured Discord roles, including admins. Role-gated agents deny
+  routines.
+- Slack and Teams have no per-user agent gate. Admins must route these agents
+  only to private channels with restricted membership and use `runs_in` to limit
+  the channels in which they run. Every permitted channel participant can use
+  the agent's shared credentials.
+- CLI `--agent NAME` is unchecked at the agent level. Local CLI access must be
+  limited to trusted operators.
+- Fleet grants can bypass channel routing by spawning the credential holder as
+  a worker. Keep these agents out of grants whose `worker_agents` is `"any"` and
+  out of explicit worker-agent lists for other roots. Narrow the grant to
+  uncredentialed workers rather than allowing any agent.
+- Outside the Discord invoker-role gate, routines are not technically blocked
+  on these agents; only skill guidance forbids unattended writes. Operators
+  must not configure such routines.
+
+Google tokens enter the transcript as tool results and again in literal shell
+handoff commands, and last about one hour. The skills show a quoted heredoc;
+the scripts receive stdin and do not store tokens in their own argv or files.
+Drive copy/rename and template-copy/get support Shared Drives. Calendar updates
+accept any nonempty subset of supported fields; creates require summary/start/end.
+Slides text replacement skips deletion when a placeholder is already empty.

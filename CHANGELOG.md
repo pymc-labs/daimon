@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Replace whitespace-only Slides text by deleting it before insertion, including
+  newline-only shapes; genuinely empty shapes still skip deletion.
+
+- Limit Toggl corrections to stopped entries attributed by workspace Reports in
+  an explicit 365-day UTC date window. Remove timer-stop support; refuse missing
+  targets, including running entries and very recent edits affected by Reports lag.
+
+- Support Shared Drives and partial Calendar patches in sandbox writes; fill empty
+  Slides placeholders without deleting absent text. Check packaged runtime copies
+  for drift and missing folders, and document audience controls and token transcript exposure.
+
+- Fix Toggl shared-account edits by resolving ownership and timing through
+  workspace Reports v3 filtered by entry ID and explicitly named member, rather
+  than a key-owner-only lookup. Refuse incomplete or ambiguous report evidence.
+
+- Add sandbox OpenAI image generation and local-reference editing with validated
+  reply attachments. Ship opt-in credential-holder agent specs for Workspace,
+  Toggl and images; the retired Gemini Imagen route is explicitly refused.
+
+- Add narrow Toggl Track scripts for explicit-member stopped-entry update and
+  bulk edits, checking all target owners before writing and reporting partial results.
+
+- Add a sandbox Slides template workflow with validated batches, revision checks
+  and PNG rendering for mandatory visual review.
+
+- Add a sandbox Workspace write skill using short-lived Google tokens on a dedicated
+  bound agent, with explicit operations and redacted errors. Correct CLI auth
+  guidance for ordinary chat identity.
+
 - Add slot-safe routine handover with claimed-slot and completion evidence,
   stable internal ids, atomic `seed-first-run` and `pause-for-handback` operator
   commands, and read-only `export-rollback`. Handback preserves the enabled state
