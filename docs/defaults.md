@@ -276,8 +276,9 @@ can set `credentials.google_user_json` to the full authorized-user JSON and
 `credentials.google_user_email` to its account email. Only bindings matching that
 email (without case sensitivity) use it, with the binding’s scopes and without
 domain-wide delegation. Other bindings use `credentials.google_sa_json`, a
-service-account key with domain-wide delegation. Full Drive scope is required for
-existing shared files and templates.
+service-account key with domain-wide delegation. With a user credential, bind only scopes the sign-in was granted, such as `gmail.modify`, `calendar`, `drive`, `documents` and `presentations` (each under `https://www.googleapis.com/auth/`); any other scope makes Google refuse the refresh with `invalid_scope`. A matching
+binding never falls back to the service account when the user refresh fails.
+Full Drive scope is required for existing shared files and templates.
 
 Sharing, permission changes, permanent file deletion, Calendar deletion and Drive
 moves are not exposed. Tokens enter on stdin; errors are redacted, writes are not
@@ -335,8 +336,9 @@ in `defaults/agents-optional/`. Run `daimon defaults apply` to deliver skills, t
 These specs contain no credentials and do not auto-attach keys or Google bindings.
 Operators must restrict their audience before binding Google or collecting keys.
 Use `daimon agents bind-google workspace-writer <shared-email> --scopes <scope>...`
-with explicit scopes and either the matching authorized-user credential or a
-service account with domain-wide delegation; use `request_agent_key`
+with explicit scopes and either the matching authorized-user credential (bind
+only scopes its sign-in was granted) or a service account with domain-wide
+delegation; use `request_agent_key`
 for `TOGGL_API_TOKEN` on time-editor and `OPENAI_API_KEY` on image-maker. Keep default
 Daimon unbound and without these shared keys. The skill library’s existing per-file
 content hashes update for changed skill bytes; no static fingerprint is maintained.

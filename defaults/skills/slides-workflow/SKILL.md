@@ -12,7 +12,7 @@ script's argv/files/errors are kept free of tokens by this stdin handoff. Do not
 echo or persist the token. The operator configures an agent binding and either
 the matching account’s authorized-user JSON (`google_user_json` plus
 `google_user_email`) or a service-account key (`google_sa_json`) with domain-wide
-delegation. Missing binding, credentials or scopes is an operator setup error; never request a refresh token or run `gws auth`.
+delegation. With a user credential, bind only scopes the sign-in was granted, such as `gmail.modify`, `calendar`, `drive`, `documents` and `presentations` (each under `https://www.googleapis.com/auth/`); any other scope makes Google refuse the refresh with `invalid_scope`. Missing binding, credentials or scopes is an operator setup error; never request a refresh token or run `gws auth`.
 
 Work only on a template copy made for this task or a deck ID the user explicitly
 names. Never use an inferred last/recent deck or edit the source template.

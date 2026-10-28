@@ -2145,10 +2145,18 @@ from `AuthIdentity.agent_id`; origin tools additionally require the matching
 session grant. GitHub chat calls use the agent’s App grants; other identity gates
 and the two-tool search interface remain unchanged.
 
-The operator must configure `credentials.google_sa_json`, authorize domain-wide
-delegation, and bind the agent with `daimon agents bind-google <agent> <email>
---scopes <scope>...`. The broker impersonates only that agent's bound Workspace
-user and scopes; an unbound agent receives a clear operator-binding error.
+The operator binds the agent with `daimon agents bind-google <agent> <email>
+--scopes <scope>...` and configures one of two routes. When
+`credentials.google_user_email` matches the bound email (without case
+sensitivity) and `credentials.google_user_json` holds that account's
+authorized-user JSON, the broker refreshes that sign-in for the binding's
+scopes; those must be scopes the sign-in was granted, or Google refuses with
+`invalid_scope`. A binding with no scopes is refused before the refresh. A
+failed refresh names only Google's OAuth error code (`invalid_scope`,
+`invalid_grant`, or "network or unknown") and never falls back to the service
+account. Every other binding uses `credentials.google_sa_json` with domain-wide
+delegation, impersonating only the bound Workspace user and scopes. An unbound
+agent receives a clear operator-binding error.
 Core does not ship curated Workspace tools. Agents may use the token themselves
 or a deployment-provided Google MCP server.
 

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Support operator-configured Google authorized-user credentials for matching agent bindings alongside service-account delegation.
 
+- Name Google's error code (`invalid_scope`, `invalid_grant`) when a Google user-credential refresh fails, and refuse user-credential bindings with no scopes.
+
 - Keep legacy repository-memory readers suppressed during in-place session updates
   and confirmation checks. Preserve origin restrictions on native-runtime rebinds,
   inject repository state only on the first successful turn or a state change, and

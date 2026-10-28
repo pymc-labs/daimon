@@ -15,6 +15,7 @@ from typing import Any, ClassVar, cast
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
 from daimon.core.config import Settings
 from daimon.core.stores.agent_google_binding import get_agent_google_binding
+from google.auth import exceptions as google_exceptions
 from google.auth.transport.requests import Request
 from google.oauth2 import credentials, service_account
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -63,6 +64,12 @@ class GcloudTokenProvider:
             and binding.email.casefold() == user_email.casefold()
             and settings.credentials.google_user_json is not None
         ):
+            if not binding.scopes:
+                # An empty scope request returns the sign-in's full grant.
+                raise ProviderConfigError(
+                    "the Google binding has no scopes; rebind it with --scopes "
+                    "naming only scopes the google_user_json sign-in was granted"
+                )
             return await asyncio.to_thread(
                 _refresh_user_token,
                 settings.credentials.google_user_json.get_secret_value(),
@@ -141,12 +148,34 @@ def _refresh_user_token(json_text: str, scopes: list[str]) -> str:
         )
         creds.refresh(Request())  # pyright: ignore[reportUnknownMemberType]
         token = cast(str | None, creds.token)  # pyright: ignore[reportUnknownMemberType]
-    except Exception:
-        # Raise outside the handler so even the exception context stays secret-free.
-        pass
+    except Exception as exc:
+        # Keep only an allowlisted OAuth code; raise outside the handler so the
+        # exception context, message and response body stay secret-free.
+        code = _oauth_error_code(exc)
     else:
         if token:
             return token
+        code = _UNKNOWN_REFRESH_ERROR
     raise ProviderConfigError(
-        "settings.credentials.google_user_json could not refresh a Google access token"
+        "settings.credentials.google_user_json could not refresh a Google access "
+        f"token ({code}): {_REFRESH_GUIDANCE[code]}"
     )
+
+
+_UNKNOWN_REFRESH_ERROR = "network or unknown"
+_REFRESH_GUIDANCE = {
+    "invalid_scope": "bind only scopes the sign-in was granted",
+    "invalid_grant": "the sign-in was revoked or expired; sign in again",
+    _UNKNOWN_REFRESH_ERROR: "check the network and the credential, then retry",
+}
+
+
+def _oauth_error_code(exc: Exception) -> str:
+    """Return Google's OAuth error code if allowlisted, never the response text."""
+    if isinstance(exc, google_exceptions.RefreshError) and len(exc.args) > 1:
+        response: object = exc.args[1]
+        if isinstance(response, dict):
+            code = cast(dict[str, object], response).get("error")
+            if code in ("invalid_scope", "invalid_grant"):
+                return code
+    return _UNKNOWN_REFRESH_ERROR

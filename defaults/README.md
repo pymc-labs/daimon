@@ -45,7 +45,7 @@ Operators configure either the account’s full authorized-user JSON in
 or a service-account key in `credentials.google_sa_json` with domain-wide
 delegation. Only agent bindings matching the user email (without case sensitivity)
 use the user credential; other bindings require the service account. Both routes
-use the binding’s scopes. The skill does not provision credentials or bind the
+use the binding’s scopes; with a user credential, bind only scopes the sign-in was granted, such as `gmail.modify`, `calendar`, `drive`, `documents` and `presentations` (each under `https://www.googleapis.com/auth/`); any other scope makes Google refuse the refresh with `invalid_scope`. The skill does not provision credentials or bind the
 default Daimon agent.
 
 `slides-workflow` packages template copying, text/image edits, validated batches

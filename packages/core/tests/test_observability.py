@@ -172,6 +172,19 @@ def test_scrub_event_redacts_token_when_secret_key_in_tags() -> None:
     assert tags["tenant_id"] == "t-abc123", "non-secret tag values should be left intact"
 
 
+@pytest.mark.parametrize("key", ["google_sa_json", "google_user_json"])
+def test_scrub_event_redacts_google_credential_tags(key: str) -> None:
+    """Both Google credential settings are on the app denylist."""
+    event: dict[str, object] = {"tags": {key: '{"type": "authorized_user"}'}}
+
+    result = _scrub_event(event, {})  # type: ignore[arg-type]
+
+    assert result is not None
+    tags = result.get("tags")
+    assert isinstance(tags, dict)
+    assert tags[key] == "[redacted]"
+
+
 def test_scrub_event_drops_message_body_when_request_data_present() -> None:
     """_scrub_event removes request.data so user message content cannot leave the process."""
     event: dict[str, object] = {
