@@ -197,3 +197,98 @@ async def test_turn_query_is_single_bounded_read(db_session: AsyncSession) -> No
     assert await turn_entries(
         db_session, tenant_id=tenant.id, agent_id=agent, account_id=alice.id
     ) == ("", [])
+
+
+async def test_verified_origin_keeps_memory_restriction(db_session: AsyncSession) -> None:
+    from datetime import timedelta
+
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.turn_origins import (
+        bind_origin_session,
+        create_origin,
+        get_active_origin,
+    )
+
+    tenant = await make_tenant(db_session)
+    owner = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    origin = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=owner.id,
+        platform="discord",
+        parent_channel_id="channel",
+        thread_id="thread",
+        responder_ma_agent_id="agent",
+        responder_name="Agent",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
+        now=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    await bind_origin_session(
+        db_session, origin_id=origin.id, chat_session_id="signed", memory_read_only=True
+    )
+    stamped = await get_active_origin(
+        db_session,
+        origin_id=origin.id,
+        tenant_id=tenant.id,
+        account_id=owner.id,
+        platform="discord",
+        now=now,
+    )
+    assert stamped is not None and stamped.memory_read_only is True
+    await bind_origin_session(db_session, origin_id=origin.id, chat_session_id=None)
+    cleared = await get_active_origin(
+        db_session,
+        origin_id=origin.id,
+        tenant_id=tenant.id,
+        account_id=owner.id,
+        platform="discord",
+        now=now,
+    )
+    assert cleared is not None and cleared.memory_read_only is None
+
+
+async def test_concurrent_personal_first_saves_have_one_owner(
+    db_committing_engine, db_clean: None
+) -> None:
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        tenant = await make_tenant(session)
+        alice = await make_account(session, tenant=tenant)
+        bob = await make_account(session, tenant=tenant)
+    now = datetime.now(UTC)
+
+    async def write(account_id: uuid.UUID) -> str | None:
+        async with sessions.begin() as session:
+            return await save_entry(
+                session,
+                entry=MemoryEntry(
+                    tenant_id=tenant.id,
+                    repo_id=17,
+                    name="preference",
+                    title="Preference",
+                    body=str(account_id),
+                    kind="directive",
+                    scope="user",
+                    created_by_account_id=account_id,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+
+    outcomes = await asyncio.gather(write(alice.id), write(bob.id), return_exceptions=True)
+    assert sum(result is None for result in outcomes) == 1
+    assert sum(isinstance(result, ValueError) for result in outcomes) == 1
+    async with sessions() as session:
+        entry = await get_entry(session, tenant_id=tenant.id, repo_id=17, name="preference")
+    assert entry is not None
+    assert entry.body == str(entry.created_by_account_id)
