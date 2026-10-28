@@ -17,12 +17,17 @@ result as `CLOUDSDK_AUTH_ACCESS_TOKEN` before running the CLI.
 - For `gcloud`: the operator must configure deployment Google access and bind
   the agent to a Google identity with `daimon agents bind-google <agent>
   <email> --scopes <scope>`, repeating `--scopes` for additional scopes.
-  Tokens are short-lived (≈1 hour) impersonated access tokens.
+  Tokens are short-lived (≈1 hour) access tokens.
   Ordinary chat supplies a signed `chat_agent_id`; agent sessions supply
   `agent_id`. Calls without either identity fail closed. A Google binding and
-  deployment domain-wide delegation are required; report missing setup to the operator.
+  deployment credentials are required: either authorized-user JSON in
+  `google_user_json` plus its account email in `google_user_email`, or a
+  service-account key in `google_sa_json` with domain-wide delegation. The user
+  credential serves only bindings matching that email, without case sensitivity;
+  other bindings require the service account. Both routes use the binding’s
+  scopes. Report missing setup to the operator.
 
-Google mints a short-lived impersonated token (about one hour). The returned
+Google mints a short-lived access token (about one hour). The returned
 token enters model context and the session transcript; shell commands containing
 it also enter that transcript and may be shell command arguments. Do not echo
 or persist it. The workspace-write and slides-workflow skills show a quoted

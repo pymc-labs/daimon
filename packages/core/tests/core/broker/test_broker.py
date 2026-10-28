@@ -173,13 +173,14 @@ async def test_gcloud_raises_no_binding_when_no_agent_google_binding(
 
 @pytest.mark.asyncio
 async def test_gcloud_raises_provider_config_error_when_sa_json_unset(
+    db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     gcloud_settings_no_sa: Settings,
 ) -> None:
-    """SA JSON unset → ProviderConfigError (BEFORE binding lookup, per
-    Pitfall 2)."""
+    """A bound agent with no usable credential gets a configuration error."""
     account_id = uuid.uuid4()
     agent_id = uuid.uuid4()
+    await _insert_google_binding(db_session, agent_id=agent_id)
     with pytest.raises(ProviderConfigError, match="google_sa_json"):
         await dispatch_mint_token(
             service="gcloud",

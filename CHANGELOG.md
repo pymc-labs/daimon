@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Support operator-configured Google authorized-user credentials for matching agent bindings alongside service-account delegation.
+
 - Replace whitespace-only Slides text by deleting it before insertion, including
   newline-only shapes; genuinely empty shapes still skip deletion.
 

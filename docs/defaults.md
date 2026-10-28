@@ -271,15 +271,22 @@ The `workspace-write` default skill packages a Python script for explicit Gmail
 send/draft, Drive create/copy/rename, Docs create/text edits and Calendar create/update.
 It uses `get_cli_token("gcloud")` and an operator-bound dedicated agent, such as
 `workspace-writer`. Ordinary chat supplies the signed identity needed by the broker.
-The deployment service-account credential stays server-side; no refresh token is
-mounted. Full Drive scope is required for existing shared files and templates.
+Deployment credentials stay server-side; no refresh token is mounted. Operators
+can set `credentials.google_user_json` to the full authorized-user JSON and
+`credentials.google_user_email` to its account email. Only bindings matching that
+email (without case sensitivity) use it, with the binding’s scopes and without
+domain-wide delegation. Other bindings use `credentials.google_sa_json`, a
+service-account key with domain-wide delegation. Full Drive scope is required for
+existing shared files and templates.
 
 Sharing, permission changes, permanent file deletion, Calendar deletion and Drive
 moves are not exposed. Tokens enter on stdin; errors are redacted, writes are not
 retried automatically, and uncertain outcomes need read-back before retrying.
 All users of the bound agent can use its identity directly; these scripts do not
 isolate credentials from sandbox code. Operators must restrict access to that agent
-or workspace and must not bind default Daimon to the shared account. No routine
+or workspace and must not bind default Daimon to the shared account. With full
+Drive and send-mail scopes, everyone who can reach the bound agent can act as that
+account, including reading or changing Drive files and sending mail. No routine
 is created. Skill scripts participate in the existing content-derived fingerprint.
 
 `slides-workflow` uses the same dedicated Google-bound agent. Copy a named template
@@ -328,7 +335,8 @@ in `defaults/agents-optional/`. Run `daimon defaults apply` to deliver skills, t
 These specs contain no credentials and do not auto-attach keys or Google bindings.
 Operators must restrict their audience before binding Google or collecting keys.
 Use `daimon agents bind-google workspace-writer <shared-email> --scopes <scope>...`
-with explicit scopes and deployment domain-wide delegation; use `request_agent_key`
+with explicit scopes and either the matching authorized-user credential or a
+service account with domain-wide delegation; use `request_agent_key`
 for `TOGGL_API_TOKEN` on time-editor and `OPENAI_API_KEY` on image-maker. Keep default
 Daimon unbound and without these shared keys. The skill library’s existing per-file
 content hashes update for changed skill bytes; no static fingerprint is maintained.
