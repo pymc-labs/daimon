@@ -306,3 +306,22 @@ workspace administrator/access permission. Bulk partial results identify success
 and failed entries without retrying. All users of this agent can use the shared key;
 it must not be attached to default Daimon. Vendor permission acceptance requires a
 disposable entry owned by a named member different from the key owner.
+
+`image-workflow` supports OpenAI image generation and local-reference edits using
+`gpt-image-2` or `gpt-image-1.5`. It requires `OPENAI_API_KEY` on an operator-created
+`image-maker` agent and Pillow in the sandbox. Each call generates one bounded PNG,
+validates it and writes a unique file under `/mnt/session/outputs` for attachment.
+It refuses remote references, symlinks, oversized images and custom output paths.
+There is no automatic paid retry. Google’s retired Gemini Imagen route is explicitly
+refused; no Gemini key is needed. All users of image-maker can spend its project key.
+
+Optional agent specs for `workspace-writer`, `time-editor` and `image-maker` live
+in `defaults/agents-optional/`. Run `daimon defaults apply` to deliver skills, then
+`daimon agents create defaults/agents-optional/<name>.yaml` to opt into an agent.
+These specs contain no credentials and do not auto-attach keys or Google bindings.
+Operators must restrict their audience before binding Google or collecting keys.
+Use `daimon agents bind-google workspace-writer <shared-email> --scopes <scope>...`
+with explicit scopes and deployment domain-wide delegation; use `request_agent_key`
+for `TOGGL_API_TOKEN` on time-editor and `OPENAI_API_KEY` on image-maker. Keep default
+Daimon unbound and without these shared keys. The skill library’s existing per-file
+content hashes update for changed skill bytes; no static fingerprint is maintained.

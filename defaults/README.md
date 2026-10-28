@@ -48,3 +48,13 @@ completion. It shares the same short-lived Google binding as Workspace writes.
 
 `toggl-edits` provides named-member update, PUT-based stop and bulk edits on
 `time-editor`, with verified entry ownership and no key-owner fallback or admin operations.
+
+`image-workflow` generates and edits images through OpenAI and validates PNG
+attachments in `/mnt/session/outputs`, using a limited project key on `image-maker`.
+The retired optional Gemini Imagen endpoint is refused.
+
+Opt-in agent specs live in `agents-optional/workspace-writer.yaml`,
+`agents-optional/time-editor.yaml` and `agents-optional/image-maker.yaml`. After
+applying the default skill library, create each with `daimon agents create <path>`.
+They are not auto-created and carry no credentials. Restrict their audience before
+binding Google or collecting keys; every user of an agent can use its credentials.
