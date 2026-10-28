@@ -610,3 +610,76 @@ async def test_owner_reading_the_end_gets_no_second_report_and_outages_wait(db_e
     assert seen.state == "failed" and seen.exit_code == 1
     await service.poll_tasks()
     assert await wakes_for(sm, owner) == []
+
+
+async def test_nul_output_is_stored_and_reported_once(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    session = await launch(service, owner)
+    task = await service.start_task(
+        owner, session.id, command="find . -print0", timeout_minutes=60, request_key="nul"
+    )
+    fake.tasks[task.id.hex].output = "./a\x00./b\x00"
+    await service.poll_tasks()
+    assert (await service.task_result(owner, task.id)).state == "running"
+    fake.tasks[task.id.hex].status, fake.tasks[task.id.hex].exit_code = "exit", 0
+    await service.poll_tasks()
+    await service.poll_tasks()
+    done = await service.task_result(owner, task.id)
+    assert done.state == "succeeded" and "\x00" not in done.output_tail
+    assert done.output_tail == "./a�./b�"
+    assert len(await wakes_for(sm, owner)) == 1
+
+
+async def test_merged_stderr_with_missing_output_becomes_lost(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+
+    class MergedStderr(FakeComputeProvider):
+        async def call(self, session, token, tool, arguments):
+            result = await super().call(session, token, tool, arguments)
+            command = arguments.get("command")
+            if isinstance(command, str) and command.startswith("# daimon-task probe"):
+                return {
+                    "exit_code": 0,
+                    "stdout": "gone\nsh: 6: cannot open /tmp/daimon-tasks/x.out: No such file\n"
+                    "bytes 0\n",
+                    "timed_out": False,
+                }
+            return result
+
+    fake = MergedStderr()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    session = await launch(service, owner)
+    task = await service.start_task(
+        owner, session.id, command="make", timeout_minutes=60, request_key="merged"
+    )
+    await service.poll_tasks()
+    assert (await service.task_result(owner, task.id)).state == "lost"
+    assert len(await wakes_for(sm, owner)) == 1
+
+
+async def test_status_turns_a_failed_database_write_into_a_plain_refusal(monkeypatch):
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    from sqlalchemy.exc import DataError
+
+    @asynccontextmanager
+    async def begin():
+        yield None
+
+    sm = type("SM", (), {"begin": staticmethod(begin)})()
+    service = ComputeSessions(sm, settings(), FakeComputeProvider(), clock=lambda: NOW)
+    running = type("T", (), {"state": "running", "tenant_id": uuid.uuid4(), "id": uuid.uuid4()})
+    monkeypatch.setattr(service, "_owned_task", AsyncMock(return_value=running))
+    monkeypatch.setattr(
+        service,
+        "_poll_task",
+        AsyncMock(side_effect=DataError("INSERT ... secret", {}, Exception("NUL"))),
+    )
+    with pytest.raises(StoreError) as error:
+        await service.task_status(None, uuid.uuid4())
+    assert "secret" not in str(error.value) and "INSERT" not in str(error.value)

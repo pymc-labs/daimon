@@ -272,7 +272,12 @@ def register_fly_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         fly_task_status or files first. Commands, file writes and running background
         commands renew the idle lease. Reads do not renew it.
         """
-        if not command.strip() or len(command) > 8000 or not 1 <= timeout <= 40000:
+        if (
+            not command.strip()
+            or "\x00" in command
+            or len(command) > 8000
+            or not 1 <= timeout <= 40000
+        ):
             raise ToolError(
                 "Use a command of 1–8000 characters and timeout of 1–40000 milliseconds."
             )

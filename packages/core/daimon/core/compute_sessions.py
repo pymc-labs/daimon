@@ -39,6 +39,7 @@ from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.stores.turn_origins import get_active_origin
 from pydantic import JsonValue
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -448,7 +449,12 @@ class ComputeSessions:
             task = await self._owned_task(db, caller, task_id)
         if task.state in ACTIVE_TASK_STATES:
             # The owner sees an ending here, so no separate wake is queued for it.
-            await self._poll_task(task.tenant_id, task.id, wake=False)
+            try:
+                await self._poll_task(task.tenant_id, task.id, wake=False)
+            except SQLAlchemyError:
+                # Never relay database errors; the scheduler keeps polling.
+                log.warning("compute.task_status_retry", task_id=str(task.id))
+                raise StoreError("Could not check the command right now. Try again soon.") from None
             async with self.sm.begin() as db:
                 task = await self._owned_task(db, caller, task_id)
         return task
@@ -462,8 +468,13 @@ class ComputeSessions:
         if not self.settings.deployment_id:
             return
         for tenant in await list_tenants_by_platform(self.sm):
-            async with self.sm.begin() as db:
-                tasks = await task_store.list_active(db, tenant.id)
+            try:
+                async with self.sm.begin() as db:
+                    tasks = await task_store.list_active(db, tenant.id)
+            except Exception:
+                # One tenant's read failure must not stop the pass for the others.
+                log.warning("compute.task_list_retry", tenant_id=str(tenant.id))
+                continue
             for task in tasks:
                 try:
                     await self._poll_task(task.tenant_id, task.id, wake=True)
@@ -536,17 +547,20 @@ class ComputeSessions:
                         "run_bash",
                         {"command": scripts.kill_script(task.id), "timeout_s": 20},
                     )
-                finally:
-                    await task_store.finish(
-                        db,
-                        task,
-                        session,
-                        state="timed_out",
-                        now=now,
-                        wake=wake,
-                        output_bytes=probe.output_bytes,
-                        output_tail=probe.tail,
-                    )
+                except ComputeProviderError:
+                    # Settle anyway: the task is past its deadline, and deleting the
+                    # machine at lease end is the final kill.
+                    log.warning("compute.task_kill_retry", task_id=str(task.id))
+                await task_store.finish(
+                    db,
+                    task,
+                    session,
+                    state="timed_out",
+                    now=now,
+                    wake=wake,
+                    output_bytes=probe.output_bytes,
+                    output_tail=probe.tail,
+                )
             elif probe.status == "running" or (
                 probe.status == "missing"
                 and task.state == "starting"

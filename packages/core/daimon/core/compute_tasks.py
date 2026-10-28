@@ -11,6 +11,7 @@ Nothing here ever starts a command a second time.
 from __future__ import annotations
 
 import base64
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Literal
@@ -69,8 +70,10 @@ def probe_script(task_id: uuid.UUID, *, task_dir: str = TASK_DIR) -> str:
         f'elif [ -f {t}.exit ]; then echo "exit $(cat {t}.exit)"\n'
         f"elif [ -f {t}.lock ]; then echo gone\n"
         "else echo missing; fi\n"
-        f'echo "bytes $(wc -c < {t}.out 2>/dev/null || echo 0)"\n'
-        f"tail -c {OUTPUT_TAIL_BYTES} {t}.out 2>/dev/null || true\n"
+        # Braces: a failed `<` redirect reports before a trailing 2> applies.
+        f'echo "bytes $({{ wc -c < {t}.out; }} 2>/dev/null || echo 0)"\n'
+        f"{{ tail -c {OUTPUT_TAIL_BYTES} {t}.out; }} 2>/dev/null | tr -d '\\000'\n"
+        "true\n"
     )
 
 
@@ -115,18 +118,36 @@ def parse_start(result: JsonValue) -> None:
         raise ComputeProviderError("The session could not start the command.")
 
 
+_STATUS = re.compile(r"(running|gone|missing|exit (-?\d+))")
+_BYTES = re.compile(r"bytes\s+(\d+)")
+_WORDS: dict[str, Literal["running", "gone", "missing"]] = {
+    "running": "running",
+    "gone": "gone",
+    "missing": "missing",
+}
+
+
+def _text(raw: str) -> str:
+    """Make machine output storable: Postgres TEXT refuses NUL and invalid UTF-8."""
+    return raw.encode("utf-8", "replace").decode("utf-8").replace("\x00", "\ufffd")
+
+
 def parse_probe(result: JsonValue) -> Probe:
-    status_line, _, rest = _stdout(result).partition("\n")
-    bytes_line, _, tail = rest.partition("\n")
-    words = status_line.split()
-    try:
-        output_bytes = int(bytes_line.removeprefix("bytes ").strip())
-        if words == ["running"] or words == ["gone"] or words == ["missing"]:
-            return Probe(words[0], None, output_bytes, tail)  # type: ignore[arg-type]
-        if len(words) == 2 and words[0] == "exit":
-            return Probe("exit", int(words[1]), output_bytes, tail)
-    except ValueError:
-        pass
+    """Read the probe, skipping stray lines a server that merges stderr may add."""
+    lines = _text(_stdout(result)).split("\n")
+    for index, line in enumerate(lines):
+        status = _STATUS.fullmatch(line.strip())
+        if status is None:
+            continue
+        for offset, size_line in enumerate(lines[index + 1 :], start=index + 1):
+            size = _BYTES.fullmatch(size_line.strip())
+            if size is None:
+                continue
+            tail = "\n".join(lines[offset + 1 :])
+            if status[2] is not None:
+                return Probe("exit", int(status[2]), int(size[1]), tail)
+            return Probe(_WORDS[status[1]], None, int(size[1]), tail)
+        break
     raise ComputeProviderError("The session returned an invalid task status.")
 
 

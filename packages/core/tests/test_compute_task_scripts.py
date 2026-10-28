@@ -20,9 +20,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def run(script: str) -> JsonValue:
+def run(script: str, *, merge_stderr: bool = False) -> JsonValue:
     started = time.monotonic()
-    done = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+    done = subprocess.run(
+        ["sh", "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
     # A detached command must never hold the inline call open.
     assert time.monotonic() - started < 5
     return {"exit_code": done.returncode, "stdout": done.stdout, "timed_out": False}
@@ -70,6 +77,41 @@ def test_deadline_kill_and_lost_tasks(tmp_path):
     assert ct.parse_probe(run(ct.probe_script(uuid.uuid4(), task_dir=task_dir))).status == (
         "missing"
     )
+
+
+def test_nul_and_invalid_utf8_output_is_storable_text(tmp_path):
+    task_dir = str(tmp_path / "tasks")
+    task_id = uuid.uuid4()
+    run(ct.start_script(task_id, r"printf 'a\000b\377c'", timeout_s=60, task_dir=task_dir))
+    probe = wait_for(task_id, task_dir, "exit")
+    assert probe.exit_code == 0
+    assert "\x00" not in probe.tail
+    assert probe.tail.startswith("ab") and probe.tail.endswith("c")
+    # A server that passes NUL or lone surrogates through still yields storable text.
+    raw = {"exit_code": 0, "stdout": "exit 0\nbytes 4\na\x00b\udcff", "timed_out": False}
+    assert ct.parse_probe(raw).tail == "a\ufffdb?"
+
+
+@pytest.mark.parametrize("files", ["lock_only", "none"])
+def test_merged_stderr_and_missing_output_still_parse(tmp_path, files):
+    task_dir = tmp_path / "tasks"
+    task_dir.mkdir()
+    task_id = uuid.uuid4()
+    if files == "lock_only":
+        (task_dir / f"{task_id.hex}.lock").touch()
+    probe = ct.parse_probe(run(ct.probe_script(task_id, task_dir=str(task_dir)), merge_stderr=True))
+    assert probe.status == ("gone" if files == "lock_only" else "missing")
+    assert probe.output_bytes == 0 and probe.tail == ""
+
+
+def test_parser_skips_stray_stderr_lines():
+    raw = {
+        "exit_code": 0,
+        "stdout": "sh: 1: cannot open x: No such file\ngone\nsh: 2: oops\nbytes 0\n",
+        "timed_out": False,
+    }
+    probe = ct.parse_probe(raw)
+    assert (probe.status, probe.output_bytes, probe.tail) == ("gone", 0, "")
 
 
 @pytest.mark.parametrize(
