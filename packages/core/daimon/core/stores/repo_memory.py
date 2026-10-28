@@ -6,10 +6,11 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from daimon.core._models import Account, RepoMemory, ThreadSession
+from daimon.core._models import Account, RepoMemory, RepoMemorySession
 from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, or_, select, text, update
+from sqlalchemy import delete, or_, select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -113,8 +114,8 @@ async def turn_entries(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
-    mapping_id: uuid.UUID | None = None,
     session_id: str | None = None,
+    session_provider: str = "anthropic",
 ) -> tuple[str, list[tuple[str, str, str, str, str]], str | None]:
     """One indexed query: live working grant, scoped confirmation and bounded catalog.
 
@@ -122,7 +123,7 @@ async def turn_entries(
     References never transfer bodies. At most 512 rows and 12,001 characters per
     directive cross the DB boundary. There is no per-entry or network lookup.
     Agent-specific confirmations shadow shared ones even when revoked. The same
-    statement reads the last delivered hash by thread-session primary key, including
+    statement reads the last delivered hash by tenant/provider/session primary key, including
     when no working grant remains, so revocation can clear a previous state block.
     """
     coverage = installation_covers_repo_sql("r.repo_full_name", "i")
@@ -145,9 +146,9 @@ async def turn_entries(
             ORDER BY g.repo_id LIMIT 1
         )
         SELECT w.repo_full_name, m.name, m.title, m.kind, m.scope, m.body,
-               (SELECT repo_memory_sha256 FROM thread_sessions
-                WHERE id = :mapping_id AND tenant_id = :tenant_id
-                  AND ma_session_id = :session_id) AS previous_sha256
+               (SELECT sha256 FROM repo_memory_sessions
+                WHERE tenant_id = :tenant_id AND provider = :session_provider
+                  AND session_id = :session_id) AS previous_sha256
         FROM (SELECT 1) anchor LEFT JOIN working w ON true LEFT JOIN LATERAL (
             WITH candidates AS (
                 SELECT name, left(title, 1001) AS title, kind, scope,
@@ -173,7 +174,7 @@ async def turn_entries(
                 "tenant_id": tenant_id,
                 "agent_id": agent_id,
                 "account_id": account_id,
-                "mapping_id": mapping_id,
+                "session_provider": session_provider,
                 "session_id": session_id,
             },
         )
@@ -215,17 +216,25 @@ async def record_turn_state(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    mapping_id: uuid.UUID,
     session_id: str,
+    session_provider: str,
     sha256: str,
 ) -> None:
-    """Record only a successful delivery, scoped to the exact session generation."""
+    """Record only a successful delivery, scoped to this provider's exact session."""
     await session.execute(
-        update(ThreadSession)
-        .where(
-            ThreadSession.id == mapping_id,
-            ThreadSession.tenant_id == tenant_id,
-            ThreadSession.ma_session_id == session_id,
+        insert(RepoMemorySession)
+        .values(
+            tenant_id=tenant_id,
+            provider=session_provider,
+            session_id=session_id,
+            sha256=sha256,
         )
-        .values(repo_memory_sha256=sha256)
+        .on_conflict_do_update(
+            index_elements=[
+                RepoMemorySession.tenant_id,
+                RepoMemorySession.provider,
+                RepoMemorySession.session_id,
+            ],
+            set_={"sha256": sha256},
+        )
     )

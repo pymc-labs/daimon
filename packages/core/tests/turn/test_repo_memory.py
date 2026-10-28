@@ -18,6 +18,7 @@ from daimon.core.turn.prepare import PreparedTurn
     ("case", "allowed", "personal"),
     [
         ("ordinary", True, True),
+        ("native", True, True),
         ("shared_owner", True, False),
         ("unattended", True, False),
         ("hold", False, True),
@@ -51,8 +52,9 @@ async def test_turn_memory_eligibility_and_principal(
         PreparedTurn,
         SimpleNamespace(
             admission=admission,
-            mapping_id=mapping_id,
+            mapping_id=None if case == "native" else mapping_id,
             ma_session_id="session",
+            session_ref=SimpleNamespace(provider="openai") if case == "native" else None,
         ),
     )
     deps = cast(
@@ -83,7 +85,7 @@ async def test_turn_memory_eligibility_and_principal(
         deps.sessionmaker,
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent"),
-        mapping_id=mapping_id,
+        session_provider="openai" if case == "native" else "anthropic",
         session_id="session",
         account_id=account_id if personal else None,
         allowed=allowed,

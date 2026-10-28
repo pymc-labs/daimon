@@ -149,12 +149,10 @@ async def test_turn_prefix_is_sent_on_first_turn_and_only_after_a_render_change(
     import daimon.core.repo_memory as memory
 
     factory = MagicMock()
-    mapping_id = uuid.uuid4()
     key = dict(
         tenant_id=uuid.uuid4(),
         agent_id=uuid.uuid4(),
         account_id=uuid.uuid4(),
-        mapping_id=mapping_id,
         session_id="session",
         allowed=True,
     )
@@ -169,7 +167,6 @@ async def test_turn_prefix_is_sent_on_first_turn_and_only_after_a_render_change(
     await memory.record_memory_prefix(
         factory,
         tenant_id=key["tenant_id"],
-        mapping_id=mapping_id,
         session_id="session",
         prefix=first,
     )

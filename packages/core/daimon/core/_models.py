@@ -673,8 +673,6 @@ class ThreadSession(Base):
     # executes. A `daimon.core.session_snapshot.SessionSnapshot` serialized to
     # JSON. NULL on rows written before continuity existed.
     effective_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    # Last repository-memory state successfully sent to this session.
-    repo_memory_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
     identity_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     mutable_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The provider-neutral binding this row backs (`provider_binding`), and its
@@ -4817,3 +4815,18 @@ class RepoMemory(Base):
     source_id: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RepoMemorySession(Base):
+    """Last delivered repository-memory state for any provider's session."""
+
+    __tablename__ = "repo_memory_sessions"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)

@@ -306,16 +306,16 @@ async def test_concurrent_personal_first_saves_have_one_owner(
     assert entry.body == str(entry.created_by_account_id)
 
 
-async def test_render_hash_is_scoped_to_the_exact_session_and_tenant(
+async def test_render_hash_is_scoped_to_tenant_provider_and_session(
     db_session: AsyncSession,
 ) -> None:
     from daimon.core.stores.repo_memory import record_turn_state, turn_entries
-    from daimon.testing.factories import make_thread_session
 
     tenant = await make_tenant(db_session)
-    mapping = await make_thread_session(db_session, tenant=tenant)
+    other_tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    key = dict(tenant_id=tenant.id, mapping_id=mapping.id, session_id=mapping.ma_session_id)
+    # Native sessions have no ThreadSession mapping; they still retain state.
+    key = dict(tenant_id=tenant.id, session_id="native-session", session_provider="openai")
     await record_turn_state(db_session, **key, sha256="delivered-state")
     # Even an absent working repo carries the previous hash in the same state query.
     assert await turn_entries(db_session, **key, agent_id=agent_id, account_id=None) == (
@@ -325,8 +325,8 @@ async def test_render_hash_is_scoped_to_the_exact_session_and_tenant(
     )
     for different in (
         {"session_id": "replacement"},
-        {"tenant_id": uuid.uuid4()},
-        {"mapping_id": uuid.uuid4()},
+        {"tenant_id": other_tenant.id},
+        {"session_provider": "anthropic"},
     ):
         assert (
             await turn_entries(
@@ -336,7 +336,11 @@ async def test_render_hash_is_scoped_to_the_exact_session_and_tenant(
                 account_id=None,
             )
         )[-1] is None
-        await record_turn_state(db_session, **{**key, **different}, sha256="wrong-generation")
+        await record_turn_state(db_session, **{**key, **different}, sha256="other-session")
     assert (await turn_entries(db_session, **key, agent_id=agent_id, account_id=None))[
         -1
     ] == "delivered-state"
+    await record_turn_state(db_session, **key, sha256="updated-state")
+    assert (await turn_entries(db_session, **key, agent_id=agent_id, account_id=None))[
+        -1
+    ] == "updated-state"

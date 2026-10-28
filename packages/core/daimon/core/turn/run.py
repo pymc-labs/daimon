@@ -1030,7 +1030,7 @@ async def _repo_memory_prefix(
         deps.sessionmaker,
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id),
-        mapping_id=prepared.mapping_id,
+        session_provider=prepared.session_ref.provider if prepared.session_ref else "anthropic",
         session_id=prepared.ma_session_id,
         # Shared conversations never acquire one speaker's private directives.
         account_id=(
@@ -1777,8 +1777,10 @@ async def run_prepared_turn_impl(
                             await record_memory_prefix(
                                 deps.sessionmaker,
                                 tenant_id=tenant_id,
-                                mapping_id=mapping_id,
                                 session_id=ma_session_id,
+                                session_provider=prepared.session_ref.provider
+                                if prepared.session_ref
+                                else "anthropic",
                                 prefix=repo_memory,
                             )
                         if delivery is not None:
@@ -1978,8 +1980,8 @@ async def run_prepared_turn_impl(
                         await record_memory_prefix(
                             deps.sessionmaker,
                             tenant_id=tenant_id,
-                            mapping_id=new_mapping_id,
                             session_id=new_session_id,
+                            session_provider="anthropic",
                             prefix=recovery_memory,
                         )
             finally:

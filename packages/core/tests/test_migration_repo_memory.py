@@ -50,11 +50,9 @@ async def test_memory_state_migration_matches_model(db_session: AsyncSession) ->
         schema = sync.scalar(text("SELECT current_schema()"))
         with Operations.context(MigrationContext.configure(sync)):
             module.downgrade()
-            assert "repo_memory_sha256" not in {
-                c["name"] for c in inspect(sync).get_columns("thread_sessions", schema=schema)
-            }
+            assert "repo_memory_sessions" not in inspect(sync).get_table_names(schema=schema)
             module.upgrade()
             differences = compare_metadata(MigrationContext.configure(sync), Base.metadata)
-            assert not [d for d in differences if "repo_memory_sha256" in str(d)]
+            assert not [d for d in differences if "repo_memory_sessions" in str(d)]
 
     await connection.run_sync(cycle)

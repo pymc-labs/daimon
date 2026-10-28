@@ -143,8 +143,8 @@ async def turn_memory_prefix(
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
     allowed: bool,
-    mapping_id: uuid.UUID | None = None,
     session_id: str | None = None,
+    session_provider: str = "anthropic",
 ) -> str:
     if not allowed:
         return ""
@@ -154,7 +154,7 @@ async def turn_memory_prefix(
             tenant_id=tenant_id,
             agent_id=agent_id,
             account_id=account_id,
-            mapping_id=mapping_id,
+            session_provider=session_provider,
             session_id=session_id,
         )
     entries = [
@@ -178,17 +178,17 @@ async def record_memory_prefix(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
-    mapping_id: uuid.UUID | None,
     session_id: str,
+    session_provider: str = "anthropic",
     prefix: str,
 ) -> None:
-    if not prefix or mapping_id is None:
+    if not prefix:
         return
     async with session_factory.begin() as session:
         await record_turn_state(
             session,
             tenant_id=tenant_id,
-            mapping_id=mapping_id,
+            session_provider=session_provider,
             session_id=session_id,
             sha256=hashlib.sha256(prefix.encode()).hexdigest(),
         )
