@@ -255,6 +255,9 @@ Compute cleanup uses its own `_repeat_until_stopped` loop alongside the usage
 sweep, so routine dispatch never waits for Fly inventory or deletion. A sweep
 has no total timeout: large inventories can finish, and inventory failures or
 request timeouts still allow registered machines to be cleaned up.
+Background Fly command polling has a third loop of its own, so a slow machine
+delays neither cleanup nor dispatch. `--once` runs one cleanup pass, then one
+polling pass.
 
 The per-routine catch-up policy controls downtime recovery:
 

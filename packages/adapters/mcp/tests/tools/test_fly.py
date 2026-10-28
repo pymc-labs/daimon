@@ -168,3 +168,114 @@ async def test_exact_approval_arguments_and_session_key(monkeypatch, mode):
                 args,
                 {"region": "iad", "ttl_hours": None},
             )
+
+
+@pytest.mark.parametrize("mode", ["same", "changed", "foreign_tool", "none"])
+async def test_background_command_key_is_the_provider_tool_use(monkeypatch, mode):
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def db():
+        yield None
+
+    runtime = SimpleNamespace(session_factory=db, client=None)
+    auth = AuthIdentity(
+        tenant_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        role=Role.USER,
+        platform="discord",
+        chat_session_id="chat",
+    )
+    origin = SimpleNamespace(
+        platform="discord",
+        thread_id="thread",
+        responder_ma_agent_id="agent",
+        parent_channel_id="parent",
+    )
+    # Inline bash has no approval card; a background start must not demand one.
+    gap = AsyncMock(return_value="session_not_gated")
+    monkeypatch.setattr(fly._session_gate, "session_card_gap", gap)
+    monkeypatch.setattr(
+        fly,
+        "get_live_thread_session",
+        AsyncMock(return_value=SimpleNamespace(ma_session_id="parent-session")),
+    )
+    monkeypatch.setattr(
+        fly,
+        "retrieve_session",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id="parent-session", agent=SimpleNamespace(id="agent"), metadata={}
+            )
+        ),
+    )
+    args = {
+        "session_id": "s",
+        "command": "python fit.py",
+        "origin_context_id": "origin",
+        "timeout": 40000,
+        "run_in_background": True,
+        "timeout_minutes": None,
+    }
+    defaults = {"timeout": 40000, "run_in_background": False, "timeout_minutes": None}
+    event_input = {
+        "session_id": "s",
+        "command": "python fit.py" if mode != "changed" else "python other.py",
+        "origin_context_id": "origin",
+        "run_in_background": True,
+    }
+    events = [
+        SimpleNamespace(
+            type="agent.mcp_tool_use",
+            name="fly_run_bash",
+            mcp_server_name="foreign" if mode == "foreign_tool" else fly.DAIMON_SERVER_NAME,
+            input={**event_input, "run_in_background": False},
+            id="earlier-inline",
+        ),
+        SimpleNamespace(
+            type="agent.mcp_tool_use",
+            name="fly_run_bash",
+            mcp_server_name="foreign" if mode == "foreign_tool" else fly.DAIMON_SERVER_NAME,
+            input=event_input,
+            id="background-use",
+        ),
+    ]
+    if mode == "none":
+        events = []
+    monkeypatch.setattr(
+        fly, "LegacyTurnIO", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
+    )
+    if mode == "same":
+        key, _ = await fly._approved(
+            runtime, auth, origin, "fly_run_bash", args, defaults, approval=False
+        )
+        assert key == "parent-session:background-use"
+        gap.assert_not_awaited()
+    else:
+        with pytest.raises(ToolError):
+            await fly._approved(
+                runtime, auth, origin, "fly_run_bash", args, defaults, approval=False
+            )
+
+
+def test_task_view_withholds_output_except_from_result():
+    from daimon.core.compute_models import ComputeTask
+
+    now = datetime.now(UTC)
+    task = ComputeTask(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        owner_account_id=uuid.uuid4(),
+        request_key="parent:use",
+        command_preview="python fit.py",
+        timeout_minutes=60,
+        deadline_at=now,
+        output_tail="secret output",
+        output_path="/tmp/daimon-tasks/x.out",
+        created_at=now,
+    )
+    status = fly._task_view(task, output=False)
+    assert status["task_id"] == str(task.id) and "output_tail" not in status
+    assert not {"tenant_id", "owner_account_id", "request_key"} & set(status)
+    assert fly._task_view(task, output=True)["output_tail"] == "secret output"

@@ -50,3 +50,32 @@ class ComputeResource(BaseModel):
     session_id: uuid.UUID
     machine_state: str = "unknown"
     machine_id: str | None = None
+
+
+ComputeTaskState = Literal[
+    "starting", "running", "succeeded", "failed", "timed_out", "lost", "cancelled"
+]
+ACTIVE_TASK_STATES: frozenset[str] = frozenset({"starting", "running"})
+
+
+class ComputeTask(BaseModel):
+    """A detached command on a session; its conversation is the session's own."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    session_id: uuid.UUID
+    owner_account_id: uuid.UUID
+    request_key: str
+    command_preview: str
+    state: ComputeTaskState = "starting"
+    exit_code: int | None = None
+    timeout_minutes: int
+    deadline_at: datetime
+    output_bytes: int = 0
+    output_tail: str = ""
+    output_path: str
+    created_at: datetime
+    finished_at: datetime | None = None
+    version: int = 0

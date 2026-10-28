@@ -3095,5 +3095,43 @@ deletion intent commits before provider deletion, which is retried until confirm
 Row locks serialize active machine actions and renewal against deletion. Disabling
 new launches does not disable cleanup. The provider port has an in-memory fake and
 HTTP contract tests; it does not depend on chat adapters. Expiry warnings enter
-the existing owner-bound continuation queue. Bash is inline only; this feature
-does not create background tasks or completion wakes.
+the existing owner-bound continuation queue.
+
+#### Background commands and completion wakes
+
+`fly_run_bash` with `run_in_background` registers a `compute_tasks` row (session,
+owner, provider tool-use key, deadline, state) and commits it before touching the
+machine. One inline `run_bash` then starts the command detached under `setsid`
+and `timeout`, writing a pid, exit and output file under `/tmp/daimon-tasks/` on
+the machine. A noclobber lock file makes a second start of the same task id a
+no-op, and a retried tool use returns its existing row. Task handles never live
+in an MCP client session, so scheduler, thin-server and control-plane restarts
+lose nothing.
+
+The scheduler polls active tasks on its own `_repeat_until_stopped` loop, beside
+compute cleanup and never awaited by dispatch. Each pass reads a task's files
+with one inline `run_bash` under the session row lock (skipping a session busy
+with an owner call) and stores the output size and its last 16 KiB. While a
+task runs, the poller renews the session lease, never past the max TTL counted
+from the task's start. Outcomes:
+
+| Machine says | Task becomes |
+| --- | --- |
+| exit 0 | `succeeded` |
+| exit 124, or another nonzero exit at or after the deadline | `timed_out` |
+| other exit | `failed` |
+| still running after deadline plus five minutes | process group killed, `timed_out` |
+| process gone without an exit file, or no pid two minutes after a start | `lost` |
+| unreachable past deadline plus five minutes | `lost` |
+| session stopping, deleted or expired | `cancelled` |
+
+A command is never started again. The terminal versioned update and
+`record_continuation` commit in one transaction, keyed by
+`uuid5(task_id, "finished")`, so the session's own conversation (the only one a
+task can start from) receives exactly one unattended `timer` wake. Its text is
+short: the outcome, exit code and at most 1,500 characters of output inside
+markers that call it untrusted data, never instructions. When the owner's own
+`fly_task_status` call observes the end, no wake is queued, since the result is
+already in that conversation. `fly_task_status` and `fly_task_result` use the
+same attended origin, owner, conversation, tenant and source checks as the other
+session tools; tenant admins cannot read them.

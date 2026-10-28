@@ -1954,10 +1954,22 @@ while any sessions remain.
 `DAIMON_COMPUTE__MAX_TTL_HOURS` bound concurrent sessions and idle lifetimes. There
 is no compute dollar cap or usage metering. An active session can renew repeatedly;
 provider outages may delay deletion and increase charges. Session disks are
-perishable: export outputs before stopping or expiry. Bash currently runs inline
-with a maximum 40-second timeout; background task handles and completion reports
-are not provided. Image-profile authoring tools, compiler credential injection and
-browser notebook access are not provided.
+perishable: export outputs before stopping or expiry. Image-profile authoring
+tools, compiler credential injection and browser notebook access are not provided.
+
+Inline bash has a 40-second limit. Longer commands run in the background: the
+machine image also needs `sh`, `setsid`, `timeout`, `base64` and `tail`
+(util-linux and coreutils), and a writable `/tmp`. The scheduler checks running
+commands on each tick, keeps their session alive up to `DAIMON_COMPUTE__MAX_TTL_HOURS`
+from the command's start, and posts one message in the original conversation when
+each ends. `DAIMON_COMPUTE__PER_SESSION_TASKS` caps commands running at once per
+session. Polling needs `DAIMON_COMPUTE__DEPLOYMENT_ID` and
+`DAIMON_COMPUTE__SESSION_AUTH_KEY` in the scheduler; it keeps running when launches
+are disabled. A machine restart loses running commands; they are reported as
+stopped unexpectedly, never rerun. Stopping a session ends its commands and
+reports them once. A command that daemonizes itself (its own `setsid` or
+double fork) survives the overdue-command kill until the machine is deleted
+at lease end.
 
 Account erasure cascades the Fly registration and its conversation metadata; the
 scheduler deletes the remaining tagged machine as an orphan on a later sweep.

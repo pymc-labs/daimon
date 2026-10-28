@@ -9,8 +9,9 @@ Imperative shell that:
    the full process lifetime (created via ``engine.connect()``, never via
    ``async_sessionmaker``).
 3. Installs SIGINT/SIGTERM signal handlers via the running event loop.
-4. Loops: every ``tick_interval_s``, awaits ``run_one_tick``; the usage and
-   compute sweeps repeat on their own loops at the same interval.
+4. Loops: every ``tick_interval_s``, awaits ``run_one_tick``; the usage sweep,
+   compute cleanup and compute task polling repeat on their own loops at the
+   same interval.
 5. On stop: releases the lock, disposes the engine, exits.
 
 The ``--once`` flag runs a single tick and exits 0. The tick uses
@@ -195,6 +196,16 @@ async def _sweep_compute(compute: ComputeSessions) -> None:
         await compute.reconcile()
     except Exception:
         log.warning("compute.sweep_retry")
+
+
+async def _poll_compute_tasks(compute: ComputeSessions) -> None:
+    # Background commands are read and reported even if new launches are disabled.
+    if not compute.settings.deployment_id or compute.settings.session_auth_key is None:
+        return
+    try:
+        await compute.poll_tasks()
+    except Exception:
+        log.warning("compute.task_poll_retry")
 
 
 async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnection | None:
@@ -1502,6 +1513,7 @@ async def _run_loops(
     usage_sweep: Callable[[], Awaitable[None]] | None,
     privacy_sweep: Callable[[], Awaitable[None]],
     compute_sweep: Callable[[], Awaitable[None]],
+    compute_task_poll: Callable[[], Awaitable[None]],
     interval_s: float,
     stop_event: asyncio.Event,
 ) -> None:
@@ -1511,6 +1523,8 @@ async def _run_loops(
     privacy deletion and compute cleanup loops always run, since deletion must
     not wait on an unrelated setting. Compute inventory may outlast many ticks;
     it has no total sweep timeout, so growing inventory cannot starve cleanup.
+    Background command polling has its own loop, so a slow machine delays
+    neither cleanup nor dispatch.
 
     A usage pass settles whole session histories and can outlast many ticks;
     inline, routine claims waited for it. On stop the passes in flight are
@@ -1524,6 +1538,11 @@ async def _run_loops(
             ),
             loops.create_task(
                 _repeat_until_stopped(compute_sweep, interval_s=interval_s, stop_event=stop_event)
+            ),
+            loops.create_task(
+                _repeat_until_stopped(
+                    compute_task_poll, interval_s=interval_s, stop_event=stop_event
+                )
             ),
         ]
         if usage_sweep is not None:
@@ -1670,6 +1689,7 @@ async def run(
             )
             await long_jobs.sweep()
             await _sweep_compute(compute)
+            await _poll_compute_tasks(compute)
             await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
             await _sweep_privacy_deletes(client, sm)
@@ -1754,6 +1774,7 @@ async def run(
                 usage_sweep=usage_sweep if scheduler_settings.usage_sweep_enabled else None,
                 privacy_sweep=privacy_sweep,
                 compute_sweep=lambda: _sweep_compute(compute),
+                compute_task_poll=lambda: _poll_compute_tasks(compute),
                 interval_s=scheduler_settings.tick_interval_s,
                 stop_event=stop_event,
             )

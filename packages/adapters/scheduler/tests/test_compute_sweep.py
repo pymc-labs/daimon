@@ -52,10 +52,60 @@ async def test_dispatch_keeps_ticking_and_shutdown_cancels_stalled_compute():
             usage_sweep=AsyncMock(),
             privacy_sweep=AsyncMock(),
             compute_sweep=stalled,
+            compute_task_poll=AsyncMock(),
             interval_s=0.01,
             stop_event=stop,
         )
     assert ticks == 3
+    assert cancelled.is_set()
+
+
+async def test_task_poll_skips_unconfigured_and_contains_errors():
+    compute = SimpleNamespace(
+        settings=SimpleNamespace(deployment_id="", session_auth_key=None), poll_tasks=AsyncMock()
+    )
+    await main._poll_compute_tasks(compute)
+    compute.poll_tasks.assert_not_awaited()
+    compute.settings = SimpleNamespace(deployment_id="d", session_auth_key=SecretStr("k"))
+    compute.poll_tasks = AsyncMock(side_effect=RuntimeError("remote body with secrets"))
+    await main._poll_compute_tasks(compute)
+    compute.poll_tasks.assert_awaited_once()
+
+
+async def test_stalled_task_polling_blocks_neither_dispatch_nor_cleanup():
+    stop = asyncio.Event()
+    started, cancelled = asyncio.Event(), asyncio.Event()
+    ticks = cleanups = 0
+
+    async def stalled():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async def cleanup():
+        nonlocal cleanups
+        cleanups += 1
+
+    async def tick():
+        nonlocal ticks
+        await started.wait()
+        ticks += 1
+        if ticks >= 3 and cleanups >= 2:
+            stop.set()
+
+    async with asyncio.timeout(5):
+        await main._run_loops(
+            tick=tick,
+            usage_sweep=None,
+            privacy_sweep=AsyncMock(),
+            compute_sweep=cleanup,
+            compute_task_poll=stalled,
+            interval_s=0.01,
+            stop_event=stop,
+        )
+    assert ticks >= 3 and cleanups >= 2
     assert cancelled.is_set()
 
 
@@ -191,6 +241,7 @@ async def test_many_expired_apps_are_deleted_without_delaying_dispatch(monkeypat
             usage_sweep=AsyncMock(),
             privacy_sweep=AsyncMock(),
             compute_sweep=sweep,
+            compute_task_poll=AsyncMock(),
             interval_s=0.01,
             stop_event=stop,
         )
