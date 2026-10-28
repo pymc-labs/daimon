@@ -38,6 +38,14 @@ stop/duration; it deliberately does not use PATCH stop. The official
 [role guide](https://support.toggl.com/en-us/article/access-rights-and-privileges-108y786/)
 establishes workspace-admin editing of other members' entries. Actual token,
 plan, private-project and locked-entry permissions need live acceptance.
-The `/me/time_entries/{id}` read endpoint returns an entry accessible to the
-current credential; it is never used to infer ownership. If another member's
-entry is inaccessible, the script refuses to write.
+Ownership preflight uses workspace-scoped
+[Reports v3 detailed search](https://engineering.toggl.com/docs/track/reports/detailed_reports/),
+never `/me`. For each explicit entry ID it sends `time_entry_ids: [id]`,
+`user_ids: [resolved_user]`, `grouped: false`, `page_size: 2`, `rounding: 0`.
+It requires exactly one row containing exactly one matching entry. Report rows
+provide `user_id`; nested `time_entries` provide `id`, `seconds`, `start`, `stop`
+(as described in the [report schema](https://engineering.toggl.com/docs/track/reports/saved_reports/)).
+Workspace identity comes from the authenticated workspace-scoped endpoint;
+conflicting owner/workspace fields, missing timing or ambiguous results refuse
+all writes. Null `stop` explicitly identifies a running entry. Report access
+requires the relevant plan and workspace-admin/project permission.

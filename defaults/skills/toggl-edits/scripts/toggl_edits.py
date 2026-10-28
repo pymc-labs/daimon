@@ -137,6 +137,69 @@ def ownership(entry, entry_id, workspace, user):
     return entry
 
 
+def workspace_entry(api, workspace, user, entry_id):
+    # Reports are workspace-scoped. A one-ID query avoids pagination ambiguity:
+    # require exactly one row and one entry, rather than trusting a truncated page.
+    rows = api.request(
+        "POST",
+        f"/reports/api/v3/workspace/{workspace}/search/time_entries",
+        {
+            "time_entry_ids": [entry_id],
+            "user_ids": [user],
+            "grouped": False,
+            "page_size": 2,
+            "rounding": 0,
+        },
+    )
+    require(
+        isinstance(rows, list) and len(rows) == 1,
+        "Entry is missing or ambiguous in the named member's workspace report; no entries changed",
+    )
+    row = rows[0]
+    require(
+        isinstance(row, dict) and row.get("user_id") == user,
+        "Report entry does not belong to the explicitly named member; no entries changed",
+    )
+    children = row.get("time_entries")
+    require(
+        isinstance(children, list) and len(children) == 1,
+        "Report entry is missing or ambiguous; no entries changed",
+    )
+    child = children[0]
+    require(
+        isinstance(child, dict) and child.get("id") == entry_id,
+        "Report returned an unexpected entry ID; no entries changed",
+    )
+    for source in (row, child):
+        for field, expected in (
+            ("user_id", user),
+            ("uid", user),
+            ("workspace_id", workspace),
+            ("wid", workspace),
+        ):
+            require(
+                field not in source or source[field] == expected,
+                "Conflicting report ownership/workspace evidence; no entries changed",
+            )
+    require(
+        "start" in child and "stop" in child and type(child.get("seconds")) is int,
+        "Report lacks entry timing evidence; no entries changed",
+    )
+    timestamp(child["start"])
+    if child["stop"] is not None:
+        timestamp(child["stop"])
+        require(child["seconds"] >= 0, "Invalid stopped-entry duration")
+    # The response omits workspace_id: its evidence is the authenticated route,
+    # not a default account. A null stop explicitly denotes a running entry.
+    entry = {
+        **child,
+        "user_id": user,
+        "workspace_id": workspace,
+        "duration": -1 if child["stop"] is None else child["seconds"],
+    }
+    return ownership(entry, entry_id, workspace, user)
+
+
 def update_body(entry, changes):
     result = dict(changes)
     if set(result) & {"start", "stop", "duration"}:
@@ -169,13 +232,8 @@ def run(request, api=None, now=None):
     workspace = request["workspace_id"]
     user = member(api, workspace, request["person"])
     ids = request["entry_ids"]
-    # Fetch/check ALL owners before ANY write, including bulk edits.
-    entries = [
-        ownership(
-            api.request("GET", f"/api/v9/me/time_entries/{entry_id}"), entry_id, workspace, user
-        )
-        for entry_id in ids
-    ]
+    # Resolve ALL entries from the workspace report before ANY mutation.
+    entries = [workspace_entry(api, workspace, user, entry_id) for entry_id in ids]
     prefix = f"/api/v9/workspaces/{workspace}/time_entries/"
     if request["operation"] == "bulk-edit":
         response = api.request("PATCH", prefix + ",".join(map(str, ids)), request["operations"])

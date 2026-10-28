@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix Toggl shared-account edits by resolving ownership and timing through
+  workspace Reports v3 filtered by entry ID and explicitly named member, rather
+  than a key-owner-only lookup. Refuse incomplete or ambiguous report evidence.
+
 - Add sandbox OpenAI image generation and local-reference editing with validated
   reply attachments. Ship opt-in credential-holder agent specs for Workspace,
   Toggl and images; the retired Gemini Imagen route is explicitly refused.
