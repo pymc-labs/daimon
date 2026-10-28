@@ -157,6 +157,11 @@ def _validate_settings(
             "DAIMON_MCP__PUBLIC_URL is required — use the URL MA will dial, "
             "e.g. https://daimon-mcp.example.com/mcp"
         )
+    if settings.mcp_identity.servers and settings.mcp_identity.signing_key is None:
+        raise BootstrapError(
+            "DAIMON_MCP_IDENTITY__SIGNING_KEY is required on the MCP service "
+            "when DAIMON_MCP_IDENTITY__SERVERS is set"
+        )
 
 
 async def _healthz(_req: Request) -> PlainTextResponse:
@@ -383,7 +388,7 @@ def create_mcp_app(
 
     identity = effective_settings.mcp_identity
     relay_clients: dict[str, httpx.AsyncClient] = {}
-    if identity.servers and identity.signing_key is not None:
+    if identity.servers:
         from daimon.adapters.mcp.identity_relay import build_relay_clients
 
         relay_clients = build_relay_clients(identity.servers)
@@ -576,7 +581,8 @@ def create_mcp_app(
         methods=["PUT"],
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
-    if relay_clients and identity.signing_key is not None:
+    if relay_clients:
+        assert identity.signing_key is not None
         from daimon.adapters.mcp.identity_relay import (
             RELAY_METHODS,
             RELAY_ROUTE,

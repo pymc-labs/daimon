@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import ssl
 import uuid
 from dataclasses import dataclass
 
 import httpx
 import jwt as pyjwt
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import NameOID
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.identity_relay import (
     MAX_BODY_BYTES,
     RELAY_METHODS,
     RELAY_ROUTE,
     build_identity_relay_route,
+    build_relay_clients,
 )
 from daimon.core.config import SignedIdentityServer
 from daimon.core.ma_identity import derive_agent_uuid
@@ -39,6 +46,27 @@ SERVER = SignedIdentityServer(
     issuer="daimon-test",
     audience="https://tools.example.com",
 )
+ISOLATED_SERVER = SERVER.model_copy(update={"isolate_context": True})
+
+
+def _public_ca() -> tuple[str, bytes]:
+    key = Ed25519PrivateKey.generate()
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "synthetic relay CA")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(dt.datetime(2025, 1, 1, tzinfo=dt.UTC))
+        .not_valid_after(dt.datetime(2035, 1, 1, tzinfo=dt.UTC))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, algorithm=None)
+    )
+    return (
+        certificate.public_bytes(serialization.Encoding.PEM).decode(),
+        certificate.public_bytes(serialization.Encoding.DER),
+    )
 
 
 class _Upstream:
@@ -96,6 +124,8 @@ async def _chat_session(
     *,
     turn: bool = True,
     foreign: bool = False,
+    message: bool = True,
+    isolated: bool = False,
 ) -> tuple[str, uuid.UUID]:
     """A person's chat session in `thread`, optionally running their turn there.
 
@@ -117,9 +147,10 @@ async def _chat_session(
                 configuration_target_ma_agent_id=None, configuration_target_name=None,
                 role=Role.USER, expires_at=now + dt.timedelta(hours=1), now=now,
                 sender_foreign=foreign, shared_channel=False,
-                platform_channel_id=thread, platform_message_id=f"msg-{thread}",
+                platform_channel_id=thread,
+                platform_message_id=f"msg-{thread}" if message else None,
             )  # fmt: skip
-    token = await _token(factory, person, RelayBinding("Agent A", mapping_id))
+    token = await _token(factory, person, RelayBinding("Agent A", mapping_id, isolated))
     return token, mapping_id
 
 
@@ -150,6 +181,40 @@ def _relay(
 def _identity(request: httpx.Request, key: SigningKey) -> dict[str, object]:
     token = request.headers["authorization"].removeprefix("Bearer ")
     return pyjwt.decode(token, key.public_key(), algorithms=["EdDSA"], audience=SERVER.audience)
+
+
+def test_relay_ca_is_scoped_to_one_https_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    pem, der = _public_ca()
+    private = SignedIdentityServer(
+        name="private",
+        url=SERVER.url,
+        issuer=SERVER.issuer,
+        audience=SERVER.audience,
+        ca_certificate=pem,
+    )
+    ordinary = SERVER.model_copy(update={"name": "ordinary"})
+    captured: list[object] = []
+
+    class CaptureClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs.get("verify"))
+
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.httpx.AsyncClient", CaptureClient)
+    build_relay_clients([private, ordinary])
+    custom, normal = captured
+    assert isinstance(custom, ssl.SSLContext)
+    assert custom.verify_mode == ssl.CERT_REQUIRED and custom.check_hostname
+    assert der in custom.get_ca_certs(binary_form=True)
+    assert normal is True
+
+    with pytest.raises(ValueError, match="valid PEM certificate"):
+        SignedIdentityServer(
+            name="invalid",
+            url=SERVER.url,
+            issuer=SERVER.issuer,
+            audience=SERVER.audience,
+            ca_certificate="not a PEM certificate",
+        )
 
 
 async def _call(client: httpx.AsyncClient, token: str) -> httpx.Response:
@@ -290,3 +355,44 @@ async def test_unreachable_server_is_a_bad_gateway_and_a_full_pool_a_retry(
     assert down.status_code == 502, "a server that cannot be reached is a 502"
     assert busy.status_code == 503, "every connection to the server is in use"
     assert busy.headers["retry-after"] == "5", "the caller is told when to retry"
+
+
+async def test_isolated_relay_requires_a_live_requester_message(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    valid, _ = await _chat_session(db_session_factory, person, "thread-valid", isolated=True)
+    legacy, _ = await _chat_session(db_session_factory, person, "thread-legacy")
+    idle, _ = await _chat_session(
+        db_session_factory, person, "thread-idle", turn=False, isolated=True
+    )
+    no_message, _ = await _chat_session(
+        db_session_factory, person, "thread-no-message", message=False, isolated=True
+    )
+    foreign, _ = await _chat_session(
+        db_session_factory, person, "thread-foreign", foreign=True, isolated=True
+    )
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, generate_signing_key(), ISOLATED_SERVER
+    ) as client:
+        responses = [
+            await _call(client, token) for token in (valid, legacy, idle, no_message, foreign)
+        ]
+    assert [response.status_code for response in responses] == [200, 403, 403, 403, 403]
+    assert len(upstream.requests) == 1
+
+
+async def test_isolated_relay_refuses_an_older_live_session(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    old, _ = await _chat_session(db_session_factory, person, "thread-1", isolated=True)
+    await _chat_session(db_session_factory, person, "thread-1", turn=False, isolated=True)
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, generate_signing_key(), ISOLATED_SERVER
+    ) as client:
+        response = await _call(client, old)
+    assert response.status_code == 403
+    assert upstream.requests == []

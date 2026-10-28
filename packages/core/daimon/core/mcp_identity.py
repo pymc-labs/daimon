@@ -25,6 +25,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final, cast
+from urllib.parse import unquote, urlsplit
 
 import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
@@ -116,6 +117,20 @@ def relay_url(public_url: str, name: str) -> str:
     return relay_base(public_url) + name
 
 
+def relay_route_name(url: str, *, public_url: str) -> str | None:
+    """Resolve the relay route reached by a server URL, ignoring query and path encoding."""
+    parts = urlsplit(canonical_mcp_url(url))
+    base = urlsplit(relay_base(public_url))
+    if (parts.scheme, parts.netloc) != (base.scheme, base.netloc):
+        return None
+    prefix = base.path.rstrip("/") + "/"
+    path = unquote(parts.path).rstrip("/")
+    if not path.startswith(prefix):
+        return None
+    name = path[len(prefix) :]
+    return name if name and "/" not in name else None
+
+
 def identity_relay_urls(server_urls: Iterable[str], *, public_url: str) -> tuple[str, ...]:
     """The attached URLs that are this deployment's relay, which need its credential.
 
@@ -138,11 +153,14 @@ class RelayBinding:
 
     agent_name: str
     session_key: uuid.UUID | None = None
+    isolated: bool = False
 
-    def claim(self) -> dict[str, str]:
-        value = {"agent_name": self.agent_name}
+    def claim(self) -> dict[str, str | bool]:
+        value: dict[str, str | bool] = {"agent_name": self.agent_name}
         if self.session_key is not None:
             value["session"] = str(self.session_key)
+        if self.isolated:
+            value["isolated"] = True
         return value
 
 
@@ -151,15 +169,21 @@ def parse_relay_claim(raw: object) -> RelayBinding:
     if not isinstance(raw, Mapping):
         raise ValueError("relay claim is not an object")
     claim = cast("Mapping[str, object]", raw)
-    name, key = claim.get("agent_name"), claim.get("session")
+    name, key, isolated = claim.get("agent_name"), claim.get("session"), claim.get("isolated")
     if (
-        not set(claim) <= {"agent_name", "session"}
+        not set(claim) <= {"agent_name", "session", "isolated"}
         or not isinstance(name, str)
         or not name
         or not (key is None or isinstance(key, str))
+        or isolated is not None
+        and isolated is not True
     ):
         raise ValueError("relay claim has the wrong shape")
-    return RelayBinding(agent_name=name, session_key=None if key is None else uuid.UUID(key))
+    return RelayBinding(
+        agent_name=name,
+        session_key=None if key is None else uuid.UUID(key),
+        isolated=isolated is True,
+    )
 
 
 @dataclass(frozen=True)

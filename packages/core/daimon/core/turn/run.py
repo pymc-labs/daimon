@@ -87,6 +87,7 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_ma_session,
     insert_mapping,
+    isolated_relay_names,
     stamp_session_seal,
 )
 from daimon.core.turn.progress_plans import progress_plans_prefix
@@ -667,7 +668,23 @@ async def _replace_dead_session_locked(
             ):
                 raise SessionRetired("This conversation moved. Continue in the new one.")
 
+            dead_snapshot = dead_row.effective_config if dead_row is not None else None
+            # An isolated request's results stay in its own session: recovery never
+            # adopts another row for the thread nor replays a transcript into or
+            # out of an isolated one.
+            isolated = (
+                bool(isolated_relay_names(deps, admission))
+                or (dead_snapshot is not None and dead_snapshot.context_isolated)
+                or (
+                    live is not None
+                    and live.effective_config is not None
+                    and live.effective_config.context_isolated
+                )
+            )
+
             if live is not None and live.id != dead_mapping_id:
+                if isolated:
+                    raise SessionRetired("This conversation moved. Continue in the new one.")
                 # The lock wait above can be long: decide again before adopting
                 # another turn's replacement. A pin raises `AdmissionDenied`; a
                 # seal added since, or a replacement built writable that the
@@ -719,19 +736,22 @@ async def _replace_dead_session_locked(
             # Whose conversation it was, for the quoted block's `from` attribute:
             # the snapshot the dead session actually froze, or the responder
             # resolved for this turn on a row written before snapshots existed.
-            dead_snapshot = dead_row.effective_config if dead_row is not None else None
             from_agent_name = (
                 dead_snapshot.agent_name if dead_snapshot is not None else admission.agent.name
             )
-            previous_session = await _replay_previous_session(
-                deps.anthropic,
-                session_id=dead_session_id,
-                from_agent_name=from_agent_name,
-                io=turn_io(
+            previous_session = (
+                None
+                if isolated
+                else await _replay_previous_session(
                     deps.anthropic,
-                    dead_session_id,
-                    **_turn_port_kwargs(deps, admission, dead_session_id, tenant_id=tenant_id),
-                ),
+                    session_id=dead_session_id,
+                    from_agent_name=from_agent_name,
+                    io=turn_io(
+                        deps.anthropic,
+                        dead_session_id,
+                        **_turn_port_kwargs(deps, admission, dead_session_id, tenant_id=tenant_id),
+                    ),
+                )
             )
 
             # What the successor actually inherited, recorded on its row as the
@@ -749,7 +769,7 @@ async def _replace_dead_session_locked(
                 deps,
                 admission,
                 tenant_id=tenant_id,
-                predecessor_session_id=dead_session_id,
+                predecessor_session_id=None if isolated else dead_session_id,
                 platform=platform,
             )
             fresh = await insert_mapping(
