@@ -359,7 +359,11 @@ async def test_signed_origin_keeps_attendance_separate_from_calling_grant(
     )
     assert origin.human_invocation is None, "legacy/unbound controls carry no calling grant"
     await bind_origin_session(
-        db_session, origin_id=origin.id, chat_session_id="signed-session", human_invocation=human
+        db_session,
+        origin_id=origin.id,
+        chat_session_id="signed-session",
+        human_invocation=human,
+        memory_read_only=False,
     )
     current = await get_active_origin(
         db_session,
@@ -371,3 +375,24 @@ async def test_signed_origin_keeps_attendance_separate_from_calling_grant(
     )
     assert current is not None and current.human_invocation is human
     assert current.attended is True
+
+    await bind_origin_session(db_session, origin_id=origin.id, chat_session_id=str(origin.id))
+    rebound = await get_active_origin(
+        db_session,
+        origin_id=origin.id,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        now=now,
+    )
+    assert rebound is not None and rebound.memory_read_only is False
+    await bind_origin_session(db_session, origin_id=origin.id, chat_session_id=None)
+    cleared = await get_active_origin(
+        db_session,
+        origin_id=origin.id,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        now=now,
+    )
+    assert cleared is not None and cleared.memory_read_only is None

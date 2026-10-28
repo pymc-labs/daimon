@@ -180,8 +180,10 @@ async def bind_origin_session(
         )
     values: dict[str, Any] = {
         "chat_session_id": chat_session_id,
-        "memory_read_only": memory_read_only if chat_session_id is not None else None,
     }
+    # Native runtimes rebind the signed grant without changing its admission stamp.
+    if chat_session_id is None or memory_read_only is not None:
+        values["memory_read_only"] = memory_read_only if chat_session_id is not None else None
     if attended is not None:
         values["attended"] = TurnOrigin.attended & attended
     if human_invocation is not None:

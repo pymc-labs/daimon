@@ -245,6 +245,7 @@ async def apply_update_ops(
     daimon_rule_tools: frozenset[str] = frozenset(),
     mcp_vault_ids: McpVaultIds | None = None,
     shared_owner: uuid.UUID | None = None,
+    legacy_memory_servers: tuple[str, ...] = (),
 ) -> AppliedOps | SessionBusy:
     """Run `ops` against the live session and return what it runs afterwards.
 
@@ -316,6 +317,7 @@ async def apply_update_ops(
                     asks_before_publishing=asks_before_publishing,
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
+                    legacy_memory_servers=legacy_memory_servers,
                 )
                 servers = session_mcp_servers(
                     agent,

@@ -1190,6 +1190,9 @@ async def _prepare_session_for_turn_locked(
                 confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
                 daimon_rule_tools=admission.daimon_rule_tools,
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
+                legacy_memory_servers=(
+                    deps.repo_memory.legacy_mcp_server_names if deps.repo_memory.enabled else ()
+                ),
             )
 
         if isinstance(decision, ReuseAsIs):

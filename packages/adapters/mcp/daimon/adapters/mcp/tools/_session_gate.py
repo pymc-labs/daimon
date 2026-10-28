@@ -230,6 +230,11 @@ async def _recorded_as_gated(
                     asks_before_publishing=asks_before_publishing,
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
+                    legacy_memory_servers=(
+                        runtime.settings.repo_memory.legacy_mcp_server_names
+                        if runtime.settings.repo_memory.enabled
+                        else ()
+                    ),
                 )
                 if pre_watch:
                     # Policy-on sessions add watch gates implicitly too. Rebuild
