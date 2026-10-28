@@ -215,8 +215,9 @@ async def quarantine_conversation(
 
 
 async def dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """On unless an admin turned DMs off (`/dm-me disable`); no policy row means on."""
     policy = await session.get(DirectMessagePolicy, tenant_id)
-    return policy is not None and policy.enabled
+    return policy is None or policy.enabled
 
 
 async def set_dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID, enabled: bool) -> None:

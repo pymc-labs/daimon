@@ -70,7 +70,7 @@ async def test_a_cold_dm_names_no_server(monkeypatch: pytest.MonkeyPatch) -> Non
     await _cog()._reply(message)  # pyright: ignore[reportPrivateUsage]
 
     text = message.channel.send.await_args.args[0]
-    assert text.startswith("I can't start a private chat from here.")
+    assert text.startswith("To talk here, run `/dm-me` in a server channel first")
     assert "are off here" not in text
 
 

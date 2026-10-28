@@ -540,8 +540,19 @@ Discord bot token. Required to run the Discord adapter.
 
 `list[int]` · optional · default unset
 
-Guilds allowed to receive commands and events when the environment name is set. An empty
-list disables all Discord ingress, including DMs, in non-production.
+Guilds allowed to receive commands and events when the environment name is set. A DM is
+accepted only from a member of one of these guilds. Elsewhere an @mention or a new
+install gets one line naming staging_contact, at most once per channel per hour, and
+nothing else. DM buttons, modals and slash commands stay blocked in non-production. An
+empty list processes nothing in non-production (it still answers with the one line
+above).
+
+### `DAIMON_DISCORD__STAGING_CONTACT`
+
+`str` · optional · default `the team running Daimon`
+
+Who to ask, named in the one-line reply a non-production bot gives in a guild or DM it
+is not enabled for. Ignored in production.
 
 ### `DAIMON_DISCORD__STARTUP_REPLAY_MINUTES`
 

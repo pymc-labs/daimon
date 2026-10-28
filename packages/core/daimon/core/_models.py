@@ -104,9 +104,10 @@ class Tenant(Base):
     )
     turn_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # A plain-text "@<bot name>" in a channel or thread starts a turn like a
-    # real mention (daimon.core.name_mentions). Off until an admin opts in.
+    # real mention (daimon.core.name_mentions). On for new tenants; an admin
+    # can turn it off.
     plain_text_mentions: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
+        Boolean, nullable=False, server_default=text("true")
     )
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -3423,7 +3424,7 @@ class AgentPostedMessage(Base):
 
 
 class DirectMessagePolicy(Base):
-    """Explicit tenant opt-in; absence leaves existing DM behavior unchanged."""
+    """A tenant's DM switch; with no row DMs are on (`/dm-me disable` writes one)."""
 
     __tablename__ = "direct_message_policies"
     tenant_id: Mapped[uuid.UUID] = mapped_column(

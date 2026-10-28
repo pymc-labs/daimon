@@ -103,8 +103,8 @@ async def test_missing_im_scopes_say_so_plainly_and_log_the_setup_steps(
 
     text = client.chat_postEphemeral.await_args.kwargs["text"]
     assert text.startswith(
-        "Daimon can't use DMs in this workspace yet.\n\n"
-        "Ask a workspace admin to finish Daimon's DM setup.\n\n_Ref "
+        "Daimon needs to be reinstalled in this workspace before it can use DMs.\n\n"
+        "Ask a workspace admin to reinstall the Daimon app.\n\n_Ref "
     )
     assert "im:history" not in text, "the setup steps go to the log, not the chat"
     [entry] = [e for e in logs if e["event"] == "slack.dm.setup_incomplete"]
@@ -123,6 +123,8 @@ async def test_a_scope_error_from_slack_logs_the_setup_steps() -> None:
         message = direct_messages._error_message(  # pyright: ignore[reportPrivateUsage]
             error, settings=MagicMock(), team_id="T1"
         )
-    assert message.startswith("Daimon can't use DMs in this workspace yet.\n\n")
+    assert message.startswith(
+        "Daimon needs to be reinstalled in this workspace before it can use DMs.\n\n"
+    )
     [entry] = [e for e in logs if e["event"] == "slack.dm.setup_incomplete"]
     assert entry["cause"] == "missing_scope"

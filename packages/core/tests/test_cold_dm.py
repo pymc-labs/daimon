@@ -18,16 +18,15 @@ def test_private_chats_off_names_the_platforms_own_admin_and_command() -> None:
 
 def test_private_chats_on_points_to_dm_me_in_a_channel() -> None:
     assert cold_dm_text("slack", dms_on=True) == (
-        "I answer in channels first.\n"
-        "Mention me in a channel, or run `/dm-me` in one to continue privately here."
+        "To talk here, run `/dm-me` in a channel first and I'll continue with you here.\n"
+        "Or mention me in any channel."
     )
 
 
 def test_unknown_space_names_no_server_and_does_not_claim_chats_are_off() -> None:
     text = cold_dm_text("discord", dms_on=None)
-    assert text.startswith("I can't start a private chat from here.\n")
+    assert text.startswith("To talk here, run `/dm-me` in a server channel first")
     assert "are off here" not in text
-    assert "`/dm-me` there" in text
     assert "ask a server admin to run `/dm-me enable`" in text
 
 

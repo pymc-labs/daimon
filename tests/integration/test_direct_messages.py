@@ -250,9 +250,13 @@ async def _reply(deps, route, *, message_id="1", content="hello", role=Role.USER
     )
 
 
-async def test_dms_are_off_without_an_explicit_tenant_policy(db_session, db_session_factory):
+async def test_dms_are_on_until_an_admin_turns_them_off(db_session, db_session_factory):
     tenant = await make_tenant(db_session)
+    assert await dm_enabled(db_session, tenant_id=tenant.id), "no policy row means on"
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=False)
     assert not await dm_enabled(db_session, tenant_id=tenant.id)
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    assert await dm_enabled(db_session, tenant_id=tenant.id)
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack"])
@@ -954,8 +958,8 @@ async def test_slack_missing_im_grants_refuses_before_open_or_policy_write(
         ]
         assert len(replies) == 1
         assert replies[0].startswith(
-            "Daimon can't use DMs in this workspace yet.\n\n"
-            "Ask a workspace admin to finish Daimon's DM setup."
+            "Daimon needs to be reinstalled in this workspace before it can use DMs.\n\n"
+            "Ask a workspace admin to reinstall the Daimon app."
         ), "the scope names and setup steps go to the log, not the chat"
     async with db_session_factory() as session:
         assert not await dm_enabled(session, tenant_id=tenant.id)
@@ -1005,7 +1009,9 @@ async def test_slack_open_failure_requires_reauthorization_without_creating_rout
             for call in calls
         ]
         assert len(replies) == 1
-        assert replies[0].startswith("Daimon can't use DMs in this workspace yet.")
+        assert replies[0].startswith(
+            "Daimon needs to be reinstalled in this workspace before it can use DMs."
+        )
     async with db_session_factory() as session:
         assert (
             await session.scalar(sql_text("SELECT count(*) FROM direct_message_conversations")) == 0

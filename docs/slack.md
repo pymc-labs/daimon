@@ -197,7 +197,7 @@ agent still has a saved GitHub key, `/github connect` asks the person to contact
 the Daimon operator to switch it. Existing Slack installations need the
 `/github` command added from `docs/slack-app-manifest.yaml` and reinstallation.
 
-Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle; a channel message starts a conversation only through `app_mention`, or, when an admin turned on plain-text mentions (`set_plain_text_mentions`), as a person's message that types `@` followed by the bot's configured name (not inside a link or a `>` quote, nor followed by "(" or by a dot and a letter, as in "@Daimon (urgent)" or "@Daimon.Thanks"). An `app_mention` runs a turn only when the message actually contains a real mention of the bot, so follow-ups in a thread need one too (or the typed name, with that setting on); Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. A message with both a real mention and the typed name runs one turn. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
+Existing Slack apps must update **Event Subscriptions → Subscribe to bot events** to match `docs/slack-app-manifest.yaml`, including `message.channels`, `message.groups`, channel/group archive, unarchive, and deletion events. These subscriptions track setup lifecycle; a channel message starts a conversation only through `app_mention`, or, with plain-text mentions on (the default for new workspaces; `set_plain_text_mentions`), as a person's message that types `@` followed by the bot's configured name (not inside a link or a `>` quote, nor followed by "(" or by a dot and a letter, as in "@Daimon (urgent)" or "@Daimon.Thanks"). An `app_mention` runs a turn only when the message actually contains a real mention of the bot, so follow-ups in a thread need one too (or the typed name, with that setting on); Slack has been reported to deliver the event for un-mentioned thread replies, and those are dropped. A message with both a real mention and the typed name runs one turn. Root deletion is delivered as the [`message_deleted` message subtype](https://docs.slack.dev/reference/events/message/message_deleted/).
 
 Workspace admins can click **🐙 GitHub** in `/agent-setup` or run `/github`.
 The GitHub home lists each agent and its repo count without grant controls.
@@ -367,7 +367,8 @@ Subscribe the app to `channel_shared`, `channel_unshared` and
 
 ### Private conversations
 
-Workspace admins opt in with `/dm-me enable` (and disable with `/dm-me disable`). Then use
+Private conversations are on unless a workspace admin turns them off with `/dm-me disable`
+(`/dm-me enable` turns them back on). Use
 `/dm-me` in a channel to continue privately with its recent text context and a back-link.
 Send later messages directly to the app. Run `/dm-me` again to reset the private scope.
 Only current workspace members allowed by the tenant access policy can invoke it.
@@ -376,13 +377,14 @@ rule out of the copied history, so their content never moves into a DM.
 
 Update the app from `docs/slack-app-manifest.yaml` and reinstall it to grant the new
 bot scopes `im:history` and `im:write`, subscribe to `message.im`, and enable the App
-Home messages tab. Existing installations remain DM-disabled until an admin opts in.
+Home messages tab. An installation without those scopes refuses `/dm-me` until it is reinstalled.
 This version moves recent channel text, not Slack thread replies or attachments.
 
 Before `/dm-me` moves a conversation or `/dm-me enable` changes policy, Daimon checks the
 granted `x-oauth-scopes` for both IM scopes. Missing or unreadable grants refuse
-without saving a route. The person sees "Daimon can't use DMs in this workspace
-yet." and "Ask a workspace admin to finish Daimon's DM setup."; the steps below are
+without saving a route. The person sees "Daimon needs to be reinstalled in this
+workspace before it can use DMs." and "Ask a workspace admin to reinstall the Daimon
+app."; the steps below are
 logged as a `slack.dm.setup_incomplete` warning with the workspace's `team_id`.
 The scope header cannot verify event subscriptions: operators must also apply the
 manifest's `message.im` subscription and enable the Messages tab.
@@ -393,7 +395,8 @@ manifest's `message.im` subscription and enable the Messages tab.
    `im:write` bot scopes.
 2. Subscribe the app to the `message.im` bot event.
 3. Turn on the Messages tab under App Home.
-4. Run `/dm-me enable` as a workspace admin.
+4. Private chats are on by default; `/dm-me enable` turns them back on if an
+   admin turned them off.
 
 `docs/slack-app-manifest.yaml` already carries steps 1 to 3; applying it and
 reinstalling covers them.

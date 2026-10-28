@@ -1303,6 +1303,7 @@ async def test_a_typed_bot_name_behaves_as_before_when_the_switch_is_off(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Off: a root post is ignored and a thread reply is screened by participation."""
+    await _switch(db_session_factory, on=False)
     teams = _app(db_session_factory, FakeSender())
     root = _named_post("@Daimon summarise the week", conversation_id=CHANNEL_ID)
 

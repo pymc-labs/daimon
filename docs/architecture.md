@@ -540,7 +540,8 @@ the intent active for another recovery attempt. An unprompted turn likewise reta
 intent when its card delete fails, including an unknown-webhook error.
 
 Plain-text mentions are a per-tenant switch (`tenants.plain_text_mentions`,
-off by default, set with the admin-only `set_plain_text_mentions`). Each
+on for tenants created since migration 0125 and left as it was for older ones,
+set with the admin-only `set_plain_text_mentions`). Each
 adapter first runs the pure matcher in `daimon.core.name_mentions` on a
 person's channel or thread message: "@" plus a bot name, case-insensitive,
 any whitespace between its words, not after a word character, "@" or "/"
@@ -2221,10 +2222,11 @@ no `admin` tag and a server baseline hides them from everyone else. A later
 `channels:write` tool joins by taking the tag and the `require_scope` call;
 `_scopes.py` describes the steps.
 
-### Opt-in DM conversations
+### DM conversations
 
-DM conversations are disabled unless the tenant's separate `direct_message_policies`
-row enables them. Admins use `/dm-me enable` or `/dm-me disable`; the invoker allowlist
+DM conversations are on unless the tenant's separate `direct_message_policies`
+row turns them off; a tenant with no row has them on. Admins use `/dm-me disable`
+or `/dm-me enable`; the invoker allowlist
 still applies through `admit(is_dm=True)` on every move and every private turn.
 Discord uses a live guild-member lookup and Slack checks the current workspace
 membership and role. No stored admin role grants access.
