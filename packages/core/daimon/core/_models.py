@@ -2625,6 +2625,7 @@ class TurnOrigin(Base):
     )
     chat_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     human_invocation: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    memory_read_only: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     attended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -4784,3 +4785,33 @@ class ComputeSessionRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     warned_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RepoMemory(Base):
+    """One tenant/repository pool, shared across agents; personal directives stay owned."""
+
+    __tablename__ = "repo_memory"
+    __table_args__ = (
+        CheckConstraint("kind IN ('reference', 'directive')", name="ck_repo_memory_kind"),
+        CheckConstraint("scope IN ('repo', 'user')", name="ck_repo_memory_scope"),
+        CheckConstraint("scope = 'repo' OR kind = 'directive'", name="ck_repo_memory_personal"),
+        CheckConstraint("length(name) BETWEEN 1 AND 64", name="ck_repo_memory_name"),
+        Index("ix_repo_memory_turn", "tenant_id", "repo_id", "kind", "name"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    repo_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    title: Mapped[str] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text)
+    # The erasure path deletes personal directives first; shared knowledge
+    # survives with its attribution removed.
+    created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    source_id: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

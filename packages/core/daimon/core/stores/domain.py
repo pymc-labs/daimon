@@ -1170,6 +1170,7 @@ class TurnOriginRow(BaseModel):
     account_id: uuid.UUID
     chat_session_id: str | None = None
     human_invocation: bool | None = None
+    memory_read_only: bool | None = None
     attended: bool = False
     platform: str
     parent_channel_id: str
