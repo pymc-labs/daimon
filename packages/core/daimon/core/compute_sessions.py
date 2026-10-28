@@ -313,7 +313,12 @@ class ComputeSessions:
             if current is None or current.state == "deleted":
                 return
             now = self.clock()
-            if archived or current.expires_at <= now or current.state == "stopping":
+            if (
+                archived
+                or current.expires_at <= now
+                or current.state == "stopping"
+                or (current.state == "launching" and not self.settings.enabled)
+            ):
                 current = current.model_copy(update={"state": "stopping"})
                 await store.save(db, current)
             elif current.state == "launching":

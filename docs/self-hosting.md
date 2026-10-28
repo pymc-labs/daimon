@@ -1927,7 +1927,8 @@ Fly sessions are an optional native feature, disabled by default. Configure
 same deployment identifier and authentication key across restarts. Give each
 installation its own identifier and Fly organization/token scope. Removing these
 settings before cleanup finishes can leave paid resources behind. Disabling
-launches leaves cleanup enabled.
+launches leaves cleanup enabled and cancels unfinished launch attempts. Running
+sessions retain their existing leases.
 
 Set `DAIMON_COMPUTE__PROFILES` to a JSON map of reviewed image profiles. Each entry
 contains `image`, `regions`, `cpu_kind`, `cpus` and `memory_mb`. For example,

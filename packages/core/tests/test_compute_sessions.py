@@ -335,3 +335,24 @@ async def test_inventory_failure_does_not_disable_known_session_cleanup(db_engin
     now += timedelta(days=2)
     await service.reconcile()
     assert (await service.get(owner, session.id)).state == "deleted"
+
+
+async def test_disabling_launch_cleans_partial_creation_without_starting_a_machine(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, _, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    fake.fail_create = True
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    with pytest.raises(ComputeProviderError):
+        await launch(service, owner)
+    [session] = await service.list(owner)
+    assert session.state == "launching" and fake.machine_env == {}
+    fake.fail_create = False
+    disabled = ComputeSessions(
+        sm, settings().model_copy(update={"enabled": False}), fake, clock=lambda: NOW
+    )
+    await disabled.reconcile()
+    assert (await disabled.get(owner, session.id)).state == "deleted"
+    assert fake.resources == {} and fake.machine_env == {}
