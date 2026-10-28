@@ -173,6 +173,10 @@ SERVER_SEPARATOR: Final[str] = "/"
 #: to the input field whose presence makes the call the write. Without it the
 #: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
+    "fly_launch_session": "template",
+    "fly_extend_session": "hours",
+    "fly_run_bash": "command",
+    "fly_write_file": "content",
     "start_long_job": "command",
     "create_watch": "source",
     "resume_watch": "watch_id",
@@ -191,7 +195,16 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
 
 
 WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
-    {"create_watch", "resume_watch", "rotate_watch_key", "start_long_job"}
+    {
+        "create_watch",
+        "resume_watch",
+        "rotate_watch_key",
+        "start_long_job",
+        "fly_launch_session",
+        "fly_extend_session",
+        "fly_run_bash",
+        "fly_write_file",
+    }
 )
 
 

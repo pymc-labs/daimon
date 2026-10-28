@@ -52,6 +52,8 @@ from daimon.core.authz import (
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_channel
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.compute_fly import FlyComputeProvider
+from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import DirectMessagePolicy, Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -178,6 +180,16 @@ from sqlalchemy.ext.asyncio import (
 )
 
 log = structlog.get_logger(__name__)
+
+
+async def _sweep_compute(compute: ComputeSessions) -> None:
+    # Cleanup is independent of launch enablement and user routines.
+    if not compute.settings.deployment_id or compute.settings.api_token is None:
+        return
+    try:
+        await compute.reconcile()
+    except Exception:
+        log.warning("compute.sweep_retry")
 
 
 async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnection | None:
@@ -1619,6 +1631,7 @@ async def run(
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
+    compute = ComputeSessions(sm, settings.compute, FlyComputeProvider(settings.compute))
     long_jobs = LongJobExecutor(sm, ManagedLongJobPort(client, sm, settings), settings.long_jobs)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1645,6 +1658,7 @@ async def run(
                 wait_for_completion=True,
             )
             await long_jobs.sweep()
+            await _sweep_compute(compute)
             await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
             await _sweep_privacy_deletes(client, sm)
@@ -1688,6 +1702,7 @@ async def run(
                 dispatcher=dispatcher,
             )
             await long_jobs.sweep()
+            await _sweep_compute(compute)
             await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
