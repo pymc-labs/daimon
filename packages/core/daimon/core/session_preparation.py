@@ -941,6 +941,9 @@ async def _prepare_session_for_turn_locked(
             fernet=deps.fernet,
             recorded=recorded,
             tool_safety=deps.tool_safety,
+            legacy_memory_servers=(
+                deps.repo_memory.legacy_mcp_server_names if deps.repo_memory.enabled else ()
+            ),
             public_url=deps.public_url,
             requires_chat_session=(
                 admission.shared_owner is None

@@ -271,6 +271,7 @@ async def project_session_resources(
     channel_skills: Sequence[MaSkill] = (),
     tool_safety: ToolSafetyPolicy,
     asks_before_publishing: bool = False,
+    legacy_memory_servers: tuple[str, ...] = (),
     mcp_settings: McpSettings | None = None,
     agent_github_app: GithubAppSettings | None = None,
     hide_personal_for: uuid.UUID | None = None,
@@ -358,6 +359,7 @@ async def project_session_resources(
         tool_safety=tool_safety,
         public_url=public_url,
         asks_before_publishing=asks_before_publishing,
+        legacy_memory_servers=legacy_memory_servers,
     )
     servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
     payload = agent.model_dump(
@@ -552,6 +554,7 @@ async def create_session(
     personal_memory: bool = False,
     tool_safety: ToolSafetyPolicy,
     asks_before_publishing: bool = False,
+    legacy_memory_servers: tuple[str, ...] = (),
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
     slack_turn_context_id: uuid.UUID | None = None,
@@ -1128,6 +1131,7 @@ async def create_session(
             tool_safety=tool_safety,
             public_url=public_url,
             asks_before_publishing=asks_before_publishing,
+            legacy_memory_servers=legacy_memory_servers,
             confirmed_tools=confirmed_tools,
             daimon_rule_tools=daimon_rule_tools,
         )
@@ -1432,6 +1436,7 @@ async def create_session(
                     channel_skills=source_channel_skills,
                     tool_safety=tool_safety,
                     asks_before_publishing=asks_before_publishing,
+                    legacy_memory_servers=legacy_memory_servers,
                     mcp_settings=mcp_settings,
                     agent_github_app=agent_github_app,
                     hide_personal_for=hide_personal_for,

@@ -535,6 +535,11 @@ async def run_turn_impl(
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
             agent_github_app=agent_github_app,
+            legacy_memory_servers=(
+                repo_memory.legacy_mcp_server_names
+                if repo_memory is not None and repo_memory.enabled
+                else ()
+            ),
             requester_is_headless=True,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",

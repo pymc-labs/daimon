@@ -698,6 +698,11 @@ async def _start_turn_impl(
             fernet=runtime.fernet,
             app_session_unmapped=True,
             tool_safety=runtime.settings.tool_safety,
+            legacy_memory_servers=(
+                runtime.settings.repo_memory.legacy_mcp_server_names
+                if runtime.settings.repo_memory.enabled
+                else ()
+            ),
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,

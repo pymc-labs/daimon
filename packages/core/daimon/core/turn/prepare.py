@@ -685,6 +685,9 @@ async def create_ma_session(
             # person and may carry that person's own memory.
             personal_memory=True,
             tool_safety=deps.tool_safety,
+            legacy_memory_servers=(
+                deps.repo_memory.legacy_mcp_server_names if deps.repo_memory.enabled else ()
+            ),
             asks_before_publishing=admission.asks_before_publishing,
             confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
             daimon_rule_tools=admission.daimon_rule_tools,

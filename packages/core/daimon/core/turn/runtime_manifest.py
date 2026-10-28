@@ -1650,6 +1650,11 @@ async def capture_preparation_source(
         fernet=request.deps.fernet,
         channel_skills=request.admission.channel_skills,
         tool_safety=request.deps.tool_safety,
+        legacy_memory_servers=(
+            request.deps.repo_memory.legacy_mcp_server_names
+            if request.deps.repo_memory.enabled
+            else ()
+        ),
         asks_before_publishing=request.admission.asks_before_publishing,
         mcp_settings=request.deps.mcp,
         agent_github_app=request.deps.agent_github_app,
