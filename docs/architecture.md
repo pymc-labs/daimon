@@ -2269,7 +2269,7 @@ to its full body rather than a partial instruction.
 The first turn receives the rendered state; subsequent turns receive it only when
 that state changes. The same query reads the last delivered hash by tenant, provider
 and session in `repo_memory_sessions`. A successful turn records the new hash; failed turns can retry it, and
-replacement sessions receive a fresh copy. Empty state supersedes earlier saved
+replacement sessions receive a fresh copy from the same turn’s state read. Empty state supersedes earlier saved
 rules. No reference bodies are preloaded.
 
 Both mutations refuse restricted, held, foreign and memory-read-only conversations,

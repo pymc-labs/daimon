@@ -48,7 +48,7 @@ from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.mux_compat import legacy_call
-from daimon.core.repo_memory import record_memory_prefix, turn_memory_prefix
+from daimon.core.repo_memory import MemoryState, record_memory_prefix, turn_memory_state
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
@@ -1016,17 +1016,17 @@ async def run_prepared_turn(
 _CHAT_RENDERED_ORIGINS: frozenset[TurnContext] = frozenset({"chat", "handoff"})
 
 
-async def _repo_memory_prefix(
+async def _repo_memory_state(
     deps: TurnDeps,
     prepared: PreparedTurn,
     *,
     tenant_id: uuid.UUID,
     origin: TurnContext,
     unattended: bool,
-) -> str:
+) -> MemoryState:
     if not deps.repo_memory.enabled:
-        return ""
-    return await turn_memory_prefix(
+        return MemoryState()
+    return await turn_memory_state(
         deps.sessionmaker,
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id),
@@ -1181,13 +1181,14 @@ async def run_prepared_turn_impl(
         thread_id=thread_id,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
-    repo_memory = await _repo_memory_prefix(
+    memory_state = await _repo_memory_state(
         deps,
         prepared,
         tenant_id=tenant_id,
         origin=origin,
         unattended=unattended,
     )
+    repo_memory = memory_state.prefix
     prefix = context + plans + repo_memory + prepared.continuity.user_prefix
     if prepared.admission.model_fell_back:
         prefix += MODEL_FALLBACK_NOTICE
@@ -1916,17 +1917,21 @@ async def run_prepared_turn_impl(
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
             reseeded_message = _with_prefix(plans + loss_user_prefix, await reseed_user_message())
-            recovery_memory = await _repo_memory_prefix(
-                deps,
-                replace(
-                    prepared,
-                    admission=recovery.admission or prepared.admission,
-                    ma_session_id=new_session_id,
-                    mapping_id=new_mapping_id,
-                ),
-                tenant_id=tenant_id,
-                origin=origin,
-                unattended=unattended,
+            # A replacement needs the full state even if the old session already
+            # had it. Reuse this turn's single read, only for the same principal
+            # and repo-binding agent under an equally eligible admission.
+            recovery_admission = recovery.admission or prepared.admission
+            recovery_memory = (
+                memory_state.rendered
+                if (
+                    recovery_admission.agent.id == prepared.admission.agent.id
+                    and recovery_admission.account_id == prepared.admission.account_id
+                    and recovery_admission.shared_owner == prepared.admission.shared_owner
+                    and recovery_admission.hold is None
+                    and not recovery_admission.shared_channel
+                    and not recovery_admission.source_shared
+                )
+                else ""
             )
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)

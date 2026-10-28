@@ -136,7 +136,17 @@ def render_memory(repo: str, entries: list[MemoryPointer]) -> str:
     return header + "".join(lines) + (notice if omitted else "") + footer
 
 
-async def turn_memory_prefix(
+@dataclass(frozen=True)
+class MemoryState:
+    rendered: str = ""
+    changed: bool = False
+
+    @property
+    def prefix(self) -> str:
+        return self.rendered if self.changed else ""
+
+
+async def turn_memory_state(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
@@ -145,9 +155,9 @@ async def turn_memory_prefix(
     allowed: bool,
     session_id: str | None = None,
     session_provider: str = "anthropic",
-) -> str:
+) -> MemoryState:
     if not allowed:
-        return ""
+        return MemoryState()
     async with session_factory() as session:
         repo, rows, previous_sha256 = await turn_entries(
             session,
@@ -171,7 +181,30 @@ async def turn_memory_prefix(
         )
     )
 
-    return "" if hashlib.sha256(rendered.encode()).hexdigest() == previous_sha256 else rendered
+    return MemoryState(rendered, hashlib.sha256(rendered.encode()).hexdigest() != previous_sha256)
+
+
+async def turn_memory_prefix(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    allowed: bool,
+    session_id: str | None = None,
+    session_provider: str = "anthropic",
+) -> str:
+    return (
+        await turn_memory_state(
+            session_factory,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account_id,
+            allowed=allowed,
+            session_id=session_id,
+            session_provider=session_provider,
+        )
+    ).prefix
 
 
 async def record_memory_prefix(

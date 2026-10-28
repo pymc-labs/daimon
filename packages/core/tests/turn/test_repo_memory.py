@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from daimon.core.config import RepoMemorySettings
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.repo_memory import MemoryState
 from daimon.core.turn import run
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
@@ -64,11 +65,11 @@ async def test_turn_memory_eligibility_and_principal(
             sessionmaker=MagicMock(),
         ),
     )
-    prefix = AsyncMock(return_value="memory")
-    monkeypatch.setattr(run, "turn_memory_prefix", prefix)
+    prefix = AsyncMock(return_value=MemoryState("memory", True))
+    monkeypatch.setattr(run, "turn_memory_state", prefix)
     token = run.current_origin_id.set(None if case in {"unresolved", "routine"} else uuid.uuid4())
     try:
-        result = await run._repo_memory_prefix(  # pyright: ignore[reportPrivateUsage]
+        result = await run._repo_memory_state(  # pyright: ignore[reportPrivateUsage]
             deps,
             prepared,
             tenant_id=tenant_id,
@@ -78,7 +79,7 @@ async def test_turn_memory_eligibility_and_principal(
     finally:
         run.current_origin_id.reset(token)
     if case == "disabled":
-        assert result == ""
+        assert result.prefix == ""
         prefix.assert_not_called()
         return
     prefix.assert_awaited_once_with(

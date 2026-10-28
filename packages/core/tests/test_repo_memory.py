@@ -173,7 +173,9 @@ async def test_turn_prefix_is_sent_on_first_turn_and_only_after_a_render_change(
     digest = record.call_args.kwargs["sha256"]
     assert digest == hashlib.sha256(first.encode()).hexdigest()
     query.return_value = ("owner/repo", rows, digest)
-    assert await memory.turn_memory_prefix(factory, **key) == ""
+    unchanged = await memory.turn_memory_state(factory, **key)
+    assert unchanged.prefix == ""
+    assert unchanged.rendered == first, "a replacement can reuse the state without a second query"
     query.return_value = ("owner/repo", [], digest)
     deleted = await memory.turn_memory_prefix(factory, **key)
     assert "supersedes" in deleted and "Use uv" not in deleted
