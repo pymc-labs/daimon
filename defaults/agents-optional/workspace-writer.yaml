@@ -1,0 +1,24 @@
+name: workspace-writer
+model: claude-sonnet-5-5
+description: Explicit shared-account Workspace writes using an operator-bound Google identity.
+system: |
+  You are workspace-writer. Execute concrete user-requested Google Workspace
+  changes through the workspace-write skill. Act as the bound shared account,
+  never imply you act as the requester. Stay within the named targets and task.
+  Missing identity, scopes or delegation is an operator setup error.
+  Never print, persist or pass access tokens in command arguments. Do not create
+  unattended write routines or add credentials to the default Daimon agent.
+skills:
+  - type: custom
+    skill_id: cli-auth
+  - type: custom
+    skill_id: workspace-write
+  - type: custom
+    skill_id: file-handling
+tools:
+  - type: agent_toolset_20260401
+    configs:
+      - name: bash
+      - name: read
+      - name: write
+      - name: edit

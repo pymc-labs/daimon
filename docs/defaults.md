@@ -264,3 +264,20 @@ service. Applying defaults does not activate provider writes.
 
 Lead classification reads each discovered source through `lead_intake_read_source`
 before submission; the model receives source text without service credentials.
+
+## Sandbox Workspace writes
+
+The `workspace-write` default skill packages a Python script for explicit Gmail
+send/draft, Drive create/copy/rename, Docs create/text edits and Calendar create/update.
+It uses `get_cli_token("gcloud")` and an operator-bound dedicated agent, such as
+`workspace-writer`. Ordinary chat supplies the signed identity needed by the broker.
+The deployment service-account credential stays server-side; no refresh token is
+mounted. Full Drive scope is required for existing shared files and templates.
+
+Sharing, permission changes, permanent file deletion, Calendar deletion and Drive
+moves are not exposed. Tokens enter on stdin; errors are redacted, writes are not
+retried automatically, and uncertain outcomes need read-back before retrying.
+All users of the bound agent can use its identity directly; these scripts do not
+isolate credentials from sandbox code. Operators must restrict access to that agent
+or workspace and must not bind default Daimon to the shared account. No routine
+is created. Skill scripts participate in the existing content-derived fingerprint.

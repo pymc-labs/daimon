@@ -18,8 +18,8 @@ result as `CLOUDSDK_AUTH_ACCESS_TOKEN` before running the CLI.
   the agent to a Google identity with `daimon agents bind-google <agent>
   <email> --scopes <scope>`, repeating `--scopes` for additional scopes.
   Tokens are short-lived (≈1 hour) impersonated access tokens.
-  The call also needs an agent-bound identity, which ordinary chat does not
-  currently provide. Binding the Google identity alone cannot fix a missing
-  caller `agent_id`; hand that limitation to the operator.
+  Ordinary chat supplies a signed `chat_agent_id`; agent sessions supply
+  `agent_id`. Calls without either identity fail closed. A Google binding and
+  deployment domain-wide delegation are required; report missing setup to the operator.
 
 Google mints a short-lived impersonated token. Never print it.

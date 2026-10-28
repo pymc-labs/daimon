@@ -37,3 +37,7 @@ any delivery. Recipient addresses, sales users and CRM settings are tenant-owned
 
 Lead classification reads each discovered source through `lead_intake_read_source`
 before submission; the model receives source text without service credentials.
+
+`workspace-write` ships explicit Gmail/Drive/Docs/Calendar write scripts for an
+operator-created `workspace-writer` agent using short-lived delegated Google tokens.
+It does not provision credentials or bind the default Daimon agent.
