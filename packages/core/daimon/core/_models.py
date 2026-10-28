@@ -673,6 +673,8 @@ class ThreadSession(Base):
     # executes. A `daimon.core.session_snapshot.SessionSnapshot` serialized to
     # JSON. NULL on rows written before continuity existed.
     effective_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Last repository-memory state successfully sent to this session.
+    repo_memory_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
     identity_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     mutable_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The provider-neutral binding this row backs (`provider_binding`), and its

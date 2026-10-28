@@ -179,24 +179,25 @@ async def test_turn_query_is_single_bounded_read(db_session: AsyncSession) -> No
 
     event.listen(connection.sync_connection, "before_cursor_execute", capture)
     try:
-        repo, rows = await turn_entries(
+        repo, rows, previous = await turn_entries(
             db_session, tenant_id=tenant.id, agent_id=agent, account_id=alice.id
         )
     finally:
         event.remove(connection.sync_connection, "before_cursor_execute", capture)
     assert len(queries) == 1, "grant resolution and catalog injection share one SQL round trip"
+    assert previous is None
     assert repo == "owner/repo"
     assert {row[0] for row in rows} == {"alice", "fact"}
     assert next(row for row in rows if row[0] == "fact")[-1] == ""
     assert "Bob only" not in str(rows)
-    _, routine = await turn_entries(
+    _, routine, _ = await turn_entries(
         db_session, tenant_id=tenant.id, agent_id=agent, account_id=None
     )
     assert [row[0] for row in routine] == ["fact"]
     await db_session.execute(update(GitHubAppInstallation).values(suspended_at=now))
     assert await turn_entries(
         db_session, tenant_id=tenant.id, agent_id=agent, account_id=alice.id
-    ) == ("", [])
+    ) == ("", [], None)
 
 
 async def test_verified_origin_keeps_memory_restriction(db_session: AsyncSession) -> None:
@@ -241,6 +242,17 @@ async def test_verified_origin_keeps_memory_restriction(db_session: AsyncSession
         now=now,
     )
     assert stamped is not None and stamped.memory_read_only is True
+    # Native backends rebind without an admission stamp; the restriction survives.
+    await bind_origin_session(db_session, origin_id=origin.id, chat_session_id=str(origin.id))
+    rebound = await get_active_origin(
+        db_session,
+        origin_id=origin.id,
+        tenant_id=tenant.id,
+        account_id=owner.id,
+        platform="discord",
+        now=now,
+    )
+    assert rebound is not None and rebound.memory_read_only is True
     await bind_origin_session(db_session, origin_id=origin.id, chat_session_id=None)
     cleared = await get_active_origin(
         db_session,
@@ -292,3 +304,39 @@ async def test_concurrent_personal_first_saves_have_one_owner(
         entry = await get_entry(session, tenant_id=tenant.id, repo_id=17, name="preference")
     assert entry is not None
     assert entry.body == str(entry.created_by_account_id)
+
+
+async def test_render_hash_is_scoped_to_the_exact_session_and_tenant(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.core.stores.repo_memory import record_turn_state, turn_entries
+    from daimon.testing.factories import make_thread_session
+
+    tenant = await make_tenant(db_session)
+    mapping = await make_thread_session(db_session, tenant=tenant)
+    agent_id = uuid.uuid4()
+    key = dict(tenant_id=tenant.id, mapping_id=mapping.id, session_id=mapping.ma_session_id)
+    await record_turn_state(db_session, **key, sha256="delivered-state")
+    # Even an absent working repo carries the previous hash in the same state query.
+    assert await turn_entries(db_session, **key, agent_id=agent_id, account_id=None) == (
+        "",
+        [],
+        "delivered-state",
+    )
+    for different in (
+        {"session_id": "replacement"},
+        {"tenant_id": uuid.uuid4()},
+        {"mapping_id": uuid.uuid4()},
+    ):
+        assert (
+            await turn_entries(
+                db_session,
+                **{**key, **different},
+                agent_id=agent_id,
+                account_id=None,
+            )
+        )[-1] is None
+        await record_turn_state(db_session, **{**key, **different}, sha256="wrong-generation")
+    assert (await turn_entries(db_session, **key, agent_id=agent_id, account_id=None))[
+        -1
+    ] == "delivered-state"

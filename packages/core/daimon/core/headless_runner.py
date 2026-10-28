@@ -583,6 +583,7 @@ async def run_turn_impl(
             from daimon.core.ma_identity import derive_agent_uuid
             from daimon.core.repo_memory import turn_memory_prefix
 
+            # Headless executions create a fresh session, so each needs its first block.
             routine_memory = await turn_memory_prefix(
                 session_factory,
                 tenant_id=tenant_id,

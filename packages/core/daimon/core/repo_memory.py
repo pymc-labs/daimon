@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 from xml.sax.saxutils import escape, quoteattr
 
-from daimon.core.stores.repo_memory import MemoryEntry, turn_entries
+from daimon.core.stores.repo_memory import MemoryEntry, record_turn_state, turn_entries
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -142,19 +143,26 @@ async def turn_memory_prefix(
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
     allowed: bool,
+    mapping_id: uuid.UUID | None = None,
+    session_id: str | None = None,
 ) -> str:
     if not allowed:
         return ""
     async with session_factory() as session:
-        repo, rows = await turn_entries(
-            session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+        repo, rows, previous_sha256 = await turn_entries(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account_id,
+            mapping_id=mapping_id,
+            session_id=session_id,
         )
     entries = [
         MemoryPointer.model_validate(dict(name=n, title=t, kind=k, scope=s, body=b))
         for n, t, k, s, b in rows
     ]
     # Empty state is explicit, so a deletion clears a previously injected rule.
-    return (
+    rendered = (
         render_memory(repo, entries)
         if repo
         else (
@@ -162,3 +170,25 @@ async def turn_memory_prefix(
             "no longer apply.</repo_memory_state>\n"
         )
     )
+
+    return "" if hashlib.sha256(rendered.encode()).hexdigest() == previous_sha256 else rendered
+
+
+async def record_memory_prefix(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    mapping_id: uuid.UUID | None,
+    session_id: str,
+    prefix: str,
+) -> None:
+    if not prefix or mapping_id is None:
+        return
+    async with session_factory.begin() as session:
+        await record_turn_state(
+            session,
+            tenant_id=tenant_id,
+            mapping_id=mapping_id,
+            session_id=session_id,
+            sha256=hashlib.sha256(prefix.encode()).hexdigest(),
+        )

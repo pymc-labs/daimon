@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Support operator-configured Google authorized-user credentials for matching agent bindings alongside service-account delegation.
 
+- Keep legacy repository-memory readers suppressed during in-place session updates
+  and confirmation checks. Preserve origin restrictions on native-runtime rebinds,
+  inject repository state only on the first successful turn or a state change, and
+  reject invalid or reserved slugs in offline memory imports.
+
 - Replace whitespace-only Slides text by deleting it before insertion, including
   newline-only shapes; genuinely empty shapes still skip deletion.
 

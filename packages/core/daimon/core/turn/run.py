@@ -48,7 +48,7 @@ from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.mux_compat import legacy_call
-from daimon.core.repo_memory import turn_memory_prefix
+from daimon.core.repo_memory import record_memory_prefix, turn_memory_prefix
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
@@ -1016,6 +1016,38 @@ async def run_prepared_turn(
 _CHAT_RENDERED_ORIGINS: frozenset[TurnContext] = frozenset({"chat", "handoff"})
 
 
+async def _repo_memory_prefix(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    origin: TurnContext,
+    unattended: bool,
+) -> str:
+    if not deps.repo_memory.enabled:
+        return ""
+    return await turn_memory_prefix(
+        deps.sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id),
+        mapping_id=prepared.mapping_id,
+        session_id=prepared.ma_session_id,
+        # Shared conversations never acquire one speaker's private directives.
+        account_id=(
+            None
+            if unattended or prepared.admission.shared_owner is not None
+            else prepared.admission.account_id
+        ),
+        allowed=(
+            (current_origin_id.get() is not None or origin == "routine")
+            and origin != "worker"
+            and prepared.admission.hold is None
+            and not prepared.admission.shared_channel
+            and not prepared.admission.source_shared
+        ),
+    )
+
+
 async def run_prepared_turn_impl(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -1149,28 +1181,13 @@ async def run_prepared_turn_impl(
         thread_id=thread_id,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
-    repo_memory = ""
-    if deps.repo_memory.enabled:
-        repo_memory = await turn_memory_prefix(
-            deps.sessionmaker,
-            tenant_id=tenant_id,
-            agent_id=derive_agent_uuid(
-                tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id
-            ),
-            # Shared conversations never acquire one speaker's private directives.
-            account_id=(
-                None
-                if unattended or prepared.admission.shared_owner is not None
-                else prepared.admission.account_id
-            ),
-            allowed=(
-                (current_origin_id.get() is not None or origin == "routine")
-                and origin != "worker"
-                and prepared.admission.hold is None
-                and not prepared.admission.shared_channel
-                and not prepared.admission.source_shared
-            ),
-        )
+    repo_memory = await _repo_memory_prefix(
+        deps,
+        prepared,
+        tenant_id=tenant_id,
+        origin=origin,
+        unattended=unattended,
+    )
     prefix = context + plans + repo_memory + prepared.continuity.user_prefix
     if prepared.admission.model_fell_back:
         prefix += MODEL_FALLBACK_NOTICE
@@ -1756,6 +1773,14 @@ async def run_prepared_turn_impl(
                                 deps.sessionmaker, ma_session_id
                             ),
                         )
+                        if state.error is None and state.termination == TerminationReason.COMPLETED:
+                            await record_memory_prefix(
+                                deps.sessionmaker,
+                                tenant_id=tenant_id,
+                                mapping_id=mapping_id,
+                                session_id=ma_session_id,
+                                prefix=repo_memory,
+                            )
                         if delivery is not None:
                             await first_attempt.flush_held_failure()
                     finally:
@@ -1889,6 +1914,18 @@ async def run_prepared_turn_impl(
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
             reseeded_message = _with_prefix(plans + loss_user_prefix, await reseed_user_message())
+            recovery_memory = await _repo_memory_prefix(
+                deps,
+                replace(
+                    prepared,
+                    admission=recovery.admission or prepared.admission,
+                    ma_session_id=new_session_id,
+                    mapping_id=new_mapping_id,
+                ),
+                tenant_id=tenant_id,
+                origin=origin,
+                unattended=unattended,
+            )
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
             # Mirror a LATE cancel on the ORIGINAL event into
@@ -1914,7 +1951,7 @@ async def run_prepared_turn_impl(
                         ),
                         anthropic=deps.anthropic,
                         session_id=new_session_id,
-                        user_message=context + reseeded_message,
+                        user_message=context + recovery_memory + reseeded_message,
                         lifecycle=new_lifecycle,
                         cancel=fresh_cancel,
                         render_interval_s=render_interval_s,
@@ -1934,6 +1971,17 @@ async def run_prepared_turn_impl(
                             deps.sessionmaker, recovery.ma_session_id
                         ),
                     )
+                    if (
+                        recovered_state.error is None
+                        and recovered_state.termination == TerminationReason.COMPLETED
+                    ):
+                        await record_memory_prefix(
+                            deps.sessionmaker,
+                            tenant_id=tenant_id,
+                            mapping_id=new_mapping_id,
+                            session_id=new_session_id,
+                            prefix=recovery_memory,
+                        )
             finally:
                 if not mirror_task.done():
                     mirror_task.cancel()

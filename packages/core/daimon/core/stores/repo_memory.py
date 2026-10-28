@@ -6,10 +6,10 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from daimon.core._models import Account, RepoMemory
+from daimon.core._models import Account, RepoMemory, ThreadSession
 from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, or_, select, text
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -113,13 +113,17 @@ async def turn_entries(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     account_id: uuid.UUID | None,
-) -> tuple[str, list[tuple[str, str, str, str, str]]]:
+    mapping_id: uuid.UUID | None = None,
+    session_id: str | None = None,
+) -> tuple[str, list[tuple[str, str, str, str, str]], str | None]:
     """One indexed query: live working grant, scoped confirmation and bounded catalog.
 
     Primary-key prefixes select the agent's grants and the repo's memory slots.
     References never transfer bodies. At most 512 rows and 12,001 characters per
     directive cross the DB boundary. There is no per-entry or network lookup.
-    Agent-specific confirmations shadow shared ones even when revoked.
+    Agent-specific confirmations shadow shared ones even when revoked. The same
+    statement reads the last delivered hash by thread-session primary key, including
+    when no working grant remains, so revocation can clear a previous state block.
     """
     coverage = installation_covers_repo_sql("r.repo_full_name", "i")
     rows = (
@@ -140,8 +144,11 @@ async def turn_entries(
               AND {coverage}
             ORDER BY g.repo_id LIMIT 1
         )
-        SELECT w.repo_full_name, m.name, m.title, m.kind, m.scope, m.body
-        FROM working w LEFT JOIN LATERAL (
+        SELECT w.repo_full_name, m.name, m.title, m.kind, m.scope, m.body,
+               (SELECT repo_memory_sha256 FROM thread_sessions
+                WHERE id = :mapping_id AND tenant_id = :tenant_id
+                  AND ma_session_id = :session_id) AS previous_sha256
+        FROM (SELECT 1) anchor LEFT JOIN working w ON true LEFT JOIN LATERAL (
             WITH candidates AS (
                 SELECT name, left(title, 1001) AS title, kind, scope,
                        CASE WHEN kind = 'directive' THEN left(body, 12001) ELSE '' END AS body
@@ -162,16 +169,24 @@ async def turn_entries(
         ) m ON true
         ORDER BY m.kind, m.name
     """),
-            {"tenant_id": tenant_id, "agent_id": agent_id, "account_id": account_id},
+            {
+                "tenant_id": tenant_id,
+                "agent_id": agent_id,
+                "account_id": account_id,
+                "mapping_id": mapping_id,
+                "session_id": session_id,
+            },
         )
     ).all()
-    if not rows:
-        return "", []
-    return str(rows[0][0]), [
-        (str(row[1]), str(row[2]), str(row[3]), str(row[4]), str(row[5]))
-        for row in rows
-        if row[1] is not None
-    ]
+    return (
+        str(rows[0][0] or ""),
+        [
+            (str(row[1]), str(row[2]), str(row[3]), str(row[4]), str(row[5]))
+            for row in rows
+            if row[1] is not None
+        ],
+        rows[0][6],
+    )
 
 
 async def import_entry(session: AsyncSession, *, entry: MemoryEntry) -> bool:
@@ -194,3 +209,23 @@ async def import_entry(session: AsyncSession, *, entry: MemoryEntry) -> bool:
     session.add(RepoMemory(**entry.model_dump()))
     await session.flush()
     return True
+
+
+async def record_turn_state(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    mapping_id: uuid.UUID,
+    session_id: str,
+    sha256: str,
+) -> None:
+    """Record only a successful delivery, scoped to the exact session generation."""
+    await session.execute(
+        update(ThreadSession)
+        .where(
+            ThreadSession.id == mapping_id,
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.ma_session_id == session_id,
+        )
+        .values(repo_memory_sha256=sha256)
+    )

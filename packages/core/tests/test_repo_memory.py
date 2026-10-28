@@ -107,17 +107,17 @@ async def test_turn_prefix_reads_fresh_state_and_can_skip_entirely(
     factory = MagicMock()
     key = dict(tenant_id=uuid.uuid4(), agent_id=uuid.uuid4(), account_id=uuid.uuid4())
     query = AsyncMock(
-        return_value=("owner/repo", [("rule", "Rule", "directive", "repo", "Use uv")])
+        return_value=("owner/repo", [("rule", "Rule", "directive", "repo", "Use uv")], None)
     )
     monkeypatch.setattr(memory, "turn_entries", query)
     assert await memory.turn_memory_prefix(factory, **key, allowed=False) == ""
     query.assert_not_called()
     first = await memory.turn_memory_prefix(factory, **key, allowed=True)
     assert "Use uv" in first
-    query.return_value = ("owner/repo", [])
+    query.return_value = ("owner/repo", [], None)
     second = await memory.turn_memory_prefix(factory, **key, allowed=True)
     assert "Use uv" not in second and "supersedes" in second
-    query.return_value = ("", [])
+    query.return_value = ("", [], None)
     assert "no longer apply" in await memory.turn_memory_prefix(factory, **key, allowed=True)
     assert query.await_count == 3
 
@@ -138,3 +138,53 @@ def test_oversized_directive_is_a_pointer_instead_of_a_partial_rule() -> None:
     assert "partial rule" not in text
     assert "Read this directive in full" in text
     assert 'name="long-rule"' in text
+
+
+async def test_turn_prefix_is_sent_on_first_turn_and_only_after_a_render_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+    from unittest.mock import AsyncMock, MagicMock
+
+    import daimon.core.repo_memory as memory
+
+    factory = MagicMock()
+    mapping_id = uuid.uuid4()
+    key = dict(
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        mapping_id=mapping_id,
+        session_id="session",
+        allowed=True,
+    )
+    rows = [("rule", "Rule", "directive", "repo", "Use uv")]
+    query = AsyncMock(return_value=("owner/repo", rows, None))
+    record = AsyncMock()
+    monkeypatch.setattr(memory, "turn_entries", query)
+    monkeypatch.setattr(memory, "record_turn_state", record)
+    first = await memory.turn_memory_prefix(factory, **key)
+    assert "Use uv" in first
+    assert record.await_count == 0, "computing a prefix must not mark an unsent message delivered"
+    await memory.record_memory_prefix(
+        factory,
+        tenant_id=key["tenant_id"],
+        mapping_id=mapping_id,
+        session_id="session",
+        prefix=first,
+    )
+    digest = record.call_args.kwargs["sha256"]
+    assert digest == hashlib.sha256(first.encode()).hexdigest()
+    query.return_value = ("owner/repo", rows, digest)
+    assert await memory.turn_memory_prefix(factory, **key) == ""
+    query.return_value = ("owner/repo", [], digest)
+    deleted = await memory.turn_memory_prefix(factory, **key)
+    assert "supersedes" in deleted and "Use uv" not in deleted
+    query.return_value = ("", [], digest)
+    assert "no longer apply" in await memory.turn_memory_prefix(factory, **key)
+    query.return_value = ("owner/repo", rows, None)
+    assert await memory.turn_memory_prefix(factory, **{**key, "session_id": "replacement"}) == first
+    assert query.await_count == 5, (
+        "one state query on each eligible turn, including unchanged turns"
+    )
+    assert query.call_args.kwargs["session_id"] == "replacement"
