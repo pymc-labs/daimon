@@ -175,8 +175,6 @@ SERVER_SEPARATOR: Final[str] = "/"
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "fly_launch_session": "template",
     "fly_extend_session": "hours",
-    "fly_run_bash": "command",
-    "fly_write_file": "content",
     "start_long_job": "command",
     "create_watch": "source",
     "resume_watch": "watch_id",
@@ -202,8 +200,6 @@ WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
         "start_long_job",
         "fly_launch_session",
         "fly_extend_session",
-        "fly_run_bash",
-        "fly_write_file",
     }
 )
 

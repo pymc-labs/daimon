@@ -280,8 +280,6 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "create_watch",
                 "fly_extend_session",
                 "fly_launch_session",
-                "fly_run_bash",
-                "fly_write_file",
                 "resume_watch",
                 "rotate_watch_key",
                 "start_long_job",
@@ -422,8 +420,6 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
             "create_watch",
             "fly_extend_session",
             "fly_launch_session",
-            "fly_run_bash",
-            "fly_write_file",
             "resume_watch",
             "rotate_watch_key",
             "start_long_job",
@@ -757,8 +753,6 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
         "create_watch",
         "fly_extend_session",
         "fly_launch_session",
-        "fly_run_bash",
-        "fly_write_file",
         "resume_watch",
         "rotate_watch_key",
         "start_long_job",
@@ -784,8 +778,6 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
         "create_watch",
         "fly_extend_session",
         "fly_launch_session",
-        "fly_run_bash",
-        "fly_write_file",
         "publish_report",
         "resume_watch",
         "rotate_watch_key",
@@ -839,8 +831,6 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         "create_watch",
         "fly_extend_session",
         "fly_launch_session",
-        "fly_run_bash",
-        "fly_write_file",
         "resume_watch",
         "rotate_watch_key",
         "start_long_job",
@@ -858,8 +848,6 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         "create_watch",
         "fly_extend_session",
         "fly_launch_session",
-        "fly_run_bash",
-        "fly_write_file",
         "get_session",
         "resume_watch",
         "rotate_watch_key",
@@ -943,3 +931,22 @@ def test_protected_names_preserve_existing_decisions_without_deployment_opt_in(
     assert (verdict.outcome, verdict.effect, verdict.reason) == (
         ("ask", "write", "protected_tool_name") if overrides else ("allow", effect, reason)
     )
+
+
+@pytest.mark.parametrize(
+    "tool,arguments,expected",
+    [
+        ("fly_launch_session", {"template": "mmm"}, "ask"),
+        ("fly_extend_session", {"hours": 24}, "ask"),
+        ("fly_run_bash", {"command": "true"}, "allow"),
+        ("fly_write_file", {"content": "input"}, "allow"),
+    ],
+)
+def test_fly_only_lease_actions_force_a_card(tool, arguments, expected):
+    call = ToolCall(
+        tool_use_id="fly", server_name=DAIMON_SERVER_NAME, tool_name=tool, input=arguments
+    )
+    verdict = decide_tool_call(
+        _ON, call, attended=True, trusted_servers=frozenset({DAIMON_SERVER_NAME})
+    )
+    assert verdict.outcome == expected
