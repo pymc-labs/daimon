@@ -45,3 +45,6 @@ It does not provision credentials or bind the default Daimon agent.
 `slides-workflow` packages template copying, text/image edits, validated batches
 and PNG rendering for `workspace-writer`. Rendered slides must be inspected before
 completion. It shares the same short-lived Google binding as Workspace writes.
+
+`toggl-edits` provides named-member update, PUT-based stop and bulk edits on
+`time-editor`, with verified entry ownership and no key-owner fallback or admin operations.

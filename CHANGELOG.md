@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add narrow Toggl Track scripts for explicit-member update, PUT-based stop and
+  bulk edits, checking all target owners before writing and reporting partial results.
+
 - Add a sandbox Slides template workflow with validated batches, revision checks
   and PNG rendering for mandatory visual review.
 

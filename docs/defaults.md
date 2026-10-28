@@ -295,3 +295,14 @@ Sandbox I/O helpers are packaged with each workflow, with one canonical source a
 `defaults/skills/workspace-write/scripts/workflow_io.py`. After changing it run
 `uv run python scripts/sync_workflow_runtime.py`; `--check` verifies the packaged
 copies remain identical. Each skill is independently deliverable.
+
+`toggl-edits` packages narrow Toggl Track operations for an operator-created
+`time-editor` agent with `TOGGL_API_TOKEN` collected through `request_agent_key`.
+Every operation requires an explicit workspace and uniquely resolved member ID
+or email. All target owners are checked before writing; owner/workspace changes
+and administration are refused. Stop uses workspace PUT with the current UTC
+stop time and elapsed duration. A 403 identifies the shared token owner’s required
+workspace administrator/access permission. Bulk partial results identify successful
+and failed entries without retrying. All users of this agent can use the shared key;
+it must not be attached to default Daimon. Vendor permission acceptance requires a
+disposable entry owned by a named member different from the key owner.
