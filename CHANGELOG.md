@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fly sessions can run long commands in the background: `fly_run_bash` with `run_in_background` returns a task id, `fly_task_status` and `fly_task_result` read it, and the original conversation gets one short message when it ends. Running commands keep their session alive up to the maximum lifetime; a machine restart reports them lost and never reruns them.
+
 - Add optional owner-isolated Fly sessions with approved launch/extension, inline bash, file tools and automatic lease cleanup. Launches are disabled by default. Cleanup runs on its own scheduler loop and isolates failures per machine; foreign callers are refused.
 
 - Preserve trusted turn controls and disabled repository-memory defaults when
