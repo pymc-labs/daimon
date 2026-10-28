@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 @pytest.mark.fresh_schema
 async def test_repository_memory_migration_matches_model(db_session: AsyncSession) -> None:
-    path = Path(__file__).parents[1] / "alembic/versions/0152_repo_memory.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0153_repo_memory.py"
     spec = importlib.util.spec_from_file_location("repo_memory_migration", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -38,7 +38,7 @@ async def test_repository_memory_migration_matches_model(db_session: AsyncSessio
 
 @pytest.mark.fresh_schema
 async def test_memory_state_migration_matches_model(db_session: AsyncSession) -> None:
-    path = Path(__file__).parents[1] / "alembic/versions/0153_repo_memory_state.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0154_repo_memory_state.py"
     spec = importlib.util.spec_from_file_location("repo_memory_state_migration", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

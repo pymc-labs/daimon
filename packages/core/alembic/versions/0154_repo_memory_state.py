@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision = "0153_repo_memory_state"
-down_revision = "0152_repo_memory"
+revision = "0154_repo_memory_state"
+down_revision = "0153_repo_memory"
 branch_labels = None
 depends_on = None
 

@@ -83,7 +83,7 @@ ADMINS_HEAD = "0148_daimon_admins"
 ROUTINES_HEAD = "0151_routine_claimed_slot"
 
 
-HEAD = "0153_repo_memory_state"
+HEAD = "0154_repo_memory_state"
 
 
 CHAIN = [
@@ -108,7 +108,7 @@ CHAIN = [
     "0150_origin_human_invocation",
     ROUTINES_HEAD,
     "0152_compute_sessions",
-    "0152_repo_memory",
+    "0153_repo_memory",
     HEAD,
 ]
 
