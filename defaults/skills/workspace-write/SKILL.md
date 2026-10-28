@@ -16,8 +16,10 @@ tool command also passes through the transcript and may appear in the shell's
 own command arguments. This route does not keep tokens out of transcripts.
 The script itself reads stdin, does not accept a token argument, and redacts
 errors. Do not echo the token or persist it to a file. Google tokens require
-operator domain-wide delegation and an agent binding; ordinary chat carries the
-signed identity. Missing setup is an operator error; never request a refresh
+an agent binding and either the matching account’s authorized-user JSON
+(`google_user_json` plus `google_user_email`) or a service-account key
+(`google_sa_json`) with domain-wide delegation. Ordinary chat carries the signed
+identity. Missing setup is an operator error; never request a refresh
 token or run `gws auth`.
 
 Write non-secret request JSON to a working file. Replace the script/request

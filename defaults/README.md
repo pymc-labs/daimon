@@ -39,8 +39,14 @@ Lead classification reads each discovered source through `lead_intake_read_sourc
 before submission; the model receives source text without service credentials.
 
 `workspace-write` ships explicit Gmail/Drive/Docs/Calendar write scripts for an
-operator-created `workspace-writer` agent using short-lived delegated Google tokens.
-It does not provision credentials or bind the default Daimon agent.
+operator-created `workspace-writer` agent using short-lived Google tokens.
+Operators configure either the account’s full authorized-user JSON in
+`credentials.google_user_json` plus its email in `credentials.google_user_email`,
+or a service-account key in `credentials.google_sa_json` with domain-wide
+delegation. Only agent bindings matching the user email (without case sensitivity)
+use the user credential; other bindings require the service account. Both routes
+use the binding’s scopes. The skill does not provision credentials or bind the
+default Daimon agent.
 
 `slides-workflow` packages template copying, text/image edits, validated batches
 and PNG rendering for `workspace-writer`. Rendered slides must be inspected before

@@ -9,8 +9,10 @@ the token lasts about one hour. The returned token enters model context and the
 session transcript. The literal token in a bash tool command is also part of
 that transcript and may appear in the shell's own command arguments. Only the
 script's argv/files/errors are kept free of tokens by this stdin handoff. Do not
-echo or persist the token. Missing binding, delegation or scopes is an operator
-setup error; never request a refresh token or run `gws auth`.
+echo or persist the token. The operator configures an agent binding and either
+the matching account’s authorized-user JSON (`google_user_json` plus
+`google_user_email`) or a service-account key (`google_sa_json`) with domain-wide
+delegation. Missing binding, credentials or scopes is an operator setup error; never request a refresh token or run `gws auth`.
 
 Work only on a template copy made for this task or a deck ID the user explicitly
 names. Never use an inferred last/recent deck or edit the source template.

@@ -1031,8 +1031,8 @@ Read from `daimon.core.config.CredentialsSettings`. Prefix `DAIMON_CREDENTIALS__
 
 Tenant-level credentials for the token broker.
 
-Optional — the Google Workspace provider raises a config error when `google_sa_json` is
-unset.
+Optional — Google Workspace requires a matching authorized-user credential or a service-
+account credential with domain-wide delegation.
 
 ### `DAIMON_CREDENTIALS__GOOGLE_SA_JSON`
 
@@ -1040,6 +1040,21 @@ unset.
 
 Full JSON contents of a Google service-account key, used by the token broker to mint
 delegated Google Workspace credentials.
+
+### `DAIMON_CREDENTIALS__GOOGLE_USER_JSON`
+
+`SecretStr | None` · optional · default unset · secret
+
+Full authorized_user JSON containing client_id, client_secret and refresh_token. Used
+only for agents bound to google_user_email, with the binding's scopes; requires no
+domain-wide delegation.
+
+### `DAIMON_CREDENTIALS__GOOGLE_USER_EMAIL`
+
+`str | None` · optional · default unset
+
+Google account email belonging to google_user_json (the JSON does not contain it). Only
+matching agent bindings, compared without case sensitivity, may use that credential.
 
 ## Selfhosted
 
