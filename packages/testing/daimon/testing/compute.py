@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 
 from daimon.core.compute_models import ComputeResource, ComputeSession
 from daimon.core.compute_provider import ComputeProviderError
 from pydantic import JsonValue
 
 
+@dataclass
+class FakeTask:
+    """What a machine's task files would say; tests move it along by hand."""
+
+    command: str
+    status: str = "running"
+    exit_code: int | None = None
+    output: str = ""
+    starts: int = 1
+
+
 class FakeComputeProvider:
     def __init__(self) -> None:
+        self.tasks: dict[str, FakeTask] = {}
+        self.fail_calls = False
         self.resources: dict[uuid.UUID, ComputeResource] = {}
         self.machine_env: dict[uuid.UUID, dict[str, str]] = {}
         self.calls: list[tuple[uuid.UUID, str, dict[str, JsonValue]]] = []
@@ -63,5 +77,31 @@ class FakeComputeProvider:
     ) -> JsonValue:
         if self.machine_env.get(session.id) != {"MCP_AUTH_TOKEN": token}:
             raise ComputeProviderError("Invalid machine token")
+        if self.fail_calls:
+            raise ComputeProviderError("Simulated unreachable machine")
         self.calls.append((session.id, tool, arguments))
+        command = arguments.get("command")
+        if tool == "run_bash" and isinstance(command, str) and command.startswith("# daimon-task"):
+            return self._task(command)
         return self.result
+
+    def _task(self, script: str) -> JsonValue:
+        _, _, action, task_hex = script.splitlines()[0].split()
+        task = self.tasks.get(task_hex)
+        stdout = ""
+        if action == "start":
+            if task is None:
+                self.tasks[task_hex] = FakeTask(command=script)
+                stdout = "started\n"
+            else:
+                task.starts += 1
+                stdout = "exists\n"
+        elif action == "kill" and task is not None:
+            task.status, task.exit_code = "exit", 124
+        elif action == "probe":
+            status = "missing" if task is None else task.status
+            if task is not None and task.status == "exit":
+                status = f"exit {task.exit_code}"
+            output = "" if task is None else task.output
+            stdout = f"{status}\nbytes {len(output.encode())}\n{output[-16384:]}"
+        return {"exit_code": 0, "stdout": stdout, "timed_out": False}

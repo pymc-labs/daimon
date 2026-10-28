@@ -2210,6 +2210,15 @@ class ComputeSettings(BaseModel):
             "Maximum launch or extension lifetime in hours. No dollar cap or metering is provided."
         ),
     )
+    per_session_tasks: int = Field(
+        default=4,
+        gt=0,
+        le=32,
+        description=(
+            "Maximum background commands running at once on one session. A background "
+            "command may run for at most max_ttl_hours."
+        ),
+    )
     profiles: dict[str, ComputeProfile] = Field(
         default_factory=dict,
         description=(

@@ -4832,3 +4832,38 @@ class RepoMemorySession(Base):
     provider: Mapped[str] = mapped_column(Text, primary_key=True)
     session_id: Mapped[str] = mapped_column(Text, primary_key=True)
     sha256: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ComputeTaskRecord(Base):
+    __tablename__ = "compute_tasks"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "request_key", name="uq_compute_task_request"),
+        CheckConstraint(
+            "state IN ('starting','running','succeeded','failed','timed_out','lost','cancelled')",
+            name="ck_compute_task_state",
+        ),
+        CheckConstraint("timeout_minutes > 0 AND output_bytes >= 0", name="ck_compute_task_limits"),
+        Index("ix_compute_task_session", "tenant_id", "session_id", "state"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("compute_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    request_key: Mapped[str] = mapped_column(Text, nullable=False)
+    command_preview: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="starting")
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    timeout_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    output_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    output_tail: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    output_path: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")

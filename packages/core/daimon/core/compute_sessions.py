@@ -1,8 +1,12 @@
-"""Leased compute lifecycle.
+"""Leased compute lifecycle and background commands.
 
 Only the authenticated session owner, through an authorized attended conversation,
 may launch, execute in, write to or extend their registered session within the
 configured caps; the owner, a tenant admin or the fenced reconciler may stop it.
+
+Only the session owner, through an authorized attended conversation, can start a
+background command; its status and result go only to that owner; its completion
+wake goes only to the originating conversation, once.
 """
 
 from __future__ import annotations
@@ -13,7 +17,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from daimon.core.compute_models import ComputeResource, ComputeSession, ComputeStatus
+from daimon.core import compute_tasks as scripts
+from daimon.core.compute_models import (
+    ACTIVE_TASK_STATES,
+    ComputeResource,
+    ComputeSession,
+    ComputeStatus,
+    ComputeTask,
+)
 from daimon.core.compute_provider import (
     ComputeProvider,
     ComputeProviderError,
@@ -23,6 +34,7 @@ from daimon.core.compute_provider import (
 from daimon.core.config import ComputeSettings
 from daimon.core.errors import StoreError
 from daimon.core.stores import compute_sessions as store
+from daimon.core.stores import compute_tasks as task_store
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.stores.turn_origins import get_active_origin
@@ -30,6 +42,11 @@ from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
+
+# A start whose inline call was lost has this long to leave its pid file.
+_START_GRACE = timedelta(minutes=2)
+# How long after its deadline an unreachable or stuck task is given up.
+_DEADLINE_GRACE = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -333,3 +350,227 @@ class ComputeSessions:
                 await store.warn(db, current, now)
         if current.state == "stopping":
             await self._delete(current)
+
+    def _task_timeout(self, minutes: int | None) -> int:
+        limit = self.settings.max_ttl_hours * 60
+        value = min(8 * 60, limit) if minutes is None else minutes
+        if not 1 <= value <= limit:
+            raise StoreError(f"A background command can run for 1 to {limit} minutes.")
+        return value
+
+    async def start_task(
+        self,
+        caller: ComputeCaller,
+        session_id: uuid.UUID,
+        *,
+        command: str,
+        timeout_minutes: int | None,
+        request_key: str,
+    ) -> ComputeTask:
+        if not request_key:
+            raise StoreError("Run the command from the owner's conversation.")
+        minutes = self._task_timeout(timeout_minutes)
+        async with self.sm.begin() as db:
+            session = await self._owned(db, caller, session_id)
+            now = self.clock()
+            if session.state != "running" or session.expires_at <= now:
+                raise StoreError("The session is expired or stopping. Launch a new session.")
+            task_id = uuid.uuid4()
+            task, created = await task_store.register(
+                db,
+                ComputeTask(
+                    id=task_id,
+                    tenant_id=session.tenant_id,
+                    session_id=session.id,
+                    owner_account_id=caller.account_id,
+                    request_key=request_key,
+                    command_preview=command[: scripts.PREVIEW_CHARS],
+                    timeout_minutes=minutes,
+                    deadline_at=now + timedelta(minutes=minutes),
+                    output_path=scripts.output_path(task_id),
+                    created_at=now,
+                ),
+                cap=self.settings.per_session_tasks,
+            )
+        if not created:
+            # A retried call never starts the command again; the poller settles it.
+            return task
+        # The row commits before the machine is touched. If this call is lost, the
+        # task stays starting and the poller marks it lost unless its pid appears.
+        async with self.sm.begin() as db:
+            session = await self._owned(db, caller, session_id)
+            if session.state != "running" or session.expires_at <= self.clock():
+                raise StoreError("The session is expired or stopping. Launch a new session.")
+            scripts.parse_start(
+                await self.provider.call(
+                    session,
+                    session_token(self.settings, session.id),
+                    "run_bash",
+                    {
+                        "command": scripts.start_script(
+                            task.id, command, timeout_s=task.timeout_minutes * 60
+                        ),
+                        "timeout_s": 30,
+                    },
+                )
+            )
+            await self._renew_for(db, session, task)
+            return await task_store.advance(db, task, state="running") or task
+
+    async def _renew_for(
+        self, db: AsyncSession, session: ComputeSession, task: ComputeTask
+    ) -> None:
+        """Keep the lease alive for a running task, never past max TTL from its start."""
+        now = self.clock()
+        ceiling = task.created_at + timedelta(hours=self.settings.max_ttl_hours)
+        target = min(now + timedelta(hours=session.ttl_hours), ceiling)
+        if target > session.expires_at:
+            await store.save(
+                db, session.model_copy(update={"expires_at": target, "warned_for": None})
+            )
+
+    async def _owned_task(
+        self, db: AsyncSession, caller: ComputeCaller, task_id: uuid.UUID
+    ) -> ComputeTask:
+        task = await task_store.get(db, caller.tenant_id, task_id)
+        if task is None or task.owner_account_id != caller.account_id:
+            raise StoreError("Command not found")
+        # The session check also proves the same owner and the same conversation.
+        await self._owned(db, caller, task.session_id)
+        return task
+
+    async def task_status(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
+        """Read a task, probing the machine once if it is still active.
+
+        Like a poll, a probe that finds the command running keeps the lease alive.
+        """
+        async with self.sm.begin() as db:
+            task = await self._owned_task(db, caller, task_id)
+        if task.state in ACTIVE_TASK_STATES:
+            # The owner sees an ending here, so no separate wake is queued for it.
+            await self._poll_task(task.tenant_id, task.id, wake=False)
+            async with self.sm.begin() as db:
+                task = await self._owned_task(db, caller, task_id)
+        return task
+
+    async def task_result(self, caller: ComputeCaller, task_id: uuid.UUID) -> ComputeTask:
+        async with self.sm.begin() as db:
+            return await self._owned_task(db, caller, task_id)
+
+    async def poll_tasks(self) -> None:
+        """One scheduler pass over active tasks; each task's failure is isolated."""
+        if not self.settings.deployment_id:
+            return
+        for tenant in await list_tenants_by_platform(self.sm):
+            async with self.sm.begin() as db:
+                tasks = await task_store.list_active(db, tenant.id)
+            for task in tasks:
+                try:
+                    await self._poll_task(task.tenant_id, task.id, wake=True)
+                except Exception:
+                    # Never log remote exceptions: requests may include credentials.
+                    log.warning("compute.task_poll_retry", task_id=str(task.id))
+
+    async def _poll_task(self, tenant_id: uuid.UUID, task_id: uuid.UUID, *, wake: bool) -> None:
+        async with self.sm.begin() as db:
+            task = await task_store.get(db, tenant_id, task_id)
+            if task is None or task.state not in ACTIVE_TASK_STATES:
+                return
+            # The session lock serializes with stop and deletion. The poller skips
+            # a session busy with an inline call and returns next pass.
+            session = await store.get(db, tenant_id, task.session_id, lock=True, skip_locked=wake)
+            if session is None:
+                return
+            # Re-read under the lock: another poll may have settled it meanwhile.
+            task = await task_store.get(db, tenant_id, task_id)
+            if task is None or task.state not in ACTIVE_TASK_STATES:
+                return
+            now = self.clock()
+            if (
+                session.state != "running"
+                or session.expires_at <= now
+                or session.deployment_id != self.settings.deployment_id
+            ):
+                await task_store.finish(db, task, session, state="cancelled", now=now, wake=wake)
+                return
+            token = session_token(self.settings, session.id)
+            overdue = now > task.deadline_at + _DEADLINE_GRACE
+            try:
+                probe = scripts.parse_probe(
+                    await self.provider.call(
+                        session,
+                        token,
+                        "run_bash",
+                        {"command": scripts.probe_script(task.id), "timeout_s": 20},
+                    )
+                )
+            except ComputeProviderError:
+                if overdue:
+                    await task_store.finish(db, task, session, state="lost", now=now, wake=wake)
+                return
+            if probe.status == "exit":
+                assert probe.exit_code is not None
+                state = (
+                    "succeeded"
+                    if probe.exit_code == 0
+                    else "timed_out"
+                    if probe.exit_code == 124 or now >= task.deadline_at
+                    else "failed"
+                )
+                await task_store.finish(
+                    db,
+                    task,
+                    session,
+                    state=state,
+                    now=now,
+                    wake=wake,
+                    exit_code=probe.exit_code,
+                    output_bytes=probe.output_bytes,
+                    output_tail=probe.tail,
+                )
+            elif probe.status == "running" and overdue:
+                try:
+                    await self.provider.call(
+                        session,
+                        token,
+                        "run_bash",
+                        {"command": scripts.kill_script(task.id), "timeout_s": 20},
+                    )
+                finally:
+                    await task_store.finish(
+                        db,
+                        task,
+                        session,
+                        state="timed_out",
+                        now=now,
+                        wake=wake,
+                        output_bytes=probe.output_bytes,
+                        output_tail=probe.tail,
+                    )
+            elif probe.status == "running" or (
+                probe.status == "missing"
+                and task.state == "starting"
+                and now - task.created_at < _START_GRACE
+            ):
+                await self._renew_for(db, session, task)
+                if probe.status == "running":
+                    await task_store.advance(
+                        db,
+                        task,
+                        state="running",
+                        output_bytes=probe.output_bytes,
+                        output_tail=probe.tail,
+                    )
+            else:
+                # The process ended without an exit file (machine restart) or never
+                # started. It is reported, never run again.
+                await task_store.finish(
+                    db,
+                    task,
+                    session,
+                    state="lost",
+                    now=now,
+                    wake=wake,
+                    output_bytes=probe.output_bytes,
+                    output_tail=probe.tail,
+                )

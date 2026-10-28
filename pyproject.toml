@@ -153,6 +153,7 @@ source_modules = [
     "daimon.core.compute_models",
     "daimon.core.compute_provider",
     "daimon.core.compute_sessions",
+    "daimon.core.compute_tasks",
     "daimon.core.long_job_models",
     "daimon.core.long_jobs",
     "daimon.core.long_jobs_ma",

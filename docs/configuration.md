@@ -186,6 +186,13 @@ Default idle lifetime in hours; bounded by max_ttl_hours.
 
 Maximum launch or extension lifetime in hours. No dollar cap or metering is provided.
 
+### `DAIMON_COMPUTE__PER_SESSION_TASKS`
+
+`int` · optional · default `4`
+
+Maximum background commands running at once on one session. A background command may run
+for at most max_ttl_hours.
+
 ### `DAIMON_COMPUTE__PROFILES`
 
 `dict[str, ComputeProfile]` · optional · default `{}`

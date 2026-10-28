@@ -83,7 +83,13 @@ ADMINS_HEAD = "0148_daimon_admins"
 ROUTINES_HEAD = "0151_routine_claimed_slot"
 
 
-HEAD = "0154_repo_memory_state"
+COMPUTE_SESSIONS_HEAD = "0152_compute_sessions"
+
+
+REPO_MEMORY_HEAD = "0154_repo_memory_state"
+
+
+HEAD = "0155_compute_tasks"
 
 
 CHAIN = [
@@ -107,8 +113,9 @@ CHAIN = [
     "0149_context_provider_bindings",
     "0150_origin_human_invocation",
     ROUTINES_HEAD,
-    "0152_compute_sessions",
+    COMPUTE_SESSIONS_HEAD,
     "0153_repo_memory",
+    REPO_MEMORY_HEAD,
     HEAD,
 ]
 
@@ -128,6 +135,7 @@ TABLES = {
     "compute_sessions",
     "repo_memory",
     "repo_memory_sessions",
+    "compute_tasks",
     "daimon_admins",
     "context_provider_bindings",
     "selfhosted_agents",
@@ -204,6 +212,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             "compute_sessions",
             "repo_memory",
             "repo_memory_sessions",
+            "compute_tasks",
         }
     if expected not in (ADMINS_HEAD, HEAD):
         compared_tables = compared_tables - {"daimon_admins"}
@@ -444,10 +453,15 @@ async def test_deployed_upgrade_and_downgrade_paths(
             with pytest.raises(NotImplementedError, match="Delegation audit history"):
                 command.downgrade(config, LONG_JOBS_HEAD)
             _assert_head(sync, ADMINS_HEAD)
-            command.upgrade(config, HEAD)
-            _assert_head(sync)
+            command.upgrade(config, COMPUTE_SESSIONS_HEAD)
             with pytest.raises(NotImplementedError, match="Retain compute ownership records"):
                 command.downgrade(config, ROUTINES_HEAD)
+            version = sync.scalar(text("SELECT version_num FROM alembic_version"))
+            assert version == COMPUTE_SESSIONS_HEAD
+            command.upgrade(config, HEAD)
+            _assert_head(sync)
+            with pytest.raises(NotImplementedError, match="Retain compute task records"):
+                command.downgrade(config, REPO_MEMORY_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)
