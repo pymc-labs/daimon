@@ -80,6 +80,9 @@ LONG_JOBS_HEAD = "0147_long_jobs"
 ADMINS_HEAD = "0148_daimon_admins"
 
 
+ROUTINES_HEAD = "0151_routine_claimed_slot"
+
+
 HEAD = "0152_compute_sessions"
 
 
@@ -103,7 +106,7 @@ CHAIN = [
     ADMINS_HEAD,
     "0149_context_provider_bindings",
     "0150_origin_human_invocation",
-    "0151_routine_claimed_slot",
+    ROUTINES_HEAD,
     HEAD,
 ]
 
@@ -416,8 +419,9 @@ async def test_deployed_upgrade_and_downgrade_paths(
             with pytest.raises(NotImplementedError, match="long-job execution evidence"):
                 command.downgrade(config, RECRUITMENT_HEAD)
             _assert_head(sync, LONG_JOBS_HEAD)
-            command.upgrade(config, "head")
-            _assert_head(sync)
+            # Exercise reversible revisions before the retained Fly evidence.
+            command.upgrade(config, ROUTINES_HEAD)
+            assert sync.scalar(text("SELECT version_num FROM alembic_version")) == ROUTINES_HEAD
             principal = next(
                 col
                 for col in inspect(sync).get_columns("turn_origins")
@@ -432,6 +436,9 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 command.downgrade(config, LONG_JOBS_HEAD)
             _assert_head(sync, ADMINS_HEAD)
             command.upgrade(config, HEAD)
+            _assert_head(sync)
+            with pytest.raises(NotImplementedError, match="Retain compute ownership records"):
+                command.downgrade(config, ROUTINES_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)
