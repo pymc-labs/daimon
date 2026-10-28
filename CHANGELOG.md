@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add a sandbox Slides template workflow with validated batches, revision checks
+  and PNG rendering for mandatory visual review.
+
 - Add a sandbox Workspace write skill using short-lived Google tokens on a dedicated
   bound agent, with explicit operations and redacted errors. Correct CLI auth
   guidance for ordinary chat identity.

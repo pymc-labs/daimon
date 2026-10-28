@@ -41,3 +41,7 @@ before submission; the model receives source text without service credentials.
 `workspace-write` ships explicit Gmail/Drive/Docs/Calendar write scripts for an
 operator-created `workspace-writer` agent using short-lived delegated Google tokens.
 It does not provision credentials or bind the default Daimon agent.
+
+`slides-workflow` packages template copying, text/image edits, validated batches
+and PNG rendering for `workspace-writer`. Rendered slides must be inspected before
+completion. It shares the same short-lived Google binding as Workspace writes.

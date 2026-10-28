@@ -281,3 +281,17 @@ All users of the bound agent can use its identity directly; these scripts do not
 isolate credentials from sandbox code. Operators must restrict access to that agent
 or workspace and must not bind default Daimon to the shared account. No routine
 is created. Skill scripts participate in the existing content-derived fingerprint.
+
+`slides-workflow` uses the same dedicated Google-bound agent. Copy a named template
+or edit a deck ID named explicitly by the user; no default/recent deck is selected.
+The packaged script supports text, images, slides, deletion and validated styling
+batches with revision checks. It refuses unknown targets and deletion of the final
+slide. Render changed slides to PNG and visually inspect them before reporting
+completion; mutation success alone reports review incomplete. The skill copies no
+credentials and exposes no permission or sharing changes. PNG validation requires
+Pillow in custom sandbox images.
+
+Sandbox I/O helpers are packaged with each workflow, with one canonical source at
+`defaults/skills/workspace-write/scripts/workflow_io.py`. After changing it run
+`uv run python scripts/sync_workflow_runtime.py`; `--check` verifies the packaged
+copies remain identical. Each skill is independently deliverable.
