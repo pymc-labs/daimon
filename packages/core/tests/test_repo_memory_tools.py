@@ -36,6 +36,7 @@ def test_suppression_survives_native_and_mux_permission_projection() -> None:
             {
                 "type": "mcp_toolset",
                 "mcp_server_name": "legacy",
+                "configs": None,
                 "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
             }
         ],
