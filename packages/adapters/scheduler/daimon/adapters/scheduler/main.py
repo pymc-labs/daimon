@@ -9,8 +9,8 @@ Imperative shell that:
    the full process lifetime (created via ``engine.connect()``, never via
    ``async_sessionmaker``).
 3. Installs SIGINT/SIGTERM signal handlers via the running event loop.
-4. Loops: every ``tick_interval_s``, awaits ``run_one_tick``; the usage sweep
-   repeats on its own loop at the same interval.
+4. Loops: every ``tick_interval_s``, awaits ``run_one_tick``; the usage and
+   compute sweeps repeat on their own loops at the same interval.
 5. On stop: releases the lock, disposes the engine, exits.
 
 The ``--once`` flag runs a single tick and exits 0. The tick uses
@@ -187,8 +187,7 @@ async def _sweep_compute(compute: ComputeSessions) -> None:
     if not compute.settings.deployment_id or compute.settings.api_token is None:
         return
     try:
-        async with asyncio.timeout(10):
-            await compute.reconcile()
+        await compute.reconcile()
     except Exception:
         log.warning("compute.sweep_retry")
 
@@ -1496,14 +1495,16 @@ async def _run_loops(
     tick: Callable[[], Awaitable[None]],
     usage_sweep: Callable[[], Awaitable[None]] | None,
     privacy_sweep: Callable[[], Awaitable[None]],
+    compute_sweep: Callable[[], Awaitable[None]],
     interval_s: float,
     stop_event: asyncio.Event,
 ) -> None:
     """Run ticks and upstream sweeps on separate loops until stopped.
 
     ``usage_sweep=None`` (the sweep is switched off) runs no usage loop; the
-    privacy deletion loop always runs, since a pending erasure must not wait on
-    an unrelated setting.
+    privacy deletion and compute cleanup loops always run, since deletion must
+    not wait on an unrelated setting. Compute inventory may outlast many ticks;
+    it has no total sweep timeout, so growing inventory cannot starve cleanup.
 
     A usage pass settles whole session histories and can outlast many ticks;
     inline, routine claims waited for it. On stop the passes in flight are
@@ -1514,7 +1515,10 @@ async def _run_loops(
         background = [
             loops.create_task(
                 _repeat_until_stopped(privacy_sweep, interval_s=interval_s, stop_event=stop_event)
-            )
+            ),
+            loops.create_task(
+                _repeat_until_stopped(compute_sweep, interval_s=interval_s, stop_event=stop_event)
+            ),
         ]
         if usage_sweep is not None:
             background.append(
@@ -1703,7 +1707,6 @@ async def run(
                 dispatcher=dispatcher,
             )
             await long_jobs.sweep()
-            await _sweep_compute(compute)
             await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
@@ -1744,6 +1747,7 @@ async def run(
                 tick=tick,
                 usage_sweep=usage_sweep if scheduler_settings.usage_sweep_enabled else None,
                 privacy_sweep=privacy_sweep,
+                compute_sweep=lambda: _sweep_compute(compute),
                 interval_s=scheduler_settings.tick_interval_s,
                 stop_event=stop_event,
             )

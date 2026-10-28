@@ -1942,8 +1942,10 @@ private Fly network. Fly API and signing credentials remain in the control plane
 The owner launches, extends and uses a session in its original attended
 conversation. Launch and extension require approval cards. Reads do not renew
 leases; successful commands and writes do. The scheduler warns before expiry,
-marks sessions for deletion, and retries until Fly confirms deletion. Each sweep
-has a ten-second total budget so an outage cannot stall routine dispatch. Current
+marks sessions for deletion, and retries until Fly confirms deletion. Compute
+cleanup repeats on its own scheduler loop, so routine dispatch never waits for
+inventory or deletion. There is no total sweep timeout; individual Fly requests
+are bounded, and inventory errors still allow cleanup of known registrations. Current
 human Discord server admins can emergency-stop a known session without access to
 its files. This admin emergency-stop is Discord-only. Keep the scheduler running
 while any sessions remain.

@@ -277,8 +277,9 @@ class ComputeSessions:
         # have committed before its creation, including concurrent launches.
         try:
             resources = await self.provider.inventory()
-        except ComputeProviderError:
-            # A listing outage must not prevent expiry/deletion of known rows.
+        except Exception:
+            # Listing failures, including timeouts, must not prevent known-row cleanup.
+            # Never log remote exception bodies or headers.
             resources = []
             log.warning("compute.inventory_retry")
         known: set[uuid.UUID] = set()

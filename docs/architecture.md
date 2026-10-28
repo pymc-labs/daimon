@@ -3030,8 +3030,10 @@ delegated model/settings and tool-rule checks remain explicit actions.
 
 ### Temporary compute sessions
 
-The scheduler gives each compute sweep a ten-second total timeout, so a Fly
-outage cannot hold up routine dispatch. Deleted registrations are excluded from
+The scheduler runs compute cleanup on its own repeating loop alongside the usage
+sweep. Routine dispatch never awaits it, and there is no total sweep timeout.
+Each Fly request is bounded; inventory failures and timeouts still allow known
+rows to be reconciled. Deleted registrations are excluded from
 the sweep query; tagged resources without a registration are still reaped.
 
 The native `fly_*` MCP tools use a verified attended origin and owner identity to

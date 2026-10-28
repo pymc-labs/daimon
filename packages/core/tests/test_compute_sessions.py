@@ -320,13 +320,14 @@ async def test_reaper_skips_an_active_write_then_observes_its_renewal(
     assert session.id in fake.resources
 
 
-async def test_inventory_failure_does_not_disable_known_session_cleanup(db_engine, db_clean):
+@pytest.mark.parametrize("error", [ComputeProviderError, TimeoutError, RuntimeError])
+async def test_inventory_failure_does_not_disable_known_session_cleanup(db_engine, db_clean, error):
     sm = async_sessionmaker(db_engine, expire_on_commit=False)
     owner, _, _ = await caller(sm)
 
     class ListingOutage(FakeComputeProvider):
         async def inventory(self):
-            raise ComputeProviderError("Provider listing unavailable")
+            raise error("Provider listing unavailable")
 
     fake = ListingOutage()
     now = NOW
