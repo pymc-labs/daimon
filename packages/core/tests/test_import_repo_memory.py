@@ -44,6 +44,11 @@ def test_maps_and_manifest_preserve_personal_ownership() -> None:
     assert manifest == importer.manifest_for(list(reversed(entries)))
     assert manifest != importer.manifest_for([entries[0].model_copy(update={"body": "Changed"})])
     assert "Be brief" not in str(manifest)
+    for invalid_name in ("_more", "With Spaces", "Not-lowercase", "trailing-", "a" * 65, ""):
+        with pytest.raises(ValueError, match="Invalid source name"):
+            importer.prepare_entries(
+                [source.model_copy(update={"name": invalid_name})], {"person": account}, repos
+            )
     with pytest.raises(ValueError, match="Unmapped"):
         importer.prepare_entries([source], {}, repos)
     with pytest.raises(ValueError, match="Duplicate"):

@@ -39,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from daimon.core.repo_memory import slugify
 from daimon.core.stores.repo_memory import MemoryEntry, import_entry
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -79,7 +80,12 @@ def prepare_entries(
         account = accounts.get(row.created_by_discord_id)
         if target is None or account is None:
             raise ValueError("Unmapped repository or creator; every exported row needs a mapping.")
-        if not row.name or len(row.name) > 64 or (row.scope == "user" and row.kind != "directive"):
+        if (
+            not row.name
+            or slugify(row.name) != row.name
+            or row.name == "_more"
+            or (row.scope == "user" and row.kind != "directive")
+        ):
             raise ValueError("Invalid source name or personal reference; repair the export first.")
         if row.created_at.tzinfo is None or row.updated_at.tzinfo is None:
             raise ValueError("Export timestamps must include a timezone.")
