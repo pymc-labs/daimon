@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 174 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 176 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -236,8 +236,10 @@ Native owner-only Fly sessions bound to verified, attended conversation origins.
 | `fly_list_sessions` | all callers | List your live sessions in this conversation. |
 | `fly_list_templates` | all callers | List operator image profiles, fixed CPU/RAM and allowed regions. |
 | `fly_read_file` | all callers | Read a file from your session in byte chunks. |
-| `fly_run_bash` | all callers | Run bash inline on your session; return exit code and stdout. |
+| `fly_run_bash` | all callers | Run bash on your session; inline by default, returning exit code and stdout. |
 | `fly_stop_session` | all callers | Permanently delete a session and its files. |
+| `fly_task_result` | all callers | Read the end of a background command's output (last 16 KiB). |
+| `fly_task_status` | all callers | Check one of your background commands: state, exit code and output size. |
 | `fly_write_file` | all callers | Write UTF-8 text on your session and renew its idle lease. |
 
 ## `github_app`
