@@ -302,13 +302,17 @@ is independently deliverable.
 `time-editor` agent with `TOGGL_API_TOKEN` collected through `request_agent_key`.
 Every operation requires an explicit workspace and uniquely resolved member ID
 or email. All target owners are checked before writing; owner/workspace changes
-and administration are refused. Stop uses workspace PUT with the current UTC
-stop time and elapsed duration. A 403 identifies the shared token owner’s required
+and administration are refused. Only stopped entries attributed by Reports are
+supported. A 403 identifies the shared token owner’s required
 workspace administrator/access permission. Bulk partial results identify successful
 and failed entries without retrying. All users of this agent can use the shared key;
 it must not be attached to default Daimon. Ownership lookup uses workspace-scoped
 Reports v3 search filtered by entry IDs and the explicitly named member, not a
-key-owner-only `/me` lookup. Missing or ambiguous report rows refuse all writes.
+key-owner-only `/me` lookup. Every search supplies YYYY-MM-DD bounds from today
+minus 365 days through today, selected in UTC. Older entries are refused. Missing
+or ambiguous report rows refuse all writes; running entries and very recent edits
+(Reports lag) are unsupported. Running timers must be stopped in Toggl itself:
+a shared key cannot verify their owner through Reports.
 
 `image-workflow` supports OpenAI image generation and local-reference edits using
 `gpt-image-2` or `gpt-image-1.5`. It requires `OPENAI_API_KEY` on an operator-created

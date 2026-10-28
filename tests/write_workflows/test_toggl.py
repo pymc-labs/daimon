@@ -6,8 +6,16 @@ import pytest
 
 
 @pytest.fixture
-def workflow(load_workflow):
-    return load_workflow("toggl-edits", "toggl_edits")
+def workflow(load_workflow, monkeypatch):
+    module = load_workflow("toggl-edits", "toggl_edits")
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 28, 12, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    return module
 
 
 @pytest.fixture
@@ -27,8 +35,8 @@ def entry(user=20, entry_id=30):
         "user_id": user,
         "workspace_id": 10,
         "start": "2026-10-28T10:00:00Z",
-        "duration": -1,
-        "stop": None,
+        "duration": 1800,
+        "stop": "2026-10-28T10:30:00Z",
     }
 
 
@@ -61,6 +69,8 @@ def toggl_api(fake_api):
                 assert body["time_entry_ids"] in ([30], [31])
                 assert body == {
                     "time_entry_ids": body["time_entry_ids"],
+                    "start_date": "2025-10-28",
+                    "end_date": "2026-10-28",
                     "user_ids": [20],
                     "grouped": False,
                     "page_size": 2,
@@ -138,28 +148,76 @@ def test_conflicting_legacy_owner_evidence_refused(workflow, toggl_api, edit_req
     assert not mutations(api)
 
 
-def test_stop_is_put_with_duration_from_verified_start(workflow, toggl_api):
-    now = datetime(2026, 10, 28, 10, 30, tzinfo=UTC)
-    stopped = {**entry(), "stop": now.isoformat(), "duration": 1800}
-    api = toggl_api([MEMBERS, report(entry()), stopped])
-    result = workflow.run(
-        {"operation": "stop", "workspace_id": 10, "person": {"user_id": 20}, "entry_ids": [30]},
-        api,
-        now,
+def test_removed_stop_operation_refused_before_network(workflow, toggl_api):
+    api = toggl_api()
+    with pytest.raises(workflow.Failure, match="Only update and bulk-edit"):
+        workflow.run(
+            {"operation": "stop", "workspace_id": 10, "person": {"user_id": 20}, "entry_ids": [30]},
+            api,
+        )
+    assert not api.calls
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+def test_missing_running_entry_refused_with_zero_writes(workflow, toggl_api, edit_request, bulk):
+    responses = [MEMBERS, []]
+    if bulk:
+        edit_request.pop("changes")
+        edit_request.update(
+            operation="bulk-edit",
+            entry_ids=[30, 31],
+            operations=[{"op": "replace", "path": "/description", "value": "x"}],
+        )
+        responses = [MEMBERS, report(entry()), []]
+    api = toggl_api(responses)
+    with pytest.raises(
+        workflow.Failure, match=r"running entries and very recent edits \(Reports lag\)"
+    ):
+        workflow.run(edit_request, api)
+    assert not mutations(api)
+
+
+def test_every_report_search_has_explicit_utc_date_window(workflow, toggl_api, edit_request):
+    api = toggl_api([MEMBERS, report(entry()), entry()])
+    workflow.run(edit_request, api, datetime.fromisoformat("2026-10-29T00:30:00+02:00"))
+    body = api.calls[1][2]
+    assert body["start_date"] == "2025-10-28"
+    assert body["end_date"] == "2026-10-28"
+    # Exactly 365 elapsed days even across a leap day.
+    start, end = workflow.report_window(datetime(2024, 3, 1, tzinfo=UTC))
+    assert start.isoformat() == "2023-03-02" and (end - start).days == 365
+
+
+def test_older_report_entry_refused_even_if_provider_returns_it(workflow, toggl_api, edit_request):
+    old = {**entry(), "start": "2025-10-27T10:00:00Z", "stop": "2025-10-27T10:30:00Z"}
+    api = toggl_api([MEMBERS, report(old)])
+    with pytest.raises(workflow.Failure, match="older entries are not supported"):
+        workflow.run(edit_request, api)
+    assert not mutations(api)
+
+
+@pytest.mark.parametrize("changes", [{"stop": None}, {"duration": -1}])
+def test_cannot_reopen_stopped_entry(workflow, toggl_api, edit_request, changes):
+    edit_request["changes"] = changes
+    api = toggl_api()
+    with pytest.raises(workflow.Failure):
+        workflow.run(edit_request, api)
+    assert not api.calls
+
+
+def test_stopped_duration_change_has_matching_stop(workflow, toggl_api, edit_request):
+    edit_request["changes"] = {"duration": 3600}
+    api = toggl_api(
+        [MEMBERS, report(entry()), {**entry(), "duration": 3600, "stop": "2026-10-28T11:00:00Z"}]
     )
-    assert api.calls[-1] == (
-        "PUT",
-        "/api/v9/workspaces/10/time_entries/30",
-        {
-            "start": "2026-10-28T10:00:00+00:00",
-            "stop": "2026-10-28T10:30:00+00:00",
-            "duration": 1800,
-            "user_id": 20,
-            "workspace_id": 10,
-        },
-    )
-    assert result["duration"] == 1800
-    assert not any("/stop" in call[1] for call in api.calls)
+    workflow.run(edit_request, api)
+    assert api.calls[-1][2] == {
+        "start": "2026-10-28T10:00:00+00:00",
+        "stop": "2026-10-28T11:00:00+00:00",
+        "duration": 3600,
+        "user_id": 20,
+        "workspace_id": 10,
+    }
 
 
 @pytest.mark.parametrize(
@@ -260,7 +318,12 @@ def test_bulk_size_and_admin_operations_refused(workflow, toggl_api, edit_reques
             {
                 "user_id": 20,
                 "time_entries": [
-                    {"id": 31, "seconds": 1, "start": "2026-10-28T10:00:00Z", "stop": None}
+                    {
+                        "id": 31,
+                        "seconds": 1,
+                        "start": "2026-10-28T10:00:00Z",
+                        "stop": "2026-10-28T10:00:01Z",
+                    }
                 ],
             }
         ],
@@ -283,5 +346,13 @@ def test_incomplete_or_conflicting_workspace_report_refuses_all_writes(
     assert api.calls[-1] == (
         "POST",
         "/reports/api/v3/workspace/10/search/time_entries",
-        {"time_entry_ids": [30], "user_ids": [20], "grouped": False, "page_size": 2, "rounding": 0},
+        {
+            "start_date": "2025-10-28",
+            "end_date": "2026-10-28",
+            "time_entry_ids": [30],
+            "user_ids": [20],
+            "grouped": False,
+            "page_size": 2,
+            "rounding": 0,
+        },
     )

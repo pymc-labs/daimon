@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from workflow_io import Api, Failure, fields, key, main, positive, require, text
 
@@ -60,8 +60,8 @@ def plan(request):
         ("operation", "workspace_id", "person", "entry_ids"),
     )
     require(
-        request["operation"] in ("update", "stop", "bulk-edit"),
-        "Only update, stop and bulk-edit are supported",
+        request["operation"] in ("update", "bulk-edit"),
+        "Only update and bulk-edit of stopped entries are supported",
     )
     positive(request["workspace_id"])
     fields(request["person"], ("user_id", "email"))
@@ -85,8 +85,6 @@ def plan(request):
         )
     if request["operation"] == "update":
         validate_changes(request.get("changes"))
-    elif request["operation"] == "stop":
-        require("changes" not in request, "Stop computes stop time and duration itself")
     else:
         require("changes" not in request, "Bulk edit uses explicit replace patches")
         patches = request.get("operations")
@@ -137,13 +135,20 @@ def ownership(entry, entry_id, workspace, user):
     return entry
 
 
-def workspace_entry(api, workspace, user, entry_id):
+def report_window(now=None):
+    today = (now or datetime.now(UTC)).astimezone(UTC).date()
+    return today - timedelta(days=365), today
+
+
+def workspace_entry(api, workspace, user, entry_id, window):
     # Reports are workspace-scoped. A one-ID query avoids pagination ambiguity:
     # require exactly one row and one entry, rather than trusting a truncated page.
     rows = api.request(
         "POST",
         f"/reports/api/v3/workspace/{workspace}/search/time_entries",
         {
+            "start_date": window[0].isoformat(),
+            "end_date": window[1].isoformat(),
             "time_entry_ids": [entry_id],
             "user_ids": [user],
             "grouped": False,
@@ -153,7 +158,10 @@ def workspace_entry(api, workspace, user, entry_id):
     )
     require(
         isinstance(rows, list) and len(rows) == 1,
-        "Entry is missing or ambiguous in the named member's workspace report; no entries changed",
+        "Entry is missing or ambiguous in the named member's workspace report; "
+        "running entries and very recent edits (Reports lag) are not supported. "
+        f"Entries older than {window[0].isoformat()} are outside the supported UTC date window "
+        f"ending {window[1].isoformat()}; no entries changed",
     )
     row = rows[0]
     require(
@@ -185,17 +193,23 @@ def workspace_entry(api, workspace, user, entry_id):
         "start" in child and "stop" in child and type(child.get("seconds")) is int,
         "Report lacks entry timing evidence; no entries changed",
     )
-    timestamp(child["start"])
-    if child["stop"] is not None:
-        timestamp(child["stop"])
-        require(child["seconds"] >= 0, "Invalid stopped-entry duration")
-    # The response omits workspace_id: its evidence is the authenticated route,
-    # not a default account. A null stop explicitly denotes a running entry.
+    require(
+        child["stop"] is not None and child["seconds"] >= 0,
+        "Only stopped entries are supported; no entries changed",
+    )
+    start, stop = timestamp(child["start"]), timestamp(child["stop"])
+    require(stop >= start, "Invalid stopped-entry timing; no entries changed")
+    require(
+        window[0] <= start.date() <= window[1],
+        f"Entry is outside the supported UTC date window {window[0]} to {window[1]}; "
+        "older entries are not supported; no entries changed",
+    )
+    # Workspace evidence is the authenticated route, not the key owner's account.
     entry = {
         **child,
         "user_id": user,
         "workspace_id": workspace,
-        "duration": -1 if child["stop"] is None else child["seconds"],
+        "duration": child["seconds"],
     }
     return ownership(entry, entry_id, workspace, user)
 
@@ -206,20 +220,15 @@ def update_body(entry, changes):
         start = timestamp(result.get("start", entry.get("start")))
         stop_value = result.get("stop", entry.get("stop"))
         if "duration" in result and "stop" not in result:
-            from datetime import timedelta
-
             stop_value = (start + timedelta(seconds=result["duration"])).isoformat()
-        if stop_value is not None:
-            stop = timestamp(stop_value)
-            duration = int((stop - start).total_seconds())
-            require(duration >= 0, "Stop precedes start")
-            require(
-                "duration" not in changes or changes["duration"] == duration,
-                "Inconsistent duration and start/stop",
-            )
-            result.update(start=start.isoformat(), stop=stop.isoformat(), duration=duration)
-        else:
-            require("start" not in result, "Stop a running entry before changing its start")
+        stop = timestamp(stop_value)
+        duration = int((stop - start).total_seconds())
+        require(duration >= 0, "Stop precedes start")
+        require(
+            "duration" not in changes or changes["duration"] == duration,
+            "Inconsistent duration and start/stop",
+        )
+        result.update(start=start.isoformat(), stop=stop.isoformat(), duration=duration)
     return result
 
 
@@ -233,7 +242,8 @@ def run(request, api=None, now=None):
     user = member(api, workspace, request["person"])
     ids = request["entry_ids"]
     # Resolve ALL entries from the workspace report before ANY mutation.
-    entries = [workspace_entry(api, workspace, user, entry_id) for entry_id in ids]
+    window = report_window(now)
+    entries = [workspace_entry(api, workspace, user, entry_id, window) for entry_id in ids]
     prefix = f"/api/v9/workspaces/{workspace}/time_entries/"
     if request["operation"] == "bulk-edit":
         response = api.request("PATCH", prefix + ",".join(map(str, ids)), request["operations"])
@@ -258,18 +268,7 @@ def run(request, api=None, now=None):
             )
         return {"workspace_id": workspace, "user_id": user, "success": success, "failure": []}
     entry = entries[0]
-    if request["operation"] == "stop":
-        require(
-            entry.get("stop") is None
-            and type(entry.get("duration")) is int
-            and entry["duration"] < 0,
-            "Entry is not running; nothing changed",
-        )
-        # Same workspace PUT/admin authority as update, without relying on PATCH stop.
-        stop = (now or datetime.now(UTC)).astimezone(UTC).replace(microsecond=0)
-        changes = update_body(entry, {"stop": stop.isoformat()})
-    else:
-        changes = update_body(entry, request["changes"])
+    changes = update_body(entry, request["changes"])
     # Explicitly retain verified attribution even if the API defaults omitted user_id.
     changes.update(user_id=user, workspace_id=workspace)
     response = api.request("PUT", prefix + str(ids[0]), changes)

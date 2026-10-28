@@ -46,8 +46,12 @@ It does not provision credentials or bind the default Daimon agent.
 and PNG rendering for `workspace-writer`. Rendered slides must be inspected before
 completion. It shares the same short-lived Google binding as Workspace writes.
 
-`toggl-edits` provides named-member update, PUT-based stop and bulk edits on
-`time-editor`, with verified entry ownership and no key-owner fallback or admin operations.
+`toggl-edits` provides named-member update and bulk edits of stopped entries on
+`time-editor`, with Reports-verified ownership and no key-owner fallback or admin
+operations. Queries cover today minus 365 days through today, using UTC date
+bounds. Running entries, very recent edits missing from Reports, and older entries
+are unsupported. Running timers must be stopped in Toggl itself because a shared
+key cannot verify their owner through Reports.
 
 `image-workflow` generates and edits images through OpenAI and validates PNG
 attachments in `/mnt/session/outputs`, using a limited project key on `image-maker`.

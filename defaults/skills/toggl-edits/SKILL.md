@@ -1,6 +1,6 @@
 ---
 name: toggl-edits
-description: Update, stop or bulk edit existing Toggl Track entries for an explicitly named workspace member using a shared admin key.
+description: Update or bulk edit stopped Toggl Track entries for an explicitly named workspace member using a shared admin key.
 ---
 
 Use the dedicated `time-editor` agent, never default Daimon. If needed, use
@@ -22,12 +22,19 @@ Python standard library only. It reads only the named key from
 `/mnt/session/uploads/.env`, without executing that file. Read
 [references/requests.md](references/requests.md) for schemas and API references.
 
-All target entries must belong to the named member and workspace. The script
-fetches every entry before any mutation and refuses missing, ambiguous or
-conflicting attribution. No fallback to the key owner's entries. It exposes
-only update, stop and bulk edit: no creation, deletion, project/task/user admin,
-or ownership reassignment. Stop uses workspace PUT with current UTC stop time
-and duration computed from the entry's start; it does not call PATCH stop.
+toggl-edits changes only stopped entries that the Reports API attributes to the
+explicitly named member in that workspace; running timers are out of scope.
+The script checks every target before any mutation and refuses missing,
+ambiguous or conflicting attribution. No fallback to the key owner's entries.
+It exposes only update and bulk edit: no creation, deletion, project/task/user
+admin or ownership reassignment. Every Reports query uses explicit YYYY-MM-DD
+bounds, from today minus 365 days to today, chosen in UTC. Older entries refuse.
+Running entries and very recent edits (Reports lag) are not supported; if the
+report omits a target, nothing is changed. Do not bypass this check with another
+endpoint or retry writes while waiting for Reports to catch up.
+
+Stop someone's running timer in Toggl itself. Reports omit running entries, so a
+shared key cannot verify a running entry's owner through this workflow.
 
 On 403, report the missing workspace-admin/access/plan permission; never retry as
 another person. Bulk edits can partly apply: report successful and failed IDs,

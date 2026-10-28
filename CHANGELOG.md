@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Limit Toggl corrections to stopped entries attributed by workspace Reports in
+  an explicit 365-day UTC date window. Remove timer-stop support; refuse missing
+  targets, including running entries and very recent edits affected by Reports lag.
+
 - Support Shared Drives and partial Calendar patches in sandbox writes; fill empty
   Slides placeholders without deleting absent text. Check packaged runtime copies
   for drift and missing folders, and document audience controls and token transcript exposure.
@@ -19,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reply attachments. Ship opt-in credential-holder agent specs for Workspace,
   Toggl and images; the retired Gemini Imagen route is explicitly refused.
 
-- Add narrow Toggl Track scripts for explicit-member update, PUT-based stop and
+- Add narrow Toggl Track scripts for explicit-member stopped-entry update and
   bulk edits, checking all target owners before writing and reporting partial results.
 
 - Add a sandbox Slides template workflow with validated batches, revision checks

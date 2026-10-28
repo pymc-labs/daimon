@@ -22,7 +22,11 @@ ROOT = Path(__file__).resolve().parents[2]
             "slides_workflow",
             {"operation": "delete", "body": {"object_ids": ["missing"]}},
         ),
-        ("toggl-edits", "toggl_edits", {"operation": "stop", "workspace_id": 1, "entry_ids": [2]}),
+        (
+            "toggl-edits",
+            "toggl_edits",
+            {"operation": "update", "workspace_id": 1, "entry_ids": [2]},
+        ),
         (
             "image-workflow",
             "image_workflow",
