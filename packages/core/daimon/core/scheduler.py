@@ -94,11 +94,12 @@ async def _record_fire_error(
     routine_id: uuid.UUID,
     msg: str,
     reason: TerminationReason | None,
+    cause: BaseException | None = None,
 ) -> None:
     """Record a failure on a FRESH session (never reuse fire's session)."""
     try:
         async with sm() as s, s.begin():
-            await record_failure(s, routine_id, error=msg, reason=reason)
+            await record_failure(s, routine_id, error=msg, reason=reason, cause=cause)
     except Exception:
         log.exception("record_result(error) failed", routine_id=str(routine_id))
 
@@ -204,7 +205,7 @@ async def run_one_tick(
                     observation.finish(error=err, reason=reason)
                     capture_exception_with_scope(err)
                     await _record_fire_error(
-                        sm, row.id, f"{type(err).__name__}: {err}"[:500], reason
+                        sm, row.id, f"{type(err).__name__}: {err}"[:500], reason, err
                     )
         except asyncio.CancelledError as err:
             observation.finish(error=err)

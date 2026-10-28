@@ -53,20 +53,24 @@ from daimon.adapters.mcp.tools.teams._directory import (
     require_client,
     split_thread,
 )
-from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.access_policy import DM_SCOPE_PREFIX, OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_agent_ref
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import any_agent_rules, any_own_readers, home_of
 from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.routines import channel_agent, may_schedule_agent
 from daimon.core.rule_views import routine_destination_channel
-from daimon.core.scope import ScopeContext
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
-from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.stores.domain import (
+    CatchUpPolicy,
+    RoutineDestinationKind,
+    RoutineRow,
+    TurnOriginRow,
+)
 from daimon.core.teams_graph import GraphUnavailable
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -471,28 +475,58 @@ async def _require_agent_in_scope(
     or the agent the destination channel itself answers with. Anything else
     is an admin's call.
     """
-    if auth.is_admin:
-        return
     executing = auth.agent_id or auth.chat_agent_id
-    if executing is not None and executing == derive_agent_uuid(
+    talking_to = executing is not None and executing == derive_agent_uuid(
         tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id
-    ):
-        return
-    if destination_channel_id is not None:
+    )
+    answers_here: str | None = None
+    if not auth.is_admin and not talking_to and destination_channel_id is not None:
         async with runtime.session_factory() as session:
-            config = await resolve(
+            answers_here = await channel_agent(
                 session,
-                context=ScopeContext(tenant_id=auth.tenant_id, channel_id=destination_channel_id),
+                tenant_id=auth.tenant_id,
+                channel_id=destination_channel_id,
                 default=runtime.deployment_default,
             )
-        if config.agent_name == agent_name:
-            return
+    if may_schedule_agent(
+        agent_name, is_admin=auth.is_admin, talking_to=talking_to, answers_here=answers_here
+    ):
+        return
     raise ToolError(
         f"{agent_name} is neither the agent you are talking to nor the one the destination "
         "channel answers with, and a routine runs with its agent's repository, keys and "
         f"connectors, so only {admin_noun(auth.platform)} can schedule it. Tell the caller "
         "who can. Nothing was saved."
     )
+
+
+def _origin_destination(
+    platform: str, origin: TurnOriginRow
+) -> tuple[RoutineDestinationKind, str] | None:
+    """The conversation a routine was asked for in, as its destination.
+
+    A routine made in a conversation and naming nowhere posts back there,
+    in the thread it was asked in. None for a private DM (a ``dm:`` scope,
+    a Slack IM, a Teams personal or group chat): a routine cannot post there,
+    so one made there is only recorded, as before.
+    """
+    channel_id, thread_id = origin.parent_channel_id, origin.thread_id
+    if thread_id.startswith(DM_SCOPE_PREFIX):
+        return None
+    kind: RoutineDestinationKind
+    if platform == "slack":
+        kind, target = "thread", f"{channel_id}:{thread_id}"
+    elif platform == "teams":
+        kind, target = (
+            ("thread", thread_id) if ";messageid=" in thread_id else ("channel", channel_id)
+        )
+    elif thread_id and thread_id != channel_id:
+        kind, target = "thread", thread_id
+    else:
+        kind, target = "channel", channel_id
+    if destination_shape_error(platform, kind, target) is not None:
+        return None
+    return kind, target
 
 
 async def _create_routine_impl(
@@ -513,9 +547,24 @@ async def _create_routine_impl(
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
     next_fire_at = _compute_next_fire_at(cron_expr, timezone)
-    destination_channel_id = await _check_destination(
-        runtime, auth, kind=destination_kind, destination_id=destination_id
-    )
+    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    defaulted = False
+    if destination_kind is None and destination_id is None and origin is not None:
+        here = _origin_destination(auth.platform or "", origin)
+        if here is not None:
+            (destination_kind, destination_id), defaulted = here, True
+    try:
+        destination_channel_id = await _check_destination(
+            runtime, auth, kind=destination_kind, destination_id=destination_id
+        )
+    except ToolError as err:
+        if not defaulted:
+            raise
+        why = str(err).removesuffix("Nothing was saved.").strip().rstrip(".") + "."
+        raise ToolError(
+            f"With no destination named, this routine would post in this conversation, "
+            f"but it can't: {why} Name a channel or thread for its results. Nothing was saved."
+        ) from err
     if runtime.settings.mcp.require_routine_destination and destination_kind is None:
         raise ToolError(
             "No destination was supplied. This routine won't post, so nothing was created. "
@@ -529,7 +578,6 @@ async def _create_routine_impl(
             runtime.session_factory, auth, origin_context_id
         )
 
-    origin = await get_verified_origin(runtime, auth, origin_context_id)
     caller = await load_isolation_view(runtime, auth, location_channel_id=origin_channel_id(origin))
     match = await find_agent_by_daimon_tag(
         runtime.client,
@@ -778,11 +826,17 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         its final reply there. A thread is its id exactly as turn_controls
         or a read tool gives it, and a malformed id is refused with the form to
         use; the channel must be one you are in. A protected channel is refused.
-        Without a destination the
-        result is only recorded (``last_result_tail``), as before. A run's
-        spend counts toward the destination channel's budget, or without a
-        destination the budget of the channel named by ``origin_context_id``
-        (this turn's), and a run is skipped while that budget is used up.
+        Without a destination, a routine made in a conversation (pass this
+        turn's ``origin_context_id``) posts back to it, in the thread it was
+        asked in. Only one made in a private DM, or with no conversation, is
+        only recorded (``last_result_tail``); to keep any other routine
+        record-only, create it and then call
+        ``update_routine(clear_destination=true)``. A run's spend counts
+        toward the destination channel's budget, or without a destination
+        the budget of the channel named by ``origin_context_id``, and a run
+        is skipped while that budget is used up. When the routine's job is
+        to post somewhere other than this conversation, name that place as
+        the destination; otherwise its result posts here as well.
 
         ``agent_name`` MUST be the exact daimon-side display name of an
         existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
@@ -806,7 +860,9 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Example: a user says "daimon, create a routine that pings me every
         5 minutes with the message 'ping'". The correct call is
         ``create_routine(agent_name="daimon", cron_expr="*/5 * * * *",
-        timezone="UTC", trigger_message="ping")``.
+        timezone="UTC", trigger_message="ping",
+        origin_context_id="<this turn's origin_context_id>")``, and each
+        run's result posts back in this thread.
         """
         return await _create_routine_impl(
             runtime,

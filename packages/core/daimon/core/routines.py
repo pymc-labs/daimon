@@ -1,12 +1,36 @@
-"""Rules the chat `routines` panels share: status glyph, label, order and who may act. Pure."""
+"""Rules the chat `routines` panels share: status glyph, label, order and who may act.
+
+Pure, apart from `channel_agent`, which reads the agent a channel answers with,
+and `panel_save_refusal`, which reads the access policy.
+"""
 
 from __future__ import annotations
 
-from typing import Literal
+import uuid
+from typing import Literal, cast
 
+from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_subject
+from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.turn.errors import AdmissionDenialReason
+from sqlalchemy.ext.asyncio import AsyncSession
 
 PANEL_CAP = 25
+
+#: A panel routine has no destination: say so where it is confirmed, and how
+#: to read its result. `{output}` is the panel's own name for that action.
+RECORD_ONLY_NOTICE = (
+    "Its results aren't posted anywhere: open Routines and choose {output} to read them. "
+    "To have them posted in a channel, ask the agent there to make the routine instead."
+)
+#: A member's refusal when the agent this channel answers with was deleted:
+#: name it, rather than say no agent answers here.
+GONE_AGENT_NOTICE = (
+    "{agent}, the agent this channel answers with, no longer exists.\n\n"
+    "Ask an admin to pick another."
+)
 
 Glyph = Literal["⏸", "⏳", "❌", "✅"]
 
@@ -47,3 +71,70 @@ def can_manage_routine(row: RoutineRow, *, user_id: str | None, is_admin: bool) 
     ownerless routine is admin-only.
     """
     return is_admin or (user_id is not None and row.created_by_user_id == user_id)
+
+
+def may_schedule_agent(
+    agent_name: str, *, is_admin: bool, talking_to: bool = False, answers_here: str | None = None
+) -> bool:
+    """Who may make a routine for `agent_name`, the same in chat and on every panel.
+
+    A routine runs as its agent, with that agent's repository, keys,
+    connectors and memory, so a member may schedule only the agent they are
+    talking to (`talking_to`) or the one the routine's channel answers with
+    (`answers_here`, from `channel_agent`). Any agent is an admin's call.
+    """
+    return is_admin or talking_to or (answers_here is not None and answers_here == agent_name)
+
+
+async def channel_agent(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str | None,
+    default: DeploymentDefault,
+) -> str | None:
+    """The agent `channel_id` answers with (the workspace default without one)."""
+    config = await resolve(
+        session, context=ScopeContext(tenant_id=tenant_id, channel_id=channel_id), default=default
+    )
+    return config.agent_name
+
+
+async def panel_save_refusal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    is_admin: bool,
+    agent: AgentRef,
+    channel_id: str | None,
+) -> AdmissionDenialReason | None:
+    """Why a panel may not save a routine with no destination, or None.
+
+    The checks chat's `create_routine` runs inside an admitted turn: the
+    creator must be someone the access policy lets start turns (a fire acts
+    for them, `ACT_FOR_CREATOR`), and the agent must be one that may run with
+    nowhere to post, saved from `channel_id` (`SAVE_ROUTINE`: a pinned agent
+    needs one of its channels, and a channel kept to its own agents keeps its
+    routines). Without them the panel would say a routine was created that
+    every fire then refuses. Raises `AccessPolicyUnreadable` when the policy
+    can't be read.
+    """
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    subject = build_subject(is_admin=is_admin, platform_user_id=user_id)
+    for action, origin in (
+        (Action.ACT_FOR_CREATOR, None),
+        (Action.SAVE_ROUTINE, Place(channel_id=channel_id) if channel_id else None),
+    ):
+        decision = authorize(
+            policy,
+            subject=subject,
+            action=action,
+            surface=Surface.ROUTINE,
+            agent=agent if action is Action.SAVE_ROUTINE else None,
+            place=Place(),
+            origin=origin,
+        )
+        if not decision:
+            return cast(AdmissionDenialReason, decision.reason)
+    return None

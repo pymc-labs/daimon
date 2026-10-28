@@ -309,10 +309,11 @@ immediately.
 
 `bool` · optional · default `False`
 
-Require an explicit destination when the MCP create_routine tool is called. When
-enabled, a missing destination is refused before agent lookup or creation, with a
-warning that the routine would not post. Default false preserves record-only routines;
-existing routines and updates are unaffected.
+Require a destination when the MCP create_routine tool is called. A routine asked for in
+a conversation already defaults to posting back there; when enabled, a call left with no
+destination (from a DM, or with no conversation) is refused before agent lookup or
+creation, with a warning that the routine would not post. Default false keeps those
+routines record-only; existing routines and updates are unaffected.
 
 ### `DAIMON_MCP__PUBLIC_URL`
 

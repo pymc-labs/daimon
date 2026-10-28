@@ -538,3 +538,52 @@ async def test_handle_routine_action_output_by_admin_non_creator_returns_last_ou
     assert not any("can read this routine's output" in b for b in bodies), (
         "an admin must not be shown the creator-or-admin refusal"
     )
+
+
+@pytest.mark.asyncio
+async def test_create_offers_a_member_the_agent_this_channel_answers_with(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: object,
+) -> None:
+    """The panel applies the rule asking in chat does: a member may schedule the
+    agent this channel answers with, so New Routine opens for them listing only it."""
+    import dataclasses
+    import json
+
+    import httpx
+    from daimon.core.scope import DeploymentDefault
+    from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
+
+    tenant_id, fernet_key, _ = await _seed_team(db_session, team_id="T_CREATE_MEMBER")
+    await db_session.commit()
+    agents = [ma_agent(tenant_id=tenant_id, name=name) for name in ("daimon", "acme-project")]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            return list_response([agent.model_dump(mode="json") for agent in agents])
+        return httpx.Response(404, json={"error": f"unhandled {request.url.path}"})
+
+    runtime = dataclasses.replace(
+        build_slack_runtime(
+            fernet_key, db_session_factory, anthropic=build_fake_anthropic(handler)
+        ),
+        deployment_default=DeploymentDefault(agent_name="daimon"),
+    )
+    payload = {
+        "team": {"id": "T_CREATE_MEMBER"},
+        "user": {"id": _OTHER_USER_ID},
+        "trigger_id": "TRIGGER_TEST",
+        "view": {"id": _VIEW_ID, "private_metadata": "C_TEST"},
+        "actions": [{"action_id": "routines_create"}],
+    }
+
+    await handle_routine_action(runtime, payload)  # type: ignore[arg-type]
+
+    client_fake: Any = fake_slack_web_client
+    assert _ephemeral_bodies(client_fake.mock) == [], "a member is not refused"
+    [push] = client_fake.mock.requests[("POST", yarl.URL("https://slack.com/api/views.push"))]
+    modal = json.dumps(push.kwargs["json"])
+    assert '"daimon"' in modal, "the agent this channel answers with"
+    assert "acme-project" not in modal, "another project's agent is an admin's call"

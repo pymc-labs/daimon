@@ -131,8 +131,6 @@ CASES: tuple[Case, ...] = (
         "routine_create_open",
         "dialog_open",
         routines_card.CREATE_DIALOG,
-        admin="admit",
-        member="refuse",
     ),
     Case(
         "dialog",
@@ -562,9 +560,8 @@ async def test_routine_create_submit_persona_matrix(
     async with running_service(runtime, fake) as service:
         answer = await post_activity(service, activity)
     evidence = json.dumps(answer)
-    if persona.name == "admin":
-        assert "Routine created for daimon" in evidence, answer
-    elif persona.name == "external":
+    if persona.name == "external":
         assert "not available for this account" in evidence, "a 1:1 across organisations"
     else:
-        assert "Only an admin can create routines" in evidence, answer
+        # As in chat, a member may schedule the agent this chat answers with.
+        assert "Routine created for daimon" in evidence, answer
