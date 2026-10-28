@@ -25,7 +25,11 @@ result as `CLOUDSDK_AUTH_ACCESS_TOKEN` before running the CLI.
   service-account key in `google_sa_json` with domain-wide delegation. The user
   credential serves only bindings matching that email, without case sensitivity;
   other bindings require the service account. Both routes use the binding’s
-  scopes. Report missing setup to the operator.
+  scopes. With a user credential, the binding’s scopes must be ones the
+  sign-in was granted, such as `gmail.modify`, `calendar`, `drive`,
+  `documents` and `presentations` (each under
+  `https://www.googleapis.com/auth/`); otherwise the refresh fails with
+  `invalid_scope`. Report missing setup to the operator.
 
 Google mints a short-lived access token (about one hour). The returned
 token enters model context and the session transcript; shell commands containing

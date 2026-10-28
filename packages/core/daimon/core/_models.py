@@ -882,8 +882,10 @@ class AgentGoogleBinding(Base):
 
     Empty day-1; populated by an operator running `daimon agents bind-google
     <agent> <email> --scopes <scope>...`. Holds the email + scope set the
-    token broker mints credentials for via domain-wide delegation against
-    the tenant service account.
+    token broker mints credentials for: by refreshing the operator's
+    authorized-user credential when the email matches
+    ``credentials.google_user_email``, otherwise via domain-wide delegation
+    against the tenant service account.
     """
 
     __tablename__ = "agent_google_binding"

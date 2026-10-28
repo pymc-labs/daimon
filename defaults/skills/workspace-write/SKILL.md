@@ -18,7 +18,8 @@ The script itself reads stdin, does not accept a token argument, and redacts
 errors. Do not echo the token or persist it to a file. Google tokens require
 an agent binding and either the matching account’s authorized-user JSON
 (`google_user_json` plus `google_user_email`) or a service-account key
-(`google_sa_json`) with domain-wide delegation. Ordinary chat carries the signed
+(`google_sa_json`) with domain-wide delegation. With a user credential, bind only scopes the sign-in was granted, such as `gmail.modify`, `calendar`, `drive`, `documents` and `presentations` (each under `https://www.googleapis.com/auth/`); any other scope makes Google refuse the refresh with `invalid_scope`.
+Ordinary chat carries the signed
 identity. Missing setup is an operator error; never request a refresh
 token or run `gws auth`.
 
