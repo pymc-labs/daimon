@@ -284,15 +284,14 @@ class ComputeSessions:
         known: set[uuid.UUID] = set()
         for tenant in await list_tenants_by_platform(self.sm):
             async with self.sm.begin() as db:
-                sessions = await store.list_sessions(db, tenant.id)
+                sessions = await store.list_sessions(db, tenant.id, include_deleted=False)
             for session in sessions:
                 if session.deployment_id != self.settings.deployment_id:
                     continue
-                if session.state != "deleted":
-                    known.add(session.id)
+                known.add(session.id)
                 try:
                     await self._reconcile_one(session, archived=tenant.archived_at is not None)
-                except (ComputeProviderError, StoreError):
+                except Exception:
                     # Never log remote exceptions: requests may include credentials.
                     log.warning("compute.reconcile_retry", session_id=str(session.id))
         for resource in resources:

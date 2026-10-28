@@ -5199,6 +5199,273 @@
         'type': 'object',
       }),
     }),
+    'fly_extend_session': dict({
+      'description': '''
+        Set your session's expiry to this many hours from now, after owner approval.
+        <blank line>
+        Use the original attended conversation. Hours cannot exceed the operator TTL.
+        This does not change the idle window used by subsequent command/file writes.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'hours': dict({
+            'type': 'integer',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'session_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'session_id',
+          'hours',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fly_get_session_status': dict({
+      'description': "Read your session's machine state, capacity and expiry without renewing it.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'session_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'session_id',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fly_launch_session': dict({
+      'description': '''
+        Launch your own temporary Fly machine from an operator image profile.
+        <blank line>
+        Requires approval in an attended conversation. List profiles for fixed CPU/RAM,
+        regions and image before choosing. No shared credentials are mounted. Sessions
+        are deleted after their idle lease; export files before stopping or expiry.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'region': dict({
+            'default': 'iad',
+            'type': 'string',
+          }),
+          'template': dict({
+            'type': 'string',
+          }),
+          'ttl_hours': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'template',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fly_list_files': dict({
+      'description': 'List paths and sizes on your session. This does not extend its lease.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+          'pattern': dict({
+            'default': '*',
+            'type': 'string',
+          }),
+          'session_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'session_id',
+          'path',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fly_list_sessions': dict({
+      'description': "List your live sessions in this conversation. Other people's sessions are private.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fly_list_templates': dict({
+      'description': 'List operator image profiles, fixed CPU/RAM and allowed regions.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fly_read_file': dict({
+      'description': 'Read a file from your session in byte chunks. This does not extend its lease.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'limit': dict({
+            'default': 65536,
+            'type': 'integer',
+          }),
+          'offset': dict({
+            'default': 0,
+            'type': 'integer',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+          'session_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'session_id',
+          'path',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fly_run_bash': dict({
+      'description': '''
+        Run bash inline on your session; return exit code and stdout.
+        <blank line>
+        timeout is milliseconds, 1–40000. Longer/background work is not supported
+        yet. Do not retry an uncertain response automatically: inspect files first.
+        Commands and file writes renew the idle lease. Reads do not renew it.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'command': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'session_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+          'timeout': dict({
+            'default': 40000,
+            'type': 'integer',
+          }),
+        }),
+        'required': list([
+          'session_id',
+          'command',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fly_stop_session': dict({
+      'description': '''
+        Permanently delete a session and its files. Export needed files first.
+        <blank line>
+        The owner may stop it in the original conversation. A current tenant admin
+        may emergency-stop it without access to commands, files or other contents.
+        Failed provider deletion remains pending for automatic cleanup.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'session_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'session_id',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'fly_write_file': dict({
+      'description': 'Write UTF-8 text on your session and renew its idle lease. Creates parent directories.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'content': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+          'session_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'session_id',
+          'path',
+          'content',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'fork_agent': dict({
       'description': '''
         Make a copy of Daimon or another agent that you can edit under a new name.

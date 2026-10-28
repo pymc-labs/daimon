@@ -17,6 +17,8 @@ from fastmcp.exceptions import ToolError
 @pytest.mark.parametrize(
     "mode",
     [
+        "client",
+        "foreign_sender",
         "routine",
         "worker",
         "agent",
@@ -63,6 +65,10 @@ async def test_attended_signed_owner_admission(monkeypatch, mode):
         kwargs[{"routine": "routine_id", "worker": "execution_id", "agent": "agent_id"}[mode]] = (
             uuid.uuid4()
         )
+    if mode == "client":
+        kwargs["foreign_home_id"] = "other-organisation"
+    if mode == "foreign_sender":
+        origin = origin.model_copy(update={"sender_foreign": True})
     if mode == "missing_session":
         kwargs["chat_session_id"] = None
     if mode == "no_chat_agent":
@@ -84,7 +90,7 @@ async def test_attended_signed_owner_admission(monkeypatch, mode):
     else:
         with pytest.raises(ToolError):
             await fly._caller(SimpleNamespace(), None, str(origin.id))
-    if mode in {"routine", "worker", "agent", "missing_session", "no_chat_agent"}:
+    if mode in {"client", "routine", "worker", "agent", "missing_session", "no_chat_agent"}:
         verifier.assert_not_called()
 
 

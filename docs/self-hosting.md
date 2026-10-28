@@ -1942,9 +1942,11 @@ private Fly network. Fly API and signing credentials remain in the control plane
 The owner launches, extends and uses a session in its original attended
 conversation. Launch and extension require approval cards. Reads do not renew
 leases; successful commands and writes do. The scheduler warns before expiry,
-marks sessions for deletion, and retries until Fly confirms deletion. Current
-human tenant admins can emergency-stop a known session without access to its
-files. Keep the scheduler running while any sessions remain.
+marks sessions for deletion, and retries until Fly confirms deletion. Each sweep
+has a ten-second total budget so an outage cannot stall routine dispatch. Current
+human Discord server admins can emergency-stop a known session without access to
+its files. This admin emergency-stop is Discord-only. Keep the scheduler running
+while any sessions remain.
 
 `DAIMON_COMPUTE__PER_PERSON_SESSIONS`, `DAIMON_COMPUTE__DEFAULT_IDLE_TTL_HOURS` and
 `DAIMON_COMPUTE__MAX_TTL_HOURS` bound concurrent sessions and idle lifetimes. There
@@ -1954,3 +1956,6 @@ perishable: export outputs before stopping or expiry. Bash currently runs inline
 with a maximum 40-second timeout; background task handles and completion reports
 are not provided. Image-profile authoring tools, compiler credential injection and
 browser notebook access are not provided.
+
+Account erasure cascades the Fly registration and its conversation metadata; the
+scheduler deletes the remaining tagged machine as an orphan on a later sweep.

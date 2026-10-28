@@ -3030,11 +3030,15 @@ delegated model/settings and tool-rule checks remain explicit actions.
 
 ### Temporary compute sessions
 
+The scheduler gives each compute sweep a ten-second total timeout, so a Fly
+outage cannot hold up routine dispatch. Deleted registrations are excluded from
+the sweep query; tagged resources without a registration are still reaped.
+
 The native `fly_*` MCP tools use a verified attended origin and owner identity to
 register disposable compute in `compute_sessions`. The core service/store fence
 every lookup by tenant and owner plus the originating conversation. Launch and
-extend verify exact approval evidence; current tenant admins may only
-emergency-stop, without reading session contents. Operator profiles fix the image
+extend verify exact approval evidence; current human Discord server admins may
+only emergency-stop, without reading session contents. Operator profiles fix the image
 and machine capacity. File operations and inline bash use the image's
 authenticated thin MCP server; no provider token is mounted in the machine.
 

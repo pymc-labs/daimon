@@ -187,7 +187,8 @@ async def _sweep_compute(compute: ComputeSessions) -> None:
     if not compute.settings.deployment_id or compute.settings.api_token is None:
         return
     try:
-        await compute.reconcile()
+        async with asyncio.timeout(10):
+            await compute.reconcile()
     except Exception:
         log.warning("compute.sweep_retry")
 

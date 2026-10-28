@@ -35,10 +35,16 @@ async def get(
 
 
 async def list_sessions(
-    db: AsyncSession, tenant_id: uuid.UUID, *, owner: uuid.UUID | None = None
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    owner: uuid.UUID | None = None,
+    include_deleted: bool = True,
 ) -> list[ComputeSession]:
     await scope(db, tenant_id)
     query = select(ComputeSessionRecord).where(ComputeSessionRecord.tenant_id == tenant_id)
+    if not include_deleted:
+        query = query.where(ComputeSessionRecord.state != "deleted")
     if owner is not None:
         query = query.where(ComputeSessionRecord.owner_account_id == owner)
     return [ComputeSession.model_validate(row) for row in await db.scalars(query)]
@@ -121,7 +127,7 @@ async def warn(db: AsyncSession, session: ComputeSession, now: datetime) -> None
         idempotency_key=uuid.uuid5(session.id, session.expires_at.isoformat()),
         available_at=now,
         attended=False,
-        requested_work=f"Tell the owner: Fly session {session.id} expires at "
+        requested_work=f"Tell the owner: Fly machine {session.id} expires at "
         f"{session.expires_at.isoformat()} and its files will be deleted. "
         "Ask them to extend it in an attended conversation if needed. Do not run commands.",
     )

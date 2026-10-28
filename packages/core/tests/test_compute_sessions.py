@@ -356,3 +356,83 @@ async def test_disabling_launch_cleans_partial_creation_without_starting_a_machi
     await disabled.reconcile()
     assert (await disabled.get(owner, session.id)).state == "deleted"
     assert fake.resources == {} and fake.machine_env == {}
+
+
+async def test_reconcile_isolates_unexpected_errors_and_still_deletes_orphans(monkeypatch):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from daimon.core import compute_sessions as module
+
+    @asynccontextmanager
+    async def transaction():
+        yield None
+
+    sm = SimpleNamespace(begin=transaction)
+    fake = FakeComputeProvider()
+    orphan_id = uuid.uuid4()
+    fake.resources[orphan_id] = ComputeResource(
+        session_id=orphan_id,
+        deployment_id="test-deployment",
+        app_name=app_name("test-deployment", orphan_id),
+    )
+    tenant = SimpleNamespace(id=uuid.uuid4(), archived_at=None)
+    rows = [SimpleNamespace(id=uuid.uuid4(), deployment_id="test-deployment") for _ in range(2)]
+    monkeypatch.setattr(module, "list_tenants_by_platform", AsyncMock(return_value=[tenant]))
+    listing = AsyncMock(return_value=rows)
+    monkeypatch.setattr(module.store, "list_sessions", listing)
+    service = ComputeSessions(sm, settings(), fake)
+    reconcile = AsyncMock(side_effect=[RuntimeError("remote-secret-body"), None])
+    monkeypatch.setattr(service, "_reconcile_one", reconcile)
+    log = Mock()
+    monkeypatch.setattr(module, "log", log)
+    await service.reconcile()
+    listing.assert_awaited_once_with(None, tenant.id, include_deleted=False)
+    assert reconcile.await_count == 2
+    assert fake.resources == {}
+    log.warning.assert_called_once_with("compute.reconcile_retry", session_id=str(rows[0].id))
+
+
+async def test_deleted_registrations_are_excluded_but_lingering_apps_are_reaped(
+    db_engine, db_clean
+):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.stores import compute_sessions as store
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    session = await launch(service, owner)
+    resource = fake.resources[session.id]
+    await service.stop(owner, session.id)
+    async with sm.begin() as db:
+        assert await store.list_sessions(db, tenant.id, include_deleted=False) == []
+        assert len(await store.list_sessions(db, tenant.id)) == 1
+    # A resource left over after confirmed deletion is an orphan, not an active row.
+    fake.resources[session.id] = resource
+    service._reconcile_one = AsyncMock()
+    await service.reconcile()
+    service._reconcile_one.assert_not_awaited()
+    assert fake.resources == {}
+
+
+async def test_account_erasure_removes_registration_and_reaps_the_machine(db_engine, db_clean):
+    from daimon.core.stores import compute_sessions as store
+    from daimon.core.stores.accounts import delete_account
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, _ = await caller(sm)
+    fake = FakeComputeProvider()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    session = await launch(service, owner)
+    async with sm.begin() as db:
+        await delete_account(db, account_id=owner.account_id)
+    async with sm.begin() as db:
+        assert await store.list_sessions(db, tenant.id) == []
+    with pytest.raises(StoreError):
+        await service.get(owner, session.id)
+    await service.reconcile()
+    assert fake.resources == {}

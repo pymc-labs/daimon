@@ -32,16 +32,22 @@ async def _caller(
 ) -> tuple[AuthIdentity, ComputeCaller]:
     auth = await _auth(ctx)
     if (
-        auth.agent_id is not None
+        auth.client
+        or auth.agent_id is not None
         or auth.routine_id is not None
         or auth.execution_id is not None
         or auth.chat_agent_id is None
         or not auth.chat_session_id
     ):
-        raise ToolError("Use an attended conversation with the session owner.")
+        raise ToolError("Use a conversation where the machine owner is present.")
     origin = await require_turn_origin(runtime, auth, origin_id)
-    if not origin.attended or origin.human_invocation is not True or not auth.platform_user_id:
-        raise ToolError("The session owner must be here in an active conversation.")
+    if (
+        origin.sender_foreign
+        or not origin.attended
+        or origin.human_invocation is not True
+        or not auth.platform_user_id
+    ):
+        raise ToolError("The machine owner must be here in an active conversation.")
     return auth, ComputeCaller(
         tenant_id=auth.tenant_id,
         account_id=auth.account_id,
@@ -103,7 +109,7 @@ async def _readable(
         runtime, auth, session.source_metadata, origin_context_id=origin_id
     ):
         raise ToolError(
-            "You can no longer read the source conversation. Ask an admin to stop the session."
+            "You can no longer read the source conversation. Ask an admin to stop the machine."
         )
 
 

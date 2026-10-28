@@ -57,13 +57,25 @@ def _deps(*, configured: bool, tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY)
 
 def test_turns_select_microsoft_send_only_when_configured() -> None:
     on = confirmed_tools_for_turn(_deps(configured=True))
-    assert on - {"create_watch", "resume_watch", "rotate_watch_key", "start_long_job"} == {
-        "microsoft_send"
-    }, "configured: sessions ask before Microsoft sends"
+    assert on - {
+        "create_watch",
+        "resume_watch",
+        "rotate_watch_key",
+        "start_long_job",
+        "fly_launch_session",
+        "fly_extend_session",
+    } == {"microsoft_send"}, "configured: sessions ask before Microsoft sends"
     safe = confirmed_tools_for_turn(
         _deps(configured=True, tool_safety=ToolSafetyPolicy(enabled=True))
     )
-    assert safe - {"create_watch", "resume_watch", "rotate_watch_key", "start_long_job"} == {
+    assert safe - {
+        "create_watch",
+        "resume_watch",
+        "rotate_watch_key",
+        "start_long_job",
+        "fly_launch_session",
+        "fly_extend_session",
+    } == {
         "microsoft_send",
         "microsoft_write",
     }, "tool safety on: writes ask too"
@@ -73,7 +85,9 @@ def test_turns_select_microsoft_send_only_when_configured() -> None:
         "resume_watch",
         "rotate_watch_key",
         "start_long_job",
-    }, "unconfigured Microsoft: only standing watch/job actions are selected"
+        "fly_launch_session",
+        "fly_extend_session",
+    }, "unconfigured Microsoft: only standing watch/job/compute actions are selected"
 
 
 def test_selected_microsoft_send_asks_with_tool_safety_off() -> None:
