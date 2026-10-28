@@ -45,6 +45,7 @@ def mint(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> A
         email: str | None = "USER@example.com",
         *,
         agent_id: uuid.UUID | None = _AGENT_ID,
+        scopes: tuple[str, ...] = _SCOPES,
     ) -> str:
         async def binding(session: object, *, agent_id: uuid.UUID) -> AgentGoogleBindingRow | None:
             if email is None:
@@ -52,7 +53,7 @@ def mint(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> A
             return AgentGoogleBindingRow(
                 agent_id=agent_id,
                 email=email,
-                scopes=_SCOPES,
+                scopes=scopes,
                 created_at=datetime.now(UTC),
                 updated_at=datetime.now(UTC),
             )
@@ -199,3 +200,89 @@ async def test_no_credentials_and_binding_gates(mint: Any) -> None:
         await mint(_settings(), None)
     with pytest.raises(NoBindingError, match="requires an agent_id"):
         await mint(_settings(), agent_id=None)
+
+
+class _FakeResponse:
+    def __init__(self, status: int, body: dict[str, Any]) -> None:
+        self.status = status
+        self.headers: dict[str, str] = {}
+        self.data = json.dumps(body).encode()
+
+
+_ECHOED = f"{_USER_INFO['client_secret']} {_USER_INFO['refresh_token']} test-access-token"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "code", "guidance"),
+    [
+        (
+            {"error": "invalid_scope", "error_description": _ECHOED, "access_token": "x"},
+            "invalid_scope",
+            "bind only scopes the sign-in was granted",
+        ),
+        (
+            {"error": "invalid_grant", "error_description": _ECHOED},
+            "invalid_grant",
+            "revoked or expired",
+        ),
+        # An unknown code is not echoed, even when it carries a secret.
+        ({"error": _ECHOED}, "network or unknown", "retry"),
+        ({"detail": _ECHOED}, "network or unknown", "retry"),
+    ],
+)
+async def test_google_oauth_errors_name_the_code_only(
+    mint: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    body: dict[str, Any],
+    code: str,
+    guidance: str,
+) -> None:
+    """The real google-auth refresh parses a fake Google response; no network is used."""
+    sent: list[str] = []
+
+    def transport(self: object, url: str, method: str = "GET", **kwargs: Any) -> Any:
+        assert url == "https://oauth2.googleapis.com/token"
+        sent.append(kwargs["body"].decode())
+        return _FakeResponse(400, body)
+
+    monkeypatch.setattr("google.auth.transport.requests.Request.__call__", transport)
+    with pytest.raises(ProviderConfigError) as exc:
+        await mint(_settings())
+    message = str(exc.value)
+    assert f"({code})" in message
+    assert guidance in message
+    assert exc.value.__context__ is None and exc.value.__cause__ is None
+    assert sent and "scope=" in sent[0]
+    output = "".join(traceback.format_exception(exc.value)) + caplog.text + repr(exc.value)
+    for secret in (_USER_INFO["client_secret"], _USER_INFO["refresh_token"], "test-access-token"):
+        assert secret not in output
+
+
+@pytest.mark.asyncio
+async def test_network_failure_is_named_without_detail(
+    mint: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from google.auth.exceptions import TransportError
+
+    def transport(*args: Any, **kwargs: Any) -> Any:
+        raise TransportError(_ECHOED)
+
+    monkeypatch.setattr("google.auth.transport.requests.Request.__call__", transport)
+    with pytest.raises(ProviderConfigError, match=r"\(network or unknown\)") as exc:
+        await mint(_settings())
+    assert _USER_INFO["refresh_token"] not in "".join(traceback.format_exception(exc.value))
+    assert exc.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_user_binding_without_scopes_is_refused_before_refresh(
+    mint: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("refreshed with no scopes")
+
+    monkeypatch.setattr("google.oauth2.credentials.Credentials.refresh", forbidden)
+    with pytest.raises(ProviderConfigError, match="no scopes"):
+        await mint(_settings(), scopes=())

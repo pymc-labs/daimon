@@ -68,6 +68,7 @@ _APP_DENYLIST: list[str] = [
     "jwt",
     "api_key",
     "google_sa_json",
+    "google_user_json",
 ]
 
 # Keys whose values are message/body content — drop the entire field.
