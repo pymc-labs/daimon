@@ -1043,6 +1043,41 @@ async def test_a_stale_read_with_an_equal_stamp_never_undoes_a_fresher_one(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("saved_before_fix", [False, True])
+async def test_a_whole_second_read_after_a_sub_second_create_finishes_the_turn(
+    setup: Setup, saved_before_fix: bool
+) -> None:
+    """Staging QTAC78/R4WRRK: the create reply said 23:07:10.142775, every read after it
+    23:07:10. The reads were discarded as older, so the turn never ended and the next
+    message was refused as a steer."""
+    ma, t, storage, _, s, _ = setup
+    second = datetime.now(UTC).replace(microsecond=0)
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage=None,
+            created=(second + timedelta(microseconds=142775)).isoformat(),
+            updated=(second + timedelta(microseconds=142775)).isoformat(),
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    if saved_before_fix:
+        # A record saved before this fix still holds the sub-second watermark.
+        async with storage.transaction() as records:
+            records.sessions[s.ref.id].native_updated["i1"] = second + timedelta(
+                microseconds=142775
+            )
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "running"
+
+    t.saved["i1"] = native(created=second.isoformat(), updated=second.isoformat())
+    current = await ma.sessions.retrieve(SCOPE, s.ref)
+    assert current.state == "idle" and current.active_root_turn is None
+    journal = await ma.events.list(SCOPE, s.ref, page=PageRequest())
+    assert any(e.type == "session.turn_ended" for e in journal.data)
+
+
+@pytest.mark.asyncio
 async def test_a_read_from_a_workspace_replaced_meanwhile_is_refused(setup: Setup) -> None:
     """#1557 review 4: the read is checked against the snapshot's workspace before the
     lock, and again against the current record when it is applied."""

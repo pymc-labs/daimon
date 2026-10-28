@@ -380,6 +380,12 @@ class Base:
                     raise ValueError("provider timestamp has no timezone")
                 stamp = stamp.astimezone(UTC)
                 watermark = record.native_updated.get(interaction)
+                if watermark is not None and stamp.microsecond == 0:
+                    # The create reply can carry microseconds (23:07:10.142775)
+                    # while every later read says 23:07:10. Ordered exactly, each
+                    # read looks older, is discarded, and the session stays
+                    # running forever. Compare a whole-second read in whole seconds.
+                    watermark = watermark.replace(microsecond=0)
                 if watermark is not None and stamp < watermark:
                     return
                 if (
