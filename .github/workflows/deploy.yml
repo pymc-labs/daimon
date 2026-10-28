@@ -785,6 +785,8 @@ jobs:
       # verify have all passed, and never read back into the refresh steps above.
       # The keys are deploy-owned: Terraform ignores them. A failed write fails
       # the deploy, because a green deploy must leave a VM that reboots into it.
+      # The services are already live when this runs: if only this step fails,
+      # do not roll back. Re-run the job or write the keys by hand.
       - name: Record deployed image digests for VM boot
         if: steps.fresh.outputs.superseded != 'true'
         env:
