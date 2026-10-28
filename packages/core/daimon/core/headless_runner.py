@@ -66,7 +66,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from cryptography.fernet import MultiFernet
 from daimon.core.channel_backend import resolve_turn_backend
 from daimon.core.channel_budget import admit_fleet_worker, require_fleet_worker_admission
-from daimon.core.config import GithubAppSettings, McpSettings, load_turn_settings
+from daimon.core.config import (
+    GithubAppSettings,
+    McpSettings,
+    RepoMemorySettings,
+    load_turn_settings,
+)
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.continuity.wakes import enqueue_worker_finished
 from daimon.core.fleet import TERMINAL, FleetConflict, FleetWorker, spawn_operation_key, worker_slot
@@ -190,6 +195,7 @@ async def run_turn(
     trigger_message: str,
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
+    repo_memory: RepoMemorySettings | None = None,
     account_id: uuid.UUID | None = None,
     usage_record_factory: Callable[[str, str], Callable[..., Awaitable[object]]] | None = None,
     tenant_id: uuid.UUID | None = None,
@@ -224,6 +230,7 @@ async def run_turn(
             trigger_message=trigger_message,
             origin=origin,
             mcp_settings=mcp_settings,
+            repo_memory=repo_memory,
             account_id=account_id,
             usage_record_factory=usage_record_factory,
             tenant_id=tenant_id,
@@ -258,6 +265,7 @@ async def run_turn(
                 trigger_message=trigger_message,
                 origin=origin,
                 mcp_settings=mcp_settings,
+                repo_memory=repo_memory,
                 account_id=account_id,
                 usage_record_factory=usage_record_factory,
                 tenant_id=tenant_id,
@@ -321,6 +329,7 @@ async def run_turn_impl(
     trigger_message: str,
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
+    repo_memory: RepoMemorySettings | None = None,
     account_id: uuid.UUID | None = None,
     usage_record_factory: Callable[[str, str], Callable[..., Awaitable[object]]] | None = None,
     tenant_id: uuid.UUID | None = None,
@@ -558,6 +567,24 @@ async def run_turn_impl(
         raise ceiling_error() from err
 
     try:
+        routine_memory = ""
+        if (
+            repo_memory is not None
+            and repo_memory.enabled
+            and origin == "routine"
+            and tenant_id is not None
+            and session_factory is not None
+        ):
+            from daimon.core.ma_identity import derive_agent_uuid
+            from daimon.core.repo_memory import turn_memory_prefix
+
+            routine_memory = await turn_memory_prefix(
+                session_factory,
+                tenant_id=tenant_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=session.agent.id),
+                account_id=None,
+                allowed=hold is None,
+            )
         if (observation := current_outcome.get()) is not None:
             observation.session_id = session.id
             observation.model_by_session[session.id] = model_choice_id(session.agent.model)
@@ -668,7 +695,11 @@ async def run_turn_impl(
                 path=selected_path,
                 scope=turn_scope,
                 session_id=session.id,
-                user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
+                user_message=(
+                    context_prompt(origin, system=session.agent.system)
+                    + routine_memory
+                    + trigger_message
+                ),
                 lifecycle=_NoOpLifecycle(),
                 cancel=cancel,
                 render_interval_s=2.0,  # nothing renders; do not spin the diff timer

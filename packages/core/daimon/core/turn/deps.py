@@ -30,6 +30,7 @@ from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
     ProgressPlansSettings,
+    RepoMemorySettings,
     Settings,
     TurnSettings,
     load_turn_settings,
@@ -91,6 +92,7 @@ class TurnDeps:
         default_factory=dict[uuid.UUID, DirectMessagePolicy]
     )
     agent_github_app: GithubAppSettings | None = None
+    repo_memory: RepoMemorySettings = field(default_factory=RepoMemorySettings)
     # Required: safety off is the explicit `enabled=False` policy from settings.
     tool_safety: ToolSafetyPolicy = field(kw_only=True)
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
@@ -210,6 +212,7 @@ def build_turn_deps(
             else None
         ),
         direct_message_policies=settings.direct_message_policies,
+        repo_memory=settings.repo_memory,
         anthropic=anthropic,
         messages=anthropic,
         turn_runtime_factory=build_channel_runtime,

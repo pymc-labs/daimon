@@ -801,6 +801,7 @@ async def _build_fire(
             on_state=final_state.append,
             on_session=output_sessions.append,
             mcp_settings=settings.mcp,
+            repo_memory=settings.repo_memory,
             account_id=account_id,
             usage_record_factory=usage_record_factory,
             tenant_id=row.tenant_id,

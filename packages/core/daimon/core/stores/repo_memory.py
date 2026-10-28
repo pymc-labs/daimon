@@ -117,7 +117,7 @@ async def turn_entries(
     """One indexed query: live working grant, scoped confirmation and bounded catalog.
 
     Primary-key prefixes select the agent's grants and the repo's memory slots.
-    References never transfer bodies. At most 512 rows and 12,000 characters per
+    References never transfer bodies. At most 512 rows and 12,001 characters per
     directive cross the DB boundary. There is no per-entry or network lookup.
     Agent-specific confirmations shadow shared ones even when revoked.
     """
@@ -140,12 +140,11 @@ async def turn_entries(
               AND {coverage}
             ORDER BY g.repo_id LIMIT 1
         )
-        SELECT w.repo_full_name, m.name, left(m.title, 1001) AS title, m.kind, m.scope,
-               CASE WHEN m.kind = 'directive' THEN left(m.body, 12000) ELSE '' END AS body
+        SELECT w.repo_full_name, m.name, m.title, m.kind, m.scope, m.body
         FROM working w LEFT JOIN LATERAL (
             WITH candidates AS (
                 SELECT name, left(title, 1001) AS title, kind, scope,
-                       CASE WHEN kind = 'directive' THEN left(body, 12000) ELSE '' END AS body
+                       CASE WHEN kind = 'directive' THEN left(body, 12001) ELSE '' END AS body
                 FROM repo_memory
                 WHERE tenant_id = :tenant_id AND repo_id = w.repo_id
                   AND (scope = 'repo' OR created_by_account_id = :account_id)

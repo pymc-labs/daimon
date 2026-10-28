@@ -48,6 +48,7 @@ from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.mux_compat import legacy_call
+from daimon.core.repo_memory import turn_memory_prefix
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
@@ -1148,7 +1149,29 @@ async def run_prepared_turn_impl(
         thread_id=thread_id,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
-    prefix = context + plans + prepared.continuity.user_prefix
+    repo_memory = ""
+    if deps.repo_memory.enabled:
+        repo_memory = await turn_memory_prefix(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=derive_agent_uuid(
+                tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id
+            ),
+            # Shared conversations never acquire one speaker's private directives.
+            account_id=(
+                None
+                if unattended or prepared.admission.shared_owner is not None
+                else prepared.admission.account_id
+            ),
+            allowed=(
+                (current_origin_id.get() is not None or origin == "routine")
+                and origin != "worker"
+                and prepared.admission.hold is None
+                and not prepared.admission.shared_channel
+                and not prepared.admission.source_shared
+            ),
+        )
+    prefix = context + plans + repo_memory + prepared.continuity.user_prefix
     if prepared.admission.model_fell_back:
         prefix += MODEL_FALLBACK_NOTICE
 
@@ -1277,6 +1300,9 @@ async def run_prepared_turn_impl(
                             db,
                             origin_id=origin_id,
                             chat_session_id=grant,
+                            memory_read_only=(
+                                admission.memory_read_only or admission.source_sealed
+                            ),
                             attended=not unattended,
                             human_invocation=admission.grant is not None
                             and admission.grant.human_invocation,
