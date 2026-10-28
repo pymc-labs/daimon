@@ -778,6 +778,66 @@ jobs:
             verify
           fi
 
+      # The VM startup scripts run on every boot, and the copy baked in when the
+      # VM was created names an old image. They prefer these keys, so a reboot
+      # restarts the release this deploy just verified instead of that old one.
+      # Written only here, after the health gate, the settle wait and the defaults
+      # verify have all passed, and never read back into the refresh steps above.
+      # The keys are deploy-owned: Terraform ignores them. A failed write fails
+      # the deploy, because a green deploy must leave a VM that reboots into it.
+      - name: Record deployed image digests for VM boot
+        if: steps.fresh.outputs.superseded != 'true'
+        env:
+          DAIMON_IMAGE: ${{ steps.images.outputs.daimon }}
+          NOTEBOOK_IMAGE: ${{ steps.images.outputs.notebook }}
+          REPORT_IMAGE: ${{ steps.images.outputs.report }}
+          VM_PREFIX: ${{ vars.GCP_AR_REPO }}
+        run: |
+          set -euo pipefail
+          # Full registry/name@sha256:<hex> for an image given as a tag or a digest.
+          pinned_reference() {
+            local image="$1" base digest
+            base="${image%@*}"
+            base="${base%:*}"
+            digest="$(gcloud artifacts docker images describe "$image" \
+              --format='value(image_summary.digest)')"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "No image digest for $image" >&2
+              return 1
+            fi
+            printf '%s@%s\n' "$base" "$digest"
+          }
+          recorded_value() {
+            # extract() reads one key's value; no other key is output.
+            gcloud compute instances describe "$1" --zone "$ZONE" \
+              --format="value(metadata.items.extract($2).flatten())"
+          }
+          # add-metadata merges into the existing keys, so the startup script and
+          # the declared secret list are never touched. A concurrent metadata
+          # write makes gcloud fail on a stale fingerprint: retry, then verify.
+          record() {
+            local vm="$1" key="$2" value="$3" attempt
+            for attempt in 1 2 3; do
+              if gcloud compute instances add-metadata "$vm" --zone "$ZONE" \
+                --metadata "$key=$value" \
+                && [ "$(recorded_value "$vm" "$key")" = "$value" ]; then
+                echo "$vm $key=$value"
+                return 0
+              fi
+              sleep 5
+            done
+            echo "Could not record $key on $vm" >&2
+            return 1
+          }
+          daimon="$(pinned_reference "$DAIMON_IMAGE")"
+          notebook="$(pinned_reference "$NOTEBOOK_IMAGE")"
+          report="$(pinned_reference "$REPORT_IMAGE")"
+          # Also when the workers VM is stopped: the refresh above skipped it, and
+          # this is what its next boot should start.
+          record "$VM_PREFIX-workers" daimon-image "$daimon"
+          record "$VM_PREFIX-notebook" notebook-image "$notebook"
+          record "$VM_PREFIX-notebook" report-image "$report"
+
       - name: Mark tested staging images promotable
         if: (steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
