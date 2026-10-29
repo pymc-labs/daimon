@@ -4368,6 +4368,47 @@ class WatchControl(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 
+class WatchNoticeReceipt(Base):
+    """One owner-notice send attempt: ids and outcome, never the notice text.
+
+    No foreign key to `watches`, so a receipt outlives its watch; the notice
+    poller prunes receipts after `NOTICE_RECEIPT_RETENTION`.
+    """
+
+    __tablename__ = "watch_notice_receipts"
+    __table_args__ = (
+        UniqueConstraint(
+            "watch_id", "kind", "generation", "attempt", name="uq_watch_notice_attempt"
+        ),
+        CheckConstraint(
+            "outcome IN ('pending', 'sent', 'failed', 'interrupted')",
+            name="ck_watch_notice_outcome",
+        ),
+        Index("ix_watch_notice_receipt_time", "attempted_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    watch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The notice claim's lease token, so an attempt maps to exactly one claim.
+    claim: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    channel_id: Mapped[str | None] = mapped_column(Text)
+    message_id: Mapped[str | None] = mapped_column(Text)
+
+
 class LeadIntakeConfig(Base):
     __tablename__ = "lead_intake_configs"
     tenant_id: Mapped[uuid.UUID] = mapped_column(

@@ -5,12 +5,14 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from datetime import timedelta
 from typing import cast
 
 import structlog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.stores.watches import NoticeAttempt, SentNotice
 from daimon.core.turn.deps import TurnDeps
 
 import discord
@@ -106,3 +108,45 @@ async def send_member_notice(
         return True
     except (discord.HTTPException, LookupError, ValueError):
         return False
+
+
+# Discord's clock and ours can disagree; look a little before the earlier attempt.
+_HISTORY_SKEW = timedelta(minutes=1)
+
+
+async def send_watch_notice(
+    runtime: DiscordRuntime,
+    open_dm: OpenDm,
+    is_closed: Callable[[], bool],
+    *,
+    bot_user_id: int | None,
+    tenant_id: uuid.UUID,
+    workspace_id: str,
+    recipient_id: str,
+    text: str,
+    attempt: NoticeAttempt,
+) -> SentNotice | None:
+    """The member-notice transport for watch owner notices, sent at most once per notice.
+
+    The nonce makes Discord return the first message for a concurrent resend
+    within its dedup window. When an earlier attempt never recorded its
+    outcome, the DM is read first and a matching message from the bot counts
+    as sent. A failed read sends nothing, so the claim retries later.
+    """
+    policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
+    if is_closed() or not policy.allows(recipient_id):
+        return None
+    try:
+        dm = await open_dm(int(workspace_id), int(recipient_id))
+        if attempt.since is not None:
+            if bot_user_id is None:
+                return None
+            async for earlier in dm.history(after=attempt.since - _HISTORY_SKEW, limit=50):
+                if earlier.author.id == bot_user_id and earlier.content == text:
+                    return SentNotice(str(earlier.channel.id), str(earlier.id))
+        message = await dm.send(
+            text, allowed_mentions=discord.AllowedMentions.none(), nonce=attempt.nonce
+        )
+        return SentNotice(str(message.channel.id), str(message.id))
+    except (discord.HTTPException, LookupError, ValueError):
+        return None

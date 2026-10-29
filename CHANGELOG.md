@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Watch owner notices (expired, paused, stopped, cap reached) go out once even if the bot restarts mid-send: each attempt leaves a receipt, and a resumed send first looks for the earlier DM. Operators count them with `daimon watches notices --watch WATCH_UUID [--json]`; receipts hold ids, times and outcome, never the message text, and are kept 30 days, also after the watch is deleted.
+
 - Operators choose which tools a watch may poll with `DAIMON_WATCHES__POLLABLE_TOOLS`; the default keeps `read_thread` and `read_channel`. An unlisted tool is refused at create and resume, a watch whose tool is taken off the list pauses and its owner gets one private message, and a raised per-tool floor slows existing watches without pausing them; an empty value keeps the default. Polled watches also handle bigger results: a `[]` step in projections, `added` by a `key` that keeps only fingerprints, chosen `evidence` fields per new item, a 256 KiB raw read, a 64 KiB baseline and 16 KiB reports of at most 20 items with the rest counted (migration `0156_watch_mcp_sources`). A watch turn whose gathered reports exceed 512 KiB now keeps the newest and counts the rest as omitted instead of being dropped.
 
 - Add `daimon routines link-internal` to link a paused, never-fired routine to its internal original before `seed-first-run`, with a dry run by default and refusal of existing or conflicting links. Linking and seeding share never-fired validation, allowing paused DM routines with edit-only skipped delivery markers.

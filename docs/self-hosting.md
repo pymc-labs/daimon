@@ -1841,6 +1841,19 @@ prints instructions, keys, baselines or source evidence. In chat, a workspace ad
 gets the same view with `list_watches(scope="all")`; the admin check is rechecked
 live, as for admin show, pause and delete, and anyone else is refused.
 
+#### Checking owner notices
+
+Each private owner notice (expired, paused, stopped, cap reached) leaves one
+receipt per send attempt. `daimon watches notices --watch WATCH_UUID` (add
+`--json`) is read-only and prints each attempt's notice kind, time, outcome and
+Discord message ID, never the message text. Its `sent` line counts distinct
+messages per kind, so one expiry DM shows `expired=1`.
+
+Receipts are kept 30 days, even after the watch is deleted. A send interrupted by
+a restart is checked against the owner's DM before any resend, so the owner gets
+each notice once. If that check cannot read the DM, nothing is sent and the
+notice retries five minutes later.
+
 #### Offline internal-watch import
 
 Run `daimon watches import /private/watches.json` only against the intended isolated

@@ -1,7 +1,8 @@
 """Operator import CLI is discoverable and rejects oversized exports before parsing."""
 
 import uuid
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -157,3 +158,63 @@ def test_watch_list_refuses_unknown_tenant(monkeypatch):
     monkeypatch.setattr(watch_commands, "get_tenant", AsyncMock(return_value=None))
     result = CliRunner().invoke(watches_app, ["list", "--tenant", str(uuid.uuid4())])
     assert result.exit_code == 2 and "No such tenant" in result.output
+
+
+def _runtime() -> Callable[[object], AbstractAsyncContextManager[SimpleNamespace]]:
+    @asynccontextmanager
+    async def session() -> AsyncIterator[object]:
+        yield object()
+
+    @asynccontextmanager
+    async def runtime(_settings: object) -> AsyncIterator[SimpleNamespace]:
+        yield SimpleNamespace(sessionmaker=session)
+
+    return runtime
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_watch_notices_counts_distinct_messages_sent_without_notice_text(
+    monkeypatch: pytest.MonkeyPatch, as_json: bool
+) -> None:
+    import json
+    from datetime import UTC, datetime
+
+    from daimon.core.stores.watches import NoticeReceipt
+
+    watch, owner, now = uuid.uuid4(), uuid.uuid4(), datetime.now(UTC)
+
+    def receipt(attempt: int, outcome: str, message: str | None) -> NoticeReceipt:
+        settled = None if outcome == "interrupted" else now
+        return NoticeReceipt(
+            watch, owner, "discord", "expired", 1, attempt, outcome, now, settled, "900", message
+        )
+
+    # The resumed attempt found the interrupted one's message: still one message.
+    rows = [receipt(1, "sent", "901"), receipt(2, "sent", "901"), receipt(3, "failed", None)]
+    listing = AsyncMock(return_value=rows)
+    monkeypatch.setattr(watch_commands, "build_runtime", _runtime())
+    monkeypatch.setattr(watch_commands, "load_settings", lambda: None)
+    monkeypatch.setattr(watch_commands, "list_notice_receipts", listing)
+    args = ["notices", "--watch", str(watch), *(["--json"] if as_json else [])]
+    result = CliRunner().invoke(watches_app, args)
+    assert result.exit_code == 0, result.output
+    assert listing.await_args is not None
+    assert listing.await_args.kwargs["watch_id"] == watch
+    if as_json:
+        report = json.loads(result.output)
+        assert report["sent"] == {"expired": 1}
+        assert [r["outcome"] for r in report["receipts"]] == ["sent", "sent", "failed"]
+        assert report["receipts"][0]["message_id"] == "901"
+    else:
+        assert "sent: expired=1" in result.output
+        assert result.output.count("outcome=") == 3
+
+
+def test_watch_notices_with_no_receipts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(watch_commands, "build_runtime", _runtime())
+    monkeypatch.setattr(watch_commands, "load_settings", lambda: None)
+    monkeypatch.setattr(watch_commands, "list_notice_receipts", AsyncMock(return_value=[]))
+    result = CliRunner().invoke(watches_app, ["notices", "--watch", str(uuid.uuid4())])
+    assert result.exit_code == 0 and "No notice receipts." in result.output
+    result = CliRunner().invoke(watches_app, ["notices", "--watch", str(uuid.uuid4()), "--json"])
+    assert result.exit_code == 0 and '"sent": {}' in result.output
