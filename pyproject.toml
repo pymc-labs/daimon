@@ -266,6 +266,7 @@ source_modules = [
     "daimon.core.mcp_token_check",
     "daimon.core.mcp_token_connect",
     "daimon.core.mcp_tool_annotations",
+    "daimon.core.mcp_tool_call",
     "daimon.core.mcp_hold",
     "daimon.core.mcp_vault",
     "daimon.core.mcp_vault_janitor",

@@ -116,4 +116,17 @@ async def install_poll_ports(session: AsyncSession) -> None:
     await session.execute(
         text(f"GRANT EXECUTE ON FUNCTION {quoted}.claim_watch_polls() TO daimon_sidecar")
     )
+    # 0157 replaces the ingress-owned claim so it also leases mcp_poll watches,
+    # then restates the ownership and grants, as the migration does.
+    claim = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0157_watch_mcp_claim.py")
+    )
+    await session.execute(text(cast(str, claim["CLAIM_SQL"]).format(schema=quoted)))
+    await session.execute(text(f"REVOKE ALL ON FUNCTION {quoted}.claim_watch_polls() FROM PUBLIC"))
+    await session.execute(
+        text(f"ALTER FUNCTION {quoted}.claim_watch_polls() OWNER TO daimon_watch_ingress_owner")
+    )
+    await session.execute(
+        text(f"GRANT EXECUTE ON FUNCTION {quoted}.claim_watch_polls() TO daimon_sidecar")
+    )
     await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))

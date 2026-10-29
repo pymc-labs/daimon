@@ -15,6 +15,7 @@ CASES: list[tuple[str, dict[str, object], str, str]] = [
     ("paused", {"reason": "source_unmapped"}, "source_unmapped", UNMAPPED_NOTICE),
     ("paused", {"reason": "Watch paused: source moved"}, "paused", ": Watch paused: source moved"),
     ("paused", {"reason": "tool_unlisted"}, "tool_unlisted", "can no longer check that tool"),
+    ("paused", {"reason": "source_changed"}, "source_changed", "changed on its server"),
     ("paused", {"reason": "access_revoked"}, "access_revoked", "owner access was revoked"),
     ("paused", {"reason": "failed"}, "failed", "could not check its source for a day"),
     (

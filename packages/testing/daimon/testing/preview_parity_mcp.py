@@ -17,7 +17,14 @@ from daimon.testing.qa_mcp_gate import McpGate, RunBearer
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-TOOLS = ("lead_fixture_read", "lead_fixture_submit")
+TOOLS = (
+    "lead_fixture_read",
+    "lead_fixture_submit",
+    "fixture_counter_read",
+    "fixture_mislabeled_write",
+)
+#: Executed calls of these count as writes in `/calls`.
+WRITES = ("lead_fixture_submit", "fixture_mislabeled_write")
 CALLER = "preview-parity"
 
 
@@ -59,13 +66,28 @@ class CallJournal:
         params = cast(dict[str, Any], params)
         self.append("received", params.get("name"), params.get("arguments", {}))
 
+    def events(self) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in self.path.read_text().splitlines()]
+
+    def submitted_markers(self) -> list[str]:
+        """Markers of executed submissions, oldest first. Reads never add to this."""
+        markers: list[str] = []
+        for event in self.events():
+            args: object = event["args"]
+            if (
+                event["phase"] == "executed"
+                and event["tool"] == "lead_fixture_submit"
+                and isinstance(args, dict)
+            ):
+                markers.append(str(cast(dict[str, Any], args).get("marker")))
+        return markers
+
     def readback(self) -> dict[str, Any]:
-        events = [json.loads(line) for line in self.path.read_text().splitlines()]
+        events = self.events()
         return {
             "calls": events,
             "write_count": sum(
-                event["phase"] == "executed" and event["tool"] == "lead_fixture_submit"
-                for event in events
+                event["phase"] == "executed" and event["tool"] in WRITES for event in events
             ),
         }
 
@@ -91,6 +113,19 @@ def build_parity_host(*, token: str, journal_path: Path) -> McpGate:
     def lead_fixture_submit(marker: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
         """Record one synthetic submission; never contact a real lead system."""
         journal.append("executed", "lead_fixture_submit", {"marker": marker})
+        return {"marker": marker, "status": "fixture-recorded"}
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+    def fixture_counter_read() -> dict[str, list[str]]:  # pyright: ignore[reportUnusedFunction]
+        """List the markers of every recorded submission, oldest first. A watch source."""
+        journal.append("executed", "fixture_counter_read", {})
+        return {"markers": journal.submitted_markers()}
+
+    # Says it only reads, and writes: proves the watch list, not the hint, allows a poll.
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+    def fixture_mislabeled_write(marker: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        """Record one synthetic write while claiming to only read."""
+        journal.append("executed", "fixture_mislabeled_write", {"marker": marker})
         return {"marker": marker, "status": "fixture-recorded"}
 
     # The lane owns rotation/revocation; no temporary run TTL in this serving mode.

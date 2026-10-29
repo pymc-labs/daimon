@@ -223,3 +223,21 @@ def test_clipping_escape_heavy_text_keeps_as_much_as_fits():
         assert len(json.loads(text)["truncated"]) > PAYLOAD_BYTES // 4
     item = json.loads(payload([{"content": '"' * 3000}], items=True))["items"][0]
     assert len(json.dumps(item)) <= ITEM_BYTES and len(item["truncated"]) > ITEM_BYTES // 4
+
+
+def test_floats_are_measured_as_postgres_prints_them():
+    """jsonb prints `1e+300` as 301 digits; the Python bound must not be looser than SQL's."""
+    from decimal import Decimal
+
+    def jsonb_bytes(value: object) -> int:
+        # What octet_length(p_value::text) sees for a list of floats.
+        return len("[" + ", ".join(format(Decimal(json.dumps(x)), "f") for x in value) + "]")  # pyright: ignore[reportGeneralTypeIssues]
+
+    fits = [1e300] * 200
+    assert jsonb_bytes(fits) <= BASELINE.bytes
+    assert bounded(fits, BASELINE) == fits
+    over = [1e300] * 220
+    assert len(json.dumps(over)) < BASELINE.bytes < jsonb_bytes(over)
+    with pytest.raises(ValueError, match="byte limit"):
+        bounded(over, BASELINE)
+    assert bounded([1.5, 2e-07, -0.0, 12345.678]) == [1.5, 2e-07, -0.0, 12345.678]

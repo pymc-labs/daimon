@@ -144,8 +144,12 @@ provider connection or database. `lead_fixture_read(marker: str)` is annotated
 `readOnlyHint=true`; `lead_fixture_submit(marker: str)` is annotated
 `readOnlyHint=false`, `destructiveHint=false`, `idempotentHint=false` and
 `openWorldHint=false`. A submission only appends synthetic evidence; repeated
-calls count separately. This checks Daimon's approval plumbing, not internal
-lead-intake data or authorization parity.
+calls count separately. `fixture_counter_read()` is annotated `readOnlyHint=true`
+and returns the markers of executed submissions; it is the watch source.
+`fixture_mislabeled_write(marker: str)` is also annotated `readOnlyHint=true` but
+counts as a write, to prove the watch list, not the hint, allows a poll. This
+checks Daimon's approval plumbing, not internal lead-intake data or authorization
+parity.
 
 The profile is disabled by default. **King setup, preview only, after merge:**
 
@@ -185,7 +189,8 @@ Authenticated `GET https://preview-parity.136-90-64-248.sslip.io/calls` returns
 `calls` and `write_count`. Each accepted, bounded `tools/call` request gets a `received`
 event (including unknown tools and invalid arguments); a function that runs
 also gets an `executed` event containing tool, arguments, UTC time and caller.
-Only executed submissions increment `write_count`. The caller `preview-parity`
+Only executed `lead_fixture_submit` and `fixture_mislabeled_write` calls increment
+`write_count`. The caller `preview-parity`
 is the authenticated token principal, not a verified human identity. Correlate
 unique `marker` arguments with runner session/routine IDs to identify turns.
 The journal contains no bearer. Use synthetic markers only.
@@ -296,6 +301,8 @@ sidecar and executor. Both producer gates default off.
 Migration `0156_watch_mcp_sources` follows `0155_compute_tasks` and raises the poll
 baseline and payload bounds. `DAIMON_WATCHES__POLLABLE_TOOLS` lists the tools a
 watch may poll; leave it unset to keep `read_thread` and `read_channel`.
+Migration `0157_watch_mcp_claim` follows it and lets the sidecar lease watches on
+MCP server tools too.
 
 See [self-hosting](../../docs/self-hosting.md#polling-and-owner-management) for the
 operator watch list, owner tools and card approval, signing-key delivery,
@@ -311,6 +318,29 @@ paused, require review of the exact owner/agent/destination binding, and never c
 internal signing keys. `artifact_db_query` stays paused as `source_unmapped`; its
 owner receives the existing private notice without resuming the watch. No page
 store or internal connection is introduced.
+
+#### Watch on an MCP server tool (parity fixture)
+
+Needs the `preview-parity` profile above, attached to the disposable agent as
+`parity-bridge`, and watches enabled as in the Row 12 setup below. Use a
+non-admin owner. Record `/calls` before and after every step.
+
+1. King adds this entry to preview's `DAIMON_WATCHES__POLLABLE_TOOLS`, keeping
+   the native entries, then recreates `mcp`, `discord` and `watch-executor`:
+   `{"server": "https://preview-parity.136-90-64-248.sslip.io/mcp", "tool":
+   "fixture_counter_read", "credential": "agent", "returns_chat": false,
+   "max_interval_floor_s": 60}`. The owner asks for `create_watch` with that
+   URL as `server`, `tool="fixture_counter_read"`, `projection=".markers"`,
+   `rule="added"` and `interval=60`. Approve the card; check it shows the host.
+2. Make one attended, approved `lead_fixture_submit` call with a fresh marker.
+   Expect one report within about two minutes, quoting the marker as untrusted
+   evidence. `/calls` shows only `fixture_counter_read` runs plus that one write.
+3. Ask for a watch on `fixture_mislabeled_write`, which is not listed. Expect a
+   refusal and an unchanged `write_count`.
+4. King also lists `lead_fixture_submit`. Ask for a watch on it. Expect a
+   refusal, because its server says it writes, and an unchanged `write_count`.
+5. Detach `parity-bridge` from the agent. Within one interval the watch pauses
+   and the owner gets a private message. `/calls` shows no more poller runs.
 
 #### Row 12: four-step preview polling procedure
 

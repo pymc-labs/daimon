@@ -1648,7 +1648,7 @@ proxy.
 
 `bool` · optional · default `False`
 
-Enable reviewed Discord READ-tool polling and watch dispatch. Page-event watches are not
+Enable polling of the listed read tools and watch dispatch. Page-event watches are not
 yet delivered. Keep disabled until the execution-bound unattended origin grants, non-
 gateable cleanup and watch release are reviewed. The database global gate must also be
 explicitly enabled by an operator.
@@ -1664,11 +1664,12 @@ server URL, never a server name), tool (exact name), credential ("none" for nati
 readers; "agent" or "owner" for MCP servers), returns_chat (required: true only for
 native readers, which drop Daimon's own messages), max_interval_floor_s (shortest
 interval, at least 60, default 300) and label (shown on the approval card). Native
-entries must be read_thread or read_channel. MCP server entries are checked here but are
-not polled yet. A server's read-only annotation never allows a poll; only this list
-does. A watch below a raised floor polls at the floor. Default (also used when the value
-is empty): read_thread and read_channel on daimon-mcp, credential none, returns_chat
-true, floor 60. Set [] to allow no polls.
+entries must be read_thread or read_channel. Known chat and archive tools are refused on
+MCP servers. MCP entries with credential owner are not polled yet. A server's read-only
+annotation never allows a poll; only this list does, and a server can still write when
+it says it only reads. A watch below a raised floor polls at the floor. Default (also
+used when the value is empty): read_thread and read_channel on daimon-mcp, credential
+none, returns_chat true, floor 60. Set [] to allow no polls.
 
 ## Private Channel Messages
 
