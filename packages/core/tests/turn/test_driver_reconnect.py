@@ -829,3 +829,68 @@ async def test_a_raw_transport_error_that_outlasts_the_retries_ends_the_turn_as_
     assert len(fa.beta.sessions.retrieve_calls) == 3
     assert final.termination == TerminationReason.CONNECTION_LOST
     assert len(lc.terminal_failures) == 1
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_stop_during_a_retried_read_that_succeeds_interrupts_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.turn import driver
+
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [],  # a clean close: the status read follows
+        [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))],
+    ]
+    cancel = asyncio.Event()
+    source = LegacyTurnIO(_cast(fa), "sess_1")
+    checks: list[str] = []
+
+    class StoppedDuringRetry:
+        async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
+            return await source.open_stream(read_timeout_s=read_timeout_s)
+
+        async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
+            await source.send(events)
+
+        async def status(self) -> str:
+            checks.append("status")
+            if len(checks) == 1:
+                raise ProviderError("overloaded", retryable=True)
+            cancel.set()  # Stop lands while the retried read is in flight
+            return "running"
+
+        async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:
+            return await source.replay(timeout_s=timeout_s)
+
+        async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
+            return await source.interrupt(timeout_s=timeout_s)
+
+        async def archive(self) -> None:
+            await source.archive()
+
+    io = StoppedDuringRetry()
+
+    def factory(*args: object, **kwargs: object) -> StoppedDuringRetry:
+        return io
+
+    monkeypatch.setattr(driver, "turn_io", factory)
+    lc = RecordingLifecycle()
+    async with asyncio.timeout(10):
+        await driver.run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=cancel,
+            render_interval_s=0.001,
+            interrupt_timeout_s=5.0,
+            billing=_EXEMPT,
+        )
+
+    assert checks == ["status", "status"]
+    assert lc.interrupts == ["cancel_event"]
+    sent_types = [
+        ev["type"] for _sid, payload in fa.beta.sessions.events.sent_events for ev in payload
+    ]
+    assert "user.interrupt" in sent_types
