@@ -449,3 +449,33 @@ async def test_without_a_journal_nothing_is_checked() -> None:
     with pytest.raises(TurnConnectionLost):
         await io.send(_QUESTION)
     assert [e.id for e in await io.replay()][-1] == "idle-2"
+
+
+async def test_a_hole_in_the_journal_never_adopts_an_earlier_input() -> None:
+    # The journal lost the previous turn's input and this send never landed:
+    # the earlier input must not pass as this turn's.
+    history = _History(*_PREVIOUS, ack="outcome_unknown", lands=False)
+    io, journaled = _io(history)
+    journaled.rows = journaled.rows[1:]
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    with pytest.raises(TurnConnectionLost, match="did not reach the session"):
+        await io.replay()
+
+
+async def test_an_empty_journal_on_a_new_session_finds_the_only_input() -> None:
+    # The designed reattach on a new thread's first turn (recovery c2x/h2x).
+    history = _History(ack="outcome_unknown")
+    io, _ = _io(history)
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    assert [e.id for e in await io.replay()] == ["user-0"]
+
+
+async def test_a_hole_in_the_journal_still_finds_a_landed_input() -> None:
+    history = _History(*_PREVIOUS, ack="outcome_unknown")
+    io, journaled = _io(history)
+    journaled.rows = journaled.rows[1:]  # the previous input was never journaled
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    assert [e.id for e in await io.replay()][-1] == "user-3"
