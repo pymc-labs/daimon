@@ -943,8 +943,22 @@ async def run_prepared_turn(
         else None
     )
     marking = SEND_ATTEMPTED.set(sent)
+    revision = prepared.admission.backend_revision
+    backend = revision.backend if revision is not None else "anthropic"
+    profile = revision.profile if revision is not None else "anthropic.managed_agents"
+    observation.backend = f"{backend}/{profile}"
     try:
-        with observation.activate(), deps.running_turns.track():
+        # Every log line of the turn names the backend it ran on, so failures,
+        # lost connections and ceilings can be counted per backend.
+        with (
+            structlog.contextvars.bound_contextvars(
+                backend=backend,
+                profile=profile,
+                model=revision.model if revision is not None else None,
+            ),
+            observation.activate(),
+            deps.running_turns.track(),
+        ):
             result = await run_prepared_turn_impl(
                 deps,
                 prepared,

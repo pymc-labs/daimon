@@ -239,6 +239,7 @@ async def test_a_summary_goes_back_only_when_its_turn_never_sent(
             account_id=HANDER,
             agent=SimpleNamespace(id=COPY),
             backend_footer_profile=None,
+            backend_revision=None,
         ),
         ma_session_id="sess",
         _finalize=None,
