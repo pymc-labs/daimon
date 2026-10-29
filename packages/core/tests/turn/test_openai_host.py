@@ -1328,6 +1328,40 @@ async def prechange_controls(composed, request):
     return application, wire, store, runtime, spec, slot, digest, key
 
 
+async def test_repeat_recovery_adds_no_journal_rows(composed):
+    # M19: each replay reconciles; with nothing new on the provider, a repeat
+    # writes no new gap or reconciled rows to the durable journal.
+    from daimon.core.turn.openai_host import driver
+    from daimon.core.turn.openai_io import OpenAITurnIO
+
+    request, wire, store, _, runtime = composed
+    prepared = await prepare_openai(request)
+    binding = await store.get_binding(
+        Slot(
+            thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+            account_id=SCOPE.account_id,
+        )
+    )
+    backend = driver(runtime, REVISION, SCOPE, binding)
+    rows: list[int] = []
+    markers: list[int] = []
+    for invocation in ("first-recovery", "second-recovery", "third-recovery"):
+        active = TurnPersistence(store, binding, SCOPE, operation_key=invocation)
+
+        async def recover(active=active):
+            io = OpenAITurnIO(backend, SCOPE, prepared.session_ref, persistence=active)
+            await io.replay()
+
+        with active.activate():
+            await active.run(recover)
+        saved = await store.read_events(SESSION_ID)
+        rows.append(len(saved))
+        markers.append(sum(e.type in ("session.history_gap", "session.reconciled") for e in saved))
+    assert markers == [2, 2, 2]
+    assert rows[1] == rows[2]
+    assert all(source.closed for source in wire.sources)
+
+
 async def test_prechange_binding_reuses_native_session_without_replacement(prechange_controls):
     from daimon.core.stores.mux_state import PostgresStateStore
 

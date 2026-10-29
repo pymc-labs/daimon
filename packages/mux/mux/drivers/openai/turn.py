@@ -96,6 +96,16 @@ class _NormalizedStream(AsyncIterator[Event]):
             await close(self._source)
 
 
+_SNAPSHOT_ATTEMPTS = 3
+
+
+async def _buffer(source: AsyncIterator[Object], buffered: list[Object]) -> None:
+    async for raw in source:
+        if len(buffered) >= 10000:
+            raise ProviderError("upstream", retryable=True, native_code="recovery_buffer_full")
+        buffered.append(raw)
+
+
 def event_identity(event: Event) -> tuple[str, str]:
     if event.item_id is not None:
         return ("item", event.item_id)
@@ -253,46 +263,47 @@ class OpenAIEvents:
 
     async def _snapshot(
         self, scope: Scope, session: ResourceRef
-    ) -> tuple[Session, list[Object], list[Object]]:
-        current = await self._sessions.retrieve(scope, session)
-        return current, await self._pages(session, "turns"), await self._pages(session, "items")
+    ) -> tuple[Session, list[Object], list[Object], list[Object]]:
+        """Read the saved snapshot while a live stream buffers what lands meanwhile.
+
+        Only a snapshot read entirely under an open stream is used. A clean end
+        of the stream is not a disconnect, but it leaves the rest of the reads
+        uncovered, so that attempt and its buffer are dropped and the snapshot
+        is read again under a fresh stream. A ProviderError from the stream or
+        a partial snapshot fails recovery.
+        """
+        for _ in range(_SNAPSHOT_ATTEMPTS):
+            source = await self._c.transport.open_stream(
+                f"/agents/sessions/{segment(session.id)}/events"
+            )
+            buffered: list[Object] = []
+            task = asyncio.create_task(_buffer(source, buffered))
+            try:
+                # Start consuming before the first snapshot read.
+                await asyncio.sleep(0)
+                current = await self._sessions.retrieve(scope, session)
+                turns = await self._pages(session, "turns")
+                items = await self._pages(session, "items")
+                await asyncio.sleep(0)
+                if not task.done():
+                    return current, turns, items, buffered
+                task.result()
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError, ProviderError):
+                    await task
+                await close(source)
+        raise ProviderError(
+            "transient_network", retryable=True, native_code="snapshot_stream_closed"
+        )
 
     @owned
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         self._c.check(scope, session, "session")
         previous = await self._journal.read(session) or ()
         normalizer = EventNormalizer(session.id, prior=previous)
-        source = await self._c.transport.open_stream(
-            f"/agents/sessions/{segment(session.id)}/events"
-        )
-        buffered: list[Object] = []
-        ended = False
-
-        async def buffer() -> None:
-            nonlocal ended
-            async for raw in source:
-                if len(buffered) >= 10000:
-                    raise ProviderError(
-                        "upstream", retryable=True, native_code="recovery_buffer_full"
-                    )
-                buffered.append(raw)
-            ended = True
-
-        task = asyncio.create_task(buffer())
         try:
-            # Start consuming before the first snapshot read. A ProviderError from
-            # the stream or a partial snapshot can never publish success.
-            await asyncio.sleep(0)
-            current, turns, items = await self._snapshot(scope, session)
-            await asyncio.sleep(0)
-            if task.done():
-                task.result()
-            if ended:
-                # A clean end is not a disconnect. The buffer covers everything up
-                # to the close; read the whole snapshot again after the close, so a
-                # change that landed after the close on a page read before it is
-                # not lost. Overlap with the buffer is merged by identity.
-                current, turns, items = await self._snapshot(scope, session)
+            current, turns, items, buffered = await self._snapshot(scope, session)
             events: list[Event] = []
             for turn in turns:
                 event = normalizer.saved_turn(turn)
@@ -396,11 +407,6 @@ class OpenAIEvents:
             raise ProviderError(
                 "upstream", retryable=False, native_code="malformed_snapshot"
             ) from None
-        finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError, ProviderError):
-                await task
-            await close(source)
 
     @owned
     async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
