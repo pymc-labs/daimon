@@ -3,10 +3,10 @@
 A backend joins by adding an entry here. `test_registry.py` fails CI when a turn
 profile Daimon can run has no entry.
 
-`pending` names the finding (FINAL-REVIEW.md F1 to F16, plus N1 and N2 found by
-this suite) and the PR that fixes it. Each is a strict xfail: the fixing PR turns
-the case green and must delete the entry. N1, N2 and the Gemini F15 case have no
-owner yet.
+`pending` names the finding (FINAL-REVIEW.md F1 to F16, plus N1 to N3 found by
+this suite) and the PR that fixes it. Each is a strict xfail on an assertion: the
+fixing PR turns the case green and must delete the entry. N1 to N3 have no owner
+yet.
 """
 
 from __future__ import annotations
@@ -36,7 +36,10 @@ N1 = (
     "N1: the 2-attempt drop budget is per stream generation and never resets after a "
     "reconnect delivers records (driver.py:1123), so a second drop loses the turn. No owner yet"
 )
-STALLED = "PR 3a enforced: a give-up logs turn.stalled with its backend (root decision)"
+STALLED = (
+    "PR 3a enforced: the stall cap ends a stuck turn as CEILING with a turn.stalled line "
+    "naming its backend (root decision); the case assumes DAIMON_TURN__STALL_AFTER_S"
+)
 F6 = "F6: no bounded io.interrupt settles the native turn before a give-up (PR 3a enforced)"
 M2 = "M2: no backoff between eventless reconnects (PR 3a enforced)"
 COPY = (
@@ -54,7 +57,7 @@ def _after_pr4(cause: str) -> dict[str, str]:
     reason = f"{cause}, so a stuck turn ends CONNECTION_LOST before its cap (PR 4, then PR 3a)"
     return {
         "stuck_running_ends_ceiling": reason,
-        "stuck_running_logs_turn_stalled": reason,
+        "stuck_running_stalls_out_before_the_ceiling": reason,
         "stuck_running_reconnects_back_off": reason,
         "give_up_notice_asks_what_it_finished": reason,
     }
@@ -67,7 +70,7 @@ BACKENDS: dict[str, Backend] = {
         anthropic_fake.run,
         pending={
             "two_drops_with_progress_between": N1,
-            "stuck_running_logs_turn_stalled": STALLED,
+            "stuck_running_stalls_out_before_the_ceiling": STALLED,
             "stuck_running_settles_the_native_turn": F6,
             "stuck_running_reconnects_back_off": M2,
             "give_up_notice_asks_what_it_finished": COPY,
@@ -93,6 +96,11 @@ BACKENDS: dict[str, Backend] = {
         "gemini",
         (gemini_fake.PROFILE,),
         gemini_fake.run,
+        not_applicable={
+            "restart_resumes_only_this_turn": (
+                "each Gemini turn is its own interaction, and a turn reads only its own"
+            ),
+        },
         pending={
             "clock_skew_reads_behind": (
                 "PR 2: a read stamped before the create is discarded by the time "
@@ -103,8 +111,13 @@ BACKENDS: dict[str, Backend] = {
                 "the second one in a row loses the turn"
             ),
             "status_always_failing_gives_up_as_lost": (
-                "F15: Gemini retries failing reads inside its IO until the ceiling, so the "
-                "turn ends CEILING, not CONNECTION_LOST. No owner yet"
+                "N3: Gemini turns failing stream reads into eventless cycles "
+                "(gemini.py:893-911) and retries them until the ceiling, so the turn ends "
+                "CEILING, not CONNECTION_LOST. No owner yet"
+            ),
+            "stuck_running_settles_the_native_turn": (
+                "F6: Gemini abandons its interaction only after the give-up is finalized "
+                "(PR 3a enforced)"
             ),
             **_after_pr4("a clean EOF on a running Gemini turn is a dropped connection"),
         },
@@ -114,7 +127,7 @@ BACKENDS: dict[str, Backend] = {
         (selfhosted_fake.PROFILE,),
         selfhosted_fake.run,
         pending={
-            "stuck_running_logs_turn_stalled": STALLED,
+            "stuck_running_stalls_out_before_the_ceiling": STALLED,
             "stuck_running_settles_the_native_turn": F6,
             "give_up_notice_asks_what_it_finished": COPY,
             "status_always_failing_gives_up_as_lost": (
@@ -123,6 +136,9 @@ BACKENDS: dict[str, Backend] = {
             ),
         },
         not_applicable={
+            "replay_fails_once_on_reconnect": (
+                "the harness poll retries its own reads, so the driver never reconnects"
+            ),
             "clean_eof_mid_turn": "a polled harness journal has no stream to close",
             "two_clean_eofs_in_a_row": "a polled harness journal has no stream to close",
             "stuck_running_reconnects_back_off": (

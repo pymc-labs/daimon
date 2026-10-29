@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from typing import Literal
 
 import httpx
 
@@ -56,10 +57,17 @@ class Progress:
         self.records: list[dict[str, object]] = []
         self.ended = False
         self.opens = 0
-        self.status_reads = 0
-        self.replay_reads = 0
         self.quiet = False
         """A connection has ended without the turn's end: reads now may fail."""
+        self.phase: Literal["status", "replay"] | None = None
+        """The host read in flight, set by `drive` around `io.status` and `io.replay`."""
+        self.polled = False
+        """A polled wire: its own poll is the read after a quiet stream."""
+        self.status_failed = 0
+        self.replay_failed = 0
+        self.interrupts = 0
+        self.order: list[str] = []
+        """`interrupt` and `finalized`, in the order they happened."""
 
     def produce(self, count: int) -> list[dict[str, object]]:
         start = len(self.records)
@@ -85,17 +93,32 @@ class Progress:
             return conn, self.finish()
         return conn, self.produce(conn.deliver)
 
-    def status_fails(self) -> bool:
+    def read_fails(self) -> bool:
+        """Whether this wire read, made inside the host's status read or replay
+        after a quiet stream, is one the script fails. Counted per operation."""
         if not self.quiet:
             return False
-        self.status_reads += 1
-        return self.status_reads <= self.script.status_failures
+        phase = "status" if self.phase is None and self.polled else self.phase
+        if phase == "status" and self.status_failed < self.script.status_failures:
+            self.status_failed += 1
+            return True
+        if phase == "replay" and self.replay_failed < self.script.replay_failures:
+            self.replay_failed += 1
+            return True
+        return False
 
-    def replay_fails(self) -> bool:
-        if not self.quiet:
-            return False
-        self.replay_reads += 1
-        return self.replay_reads <= self.script.replay_failures
+    def interrupted(self) -> None:
+        self.interrupts += 1
+        self.order.append("interrupt")
+
+    def facts(self) -> dict[str, object]:
+        return {
+            "opens": self.opens,
+            "interrupts": self.interrupts,
+            "status_failed": self.status_failed,
+            "replay_failed": self.replay_failed,
+            "order": self.order,
+        }
 
 
 def unavailable(request: httpx.Request) -> httpx.Response:

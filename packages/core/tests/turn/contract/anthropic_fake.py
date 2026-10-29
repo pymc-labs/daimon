@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -13,11 +14,36 @@ from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.testing.drivers.anthropic.ma import list_response, session_response
 
 from .drive import SCOPE, Result, drive, session
-from .script import Clock, Script, piece
+from .script import EARLIER, Clock, Script, piece
 from .wire import Progress, ScriptedBody, unavailable
 
 PROFILE = "anthropic.managed_agents"
 BASE = "/v1/sessions/session"
+
+
+def earlier(clock: Clock) -> list[dict[str, object]]:
+    """A finished turn from before the host restarted."""
+    stamp = (clock.created - timedelta(minutes=5)).isoformat()
+    return [
+        {
+            "id": "sevt_earlier_user",
+            "type": "user.message",
+            "content": [{"type": "text", "text": "earlier question"}],
+            "processed_at": stamp,
+        },
+        {
+            "id": "sevt_earlier_answer",
+            "type": "agent.message",
+            "content": [{"type": "text", "text": EARLIER}],
+            "processed_at": stamp,
+        },
+        {
+            "id": "sevt_earlier_end",
+            "type": "session.status_idle",
+            "stop_reason": {"type": "end_turn"},
+            "processed_at": stamp,
+        },
+    ]
 
 
 class MAWire:
@@ -25,9 +51,8 @@ class MAWire:
         self.script = script
         self.clock = Clock(script.stamps)
         self.progress = Progress(script, self.record)
-        self.log: list[dict[str, object]] = []
+        self.log: list[dict[str, object]] = earlier(self.clock) if script.after_restart else []
         self.sends = 0
-        self.interrupts = 0
 
     def record(self, index: int) -> dict[str, object]:
         stamp = self.clock.read().isoformat()
@@ -65,7 +90,7 @@ class MAWire:
             body = json.loads(request.content)
             kinds = [event["type"] for event in body["events"]]
             if kinds == ["user.interrupt"]:
-                self.interrupts += 1
+                self.progress.interrupted()
                 self.progress.ended = True
                 self.progress.records.append(
                     {
@@ -88,11 +113,11 @@ class MAWire:
             )
             return httpx.Response(200, json={"data": []})
         if path == BASE + "/events" and method == "GET":
-            if self.progress.replay_fails():
+            if self.progress.read_fails():
                 return unavailable(request)
             return list_response(self.history())
         if path == BASE and method == "GET":
-            if self.progress.status_fails():
+            if self.progress.read_fails():
                 return unavailable(request)
             return session_response(
                 session_id="session", status="idle" if self.progress.ended else "running"
@@ -115,10 +140,10 @@ async def run(monkeypatch: pytest.MonkeyPatch, script: Script) -> Result:
             authorization=ResourceAuthorization(SCOPE, frozenset({("session", "session")})),
         )
         io = MuxTurnIO(backend, SCOPE, session("anthropic"))
-        state, lifecycle = await drive(monkeypatch, io, deadline_s=script.deadline_s)
+        state, lifecycle = await drive(monkeypatch, io, wire.progress, deadline_s=script.deadline_s)
     return Result(
         state,
         lifecycle,
         sends=wire.sends,
-        facts={"opens": wire.progress.opens, "interrupts": wire.interrupts},
+        facts=wire.progress.facts(),
     )

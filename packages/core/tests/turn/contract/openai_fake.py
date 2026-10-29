@@ -17,8 +17,8 @@ from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from openai import AsyncOpenAI
 
-from .drive import SCOPE, Result, drive, session
-from .script import Clock, Script, piece
+from .drive import READ_TIMEOUT_S, SCOPE, Result, drive, session
+from .script import EARLIER, Clock, Script, piece
 from .wire import Progress, ScriptedBody, unavailable
 
 PROFILE = "openai.persistent_workspace"
@@ -60,13 +60,12 @@ class SessionsWire:
         self.clock = Clock(script.stamps)
         self.progress = Progress(script, self.record)
         self.sends = 0
-        self.interrupts = 0
         self.reconciling = False
         self.announced = False
 
-    def turn(self, status: str) -> dict[str, object]:
+    def turn(self, status: str, identity: str = "root") -> dict[str, object]:
         return {
-            "id": "root",
+            "id": identity,
             "session_id": "session",
             "agent_id": "agent",
             "subagent_id": None,
@@ -139,13 +138,13 @@ class SessionsWire:
         if path == BASE + "/events":
             body = json.loads(request.content)
             if body["events"][0]["type"] == "agent.session.input.cancel":
-                self.interrupts += 1
+                self.progress.interrupted()
                 self.progress.ended = True
                 return httpx.Response(202, json={})
             self.sends += 1
             return httpx.Response(202, json={})
         if path == BASE:
-            if self.progress.status_fails():
+            if self.progress.read_fails():
                 return unavailable(request)
             running = self.sends and not self.progress.ended
             return httpx.Response(
@@ -162,13 +161,28 @@ class SessionsWire:
             )
         if path == BASE + "/turns/root":
             return httpx.Response(
-                200, json=self.turn("cancelled" if self.interrupts else self.status())
+                200, json=self.turn("cancelled" if self.progress.interrupts else self.status())
             )
         if path == BASE + "/turns":
-            if self.progress.replay_fails():
+            if self.progress.read_fails():
                 return unavailable(request)
-            return self.page([self.turn(self.status())] if self.sends else [])
+            earlier = [self.turn("completed", "earlier")] if self.script.after_restart else []
+            return self.page([*earlier, *([self.turn(self.status())] if self.sends else [])])
         if path == BASE + "/items":
+            earlier = (
+                [
+                    {
+                        "id": "earlier-answer",
+                        "turn_id": "earlier",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": EARLIER}],
+                    }
+                ]
+                if self.script.after_restart
+                else []
+            )
             items = [
                 {
                     "id": "input",
@@ -184,7 +198,7 @@ class SessionsWire:
                     if r["type"] == "agent.session.turn.item.done"
                 ),
             ]
-            return self.page(items if self.sends else [])
+            return self.page([*earlier, *(items if self.sends else [])])
         raise AssertionError(f"unscripted OpenAI request {method} {path}")
 
 
@@ -203,6 +217,8 @@ async def run(monkeypatch: pytest.MonkeyPatch, script: Script) -> Result:
             usage_revisions=MemoryUsageRevisions(),
         )
         io = OpenAITurnIO(backend, SCOPE, session("openai"), persistence=Persistence())
+        # Production checks status after 15 s of a 120 s read timeout; keep the ratio.
+        io.idle_check_s = READ_TIMEOUT_S / 8
         replay = io.replay
 
         async def reconcile(*args: object, **kwargs: object) -> object:
@@ -215,10 +231,10 @@ async def run(monkeypatch: pytest.MonkeyPatch, script: Script) -> Result:
                 wire.reconciling = False
 
         monkeypatch.setattr(io, "replay", reconcile)
-        state, lifecycle = await drive(monkeypatch, io, deadline_s=script.deadline_s)
+        state, lifecycle = await drive(monkeypatch, io, wire.progress, deadline_s=script.deadline_s)
     return Result(
         state,
         lifecycle,
         sends=wire.sends,
-        facts={"opens": wire.progress.opens, "interrupts": wire.interrupts},
+        facts=wire.progress.facts(),
     )

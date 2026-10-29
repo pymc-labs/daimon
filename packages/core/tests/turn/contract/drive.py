@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import pytest
 from daimon.core.turn import driver
@@ -14,6 +15,8 @@ from daimon.core.turn.state import TurnState
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import ResourceRef, Scope
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+
+from .wire import Progress
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="host", authorization_id="contract"
@@ -46,17 +49,56 @@ class Result:
         return "".join(block.text for block in self.state.content if block.kind == "text")
 
 
+class _Lifecycle(RecordingLifecycle):
+    """Records when the turn is finalized, next to the wire's interrupts."""
+
+    def __init__(self, progress: Progress) -> None:
+        super().__init__()
+        self.progress = progress
+
+    async def on_terminal_failure(self, state: TurnState, error: BaseException) -> None:
+        self.progress.order.append("finalized")
+        await super().on_terminal_failure(state, error)
+
+    async def on_terminal_success(self, state: TurnState) -> None:
+        self.progress.order.append("finalized")
+        await super().on_terminal_success(state)
+
+
+def _phased(
+    monkeypatch: pytest.MonkeyPatch,
+    io: TurnIO,
+    progress: Progress,
+    name: Literal["status", "replay"],
+) -> None:
+    """Mark the wire reads made inside `io.<name>`, so a script fails the read it
+    names and no other. Only the marker is added; the IO's own method runs."""
+    method = getattr(io, name)
+
+    async def marked(*args: object, **kwargs: object) -> object:
+        progress.phase = name
+        try:
+            return await method(*args, **kwargs)
+        finally:
+            progress.phase = None
+
+    monkeypatch.setattr(io, name, marked)
+
+
 async def drive(
     monkeypatch: pytest.MonkeyPatch,
     io: TurnIO,
+    progress: Progress,
     *,
     deadline_s: float,
     session_id: str = "session",
 ) -> tuple[TurnState, RecordingLifecycle]:
     """The real `run_turn` on the mux path, with `io` as the backend's turn IO."""
+    _phased(monkeypatch, io, progress, "status")
+    _phased(monkeypatch, io, progress, "replay")
     monkeypatch.setattr(driver, "turn_io", lambda *args, **kwargs: io)
     transport = ScriptedTransport()
-    lifecycle = RecordingLifecycle()
+    lifecycle = _Lifecycle(progress)
     async with transport.client() as client:
         # The outer bound only catches a driver that ignores its own deadline.
         async with asyncio.timeout(deadline_s + 20):

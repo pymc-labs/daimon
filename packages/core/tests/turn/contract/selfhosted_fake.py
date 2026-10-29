@@ -10,7 +10,7 @@ both a poll with nothing new, and a withheld `turn_ended` is the stuck case.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import httpx
@@ -24,7 +24,7 @@ from mux.drivers.selfhosted.transport import DirectTransport
 
 from .drive import SCOPE, Result, drive
 from .openai_fake import Persistence
-from .script import Clock, End, Script, piece
+from .script import EARLIER, Clock, End, Script, piece
 from .wire import Progress, unavailable
 
 PROFILE = "selfhosted.loop"
@@ -35,11 +35,11 @@ class HarnessWire:
         self.script = script
         self.clock = Clock(script.stamps)
         self.progress = Progress(script, self.record)
+        self.progress.polled = True
         self.request: dict[str, object] | None = None
         self.sends = 0
-        self.interrupts = 0
-        self.failed_reads = 0
         self.drop: End | None = None
+        self.session_id = ""
 
     def stamped(self, seq: int, type_: str, data: dict[str, object], at: datetime) -> dict:
         assert self.request is not None
@@ -63,13 +63,44 @@ class HarnessWire:
             },
         }
 
-    def journal(self) -> list[dict]:
-        if self.request is None:
+    def earlier(self) -> list[dict]:
+        """A finished turn from before the host restarted."""
+        if not self.script.after_restart:
             return []
-        values = [
-            self.stamped(1, "status_running", {}, self.clock.create()),
+        at = (self.clock.created - timedelta(minutes=5)).isoformat()
+        return [
+            {
+                "seq": seq,
+                "session_id": self.session_id,
+                "turn_id": "earlier-turn",
+                "at": at,
+                "type": type_,
+                "data": data,
+            }
+            for seq, (type_, data) in enumerate(
+                [
+                    ("status_running", {}),
+                    (
+                        "agent_message",
+                        {
+                            "message_id": "earlier-message",
+                            "parts": [{"type": "text", "text": EARLIER}],
+                        },
+                    ),
+                    ("turn_ended", {"outcome": "completed"}),
+                ],
+                start=1,
+            )
+        ]
+
+    def journal(self) -> list[dict]:
+        values = self.earlier()
+        if self.request is None:
+            return values
+        values += [
+            self.stamped(len(values) + 1, "status_running", {}, self.clock.create()),
             self.stamped(
-                2,
+                len(values) + 2,
                 "usage",
                 {
                     "request_id": "request-1",
@@ -91,7 +122,7 @@ class HarnessWire:
                     self.clock.read(),
                 )
             )
-        if self.interrupts and not self.progress.ended:
+        if self.progress.interrupts and not self.progress.ended:
             values.append(
                 self.stamped(
                     len(values) + 1, "turn_ended", {"outcome": "interrupted"}, self.clock.read()
@@ -106,10 +137,7 @@ class HarnessWire:
                 if drop == "read_error":
                     raise httpx.ReadError("connection reset mid-turn", request=request)
                 raise httpx.RemoteProtocolError("peer closed mid-chunk", request=request)
-            if self.progress.quiet and self.failed_reads < (
-                self.script.status_failures + self.script.replay_failures
-            ):
-                self.failed_reads += 1
+            if self.progress.read_fails():
                 return unavailable(request)
             # Each poll after the send is one script step.
             conn, _ = self.progress.connect()
@@ -140,7 +168,7 @@ class HarnessWire:
                 self.sends += 1
             return httpx.Response(202, json={"accepted": True, "turn_id": body["turn_id"]})
         if path.endswith("/cancel"):
-            self.interrupts += 1
+            self.progress.interrupted()
             return httpx.Response(200, json={"cancelled": True})
         raise AssertionError(f"unscripted harness request {request.method} {path}")
 
@@ -197,13 +225,14 @@ async def run(monkeypatch: pytest.MonkeyPatch, script: Script) -> Result:
             ),
             key="session",
         )
+        wire.session_id = created.ref.id
         io = SelfHostedTurnIO(backend, SCOPE, created.ref, persistence=Persistence())
         state, lifecycle = await drive(
-            monkeypatch, io, deadline_s=script.deadline_s, session_id=created.ref.id
+            monkeypatch, io, wire.progress, deadline_s=script.deadline_s, session_id=created.ref.id
         )
     return Result(
         state,
         lifecycle,
         sends=wire.sends,
-        facts={"opens": wire.progress.opens, "interrupts": wire.interrupts},
+        facts=wire.progress.facts(),
     )

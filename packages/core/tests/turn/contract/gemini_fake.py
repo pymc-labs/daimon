@@ -43,13 +43,11 @@ class InteractionsWire(FakeTransport):
         self.clock = Clock(script.stamps)
         self.progress = Progress(script, lambda index: {"index": index})
         self.sends = 0
-        self.interrupts = 0
-        self.failed_reads = 0
 
     def interaction(self, *, read: bool) -> Object:
         status = (
             "cancelled"
-            if self.interrupts
+            if self.progress.interrupts
             else ("completed" if self.progress.ended else "in_progress")
         )
         created = self.clock.create().isoformat()
@@ -84,16 +82,13 @@ class InteractionsWire(FakeTransport):
 
     async def get(self, interaction_id: str) -> Object:
         self.read_requests.append(interaction_id)
-        if self.progress.quiet and self.failed_reads < (
-            self.script.status_failures + self.script.replay_failures
-        ):
-            self.failed_reads += 1
+        if self.progress.read_fails():
             raise normalize_error(httpx.ConnectError("unavailable"))
         return self.interaction(read=True)
 
     async def cancel(self, interaction_id: str) -> Object:
         self.cancelled.append(interaction_id)
-        self.interrupts += 1
+        self.progress.interrupted()
         return self.interaction(read=True)
 
     async def open_stream(
@@ -157,13 +152,13 @@ async def run(monkeypatch: pytest.MonkeyPatch, script: Script) -> Result:
     )
     io = GeminiTurnIO(backend, SCOPE, created.ref)
     state, lifecycle = await drive(
-        monkeypatch, io, deadline_s=script.deadline_s, session_id=created.ref.id
+        monkeypatch, io, wire.progress, deadline_s=script.deadline_s, session_id=created.ref.id
     )
     return Result(
         state,
         lifecycle,
         sends=wire.sends,
-        facts={"opens": wire.progress.opens, "interrupts": wire.interrupts},
+        facts=wire.progress.facts(),
     )
 
 

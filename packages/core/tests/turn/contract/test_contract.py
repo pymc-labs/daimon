@@ -9,6 +9,7 @@ mark fails CI, and the PR deletes the entry.
 
 from __future__ import annotations
 
+import time
 from typing import cast
 
 import pytest
@@ -20,7 +21,7 @@ from structlog.testing import capture_logs
 
 from .drive import Result
 from .registry import BACKENDS, Backend
-from .script import Conn, Script
+from .script import EARLIER, Conn, Script
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +38,10 @@ def backend(request: pytest.FixtureRequest) -> Backend:
     if case in chosen.not_applicable:
         pytest.skip(chosen.not_applicable[case])
     if case in chosen.pending:
-        request.applymarker(pytest.mark.xfail(reason=chosen.pending[case], strict=True))
+        # Only an assertion is the expected failure; any other error still fails.
+        request.applymarker(
+            pytest.mark.xfail(reason=chosen.pending[case], strict=True, raises=AssertionError)
+        )
     return chosen
 
 
@@ -139,13 +143,27 @@ async def test_two_drops_with_progress_between(
     await completes(backend, monkeypatch, script)
 
 
+@pytest.mark.parametrize("drop", ["none", "read_error"])
+async def test_restart_resumes_only_this_turn(
+    backend: Backend, monkeypatch: pytest.MonkeyPatch, drop: str
+) -> None:
+    """After a host restart the session already holds an earlier finished turn, and
+    the new host IO has no in-memory cursor. This turn's reply, including what a
+    reconnect replay recovers, carries only this turn's records."""
+    connections = [Conn(1, "read_error")] if drop == "read_error" else [Conn()]
+    script = Script(after_restart=True, connections=connections)
+    result = await completes(backend, monkeypatch, script)
+    assert EARLIER not in result.text()
+
+
 async def test_status_read_fails_once_after_a_quiet_stream(
     backend: Backend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """PR 1 (#1621): one failed status read after a quiet stream no longer loses
     the turn."""
     script = Script(connections=[Conn(1, "hold")], status_failures=1)
-    await completes(backend, monkeypatch, script)
+    result = await completes(backend, monkeypatch, script)
+    assert result.facts["status_failed"] == 1
 
 
 async def test_replay_fails_once_on_reconnect(
@@ -153,7 +171,8 @@ async def test_replay_fails_once_on_reconnect(
 ) -> None:
     """F2(a): the reconnect replay is retried, so one 503 does not end the turn."""
     script = Script(connections=[Conn(1, "read_error")], replay_failures=1)
-    await completes(backend, monkeypatch, script)
+    result = await completes(backend, monkeypatch, script)
+    assert result.facts["replay_failed"] == 1
 
 
 STUCK = Script(stuck=True, deadline_s=1.0, connections=[Conn(1, "eof")])
@@ -163,9 +182,7 @@ STUCK = Script(stuck=True, deadline_s=1.0, connections=[Conn(1, "eof")])
 async def stuck(
     backend: Backend, monkeypatch: pytest.MonkeyPatch, *, ceiling: bool = True
 ) -> Result:
-    with capture_logs() as logs:
-        result = await backend.run(monkeypatch, STUCK)
-    result.facts["logs"] = logs
+    result = await backend.run(monkeypatch, STUCK)
     if ceiling:
         # The give-up details below only mean something once the turn gives up at
         # its cap; a backend that loses the turn first fails here, not later.
@@ -187,13 +204,23 @@ async def test_stuck_running_ends_ceiling(
     assert not result.lifecycle.terminal_success
 
 
-async def test_stuck_running_logs_turn_stalled(
+STALL_AFTER_S = 1.0
+"""The stall cap the planned setting is given; the ceiling is four times longer."""
+
+
+async def test_stuck_running_stalls_out_before_the_ceiling(
     backend: Backend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The give-up names itself: a `turn.stalled` line with the backend (PR 3a
-    enforced, PR 7 for the backend field)."""
-    result = await stuck(backend, monkeypatch)
-    logs = cast(list[dict[str, object]], result.facts["logs"])
+    """The stall cap, not the ceiling, ends a turn that never moves: CEILING plus a
+    `turn.stalled` line naming the backend (root decision: no STALLED reason). PR 3a
+    enforced owns the setting; this case assumes `DAIMON_TURN__STALL_AFTER_S`."""
+    monkeypatch.setenv("DAIMON_TURN__STALL_AFTER_S", str(STALL_AFTER_S))
+    script = Script(stuck=True, deadline_s=4 * STALL_AFTER_S, connections=[Conn(1, "eof")])
+    started = time.monotonic()
+    with capture_logs() as logs:
+        result = await backend.run(monkeypatch, script)
+    assert result.state.termination == TerminationReason.CEILING
+    assert time.monotonic() - started < 2.5 * STALL_AFTER_S
     stalled = [line for line in logs if line.get("event") == "turn.stalled"]
     assert stalled and stalled[0].get("backend") == backend.name
 
@@ -204,7 +231,8 @@ async def test_stuck_running_settles_the_native_turn(
     """F6: before a give-up is finalized, the host asks the service to stop the
     turn, so it does not keep running and spending (PR 3a enforced)."""
     result = await stuck(backend, monkeypatch, ceiling=False)
-    assert cast(int, result.facts.get("interrupts", 0)) >= 1
+    order = cast(list[str], result.facts["order"])
+    assert "interrupt" in order and order.index("interrupt") < order.index("finalized"), order
 
 
 async def test_stuck_running_reconnects_back_off(
@@ -213,6 +241,7 @@ async def test_stuck_running_reconnects_back_off(
     """M2: eventless reconnects back off (1 s, 2 s, 4 s, cap 10 s), so a service that
     keeps closing a running turn is not hammered (PR 3a enforced)."""
     result = await stuck(backend, monkeypatch)
+    # Within a 1 s ceiling, a 1 s then 2 s backoff allows at most two reopens.
     assert cast(int, result.facts["opens"]) <= 3
 
 
@@ -237,6 +266,7 @@ async def test_status_always_failing_gives_up_as_lost(
         connections=[Conn(0, "hold")], status_failures=99, replay_failures=99, deadline_s=3.0
     )
     result = await backend.run(monkeypatch, script)
+    assert cast(int, result.facts["status_failed"]) >= 1
     assert result.state.termination == TerminationReason.CONNECTION_LOST, (
         result.state.termination,
         result.state.error,

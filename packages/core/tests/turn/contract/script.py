@@ -59,6 +59,9 @@ class Script:
     """The service says running forever and never ends the turn."""
     deadline_s: float = 10.0
     """The turn's ceiling. Stuck cases shorten it."""
+    after_restart: bool = False
+    """The session already holds an earlier, finished turn whose answer was
+    `EARLIER`, and the host IO is new (a restarted host has no in-memory cursor)."""
 
     def answer(self) -> str:
         return "".join(piece(i) for i in range(self.pieces))
@@ -67,6 +70,10 @@ class Script:
         if self.stuck:
             return self.connections[index] if index < len(self.connections) else Conn(end="eof")
         return self.connections[index] if index < len(self.connections) else Conn(end="terminal")
+
+
+EARLIER = "earlier answer "
+"""The text of the turn before a restart; it must never reach this turn's reply."""
 
 
 def piece(index: int) -> str:
@@ -85,14 +92,15 @@ class Clock:
     def create(self) -> datetime:
         if self.stamps == "same_second":
             return self.created.replace(microsecond=0)
-        if self.stamps == "behind":
-            # The create's server runs ahead of the one serving reads.
-            return self.created + SKEW
         return self.created
 
     def read(self) -> datetime:
         if self.stamps in ("coarse_read", "same_second"):
             return self.created.replace(microsecond=0)
+        if self.stamps == "behind":
+            # Fixed against the create, not the wall clock, so a slow run never
+            # catches up: every read is stamped 2 s before the create.
+            return self.created - SKEW
         if self.stamps == "ahead":
-            return datetime.now(UTC) + SKEW
+            return self.created + SKEW
         return datetime.now(UTC)
