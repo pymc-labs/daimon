@@ -32,6 +32,7 @@ from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import RoutineAlreadyRunning, StoreError
 from daimon.core.permissions import limiting_ids_at
 from daimon.core.routine_files import OUTBOX_FILES, PREFIX, plain_payload
+from daimon.core.routine_move import routine_never_fired
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import (
     CatchUpPolicy,
@@ -84,7 +85,7 @@ async def link_internal_routine(
     internal_routine_id: _uuid.UUID,
     apply: bool = False,
 ) -> RoutineRow:
-    """Link a paused, never-used routine; caller owns the transaction.
+    """Link a paused, never-fired routine; caller owns the transaction.
 
     Serialize competing links for the same tenant/internal identity, then lock
     the target against resume, edits and scheduler claims. The unique constraint
@@ -118,26 +119,7 @@ async def link_internal_routine(
         )
     if row.enabled:
         raise StoreError(f"{routine_id}: routine is enabled; pause it before linking.")
-    if any(
-        value is not None
-        for value in (
-            row.last_fired_at,
-            row.last_fired_slot,
-            row.last_finished_at,
-            row.last_finished_claim_at,
-            row.last_skipped_from,
-            row.last_skipped_until,
-            row.last_skip_reason,
-            row.last_error,
-            row.last_result_tail,
-            row.delivery_status,
-            row.delivery_lease_owner,
-            row.delivery_lease_expires_at,
-            row.delivery_note,
-            row.delivery_payload,
-            row.delivered_at,
-        )
-    ):
+    if not routine_never_fired(row):
         raise StoreError(f"{routine_id}: routine has execution or delivery state; cannot link.")
     linked_id = await session.scalar(
         select(Routine.id).where(

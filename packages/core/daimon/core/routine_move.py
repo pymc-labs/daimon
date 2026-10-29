@@ -50,19 +50,14 @@ class RoutineSeedEntry(BaseModel):
         return parsed
 
 
-def seed_first_slot(entry: RoutineSeedEntry, row: RoutineRow, *, now: datetime) -> datetime:
-    """Validate the handover against Daimon state and use its cron semantics."""
-    if row.internal_routine_id != entry.internal_routine_id:
-        raise ValueError("internal_routine_id differs from the Daimon routine")
-    if entry.last_completed_slot > now:
-        raise ValueError("last_completed_slot is in the future")
-    if entry.cron_expr != row.cron_expr:
-        raise ValueError("cron_expr differs from the Daimon routine")
-    if entry.timezone != row.timezone:
-        raise ValueError("timezone differs from the Daimon routine")
-    if row.enabled:
-        raise ValueError("routine is already enabled")
-    if any(
+def routine_never_fired(row: RoutineRow) -> bool:
+    """No execution or delivery evidence, as required for linking and seeding.
+
+    Edits may mark delivery skipped with a note before any fire. Skip-window
+    bookkeeping also records scheduling decisions, not executions. Neither
+    rules out handover; retained payloads, leases and fire evidence still do.
+    """
+    return not any(
         value is not None
         for value in (
             row.last_fired_at,
@@ -78,7 +73,22 @@ def seed_first_slot(entry: RoutineSeedEntry, row: RoutineRow, *, now: datetime) 
             row.last_result_tail,
             row.last_error,
         )
-    ):
+    )
+
+
+def seed_first_slot(entry: RoutineSeedEntry, row: RoutineRow, *, now: datetime) -> datetime:
+    """Validate the handover against Daimon state and use its cron semantics."""
+    if row.internal_routine_id != entry.internal_routine_id:
+        raise ValueError("internal_routine_id differs from the Daimon routine")
+    if entry.last_completed_slot > now:
+        raise ValueError("last_completed_slot is in the future")
+    if entry.cron_expr != row.cron_expr:
+        raise ValueError("cron_expr differs from the Daimon routine")
+    if entry.timezone != row.timezone:
+        raise ValueError("timezone differs from the Daimon routine")
+    if row.enabled:
+        raise ValueError("routine is already enabled")
+    if not routine_never_fired(row):
         raise ValueError("routine has already fired on Daimon or has a delivery record")
     slot = next_slot_at_or_after(row.cron_expr, row.timezone, entry.last_completed_slot)
     if slot != entry.internal_next_run:

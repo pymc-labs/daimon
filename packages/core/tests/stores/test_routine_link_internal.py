@@ -6,7 +6,12 @@ from datetime import UTC, datetime
 import pytest
 from daimon.core._models import Routine
 from daimon.core.errors import StoreError
-from daimon.core.stores.routines import create_routine, get_routine, link_internal_routine
+from daimon.core.stores.routines import (
+    create_routine,
+    get_routine,
+    link_internal_routine,
+    update_routine,
+)
 from daimon.testing.factories import make_tenant
 from sqlalchemy import update
 
@@ -56,12 +61,8 @@ async def test_preview_then_link_changes_only_internal_id(db_session):
         ("last_fired_slot", NOW, "execution or delivery"),
         ("last_finished_at", NOW, "execution or delivery"),
         ("last_finished_claim_at", NOW, "execution or delivery"),
-        ("last_skipped_from", NOW, "execution or delivery"),
-        ("last_skipped_until", NOW, "execution or delivery"),
-        ("last_skip_reason", "stale", "execution or delivery"),
         ("last_error", "", "execution or delivery"),
         ("last_result_tail", "", "execution or delivery"),
-        ("delivery_status", "skipped", "execution or delivery"),
         ("delivery_status", "pending", "execution or delivery"),
         ("delivery_lease_owner", "worker", "execution or delivery"),
         ("delivery_lease_expires_at", NOW, "execution or delivery"),
@@ -194,11 +195,49 @@ async def test_refuses_missing_or_archived_team(db_session, archived):
     assert await get_routine(db_session, row.id, tenant_id=row.tenant_id) == row
 
 
-async def test_linked_routine_can_be_seeded(db_session):
+@pytest.mark.parametrize(
+    "state",
+    ["plain", "skipped", "last_skipped_from", "last_skipped_until", "last_skip_reason", "dm-pause"],
+)
+async def test_linked_routine_can_be_seeded(db_session, state):
     from daimon.core.routine_move import RoutineSeedEntry
     from daimon.core.stores.routine_move import seed_routines
 
-    row = await setup(db_session)
+    if state == "dm-pause":
+        tenant = await make_tenant(db_session)
+        row = await create_routine(
+            db_session,
+            tenant_id=tenant.id,
+            created_by_user_id="123456789",
+            agent_id="ag",
+            agent_name="daimon",
+            cron_expr="0 * * * *",
+            timezone_="UTC",
+            trigger_message="run",
+            enabled=True,
+            destination_kind="dm",
+            destination_id="123456789",
+        )
+        row = await update_routine(
+            db_session,
+            row.id,
+            tenant_id=tenant.id,
+            enabled=False,
+            edited_by="123456789",
+        )
+        assert row.delivery_status == "skipped"
+        assert row.delivery_note == "private_revision_changed"
+    else:
+        row = await setup(db_session)
+        if state != "plain":
+            values = (
+                {"delivery_status": "skipped", "delivery_note": "private_revision_changed"}
+                if state == "skipped"
+                else {state: "stale" if state == "last_skip_reason" else NOW}
+            )
+            await db_session.execute(update(Routine).where(Routine.id == row.id).values(values))
+            row = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
+
     internal_id = uuid.uuid4()
     await link_internal_routine(
         db_session,
@@ -207,6 +246,8 @@ async def test_linked_routine_can_be_seeded(db_session):
         internal_routine_id=internal_id,
         apply=True,
     )
+    linked = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
+    assert linked == row.model_copy(update={"internal_routine_id": internal_id})
     entry = RoutineSeedEntry.model_validate(
         dict(
             internal_routine_id=internal_id,

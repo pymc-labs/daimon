@@ -326,14 +326,17 @@ import or a routine recreated by its owner, link the paused Daimon routine to it
 before seeding; a prompt tag alone no longer links a new routine:
 
 ```bash
-daimon routines link-internal --tenant TENANT_UUID --routine OS_ROUTINE_UUID --internal-id INTERNAL_UUID
-daimon routines link-internal --tenant TENANT_UUID --routine OS_ROUTINE_UUID --internal-id INTERNAL_UUID --apply
+daimon routines link-internal --tenant TENANT_UUID --routine DAIMON_ROUTINE_UUID --internal-id INTERNAL_UUID
+daimon routines link-internal --tenant TENANT_UUID --routine DAIMON_ROUTINE_UUID --internal-id INTERNAL_UUID --apply
 ```
 
 The default is a dry run; `--apply` writes only `internal_routine_id`. Linking
-refuses routines outside the selected team, enabled routines, any execution or
-delivery state, an existing link (even to the same ID), or an internal ID already
-linked to another routine in that team. It preserves the schedule, prompt and
+refuses routines outside the selected active team, enabled routines, evidence of
+an execution or delivery (including retained results, errors, payloads or leases),
+an existing link (even to the same ID), or an internal ID already linked to
+another routine in that team. Linking and seeding share the same never-fired
+check: an edit-only `skipped` delivery status and its note, and skip-window
+bookkeeping, do not count as a fire. It preserves the schedule, prompt and
 owner. Pause a newly created routine before linking, and use a never-fired
 routine for the move. Seed refuses both missing and ambiguous matches, and never
 matches a Daimon routine UUID against the input.
