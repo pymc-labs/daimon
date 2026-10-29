@@ -261,6 +261,8 @@ async def create_watch_impl(
     rule: str = "change",
     interval: int = 300,
     lifetime_days: int = 7,
+    key: str | None = None,
+    evidence: list[str] | None = None,
 ) -> WatchSummary:
     origin = await require_attended_owner(
         runtime, auth, origin_context_id, tool_name="create_watch"
@@ -297,6 +299,8 @@ async def create_watch_impl(
                 interval=interval,
                 expires_at=now + timedelta(days=lifetime_days),
                 now=now,
+                key=key,
+                evidence=evidence,
             )
             # Current owner/agent/seal policy, independently of the origin grant.
             await authorize_poll(runtime, watch)
@@ -434,6 +438,8 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         rule: Literal["change", "added", "updated"] = "change",
         interval: int = 300,
         lifetime_days: int = 7,
+        key: str | None = None,
+        evidence: list[str] | None = None,
     ) -> WatchSummary:
         """Watch a reviewed Discord read tool from this conversation.
 
@@ -443,10 +449,18 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Polls run without an AI turn; firings
         use unattended read-and-report turns and current access/spend checks.
         Poll arguments must explicitly name a source different from the reporting thread.
-        Only read_thread and read_channel are pollable; no URLs or outside tools.
-        Projection supports `.`, `.field.nested` and `.rows[0].field`; other jq
-        expressions are refused. Polls start with a saved baseline and compare
-        change, added array elements, or updated object keys every 60–86400 seconds.
+        Only tools on this deployment's watch list (set by whoever runs Daimon) can be
+        checked; by default that is read_thread and read_channel, and never URLs or
+        outside tools. An unlisted tool is refused, and a watch whose tool is taken off
+        the list pauses and its owner is told.
+        Projection supports `.`, `.field.nested`, `.rows[0].field` and one `[]` step
+        such as `.rows[].content`; other jq expressions are refused. Polls start with a
+        saved baseline and compare change, added array elements, or updated object keys,
+        no more often than the tool's listed shortest interval (at most every 86400 s).
+        With rule `added`, `key` (such as `.rows[].id`) compares items by that field and
+        keeps only short fingerprints of the keys, and `evidence` lists up to 8 fields
+        (such as `.content`) to report for each new item. One report holds at most 20
+        items and counts the rest as omitted.
         Lifetime is 1–30 days. Producers remain disabled until both operator gates
         are enabled. Page-event watches are refused until a producer exists.
         """
@@ -462,6 +476,8 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             rule=rule,
             interval=interval,
             lifetime_days=lifetime_days,
+            key=key,
+            evidence=evidence,
         )
 
     @mcp.tool(tags={"discord"})

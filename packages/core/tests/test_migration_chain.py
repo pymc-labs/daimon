@@ -89,7 +89,10 @@ COMPUTE_SESSIONS_HEAD = "0152_compute_sessions"
 REPO_MEMORY_HEAD = "0154_repo_memory_state"
 
 
-HEAD = "0155_compute_tasks"
+COMPUTE_TASKS_HEAD = "0155_compute_tasks"
+
+
+HEAD = "0156_watch_mcp_sources"
 
 
 CHAIN = [
@@ -116,6 +119,7 @@ CHAIN = [
     COMPUTE_SESSIONS_HEAD,
     "0153_repo_memory",
     REPO_MEMORY_HEAD,
+    COMPUTE_TASKS_HEAD,
     HEAD,
 ]
 

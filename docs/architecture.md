@@ -2878,13 +2878,22 @@ reads. Enrollment verifies the attended owner's exact-tool approval with
 `session_card_gap` inside the tool. Unsupported backends and ungated/unreadable
 proofs refuse, including with tool safety off.
 
-`continuity.poll_tools.POLL_TOOLS` is an explicit reviewed READ catalogue; unlisted,
-non-READ and NO_WATCH operations cannot enroll. Poll arguments must explicitly
+`continuity.poll_tools.POLL_TOOLS` is an explicit reviewed READ catalogue of what
+*can* be polled; unlisted, non-READ and NO_WATCH operations cannot enroll. The
+operator's `DAIMON_WATCHES__POLLABLE_TOOLS` registry says what *is* polled in a
+deployment, keyed by `daimon-mcp` or a canonical server URL and the exact tool
+name. `poll_tools.require_listed` reads it fresh at create, at resume and inside
+`authorize_poll` before and after each read; a watch whose tool is delisted pauses
+as `tool_unlisted` and its owner gets the lifecycle DM. Poll arguments must explicitly
 name a source different from the reporting thread, preventing self-report wake loops.
 The agent must currently have that read enabled with `always_allow` in its own
 canonical OS MCP toolset; missing, disabled or approval-required reads stop the watch. Arguments exclude URLs and limit
 reads to 20 messages. The safe jq-style projection subset supports identity, object
-fields and numeric indexes, with 4 KiB, depth-16 and 1,024-node input/output limits.
+fields, numeric indexes and one `[]` map step for polls. The raw read is bounded
+(256 KiB, depth 32, 20,000 nodes) and only the projection is kept: a baseline of at
+most 64 KiB (keyed `added` keeps key fingerprints only) and a payload of at most
+16 KiB and 20 items. `0156_watch_mcp_sources` enforces the kept bounds again in
+SQL; page events keep the 4 KiB limits.
 The first poll saves a baseline without firing. Later `change`, `added` and `updated`
 comparisons save their baseline with evidence and the existing `watch_fired` wake in
 one transaction. False/empty change results re-arm without firing; zero is meaningful.

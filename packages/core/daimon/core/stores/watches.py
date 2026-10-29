@@ -641,12 +641,32 @@ async def register_poll_watch(
     interval: int,
     expires_at: datetime,
     now: datetime,
+    key: str | None = None,
+    evidence: list[str] | None = None,
 ) -> WatchRow:
-    from daimon.core.continuity.poll_tools import require_distinct_source, validate_poll
+    from daimon.core.continuity.poll_tools import (
+        require_distinct_source,
+        require_listed,
+        validate_poll,
+    )
+    from daimon.core.tool_safety import DAIMON_SERVER_NAME
     from pydantic import JsonValue, TypeAdapter
 
+    # The operator registry is the only thing that allows a poll (I4).
+    listed = require_listed(DAIMON_SERVER_NAME, tool)
+    floor = listed.max_interval_floor_s
+    if interval < floor:
+        raise ValueError(f"This tool can be checked no more often than every {floor} seconds")
     args = TypeAdapter(dict[str, JsonValue]).validate_python(arguments)
-    validate_poll(tool, args, projection=projection, rule=rule, interval=interval)
+    validate_poll(
+        tool,
+        args,
+        projection=projection,
+        rule=rule,
+        interval=interval,
+        key=key,
+        evidence=evidence or (),
+    )
     require_distinct_source(args, binding.thread_id)
     watch = await register_page_watch(
         session,
@@ -662,7 +682,12 @@ async def register_poll_watch(
         .values(
             source="poll",
             source_state={"tool": tool, "arguments": args, "interval": interval},
-            rule={"projection": projection, "kind": rule},
+            rule={
+                "projection": projection,
+                "kind": rule,
+                **({"key": key} if key is not None else {}),
+                **({"evidence": evidence} if evidence else {}),
+            },
             next_check_at=now,
         )
     )
@@ -736,6 +761,15 @@ async def release_poll_lease(session: AsyncSession, watch_id: uuid.UUID, lease: 
         .where(Watch.id == watch_id, Watch.lease_owner == lease)
         .values(lease_owner=None, lease_expires_at=None)
     )
+
+
+async def pause_unlisted(session: AsyncSession, watch_id: uuid.UUID, lease: str) -> None:
+    """The operator took the tool off the registry: pause and tell the owner, never retry."""
+    await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
+    row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
+    if row is None or row.lease_owner != lease:
+        return
+    await pause_watch(session, watch_id, reason="tool_unlisted")
 
 
 async def finish_poll(
@@ -985,7 +1019,7 @@ async def claim_import_notice(
         Watch.status == "expired",
         (Watch.status == "paused")
         & or_(
-            reason.in_(("access_revoked", "cap_reached", "failed")),
+            reason.in_(("access_revoked", "cap_reached", "failed", "tool_unlisted")),
             reason.startswith("Watch paused:"),
         ),
     )

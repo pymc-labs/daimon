@@ -29,6 +29,11 @@ async def poll_watch_notices(
                 message = UNMAPPED_NOTICE
             elif reason.startswith("Watch paused:"):
                 message = f"{label}: {reason}"
+            elif reason == "tool_unlisted":
+                message = (
+                    f"{label} paused: watches here can no longer check that tool.\n"
+                    "Ask whoever runs this Daimon to add it back, then ask me to resume it."
+                )
             elif reason == "access_revoked":
                 message = f"{label} paused: owner access was revoked."
             elif watch.status == "paused" and reason == "failed":

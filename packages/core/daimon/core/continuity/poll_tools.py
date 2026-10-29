@@ -3,7 +3,11 @@
 Entries are reviewed with their adapter implementation and live authorization.
 The READ and NO_WATCH flags are independent: a read may be unsuitable to poll.
 No URL, shell, management, model execution, clock or external MCP tool belongs
-here. Expanding this registry requires code review and authorization tests.
+here. Expanding this catalogue requires code review and authorization tests.
+
+The catalogue says what *can* be polled; the operator's registry
+(`DAIMON_WATCHES__POLLABLE_TOOLS`) says what *is* polled in this deployment.
+A watch needs both, checked at create, at resume and before and after each read.
 
 I1 (loops): A poll never fires on content Daimon itself wrote. Bot- and
 assistant-authored rows are excluded before the human-message window and before
@@ -14,11 +18,13 @@ also compares resolved source and destination places.
 """
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from daimon.core.continuity.watch_projection import bounded, projection_path
+from daimon.core.config import PollableTool, load_watches_settings
+from daimon.core.continuity.watch_projection import bounded, projection_path, validate_rule
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from pydantic import JsonValue
 
 
@@ -44,14 +50,41 @@ def require_poll_tool(name: str) -> PollTool:
     return tool
 
 
+class ToolUnlisted(ValueError):
+    """The operator took the tool off the registry; pauses as `tool_unlisted`."""
+
+
+def require_listed(server: str, tool: str) -> PollableTool:
+    """The registry entry for (server, tool); servers compare by name or canonical URL only."""
+    from daimon.core.mcp_server_url import same_mcp_url
+
+    for entry in load_watches_settings().pollable_tools:
+        if entry.tool != tool:
+            continue
+        if server == DAIMON_SERVER_NAME or entry.server == DAIMON_SERVER_NAME:
+            if entry.server == server:
+                return entry
+        elif same_mcp_url(entry.server, server):
+            return entry
+    raise ToolUnlisted("This tool is not on the list of tools a watch can check here")
+
+
 def validate_poll(
-    name: str, arguments: dict[str, JsonValue], *, projection: str, rule: str, interval: int
+    name: str,
+    arguments: dict[str, JsonValue],
+    *,
+    projection: str,
+    rule: str,
+    interval: int,
+    key: str | None = None,
+    evidence: Sequence[str] = (),
 ) -> None:
     tool = require_poll_tool(name)
     bounded(arguments)
-    projection_path(projection)
+    projection_path(projection, allow_map=True)
     if set(arguments) - tool.arguments or rule not in {"change", "added", "updated"}:
         raise ValueError("Unsupported poll arguments or rule")
+    validate_rule(rule, key=key, evidence=evidence)
     identity = "thread_id" if name == "read_thread" else "channel_id"
     value = arguments.get(identity)
     canonical_source_id(value)

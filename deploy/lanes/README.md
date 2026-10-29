@@ -293,8 +293,12 @@ service listens on port 8767 without published ports or proxy routes; the public
 MCP app has no poll route. Compose supplies the same private executor secret to
 sidecar and executor. Both producer gates default off.
 
+Migration `0156_watch_mcp_sources` follows `0155_compute_tasks` and raises the poll
+baseline and payload bounds. `DAIMON_WATCHES__POLLABLE_TOOLS` lists the tools a
+watch may poll; leave it unset to keep `read_thread` and `read_channel`.
+
 See [self-hosting](../../docs/self-hosting.md#polling-and-owner-management) for the
-reviewed read registry, owner tools and card approval, signing-key delivery,
+operator watch list, owner tools and card approval, signing-key delivery,
 source authorization, projection limits, scheduling, leases, caps and backoff.
 That section also gives the standalone private-listener command and secret setup.
 The exact preview enable commands and four-step polling exercise are below.

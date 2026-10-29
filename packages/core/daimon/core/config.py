@@ -21,7 +21,7 @@ from uuid import UUID
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.scope_cascade import CascadeMode
 from daimon.core.thread_participation import ParticipationMode
-from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from pydantic import (
     AwareDatetime,
     BaseModel,
@@ -2116,6 +2116,73 @@ class FleetSettings(BaseModel):
     )
 
 
+class PollableTool(BaseModel):
+    """One operator-listed tool a watch may poll. The list is the only thing that allows a poll."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    server: str = Field(
+        description=(
+            '"daimon-mcp" for a native reader, or the https URL of an MCP server. Never a '
+            "server name: names are chosen per agent."
+        )
+    )
+    tool: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$", description="Exact tool name.")
+    credential: Literal["agent", "owner", "none"] = Field(
+        description='The one credential a poll may use; native readers use "none".'
+    )
+    returns_chat: bool = Field(
+        description=(
+            "Whether the tool can return chat or archive text Daimon posts. Required; "
+            "refused for MCP servers, since only native readers drop Daimon's own rows."
+        )
+    )
+    max_interval_floor_s: int = Field(
+        default=300, ge=60, le=86400, description="Shortest poll interval allowed for this tool."
+    )
+    label: str = Field(default="", max_length=80, description="Shown on the approval card.")
+
+    @field_validator("server")
+    @classmethod
+    def _canonical_server(cls, value: str) -> str:
+        if value == DAIMON_SERVER_NAME:
+            return value
+        url = canonical_mcp_url(value)
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+            raise ValueError('server must be "daimon-mcp" or an https URL without credentials')
+        return url
+
+    @model_validator(mode="after")
+    def _reviewed(self) -> PollableTool:
+        # Lazy: the catalogue reads these settings.
+        from daimon.core.continuity.poll_tools import POLL_TOOLS
+
+        if self.server == DAIMON_SERVER_NAME:
+            if self.tool not in POLL_TOOLS or self.credential != "none":
+                raise ValueError(
+                    f"daimon-mcp/{self.tool} is not a reviewed native poll tool "
+                    "with credential none"
+                )
+        elif self.returns_chat:
+            raise ValueError(f"{self.tool} returns chat; MCP server tools that do cannot be polled")
+        return self
+
+
+def _default_pollable_tools() -> list[PollableTool]:
+    return [
+        PollableTool(
+            server="daimon-mcp",
+            tool=tool,
+            credential="none",
+            returns_chat=True,
+            max_interval_floor_s=60,
+            label=label,
+        )
+        for tool, label in (("read_thread", "Discord thread"), ("read_channel", "Discord channel"))
+    ]
+
+
 class WatchesSettings(BaseModel):
     @field_validator("executor_secret", mode="before")
     @classmethod
@@ -2143,6 +2210,48 @@ class WatchesSettings(BaseModel):
             "The database global gate must also be explicitly enabled by an operator."
         ),
     )
+    pollable_tools: Annotated[list[PollableTool], NoDecode] = Field(
+        default_factory=_default_pollable_tools,
+        description=(
+            "JSON list of the tools a watch may poll in this deployment. Only a listed "
+            "tool can be polled: a watch on a tool taken off the list pauses at its next "
+            'poll and its owner is told. Each entry has server ("daimon-mcp" for a native '
+            "reader, otherwise an https MCP server URL, never a server name), tool (exact "
+            'name), credential ("none" for native readers; "agent" or "owner" for '
+            "MCP servers), returns_chat (required: true only for native readers, which "
+            "drop Daimon's own messages), max_interval_floor_s (shortest interval, at "
+            "least 60, default 300) and label (shown on the approval card). Native "
+            "entries must be read_thread or read_channel. MCP server entries are checked "
+            "here but are not polled yet. A server's read-only annotation never allows a "
+            "poll; only this list does. Default: read_thread and read_channel on "
+            "daimon-mcp, credential none, returns_chat true, floor 60."
+        ),
+    )
+
+    @field_validator("pollable_tools", mode="before")
+    @classmethod
+    def _parse_pollable_tools(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return []
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"DAIMON_WATCHES__POLLABLE_TOOLS is not valid JSON "
+                f"(line {err.lineno}, column {err.colno})"
+            ) from None
+
+    @field_validator("pollable_tools")
+    @classmethod
+    def _unique_pollable_tools(cls, value: list[PollableTool]) -> list[PollableTool]:
+        seen: set[tuple[str, str]] = set()
+        for entry in value:
+            if (entry.server, entry.tool) in seen:
+                raise ValueError(f"{entry.server}/{entry.tool} is listed more than once")
+            seen.add((entry.server, entry.tool))
+        return value
 
 
 class ComputeProfile(BaseModel):

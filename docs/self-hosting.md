@@ -1775,16 +1775,27 @@ access pauses polling and cancels queued work. Expired watches stop automaticall
 another owner's watch). Creation, resume and signing-key rotation require an attended
 owner `origin_context_id` and a human confirmation card even with tool safety off;
 admins cannot resume or rotate for someone else. Creation never takes a
-caller-selected owner or destination. Only reviewed `read_thread` and `read_channel`
-are pollable; no arbitrary HTTP or external sender mode is supported. Poll intervals
-are 60–86400 seconds, with 1–30 day lifetime and at most 25 live watches per owner.
+caller-selected owner or destination. Only tools on the deployment's watch list,
+`DAIMON_WATCHES__POLLABLE_TOOLS`, are pollable; no arbitrary HTTP or external sender
+mode is supported. The list is a JSON array of entries with `server` (`daimon-mcp`
+for a native reader, otherwise an `https` MCP server URL compared in canonical form,
+never a server name), `tool`, `credential`, `returns_chat` (required) and optional
+`max_interval_floor_s` and `label`. Native entries must be the reviewed `read_thread`
+or `read_channel` with credential `none`; an MCP server entry with `returns_chat:
+true` is refused at startup. MCP server entries are validated but not polled yet.
+The default lists `read_thread` and `read_channel` with a 60-second floor, which is
+today's behaviour. A server's read-only annotation never makes a tool pollable; only
+this list does. The list is read fresh at create, at resume, and before and after
+each read: an unlisted tool is refused at create and resume, and a watch whose tool
+is removed pauses at its next poll with reason `tool_unlisted` and its owner gets
+one private message. Poll intervals are the listed floor (at least 60 seconds) to
+86400 seconds, with 1–30 day lifetime and at most 25 live watches per owner.
 The first successful poll establishes the baseline without waking the agent.
 Polls select human-authored rows before the message limit; bots/assistants and
 pagination metadata never enter projections. Self-reports and cross-watch reports
 cannot trigger polls. At most 201 messages are scanned; an incomplete human window
 backs off without changing the baseline. Poll documents contain only `rows`;
-legacy baselines are re-established without firing, and the versioned saved-value
-envelope shares the 4 KiB bound. Source IDs require canonical positive
+legacy baselines are re-established without firing. Source IDs require canonical positive
 ASCII decimal spelling (1–20 digits). Enrollment verifies the attended owner's
 exact-tool card proof server-side via `session_card_gap`; unsupported backends and
 ungated/unreadable sessions refuse, including with tool safety off.
@@ -1793,10 +1804,21 @@ must have the read enabled without approval on its canonical OS MCP toolset.
 Gate, expiry and lease races release the matching poll lease without marking owner
 access revoked. Actual owner or binding revocation pauses and cancels queued wakes.
 
-Projections accept `.`, `.field.nested` and `.rows[0].content`; unsupported jq must
-be rewritten by an operator. Input and output are limited to 4 KiB, depth 16 and
-1,024 JSON nodes. `change` fires on a new non-empty/non-false value (including zero),
-`added` on new array elements and `updated` on new/changed object keys. Deletions
+Projections accept `.`, `.field.nested`, `.rows[0].content` and, for polls, one
+`[]` step after a field or index (`.rows[].content`); unsupported jq must be
+rewritten by an operator. Poll results have three bounds. The raw read is checked
+before projection (256 KiB, depth 32, 20,000 JSON nodes) and never stored. The
+saved baseline is at most 64 KiB. One wake payload is at most 16 KiB with at most
+20 items, each clipped to 1 KiB, and the rest counted as `omitted`. Migration
+`0156_watch_mcp_sources` enforces the baseline and payload bounds again in the
+firing transaction and raises the per-watch evidence byte quota from 128 KiB to
+512 KiB; owner, tenant and global quotas are unchanged. Page-event documents keep
+the 4 KiB, depth-16, 1,024-node limits. `change` fires on a new non-empty/non-false
+value (including zero), `added` on new array elements and `updated` on
+new/changed object keys. With `added`, an optional `key` such as `.rows[].id`
+compares items by that field and the baseline keeps only 24-character SHA-256
+fingerprints of at most 2,000 keys, never the keys; optional `evidence` (at most 8
+field paths such as `.content`) chooses what each new item reports. Deletions
 alone do not fire. The latest 20 events plus an omitted count are retained per
 pending firing. Daily caps (24/watch, 100/owner), evidence quotas and seven-day
 retention are shared across callbacks and polls. No additional turn path exists.

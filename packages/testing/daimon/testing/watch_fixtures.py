@@ -82,6 +82,11 @@ async def install_poll_ports(session: AsyncSession) -> None:
     )
     for key in ("PROJECT_SQL", "PAGE_SQL", "POLL_SQL", "CLAIM_SQL"):
         await session.execute(text(migration[key].format(schema=quoted)))
+    # 0156 replaces the firing transaction with the larger kept bounds.
+    bounds = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0156_watch_mcp_sources.py")
+    )
+    await session.execute(text(cast(str, bounds["POLL_SQL"]).format(schema=quoted)))
     await session.execute(
         text(f"REVOKE ALL ON FUNCTION {quoted}.project_watch_document(jsonb,text) FROM PUBLIC")
     )

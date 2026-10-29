@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Operators choose which tools a watch may poll with `DAIMON_WATCHES__POLLABLE_TOOLS`; the default keeps `read_thread` and `read_channel`. An unlisted tool is refused at create and resume, and a watch whose tool is taken off the list pauses and its owner gets one private message. Polled watches also handle bigger results: a `[]` step in projections, `added` by a `key` that keeps only fingerprints, chosen `evidence` fields per new item, a 256 KiB raw read, a 64 KiB baseline and 16 KiB reports of at most 20 items with the rest counted (migration `0156_watch_mcp_sources`).
+
 - Add `daimon routines link-internal` to link a paused, never-fired routine to its internal original before `seed-first-run`, with a dry run by default and refusal of existing or conflicting links. Linking and seeding share never-fired validation, allowing paused DM routines with edit-only skipped delivery markers.
 
 - Add `daimon routines create --paused` to create disabled routines with no next
