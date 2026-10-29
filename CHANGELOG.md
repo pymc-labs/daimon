@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Add `daimon routines link-internal` to link a paused, never-fired routine to its internal original before `seed-first-run`, with a dry run by default and refusal of existing or conflicting links. Linking and seeding share never-fired validation, allowing paused DM routines with edit-only skipped delivery markers.
+- Add `daimon routines create --paused` to create disabled routines with no next
+  fire time, ready for a later resume or `seed-first-run` cutover. Dry-run reports
+  whether the routine would be created paused or enabled.
 
 - Stop a polled watch that keeps failing: after at least five errors in a row over at least a day it pauses, cancels its queued wakes and sends its owner one private message; resuming it with the usual approval resets the count. Owners also get one private message per watch per rolling day when a daily cap holds back a firing; the watch keeps running and fires again when the day rolls.
 

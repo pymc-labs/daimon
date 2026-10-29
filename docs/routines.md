@@ -72,8 +72,11 @@ daimon routines create --tenant TENANT_UUID --owner DISCORD_USER_ID \
   --trigger 'Summarize my tasks' --destination dm --dry-run
 ```
 
-Remove `--dry-run` to write it. Dry-run still verifies the live owner and
-agent, and prints the resolved recipient and budget source. An optional
+Remove `--dry-run` to write it. Add `--paused` to create it disabled with no
+next fire time; without that flag it starts enabled. Resuming a paused routine
+computes its first slot from the resume time. Dry-run still verifies the live
+owner and agent, and prints the resolved recipient, budget source and whether
+the routine would be created paused or enabled. An optional
 `--source-channel` must resolve to a supported channel or thread in the selected
 tenant's Discord guild. Threads retain their parent for budgeting and their own
 ID for source restriction checks. Dry-run performs the same source verification
@@ -285,7 +288,10 @@ claimed run; catch-up applies to slots still pending in `next_fire_at`.
 
 Use the operator CLI with database credentials. Before moving from the internal
 bot to Daimon, pause the internal bot's scheduler and drain its runs; take each
-routine's last **completed scheduled slot** T from the internal bot. Keep the matching Daimon routines paused and never fired.
+routine's last **completed scheduled slot** T from the internal bot. Recreate
+owner-DM routines ahead of the switch with `daimon routines create --paused`
+and the required creation options above. Keep the matching Daimon routines
+paused and never fired until `seed-first-run --apply` enables them.
 The seed command is a dry run unless `--apply` is given:
 
 ```sh
