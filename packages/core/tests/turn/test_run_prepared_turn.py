@@ -1092,22 +1092,29 @@ async def test_recovery_rebinds_the_recorder_to_the_recreated_sessions_model(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-recovery-model",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    with structlog.testing.capture_logs(
+        processors=[structlog.contextvars.merge_contextvars]
+    ) as logs:
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-recovery-model",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
 
     assert outcome.recovered is True, "the dead session must be recovered exactly once"
+    completed = [entry for entry in logs if entry["event"] == "turn.completed"]
+    assert completed and completed[-1]["model"] == "claude-opus-5", (
+        "the replacement session's lines name its own model"
+    )
     async with db_session_factory() as s:
         rows = await usage_events.list_for_tenant(s, tenant_id=tenant.id)
         entries = await tenant_ledger.list_for_tenant(s, tenant_id=tenant.id)

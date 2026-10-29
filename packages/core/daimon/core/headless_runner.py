@@ -506,7 +506,7 @@ async def run_turn_impl(
         if (observation := current_outcome.get()) is not None:
             observation.session_id = session.id
             observation.model_by_session[session.id] = model_choice_id(session.agent.model)
-            observation.backend = "anthropic/anthropic.managed_agents"
+            observation.backend = f"{MANAGED_AGENTS.provider}/{MANAGED_AGENTS.profile_id}"
 
         usage_record: Callable[..., Awaitable[object]] | None = None
         if usage_record_factory is not None:
@@ -577,8 +577,8 @@ async def run_turn_impl(
         # chat turn's do (`run_prepared_turn`).
         with (
             structlog.contextvars.bound_contextvars(
-                backend="anthropic",
-                profile="anthropic.managed_agents",
+                backend=MANAGED_AGENTS.provider,
+                profile=MANAGED_AGENTS.profile_id,
                 model=model_choice_id(session.agent.model),
             ),
             persistence.activate() if persistence is not None else contextlib.nullcontext(),

@@ -654,6 +654,69 @@ async def test_a_second_cancel_during_revocation_still_restores_the_callers_log_
     assert left == {"backend": "the caller's"}, "the turn's fields never outlive it"
 
 
+async def test_a_failing_revocation_still_restores_the_callers_log_fields(
+    monkeypatch,
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    import structlog
+    from daimon.core.turn import run as run_module
+
+    async def finalize() -> None:
+        raise RuntimeError("revocation failed")
+
+    async def forever(*_args, **_kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(run_module, "run_prepared_turn_impl", forever)
+    observation = SimpleNamespace(
+        activate=lambda: __import__("contextlib").nullcontext(),
+        finish=lambda **_: None,
+        thread_id=None,
+        model_by_session={},
+    )
+    prepared = SimpleNamespace(
+        admission=SimpleNamespace(
+            observation=observation,
+            account_id=None,
+            agent=SimpleNamespace(id="agent"),
+            backend_footer_profile=None,
+            backend_revision=None,
+        ),
+        ma_session_id="session",
+        _finalize=finalize,
+    )
+    deps = SimpleNamespace(
+        backend_selection_enabled=False,
+        running_turns=SimpleNamespace(track=lambda: __import__("contextlib").nullcontext()),
+    )
+
+    async def caller() -> dict[str, object]:
+        structlog.contextvars.bind_contextvars(backend="the caller's")
+        with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+            await run_module.run_prepared_turn(
+                deps,  # pyright: ignore[reportArgumentType]
+                prepared,  # pyright: ignore[reportArgumentType]
+                tenant_id=None,  # pyright: ignore[reportArgumentType]
+                platform="discord",
+                thread_id="t",
+                external_user_id="u",
+                user_message="m",
+                lifecycle=None,  # pyright: ignore[reportArgumentType]
+                cancel=asyncio.Event(),
+                reseed_user_message=None,  # pyright: ignore[reportArgumentType]
+                recovery_lifecycle=None,  # pyright: ignore[reportArgumentType]
+            )
+        return dict(structlog.contextvars.get_contextvars())
+
+    task = asyncio.create_task(caller())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    left = await task
+    assert left == {"backend": "the caller's"}, "the turn's fields never outlive it"
+
+
 async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_is_logged(
     monkeypatch,
 ):

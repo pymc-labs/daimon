@@ -104,7 +104,7 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import SUPPORTED
 from mux.errors import ScopeViolation, UnsupportedCapability
-from mux.profiles import get_profile
+from mux.profiles import MANAGED_AGENTS, get_profile
 from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -944,8 +944,8 @@ async def run_prepared_turn(
     )
     marking = SEND_ATTEMPTED.set(sent)
     revision = prepared.admission.backend_revision
-    backend = revision.backend if revision is not None else "anthropic"
-    profile = revision.profile if revision is not None else "anthropic.managed_agents"
+    backend = revision.backend if revision is not None else MANAGED_AGENTS.provider
+    profile = revision.profile if revision is not None else MANAGED_AGENTS.profile_id
     observation.backend = f"{backend}/{profile}"
     # Every log line of the turn names the backend it ran on, so failures, lost
     # connections and ceilings can be counted per backend. Bound until the end of
