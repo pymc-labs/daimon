@@ -1,5 +1,6 @@
 """Contract fakes exercise the bridge independently of N5's lifecycle driver."""
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -12,15 +13,17 @@ from daimon.core.turn.driver import (
     _handle_interrupt_in_consume,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.turn.io import MuxTurnIO, TurnConnectionLost, TurnIO
+from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, stop_termination_reason
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.actions import UserMessage
-from mux.contracts.events import TextPart, TurnOutcome
+from mux.contracts.events import Event, TextPart, TurnOutcome
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
 from mux.contracts.resources import Session
+from mux.drivers.anthropic.normalize import EventNormalizer
 from mux.errors import ProviderError
 
 SCOPE = Scope(
@@ -266,3 +269,141 @@ def test_foreign_session_binding_fails_before_any_port_io(changed: dict[str, str
     backend = cast(ManagedAgents, SimpleNamespace())
     with pytest.raises(ScopeViolation):
         MuxTurnIO(backend, SCOPE, SESSION.model_copy(update=changed))
+
+
+class _History:
+    """An Anthropic session log behind the mux ports: send and the full walk."""
+
+    def __init__(self, *records: dict[str, object], lands: bool = True, ack: str = "processed"):
+        self.records = list(records)
+        self.lands, self.ack = lands, ack
+        self.sent = 0
+
+    def events(self) -> list[Event]:
+        normalizer = EventNormalizer(SESSION)
+        now = datetime.now(UTC)
+        return [normalizer.normalize(dict(record), observed_at=now) for record in self.records]
+
+    async def send(self, scope: Scope, session: ResourceRef, inputs: object, *, key: str):
+        self.sent += 1
+        input_id = f"user-{len(self.records)}"
+        if self.lands:
+            self.records.append(_user(input_id, "question"))
+        ids = (input_id,) if self.ack == "processed" else ()
+        return SendReceipt(operation_id=key, status=self.ack, input_ids=ids)  # type: ignore[arg-type]
+
+    async def walk(self, scope: Scope, session: ResourceRef) -> AsyncIterator[Event]:
+        for event in self.events():
+            yield event
+
+    def backend(self) -> ManagedAgents:
+        return cast(
+            ManagedAgents,
+            SimpleNamespace(
+                events=SimpleNamespace(send=self.send),
+                extension=lambda port, *, namespace, version: self,
+            ),
+        )
+
+
+class _Journal:
+    """The host journal: what earlier turns recorded, deduplicated by native id."""
+
+    def __init__(self, *events: Event) -> None:
+        self.rows: list[Event] = []
+        for event in events:
+            self.add(event)
+        self.store = SimpleNamespace(read_events=self.read_events)
+
+    def add(self, event: Event) -> None:
+        if all(row.native.event_id != event.native.event_id for row in self.rows):
+            self.rows.append(event.model_copy(update={"sequence": len(self.rows)}))
+
+    async def read_events(self, session_id: str, *, after: int = -1, limit: int = 1000):
+        assert session_id == SESSION.id
+        return self.rows[after + 1 : after + 1 + limit]
+
+    def check_session(self, scope: Scope, session: ResourceRef) -> None:
+        assert session == SESSION
+
+    async def record(self, session: ResourceRef, event: Event) -> None:
+        self.add(event)
+
+    async def mutate(self, session, kind, request, call, response, status):
+        return await call("operation-key")
+
+
+def _record(id_: str, type_: str, **values: object) -> dict[str, object]:
+    return {"id": id_, "type": type_, "processed_at": "2026-10-29T00:00:00+00:00", **values}
+
+
+def _user(id_: str, text: str) -> dict[str, object]:
+    return _record(id_, "user.message", content=[{"type": "text", "text": text}])
+
+
+# The previous turn asked the same words and finished; the host journaled it.
+_PREVIOUS = (
+    _user("user-0", "question"),
+    _record("agent-1", "agent.message", content=[{"type": "text", "text": "old answer"}]),
+    _record("idle-2", "session.status_idle", stop_reason={"type": "end_turn"}),
+)
+_QUESTION: list[BetaManagedAgentsEventParams] = [
+    {"type": "user.message", "content": [{"type": "text", "text": "question"}]}
+]
+
+
+def _io(history: _History) -> tuple[MuxTurnIO, _Journal]:
+    journal = _Journal(*history.events())
+    io = MuxTurnIO(history.backend(), SCOPE, SESSION, persistence=cast(TurnPersistence, journal))
+    return io, journal
+
+
+async def test_lost_acknowledgement_reattaches_when_the_input_landed() -> None:
+    # F12: the designed reattach still works; the input is new to the journal.
+    history = _History(*_PREVIOUS, ack="outcome_unknown")
+    io, _ = _io(history)
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    replayed = await io.replay()
+    assert history.sent == 1 and [e.id for e in replayed][-1] == "user-3"
+
+
+async def test_lost_acknowledgement_never_adopts_the_previous_answer() -> None:
+    # F12: the input never reached the session. The earlier turn's ending must
+    # not read as this turn's answer, even with the same words, on any replay.
+    history = _History(*_PREVIOUS, ack="outcome_unknown", lands=False)
+    io, _ = _io(history)
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    for _ in range(2):
+        with pytest.raises(TurnConnectionLost, match="did not reach the session"):
+            await io.replay()
+    assert history.sent == 1
+
+
+async def test_an_input_the_live_stream_already_journaled_is_this_turns() -> None:
+    history = _History(*_PREVIOUS, ack="outcome_unknown")
+    io, journal = _io(history)
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    # The stream delivered the input and journaled it before it dropped.
+    await io._record(history.events()[-1])  # pyright: ignore[reportPrivateUsage]
+    assert journal.rows[-1].id == "user-3"
+    assert [e.id for e in await io.replay()][-1] == "user-3"
+
+
+async def test_a_confirmed_input_must_be_in_the_replayed_history() -> None:
+    history = _History(*_PREVIOUS)
+    io, _ = _io(history)
+    await io.send(_QUESTION)
+    await io.replay()
+    history.records.pop()  # a history that lost the receipt's own input
+    with pytest.raises(TurnConnectionLost, match="not in the session history"):
+        await io.replay()
+
+
+async def test_a_turn_that_never_posted_replays_unchecked() -> None:
+    # A restored receipt (another process posted) has nothing to compare against.
+    history = _History(*_PREVIOUS)
+    io, _ = _io(history)
+    assert [e.id for e in await io.replay()][-1] == "idle-2"
