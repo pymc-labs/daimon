@@ -206,6 +206,10 @@ __all__ = [
 # in-flight turn to end, and the retry is the caller's next message either way.
 BUSY_RETRY_S = 5
 
+# Stamped by the removed `isolate_context` option on sessions that mount only a
+# relay. Such a session starts afresh instead of being updated in place.
+_LEGACY_ISOLATED_METADATA_KEY = "daimon_context_isolated"
+
 
 @dataclass(frozen=True, slots=True)
 class PreparationDeferred:
@@ -884,6 +888,11 @@ async def _prepare_session_for_turn_locked(
                 and stamp_observation[0] == row.id
             ):
                 observed = stamp_observation[1]
+            if (
+                observed is not None
+                and (observed.metadata or {}).get(_LEGACY_ISOLATED_METADATA_KEY) == "true"
+            ):
+                fresh_start = True
             if identity.session_exists:
                 if row.budget_channel_id == "" and stamp_observation is None:
                     # The pre-lock MA read failed. A second read of the same

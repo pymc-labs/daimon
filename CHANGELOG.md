@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A Gemini agent's reply no longer goes missing. Gemini stamps a new reply to the microsecond but every later read of it to the second, so Daimon took each later read for an older one and never saw the reply finish: the turn ended "Lost the connection" and the next message in that thread "Something went wrong". Threads stuck this way recover on their next message.
 - GitHub setup can save newly available repos even when Daimon has an older cached repo list. Error pages show the explanation once, and unexpected save failures ask for help instead of sending you through another sign-in.
-- A signed-identity MCP server on private HTTPS can set a public `ca_certificate` without changing TLS trust for other relays. The `isolate_context` option for signed-identity MCP servers was removed: remove it from `DAIMON_MCP_IDENTITY__SERVERS` entries, since unknown keys are rejected. The relay still names the asker only while that person's turn is live in the calling session's thread.
+- A signed-identity MCP server on private HTTPS can set a public `ca_certificate` without changing TLS trust for other relays.
 - **Remote MCP servers can verify who is calling (`DAIMON_MCP_IDENTITY__SERVERS`, off by default).**
   A server listed there is attached to an agent at `<root>/mcp-identity/<name>`. Daimon forwards
   each request with `Authorization: Bearer` and a two-minute EdDSA token signed with

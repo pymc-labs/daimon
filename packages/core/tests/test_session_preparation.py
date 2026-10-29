@@ -1430,6 +1430,33 @@ async def test_a_fresh_start_retires_the_old_row_and_carries_nothing(
     assert second.continuity.applied == (), "a fresh start is not a configuration change"
 
 
+async def test_a_legacy_isolated_session_starts_fresh_and_carries_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    admission = _admission(account=account)
+
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    transport.state.sessions[first.ma_session_id].metadata["daimon_context_isolated"] = "true"
+
+    async def _transfer(**_kwargs: Any) -> PreparedReplacement:
+        raise AssertionError("a relay-only session's transcript is not carried")
+
+    second = await _prepare(deps, admission, tenant=tenant, account=account, transfer=_transfer)
+
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id != first.ma_session_id, "it is replaced, not updated in place"
+    third = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(third, PreparedTurn)
+    assert third.ma_session_id == second.ma_session_id, "the replacement is reused"
+
+
 async def test_a_marked_active_session_is_not_returned_for_reuse(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
