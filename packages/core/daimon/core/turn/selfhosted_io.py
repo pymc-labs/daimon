@@ -198,11 +198,6 @@ class _SelfHostedStream(AsyncIterator[TurnEvent]):
 
 
 class SelfHostedTurnIO:
-    #: Replay keeps only this turn's own native root and drops every earlier
-    #: one (`_prior_roots`), so a reconnect after an uncertain first send cannot
-    #: adopt a previous turn's answer.
-    replay_scoped_to_turn: bool = True
-
     def __init__(
         self,
         backend: ManagedAgents,

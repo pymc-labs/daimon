@@ -186,10 +186,6 @@ class _OpenAIStream(AsyncIterator[TurnEvent]):
 
 
 class OpenAITurnIO:
-    #: Replay keeps only this turn's own native root and drops every earlier
-    #: one (`_prior_roots`), so a reconnect after an uncertain first send cannot
-    #: adopt a previous turn's answer.
-    replay_scoped_to_turn: bool = True
     #: OpenAI's event stream replays nothing: a turn that ended before it connected,
     #: or between a reconcile and it, is never reported there, and keep-alive frames
     #: hide the silence (probe 2026-10-23). The driver asks for the session status

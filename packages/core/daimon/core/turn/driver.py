@@ -181,6 +181,8 @@ async def _read_after_quiet[R](
             if not _transient_read_error(error):
                 raise
             if delay is None:
+                if isinstance(error, _CONNECTION_LOST):
+                    raise
                 raise TurnConnectionLost(f"{name} read kept failing") from error
             log.warning(
                 "turn.quiet_read_retry",
@@ -509,15 +511,6 @@ class _InterruptInConsume(Exception):
     """
 
 
-class _TurnMessageMissing(Exception):
-    """The first send failed with its outcome unknown, and nothing shows this
-    turn's message reached the provider: the reconnect replay may hold only an
-    earlier turn, so nothing in it may finish this one.
-
-    Module-private sentinel; caught at `_pump`'s top level as a lost connection.
-    """
-
-
 class _EventlessCycle(Exception):
     """The SSE stream ended without a terminal event: either a clean close
     (`StopAsyncIteration`) or a mid-body read stall (`httpx.ReadTimeout`).
@@ -751,20 +744,7 @@ async def run_turn(
                     unwedge_attempts[0] += 1
                     raise _SessionAwaitingConfirmations() from err
                 raise
-        message_sent[0] = True
         await acknowledge(lifecycle, "accepted")
-
-    # Whether this turn's message is known to have reached the provider. A first
-    # send that failed with its outcome unknown is followed by a reconnect replay
-    # whose newest message may still be the previous turn's, even in the same
-    # words, and nothing was read live before the send failed. Without the send's
-    # own confirmation that replay cannot be trusted for this turn, unless the IO
-    # scopes its replay to this turn's own native id.
-    message_sent = [False]
-    replay_scoped = bool(getattr(io, "replay_scoped_to_turn", False))
-
-    def _send_confirmed() -> bool:
-        return message_sent[0] or replay_scoped
 
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session_id
@@ -775,7 +755,6 @@ async def run_turn(
             anthropic=anthropic,
             session_id=session_id,
             send_initial=_send_initial,
-            send_confirmed=_send_confirmed,
             render_anchor=TurnState(),
             seed_state=TurnState(),
             lifecycle=lifecycle,
@@ -1017,7 +996,6 @@ async def _pump(
     anthropic: AsyncAnthropic,
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
-    send_confirmed: Callable[[], bool] = lambda: True,
     render_anchor: TurnState,
     seed_state: TurnState,
     lifecycle: TurnLifecycle,
@@ -1160,7 +1138,6 @@ async def _pump(
                                 anthropic=anthropic,
                                 session_id=session_id,
                                 send_initial=send_initial,
-                                send_confirmed=send_confirmed,
                                 is_retry=attempt_is_retry,
                                 reconnect_reason=attempt_reason,
                                 state_cell=state_cell,
@@ -1348,9 +1325,8 @@ async def _pump(
                 interrupt_timeout_s=interrupt_timeout_s,
                 renders_failed=renders_failed_cell[0],
             )
-        except (*_CONNECTION_LOST, _TurnMessageMissing) as err:
-            # tenacity exhausted with reraise=True, or a reconnect that found no
-            # trace of this turn's message.
+        except _CONNECTION_LOST as err:
+            # tenacity exhausted with reraise=True.
             await _cancel_render()
             return await _finalize_connection_lost(
                 state_cell=state_cell,
@@ -1686,7 +1662,6 @@ async def _consume_with_reconnect(
     anthropic: AsyncAnthropic,
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
-    send_confirmed: Callable[[], bool],
     is_retry: bool,
     reconnect_reason: ReconnectReason,
     state_cell: list[TurnState],
@@ -1750,8 +1725,6 @@ async def _consume_with_reconnect(
                     raise _InterruptedDuringRecovery(phase="replay") from None
             if cancel.is_set():
                 raise _InterruptedDuringRecovery(phase="replay")
-            if not send_confirmed():
-                raise _TurnMessageMissing()
             current_turn_events = _events_since_last_turn_boundary(
                 replayed, tool_confirmation=tool_confirmation
             )

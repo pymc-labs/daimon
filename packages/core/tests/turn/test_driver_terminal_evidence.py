@@ -24,7 +24,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.errors import TurnError
 from daimon.core.turn import driver
-from daimon.core.turn.io import LegacyTurnIO, TurnConnectionLost, TurnStream
+from daimon.core.turn.io import LegacyTurnIO, TurnStream
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -207,56 +207,6 @@ async def test_stop_before_the_first_read_after_a_quiet_stream_interrupts() -> N
             status, name="status", session_id="sess_1", cancel=cancel
         )
     assert reads == []
-
-
-class _UncertainFirstSend(_Wrapped):
-    """The first send's outcome is unknown: the reconnect decides what it was."""
-
-    async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-        self.sends += 1
-        if self.sends == 1:
-            raise TurnConnectionLost("input acknowledgement was lost; its outcome is unknown")
-        await self.source.send(events)
-
-
-@pytest.mark.parametrize("earlier_question", ["the earlier question", "this question"])
-async def test_a_reconnect_after_an_uncertain_send_never_adopts_the_previous_turn(
-    monkeypatch: pytest.MonkeyPatch, earlier_question: str
-) -> None:
-    """Even when the earlier question had the very same words."""
-    fake = FakeAnthropic()
-    fake.beta.sessions.events.stream_scripts = [[], []]
-    fake.beta.sessions.events.replay_events = [
-        _user("u_prev", earlier_question),
-        make_agent_message(event_id="a_prev", text="the earlier answer"),
-        make_status_idle(event_id="idle_prev", stop_reason=make_end_turn()),
-    ]
-
-    final, lifecycle = await _run(
-        monkeypatch, fake, _UncertainFirstSend(fake), user_message="this question"
-    )
-
-    assert final.termination == TerminationReason.CONNECTION_LOST
-    assert final.content == [], "the earlier turn's answer must not become this one's"
-    assert lifecycle.terminal_success == []
-
-
-async def test_a_reconnect_after_an_uncertain_send_on_a_turn_scoped_replay_carries_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake = FakeAnthropic()
-    answer = make_agent_message(event_id="a_now", text="this answer")
-    done = make_status_idle(event_id="idle_now", stop_reason=make_end_turn())
-    fake.beta.sessions.events.stream_scripts = [[], [YieldEvent(answer), YieldEvent(done)]]
-    fake.beta.sessions.events.replay_events = [_user("u_now", "this question")]
-
-    class Scoped(_UncertainFirstSend):
-        replay_scoped_to_turn = True
-
-    final, lifecycle = await _run(monkeypatch, fake, Scoped(fake), user_message="this question")
-
-    assert final.content == [TextBlock(kind="text", text="this answer")]
-    assert len(lifecycle.terminal_success) == 1
 
 
 @pytest.mark.parametrize("narration_text", ["   ", "I'll check that."])
