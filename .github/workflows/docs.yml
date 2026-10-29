@@ -9,12 +9,14 @@ on:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      - "scripts/check_docs.py"
       - ".github/workflows/docs.yml"
   # Repeated rather than shared: GitHub Actions does not support YAML anchors.
   pull_request:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      - "scripts/check_docs.py"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -39,6 +41,10 @@ jobs:
           # Off: uv's GitHub cache keeps only wheels it built (~25 MB) and
           # restoring it took longer than downloading the ~200 wheels (~3 s).
           enable-cache: false
+
+      # Page, paragraph and sentence budgets for the hand-written pages.
+      - name: readability
+        run: uv run --no-project python scripts/check_docs.py
 
       # Deliberately not a dependency group: the site needs none of the
       # project's own packages, and keeping it out of the lockfile means a

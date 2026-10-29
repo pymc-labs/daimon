@@ -100,8 +100,9 @@ uv run python scripts/generate_mcp_tool_catalogue.py --check # docs/mcp-tools.md
 Those three pages are written by generators, so a change to a settings field's
 `Field(description=...)` or to an MCP tool's docstring is a change to their
 source: re-run the generator without `--check` and commit the result, rather
-than editing the page. `CLAUDE.md` has the table of which change means which
-generator, and which pages are maintained by hand.
+than editing the page. `CLAUDE.md` says which page a change belongs on and
+how to write it; `scripts/check_docs.py` keeps the hand-written pages within
+their length budgets.
 
 CI splits the Postgres-backed pytest run into parallel jobs, and the largest
 suites (`core`, `mcp`, `discord`) into shards by test file with
