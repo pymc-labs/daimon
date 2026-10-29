@@ -260,6 +260,13 @@ async def handle_credential_request_click(runtime: SlackRuntime, payload: dict[s
             await edit_posted_card(client, row=row, state="expired")
         return
 
+    if row.kind == "watch_credential":
+        # Watches run in Discord only; Slack never opens a watch key form.
+        await post_ephemeral(
+            client, channel_id=channel_id, user_id=user_id, text=NO_LONGER_VALID_MESSAGE
+        )
+        return
+
     if row.kind == "mcp_oauth":
         # No modal: the value is a browser sign-in. The requester gets a
         # private link and the mcp process finishes the rest.

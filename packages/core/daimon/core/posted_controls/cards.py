@@ -78,7 +78,9 @@ CardState = Literal[
 ]
 #: `env_file` is a bulk upload of one .env file; the other four match the
 #: single-value request kinds in `daimon.core.credential_requests`.
-CardKind = Literal["env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo", "fleet"]
+CardKind = Literal[
+    "env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo", "watch_credential", "fleet"
+]
 RefusalReason = Literal[
     "admin_required",
     "replacement_admin_required",
@@ -126,6 +128,7 @@ _BUTTON_LABEL: Final[dict[CardKind, str]] = {
     "mcp_oauth": "🔗 Connect my account",
     "repo": "🔐 Use my GitHub token",
     "skill_repo": "🔐 Use my GitHub token",
+    "watch_credential": "🔐 Enter it privately",
 }
 
 # Leading emoji → state, for a reader (parity driver, QA script) holding only
@@ -262,6 +265,16 @@ def _requested_content(
             f"🔌 Connect {agent_name} to {target}",
             (f"{mcp_server_url} needs a token. Anyone using {agent_name} can use it.",),
         )
+    if kind == "watch_credential":
+        if mcp_server_url is None:
+            raise ValueError("kind='watch_credential' requires mcp_server_url")
+        return (
+            f"🔑 Your read-only key for {target}",
+            (
+                f"Only your own watches use it, to check {mcp_server_url}. "
+                "It is never shown in chat.",
+            ),
+        )
     if kind == "mcp_oauth":
         if mcp_server_url is None:
             raise ValueError("kind='mcp_oauth' requires mcp_server_url")
@@ -314,6 +327,8 @@ def _expired_fact(
         phrase = f"add keys to {agent_name} from a file"
     elif kind in ("mcp", "mcp_oauth"):
         phrase = f"connect {agent_name} to {target}"
+    elif kind == "watch_credential":
+        phrase = f"set up your watch key for {target}"
     elif kind == "repo":
         phrase = f"give {agent_name} access to {repo_display}"
     else:

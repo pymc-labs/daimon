@@ -79,6 +79,7 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.watch_credentials import load_watch_credential
 from daimon.core.stores.watches import (
     DailyCap,
     PollBindingRevoked,
@@ -106,6 +107,10 @@ from starlette.responses import Response
 
 class PollAccessRevoked(ValueError):
     pass
+
+
+class CredentialMissing(Exception):
+    """The owner's own key for this server is gone; pauses as `credential_missing`."""
 
 
 class SourceBusy(Exception):
@@ -188,14 +193,28 @@ async def poll_credential(
     *,
     tenant_id: uuid.UUID,
     agent_id: str,
+    owner_account_id: uuid.UUID,
     server_url: str,
     credential: str,
 ) -> str | None:
-    """Decrypt exactly one credential, the agent-wide one for this exact URL, or none."""
+    """Decrypt exactly one credential for this exact URL: the agent-wide one, the
+    watch owner's own key (looked up by tenant and owner, never another owner's), or none."""
     if credential == "none":
         return None
-    if credential != "agent" or runtime.fernet is None:
+    if credential not in ("agent", "owner") or runtime.fernet is None:
         raise PollAccessRevoked("Watch credential unavailable")
+    if credential == "owner":
+        async with runtime.session_factory.begin() as db:
+            sealed = await load_watch_credential(
+                db,
+                tenant_id=tenant_id,
+                owner_account_id=owner_account_id,
+                server_url=server_url,
+                now=datetime.now(UTC),
+            )
+        if sealed is None:
+            raise CredentialMissing
+        return decrypt_token(runtime.fernet, sealed)
     async with runtime.session_factory() as db:
         rows = await credential_store.list_credentials(
             db,
@@ -284,8 +303,7 @@ async def authorize_source(
             watch_server(watch.source, watch.source_state), str(watch.source_state.get("tool"))
         )
         if watch.source == "mcp_poll" and (
-            listed.credential not in ("agent", "none")
-            or listed.credential != watch.source_state.get("credential")
+            listed.credential != watch.source_state.get("credential")
         ):
             raise PollAccessRevoked("Watch credential changed")
     async with runtime.session_factory() as db:
@@ -481,6 +499,7 @@ async def read_mcp(
         runtime,
         tenant_id=watch.tenant_id,
         agent_id=watch.agent_id,
+        owner_account_id=watch.owner_account_id,
         server_url=server_url,
         credential=credential,
     )
@@ -629,6 +648,11 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
         # The server no longer offers what the owner approved: pause and tell them.
         async with runtime.session_factory.begin() as db:
             await pause_unlisted(db, watch_id, lease, reason="source_changed")
+        return False
+    except CredentialMissing:
+        # The owner forgot or never sent their key: pause and tell them how to send it.
+        async with runtime.session_factory.begin() as db:
+            await pause_unlisted(db, watch_id, lease, reason="credential_missing")
         return False
     except Exception as exc:
         # Never log remote content, arguments, credentials, lease capabilities or

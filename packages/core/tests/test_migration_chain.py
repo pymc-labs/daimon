@@ -98,7 +98,10 @@ WATCH_MCP_HEAD = "0156_watch_mcp_sources"
 NOTICE_RECEIPTS_HEAD = "0157_watch_notice_receipts"
 
 
-HEAD = "0161_routine_source_id"
+ROUTINE_SOURCE_HEAD = "0161_routine_source_id"
+
+
+HEAD = "0162_watch_credentials"
 
 
 CHAIN = [
@@ -129,6 +132,7 @@ CHAIN = [
     WATCH_MCP_HEAD,
     NOTICE_RECEIPTS_HEAD,
     "0158_watch_mcp_claim",
+    ROUTINE_SOURCE_HEAD,
     HEAD,
 ]
 
@@ -150,6 +154,7 @@ TABLES = {
     "repo_memory_sessions",
     "compute_tasks",
     "watch_notice_receipts",
+    "watch_credentials",
     "daimon_admins",
     "context_provider_bindings",
     "selfhosted_agents",
@@ -228,6 +233,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             "repo_memory_sessions",
             "compute_tasks",
             "watch_notice_receipts",
+            "watch_credentials",
         }
     if expected not in (ADMINS_HEAD, HEAD):
         compared_tables = compared_tables - {"daimon_admins"}
@@ -490,6 +496,11 @@ async def test_deployed_upgrade_and_downgrade_paths(
             assert version == WATCH_MCP_HEAD
             command.upgrade(config, HEAD)
             _assert_head(sync)
+            # 0162 drops the owner watch keys and the form kind that collects them.
+            command.downgrade(config, ROUTINE_SOURCE_HEAD)
+            version = sync.scalar(text("SELECT version_num FROM alembic_version"))
+            assert version == ROUTINE_SOURCE_HEAD
+            assert not inspect(sync).has_table("watch_credentials")
             command.downgrade(config, "0158_watch_mcp_claim")
             assert (
                 sync.scalar(text("SELECT version_num FROM alembic_version"))

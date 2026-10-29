@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Watches can read an MCP server tool with the owner's own key: an operator lists it in `DAIMON_WATCHES__POLLABLE_TOOLS` with credential `owner`, and `request_watch_credential` posts a private form only the requester can fill in. The key is stored encrypted, used only by that owner's watches and sent only to that exact URL, for example a read-scoped API key the person creates on that server. A new key takes effect at the next check, `forget_watch_credential` deletes it, a watch without its key pauses as `credential_missing` and its owner is told, and account erasure removes the keys (migration `0162_watch_credentials`).
+
 - Watch owner notices (expired, paused, stopped, cap reached) go out once even if the bot restarts mid-send: each attempt leaves a receipt, and a resumed send first looks for the earlier DM. Operators count them with `daimon watches notices --watch WATCH_UUID [--json]`; receipts hold ids, times and outcome, never the message text, and are kept 30 days, also after the watch is deleted.
 
 - Operators name the MCP server tools that return chat or archive text in `DAIMON_WATCHES__CHAT_TOOLS` (a JSON list, default none); listing them for polling on an MCP server is refused. Daimon's own `read_thread`, `read_channel` and `search_messages` are always refused there. Watch import notices and signing-key messages use plain words.

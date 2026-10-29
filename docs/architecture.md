@@ -2899,10 +2899,15 @@ SQL; page events keep the 4 KiB limits.
 
 An `mcp_poll` source stores the canonical URL, never the server name, and each poll
 needs that URL still attached, enabled, visible to the owner and not denied. The
-executor sends only that URL's agent-wide credential, to one pinned public address,
+executor sends exactly one credential, to one pinned public address,
 without redirects or proxies, reading at most 256 KiB and no compressed reply. The live `tools/list` entry
 must match the digest approved at create and keep `readOnlyHint`; the hint can only
-refuse, since the registry is what allows a poll. Each URL gets two polls at once
+refuse, since the registry is what allows a poll. The credential is the agent-wide
+one for that URL, or for an `owner` entry the watch owner's own key. That key
+arrives only through the requester-only `request_watch_credential` form, is stored
+encrypted in `watch_credentials` (`0159_watch_credentials`), and is looked up by
+tenant, owner and URL. A missing key pauses the watch as `credential_missing` and
+tells its owner. Each URL gets two polls at once
 and 30 a minute, and a busy URL's watches step back in the
 queue. `0158_watch_mcp_claim` lets the sidecar lease these watches.
 
@@ -2922,8 +2927,8 @@ activation. An unmapped source cannot be confirmed or resumed. The existing Disc
 notice poller sends its owner a private notice that the watch is paused, without
 running a model or resuming the watch. Every owner notice records an intent receipt before the send and
 its outcome after, so a restarted poller checks the DM instead of resending.
-Account erasure removes owned registrations, evidence, pending wakes and owner
-stop controls; the privacy preview includes the watches it will erase.
+Account erasure removes owned registrations, evidence, pending wakes, owner
+stop controls and owner watch keys; the privacy preview includes the watches it will erase.
 
 
 ## Lead intake

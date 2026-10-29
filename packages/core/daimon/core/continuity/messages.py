@@ -59,6 +59,7 @@ ChangeKind = Literal[
     "mcp_removed",
     "repo",
     "environment",
+    "watch_key",
 ]
 ChangeAvailability = Literal["saved", "ready_now", "next_message", "preparation_failed"]
 TransferKind = Literal["full", "transcript", "history"]
@@ -309,6 +310,17 @@ def _render_repo_changed(change: ConfigurationChange) -> str:
     )
 
 
+def _render_watch_key_saved(service: str | None) -> str:
+    if service is None:
+        raise ValueError("kind='watch_key' requires detail (the service name)")
+    return "\n".join(
+        [
+            f"Your read-only key for {service} is saved.",
+            "Only your own watches use it. Ask me to make the watch now.",
+        ]
+    )
+
+
 def render_change_confirmation(change: ConfigurationChange) -> str:
     """Render the person-facing confirmation for one configuration change."""
     kind = change.kind
@@ -338,6 +350,8 @@ def render_change_confirmation(change: ConfigurationChange) -> str:
         return _render_repo_changed(change)
     if kind == "environment":
         return _render_environment_changed(change.target_name, change.detail)
+    if kind == "watch_key":
+        return _render_watch_key_saved(change.detail)
     raise ValueError(f"unknown ChangeKind: {kind!r}")
 
 

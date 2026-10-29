@@ -2286,7 +2286,9 @@
         this agent, and its server must say it only reads (readOnlyHint true, not
         destructive); that hint can only refuse, never allow. Its listing is read when
         the watch is made and on every poll, and a change pauses the watch. Servers
-        that need each person's own sign-in or key are refused for now.
+        that need each person's own browser sign-in are refused. A tool listed to read
+        with the owner's own key needs that key first: if none is saved, call
+        request_watch_credential so they send it privately, never in chat.
         Projection supports `.`, `.field.nested`, `.rows[0].field` and one `[]` step
         such as `.rows[].content`; other jq expressions are refused. Polls start with a
         saved baseline and compare change, added array elements, or updated object keys,
@@ -5576,6 +5578,31 @@
           'path',
           'content',
           'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'forget_watch_credential': dict({
+      'description': '''
+        Delete your own saved watch key for one server.
+        <blank line>
+        Only ever deletes the caller's own key. Watches that read with it pause at their
+        next check and their owner is told. Needs an attended conversation.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'server': dict({
+            'description': "The server's https URL, or its name on this agent.",
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'server',
         ]),
         'type': 'object',
       }),
@@ -9335,6 +9362,37 @@
         }),
         'required': list([
           'providers',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'request_watch_credential': dict({
+      'description': '''
+        Ask the person for their own read-only key for a server their watches check.
+        <blank line>
+        Use it when create_watch says the tool reads with the owner's own key and none
+        is saved. The server must be on this deployment's watch list with credential
+        owner. Posts a card in this conversation; only the requester can open its
+        private form, and it expires in 30 minutes. The key never appears in chat or in
+        tool arguments. It is stored encrypted, used only by that person's own watches,
+        and sent only to that exact server URL. It should be read-only: for example a
+        read-scoped API key the person creates on that server. Sending a new key replaces
+        the old one from the next check. Discord only; needs an attended conversation.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'server': dict({
+            'description': "The server's https URL, or its name on this agent.",
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'server',
         ]),
         'type': 'object',
       }),

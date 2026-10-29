@@ -9,11 +9,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from daimon.testing.mcp_fixture_server import build_fixture_server
+from daimon.testing.mcp_fixture_server import OwnerBearers, build_fixture_server
 from daimon.testing.qa_mcp_gate import McpGate
 
 
-def create_app() -> McpGate:
+def create_app() -> McpGate | OwnerBearers:
     """Uvicorn factory. Fail closed unless explicitly configured for preview."""
     if os.environ.get("DAIMON_PARITY_LANE") != "preview":
         raise ValueError("the fixture may only run in the preview lane")

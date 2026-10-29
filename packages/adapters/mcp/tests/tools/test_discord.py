@@ -954,6 +954,10 @@ async def test_post_credential_button_renders_the_core_built_requested_card(
     extra: dict[str, Any] = {
         "mcp": {"target": "linear", "mcp_server_url": "https://mcp.linear.app/sse"},
         "mcp_oauth": {"target": "notion", "mcp_server_url": "https://mcp.notion.com/mcp"},
+        "watch_credential": {
+            "target": "tools.example.com",
+            "mcp_server_url": "https://tools.example.com/mcp",
+        },
         "repo": {"target": "https://github.com/acme/pipeline", "branch": "main"},
         "skill_repo": {"target": "https://github.com/acme/skills@release", "branch": "release"},
     }.get(kind, {})

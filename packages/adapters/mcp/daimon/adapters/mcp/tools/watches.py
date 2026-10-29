@@ -29,6 +29,7 @@ from daimon.adapters.mcp.tools.discord._client import (
 )
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.watch_polling import (
+    CredentialMissing,
     PollAccessRevoked,
     attached_server,
     authorize_poll,
@@ -385,8 +386,6 @@ async def create_mcp_watch(
             raise ValueError("This agent has no such server. Ask me to list its servers.")
         server_url = ascii_mcp_url(attached[0].url)
         listed = require_listed(server_url, tool)
-        if listed.credential not in ("agent", "none"):
-            raise ValueError("This tool needs your own key, which watches cannot use yet")
         args = TypeAdapter(dict[str, JsonValue]).validate_python(arguments)
         validate_mcp_poll(
             args,
@@ -412,13 +411,21 @@ async def create_mcp_watch(
             )
         if operator_denied(runtime.settings.tool_safety, server_name=server_name, tool=tool):
             raise ValueError("Whoever runs this Daimon has blocked that tool")
-        token = await poll_credential(
-            runtime,
-            tenant_id=auth.tenant_id,
-            agent_id=binding.target_ma_agent_id,
-            server_url=server_url,
-            credential=listed.credential,
-        )
+        try:
+            token = await poll_credential(
+                runtime,
+                tenant_id=auth.tenant_id,
+                agent_id=binding.target_ma_agent_id,
+                owner_account_id=auth.account_id,
+                server_url=server_url,
+                credential=listed.credential,
+            )
+        except CredentialMissing:
+            raise ToolError(
+                "This tool reads with your own key, and no read-only key of yours is saved. "
+                "Call request_watch_credential for this server so they can send it privately, "
+                "then make the watch again. Never ask for the key in chat."
+            ) from None
         try:
             # The same overall bound a poll has, so a slow server cannot hold the turn.
             async with (
@@ -612,7 +619,9 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         this agent, and its server must say it only reads (readOnlyHint true, not
         destructive); that hint can only refuse, never allow. Its listing is read when
         the watch is made and on every poll, and a change pauses the watch. Servers
-        that need each person's own sign-in or key are refused for now.
+        that need each person's own browser sign-in are refused. A tool listed to read
+        with the owner's own key needs that key first: if none is saved, call
+        request_watch_credential so they send it privately, never in chat.
         Projection supports `.`, `.field.nested`, `.rows[0].field` and one `[]` step
         such as `.rows[].content`; other jq expressions are refused. Polls start with a
         saved baseline and compare change, added array elements, or updated object keys,

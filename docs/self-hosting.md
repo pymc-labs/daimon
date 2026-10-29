@@ -1783,7 +1783,10 @@ never a server name), `tool`, `credential`, `returns_chat` (required) and option
 or `read_channel` with credential `none`; an MCP server entry with `returns_chat:
 true` is refused at startup, as are Daimon's own chat readers and any tool named in
 [`DAIMON_WATCHES__CHAT_TOOLS`](configuration.md#daimon_watches__chat_tools). An MCP entry with credential `agent` polls with the
-agent's stored credential for that exact URL; `owner` entries are not polled yet.
+agent's stored credential for that exact URL. An `owner` entry polls with each
+watch owner's own read-only key for that URL, which they send once through a private
+form: for example a read-scoped API key the person creates on that server, so the
+server itself refuses writes.
 The default lists `read_thread` and `read_channel` with a 60-second floor, which is
 today's behaviour. A server's read-only annotation never makes a tool pollable; only
 this list does. A server can say a tool only reads and still write, so list only
