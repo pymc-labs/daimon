@@ -453,7 +453,11 @@ class MuxTurnIO:
         session: ResourceRef,
         *,
         persistence: TurnPersistence | None = None,
+        idle_check_s: float | None = None,
     ) -> None:
+        #: Ask for the session status when the stream yields nothing for this long
+        #: (keep-alives never reach the driver). None: never ask.
+        self.idle_check_s = idle_check_s or None
         if session.kind != "session" or (
             not (scope.is_platform or scope.is_legacy_host_authorized)
             and (session.tenant_id != scope.tenant_id or session.account_id != scope.account_id)
@@ -686,12 +690,22 @@ def default_mux_turn_io(
             on_stop_event=persistence.record if persistence is not None else None,
         )
     )
-    return MuxTurnIO(bound.backend, scope, bound.session, persistence=persistence)
+    return MuxTurnIO(
+        bound.backend,
+        scope,
+        bound.session,
+        persistence=persistence,
+        idle_check_s=load_turn_settings().anthropic_idle_check_s,
+    )
 
 
 def _anthropic_turn_codec(request: TurnCodecRequest) -> TurnIO:
     return MuxTurnIO(
-        request.backend, request.scope, request.session, persistence=request.persistence
+        request.backend,
+        request.scope,
+        request.session,
+        persistence=request.persistence,
+        idle_check_s=load_turn_settings().anthropic_idle_check_s,
     )
 
 

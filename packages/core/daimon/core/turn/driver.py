@@ -1894,9 +1894,16 @@ async def _consume_with_reconnect(
         # asking for the session's status whenever the stream yields nothing for
         # this long. Managed Agents does not, so its turns are unchanged.
         idle_check_s = cast("float | None", getattr(io, "idle_check_s", None))
+        # Set when an idle check said the turn is not running while an event
+        # landed: that event is folded first, then the verdict stands unless the
+        # event ended the turn (F14), so chatter can't postpone it.
+        idle_verdict = False
         while True:
             if cancel.is_set():
                 raise _InterruptInConsume()
+            if idle_verdict:
+                log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
+                raise _EventlessCycle(reason="read_timeout")
             # A new fetch only once the last one's result was taken: a fetch that
             # finished during a status check still holds its event.
             if next_task is None:
@@ -1913,6 +1920,7 @@ async def _consume_with_reconnect(
             if not done:
                 # Only keep-alives for `idle_check_s`: the same status-checked path
                 # as a clean close. Still running keeps waiting on the same fetch.
+                started = time.monotonic()
                 try:
                     async with asyncio.timeout(_STATUS_READ_TIMEOUT_S):
                         status = await io.status()
@@ -1929,14 +1937,27 @@ async def _consume_with_reconnect(
                         "turn.idle_check_failed",
                         session_id=session_id,
                         error_type=type(error).__name__,
+                        read_s=round(time.monotonic() - started, 3),
                     )
                     continue
+                log.info(
+                    "turn.idle_check",
+                    session_id=session_id,
+                    status=status,
+                    read_s=round(time.monotonic() - started, 3),
+                )
                 if silence is not None:
                     silence.status = status
                 if status in {"running", "rescheduling"}:
                     continue
-                log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
-                raise _EventlessCycle(reason="read_timeout")
+                if not next_task.done():
+                    log.info(
+                        "turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s
+                    )
+                    raise _EventlessCycle(reason="read_timeout")
+                # An event landed during the read: fold it, then the verdict stands.
+                idle_verdict = True
+                done = {next_task}
             if cancel_task in done:
                 next_task.cancel()
                 with _suppress_task_exc():

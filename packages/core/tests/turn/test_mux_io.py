@@ -266,3 +266,21 @@ def test_foreign_session_binding_fails_before_any_port_io(changed: dict[str, str
     backend = cast(ManagedAgents, SimpleNamespace())
     with pytest.raises(ScopeViolation):
         MuxTurnIO(backend, SCOPE, SESSION.model_copy(update=changed))
+
+
+def test_anthropic_turns_ask_for_status_after_a_minute_of_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """3b: the Anthropic codec opts into the idle status check from one setting."""
+    from daimon.core.config import TurnSettings
+    from daimon.core.turn import io as turn_io_module
+
+    backend = cast(ManagedAgents, SimpleNamespace())
+    request = SimpleNamespace(backend=backend, scope=SCOPE, session=SESSION, persistence=None)
+    assert TurnSettings().anthropic_idle_check_s == 60.0
+    codec = turn_io_module._anthropic_turn_codec  # pyright: ignore[reportPrivateUsage]
+    for configured, expected in ((60.0, 60.0), (0.0, None)):
+        settings = TurnSettings(anthropic_idle_check_s=configured)
+        monkeypatch.setattr(turn_io_module, "load_turn_settings", lambda s=settings: s)
+        io = codec(cast(turn_io_module.TurnCodecRequest, request))
+        assert io.idle_check_s == expected
