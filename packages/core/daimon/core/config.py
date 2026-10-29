@@ -2116,24 +2116,11 @@ class FleetSettings(BaseModel):
     )
 
 
-#: Tools known to return chat or archive text, Daimon's own replies included.
-#: Only native readers drop Daimon's rows, so these are refused on an MCP
-#: server whatever `returns_chat` says (I5): a report must never fire its watch.
-CHAT_TOOLS: frozenset[str] = frozenset(
-    {
-        "connected_archives_list_channels",
-        "connected_archives_search",
-        "discord_archive_query",
-        "discord_get_message",
-        "discord_read_channel_since",
-        "discord_read_messages",
-        "discord_search_messages",
-        "fetch_attachment",
-        "read_channel",
-        "read_thread",
-        "search_messages",
-    }
-)
+#: Daimon's own readers, which return chat text, Daimon's own replies included.
+#: Only native readers drop Daimon's rows, so these and the operator's
+#: `chat_tools` are refused on an MCP server whatever `returns_chat` says: a
+#: report must never fire its watch.
+CHAT_TOOLS: frozenset[str] = frozenset({"read_channel", "read_thread", "search_messages"})
 
 
 class PollableTool(BaseModel):
@@ -2248,7 +2235,7 @@ class WatchesSettings(BaseModel):
             "MCP servers), returns_chat (required: true only for native readers, which "
             "drop Daimon's own messages), max_interval_floor_s (shortest interval, at "
             "least 60, default 300) and label (shown on the approval card). Native "
-            "entries must be read_thread or read_channel. Known chat and archive tools "
+            "entries must be read_thread or read_channel. Daimon's chat readers and chat_tools "
             "are refused on MCP servers. MCP entries with credential owner are not "
             "polled yet. A server's read-only annotation never allows a poll; only this "
             "list does, and a server can still write when it says it only reads. A "
@@ -2256,6 +2243,17 @@ class WatchesSettings(BaseModel):
             "floor. Default (also used when the value is empty): read_thread and "
             "read_channel on daimon-mcp, credential none, returns_chat true, floor 60. "
             "Set [] to allow no polls."
+        ),
+    )
+
+    chat_tools: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "JSON list of tool names on MCP servers that return chat or archive text, "
+            "such as a chat archive search. A watch could fire on its own report through "
+            "them, so POLLABLE_TOOLS refuses them on any MCP server, whatever returns_chat "
+            "says. Daimon's own read_thread, read_channel and search_messages are always "
+            "refused there. Default: none."
         ),
     )
 
@@ -2275,6 +2273,21 @@ class WatchesSettings(BaseModel):
                 f"(line {err.lineno}, column {err.colno})"
             ) from None
 
+    @field_validator("chat_tools", mode="before")
+    @classmethod
+    def _parse_chat_tools(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return []
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"DAIMON_WATCHES__CHAT_TOOLS is not valid JSON "
+                f"(line {err.lineno}, column {err.colno})"
+            ) from None
+
     @field_validator("pollable_tools")
     @classmethod
     def _unique_pollable_tools(cls, value: list[PollableTool]) -> list[PollableTool]:
@@ -2284,6 +2297,16 @@ class WatchesSettings(BaseModel):
                 raise ValueError(f"{entry.server}/{entry.tool} is listed more than once")
             seen.add((entry.server, entry.tool))
         return value
+
+    @model_validator(mode="after")
+    def _no_chat_tools_on_mcp_servers(self) -> WatchesSettings:
+        chat = set(self.chat_tools)
+        for entry in self.pollable_tools:
+            if entry.server != DAIMON_SERVER_NAME and entry.tool in chat:
+                raise ValueError(
+                    f"{entry.tool} returns chat; MCP server tools that do cannot be polled"
+                )
+        return self
 
 
 class ComputeProfile(BaseModel):

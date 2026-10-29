@@ -2861,9 +2861,9 @@ Migration `0143_watch_polling` follows `0142_watches`. Sidecar claims at most fo
 poll leases through `claim_watch_polls()`, then submits only a watch UUID and opaque
 60-second lease to the separate private `watch-executor:8767` service's
 `/internal/watches/{watch_id}/poll` endpoint. The public MCP app has no poll route.
-Only fixed private OS origins are supported and redirects are disabled. The lease
+Only fixed private executor origins are supported and redirects are disabled. The lease
 is a scheduling capability; the caller supplies no tool, arguments, identity or
-result. Sidecar cannot read watch rows or submit poll results. The OS executor loads
+result. Sidecar cannot read watch rows or submit poll results. The watch executor loads
 the immutable registration and rechecks current membership, agent rules, seals,
 exact destination visibility and source permissions before every read, and again
 before saving its result. It uses existing Discord `read_thread` and `read_channel`
@@ -2889,7 +2889,7 @@ name. `poll_tools.require_listed` reads it fresh at create, at resume and inside
 as `tool_unlisted` and its owner gets the lifecycle DM. Poll arguments must explicitly
 name a source different from the reporting thread, preventing self-report wake loops.
 The agent must currently have that read enabled with `always_allow` in its own
-canonical OS MCP toolset; missing, disabled or approval-required reads stop the watch. Arguments exclude URLs and limit
+Daimon MCP toolset; missing, disabled or approval-required reads stop the watch. Arguments exclude URLs and limit
 reads to 20 messages. The safe jq-style projection subset supports identity, object
 fields, numeric indexes and one `[]` map step for polls. The raw read is bounded
 (256 KiB, depth 32, 20,000 nodes) and only the projection is kept: a baseline of at
@@ -2919,10 +2919,9 @@ rotation and deletion. `list_watches(scope="all")` lists every watch in the call
 MCP results and stored rows contain no plaintext key. The offline CLI importer
 accepts no signing keys, imports everything paused, and requires explicit exact-binding confirmation before
 activation. An unmapped source cannot be confirmed or resumed. The existing Discord
-notice poller sends its owner a private migration notice without running a model or
-resuming the watch. Every owner notice records an intent receipt before the send and
-its outcome after, so a restarted poller checks the DM instead of resending. Notebook and report hosts do not provide a page document query
-store; imported `artifact_db_query` sources therefore remain `source_unmapped`.
+notice poller sends its owner a private notice that the watch is paused, without
+running a model or resuming the watch. Every owner notice records an intent receipt before the send and
+its outcome after, so a restarted poller checks the DM instead of resending.
 Account erasure removes owned registrations, evidence, pending wakes and owner
 stop controls; the privacy preview includes the watches it will erase.
 

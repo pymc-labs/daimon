@@ -170,12 +170,12 @@ async def rotate_signing_key(
     expires_at: datetime,
     now: datetime | None = None,
 ) -> None:
-    """Hash an OS-host secret from trusted enrollment and cancel old queued work."""
+    """Hash a page-host secret from trusted enrollment and cancel old queued work."""
     from daimon.core.continuity.page_events import KEY_ID
 
     now = now or datetime.now(UTC)
     if not 32 <= len(key.encode()) <= 256 or not KEY_ID.fullmatch(key_id):
-        raise ValueError("Invalid OS signing key")
+        raise ValueError("Invalid page signing key")
     watch = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if watch is None or not now < expires_at <= watch.expires_at:
         raise ValueError("Key must expire within its watch lifetime")
@@ -678,7 +678,7 @@ async def register_poll_watch(
     from daimon.core.tool_safety import DAIMON_SERVER_NAME
     from pydantic import JsonValue, TypeAdapter
 
-    # The operator registry is the only thing that allows a poll (I4).
+    # The operator registry is the only thing that allows a poll.
     listed = require_listed(DAIMON_SERVER_NAME, tool)
     floor = listed.max_interval_floor_s
     if interval < floor:
@@ -749,7 +749,7 @@ async def register_mcp_poll_watch(
     from daimon.core.continuity.poll_tools import require_listed, validate_mcp_poll
     from pydantic import JsonValue, TypeAdapter
 
-    # The operator registry is the only thing that allows a poll (I4).
+    # The operator registry is the only thing that allows a poll.
     listed = require_listed(server_url, tool)
     if listed.server == "daimon-mcp" or listed.credential not in ("agent", "none"):
         raise ValueError("This tool needs your own key, which watches cannot use yet")
@@ -899,7 +899,7 @@ async def finish_poll(
     value: object,
     payload: str | None,
 ) -> uuid.UUID | None:
-    """Only the trusted OS executor calls this; SQL commits baseline+evidence+wake together."""
+    """Only the trusted watch executor calls this; SQL commits baseline+evidence+wake together."""
     if not load_watches_settings().enabled:
         raise ValueError("Watch producers disabled")
     result = await session.scalar(
@@ -1059,7 +1059,7 @@ async def import_watch(
         except ValueError:
             reason = "projection_unmapped"
     if definition.source == "page_event" and definition.page_id is None:
-        raise ValueError("Imported page watches require a mapped OS page UUID")
+        raise ValueError("Imported page watches require a mapped page UUID")
     watch = await register_page_watch(
         session,
         binding,

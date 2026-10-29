@@ -11,7 +11,7 @@ down_revision: str | None = "0142_watches"
 branch_labels = None
 depends_on = None
 
-# Frozen SQL. Only the OS executor submits results; sidecar can only claim IDs.
+# Frozen SQL. Only the watch executor submits results; sidecar can only claim IDs.
 POLL_SQL = """
 CREATE FUNCTION {schema}.accept_watch_poll_result(
     p_watch uuid, p_lease text, p_value jsonb, p_payload text

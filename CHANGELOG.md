@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Watch owner notices (expired, paused, stopped, cap reached) go out once even if the bot restarts mid-send: each attempt leaves a receipt, and a resumed send first looks for the earlier DM. Operators count them with `daimon watches notices --watch WATCH_UUID [--json]`; receipts hold ids, times and outcome, never the message text, and are kept 30 days, also after the watch is deleted.
 
-- Watches can poll a read tool on an MCP server the agent attaches: pass the server's URL (or its name on the agent) as `create_watch`'s `server`. Only tools an operator lists for that exact URL in `DAIMON_WATCHES__POLLABLE_TOOLS` with credential `agent` or `none` can be watched, and the server must say the tool only reads; that can refuse a watch but never allow one. A watch pauses and tells its owner when the server is detached or moved to another URL, the tool is disabled or denied, or its listing changes (`source_changed`). Compressed replies are refused, a busy server cannot hold up watches on other servers, known chat and archive tools are refused on MCP servers, internationalised host names count as one entry, a queued report no longer runs after its tool is delisted, and poll results with very large or very small numbers are measured as the database stores them (migration `0158_watch_mcp_claim`).
+- Operators name the MCP server tools that return chat or archive text in `DAIMON_WATCHES__CHAT_TOOLS` (a JSON list, default none); listing them for polling on an MCP server is refused. Daimon's own `read_thread`, `read_channel` and `search_messages` are always refused there. Watch import notices and signing-key messages use plain words.
+
+- Watches can poll a read tool on an MCP server the agent attaches: pass the server's URL (or its name on the agent) as `create_watch`'s `server`. Only tools an operator lists for that exact URL in `DAIMON_WATCHES__POLLABLE_TOOLS` with credential `agent` or `none` can be watched, and the server must say the tool only reads; that can refuse a watch but never allow one. A watch pauses and tells its owner when the server is detached or moved to another URL, the tool is disabled or denied, or its listing changes (`source_changed`). Compressed replies are refused, a busy server cannot hold up watches on other servers, Daimon's own chat readers and the tools listed in `DAIMON_WATCHES__CHAT_TOOLS` are refused on MCP servers, internationalised host names count as one entry, a queued report no longer runs after its tool is delisted, and poll results with very large or very small numbers are measured as the database stores them (migration `0158_watch_mcp_claim`).
 
 - Operators choose which tools a watch may poll with `DAIMON_WATCHES__POLLABLE_TOOLS`; the default keeps `read_thread` and `read_channel`. An unlisted tool is refused at create and resume, a watch whose tool is taken off the list pauses and its owner gets one private message, and a raised per-tool floor slows existing watches without pausing them; an empty value keeps the default. Polled watches also handle bigger results: a `[]` step in projections, `added` by a `key` that keeps only fingerprints, chosen `evidence` fields per new item, a 256 KiB raw read, a 64 KiB baseline and 16 KiB reports of at most 20 items with the rest counted (migration `0156_watch_mcp_sources`). A watch turn whose gathered reports exceed 512 KiB now keeps the newest and counts the rest as omitted instead of being dropped.
 
@@ -210,7 +212,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - On the mux turn path, a turn that reaches a thread whose lease another running turn holds now waits for that turn instead of failing with `LeaseBusy`. The wait ends at the turn's own ceiling, honors Stop, and a holder that dies frees the thread when its lease expires. A turn whose session the holder replaced adopts the replacement.
 
-- Map supported internal Discord watches to owner-authorized Daimon poll watches (message reads require thread IDs, default/cap integer limits at 20, and warn before CLI confirmation); keep unsupported imports paused with a reason printed by the CLI, without page-data notices for Discord mapping failures. Mapped channel watches use live result differences instead of `since` and see live channel messages only, excluding archived history and messages inside child threads. Refuse page-event watch creation until a page-event producer exists.
+- Imported Discord read watches map to owner-authorized `read_thread`/`read_channel` poll watches (message reads require thread IDs, default/cap integer limits at 20, and warn before CLI confirmation); unsupported imports stay paused with a reason printed by the CLI, without an owner notice for Discord mapping failures. Mapped channel watches use live result differences instead of `since` and see live channel messages only, excluding archived history and messages inside child threads. Refuse page-event watch creation until a page-event producer exists.
 
 - Reject crossed known Azure model/deployment aliases regardless of letter case.
 
@@ -1233,7 +1235,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A conversation can run on a model of its own: `/model` in a Discord thread shows it or switches it to Haiku, Sonnet or Opus (or back to the agent's default), and asking in words ("use opus", "think harder") switches it on any platform. The thread keeps the choice for every later reply, across restarts; other conversations and the stored agent are unchanged. Anyone who may start a turn there may change it; routines and other unattended runs can't. A choice that can no longer run falls back to the agent's own model, and the reply says so. Worker fleets ignore the choice: a fleet root and its workers always run the model the agent's owner approved, and `/model` says so on such a thread.
 - Prevent watch feedback loops with bounded human-only poll windows and canonical
   source IDs. Verify owner enrollment cards inside create/resume/key rotation;
-  unsupported backends refuse. Document exact isolated preview enable commands.
+  unsupported backends refuse.
 
 - Require attended owner approval to enroll, resume or rotate watches; prevent
   polling the reporting thread, honor the agent's live read toolset, and isolate
@@ -1246,11 +1248,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve the deployed Microsoft accounts migration ID and explain deployment serialization.
 
 - Add default-off watch infrastructure with atomic evidence and durable wakes,
-  restricted database identities, replay/retention limits and an optional preview
+  restricted database identities, replay/retention limits and an optional
   sidecar. Only polled Discord `read_thread`/`read_channel` watches work end to end.
-  Supported internal Discord polls map to these tools during import and remain
+  Imported Discord read polls map to these tools and remain
   paused until owner/destination confirmation.
-  Notion, Linear, HubSpot and URL polls use unreviewed tools: creation is refused
+  Polls on other tools use unreviewed tools: creation is refused
   and imports remain paused as `source_unmapped`. Webhook/callback watches map to
   `page_event`, which is not yet delivered. Account erasure removes owned watches,
   evidence and queued wakes. Woken turns require an execution-bound unattended session grant, explicitly allowlisted
@@ -1260,10 +1262,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output write; a failed check latches delivery off through cleanup. Startup audits
   resolve the real ingress schema and refuse unsafe effective database privileges.
   Expired batches never absorb fresh events.
-- Add deterministic polling of reviewed Daimon read tools, bounded projections, saved
+- Add deterministic polling of reviewed read tools, bounded projections, saved
   baselines, separate poll leases and error backoff. Owner MCP tools manage watches
   and deliver page signing keys privately once. Offline imports remain paused until
-  their exact owner and destination are confirmed; unmapped page-data polls stay
+  their exact owner and destination are confirmed; unmapped polls stay
   paused and queue a private owner notice.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.

@@ -1667,17 +1667,15 @@ uncertain or partially sent claim to pending, because delivery is at most once.
 ### Signed page-event watch sidecar
 
 Polling works end to end for Discord `read_thread` and `read_channel` and for
-listed read tools on MCP servers an agent attaches. Imported Notion, Linear,
-HubSpot and URL watches remain paused as `source_unmapped`. Webhook/callback
+listed read tools on MCP servers an agent attaches. Imported watches on any
+other tool stay paused as `source_unmapped`. Webhook/callback
 watches map to `page_event`, which is not yet delivered: no host calls
 `sign_page_event`, and sidecar verification is not connected to per-watch keys.
 `create_watch(source="page_event")` refuses creation until a producer exists.
 
-The optional `preview-sidecar` Compose profile runs the commit-pinned application
-and digest-pinned TLS proxy after migrations. Set `DAIMON_SIDECAR_PUBLIC_HOST`
-(default `localhost` for local use) and optionally `DAIMON_SIDECAR_TLS_PORT`.
-Only callback paths are public; database, `/healthz` and other paths remain private.
-The application uses the lane's `DAIMON_LANE_IMAGE` and `DAIMON_LANE_SHA`.
+Run the sidecar after migrations, from the same image as the other services,
+behind a TLS proxy. Only callback paths are public; database, `/healthz` and other
+paths remain private.
 
 Migration `0142_watches` follows `0141_lead_intake` and has no downgrade;
 retain compatible readers for rollback. `DAIMON_WATCHES__ENABLED` and the core-owned
@@ -1697,7 +1695,7 @@ path order, and validates signatures, owner and security settings. Missing/shado
 identities, schema CREATE and unexpected privileged executable functions refuse
 startup. The service receives an explicitly allowlisted environment.
 
-`DAIMON_SIDECAR__SIGNING_KEYS` is a secret JSON map of key IDs to random OS-host
+`DAIMON_SIDECAR__SIGNING_KEYS` is a secret JSON map of key IDs to random page-host
 HMAC keys (32–256 bytes, at most 16 keys). The sidecar reads this configured map;
 registrations store hashes, not recoverable keys. Initial enrollment binds an
 existing Discord thread, page and key.
@@ -1734,10 +1732,10 @@ per-write output checks, tool restoration and cancellation behavior.
 
 #### Polling and owner management
 
-Migration `0143_watch_polling` adds leased scheduling and the transactional OS result
+Migration `0143_watch_polling` adds leased scheduling and the transactional result
 port. Sidecar gains only `claim_watch_polls()`; it still cannot enumerate tables,
-read credentials/policy, submit source results or enqueue arbitrary wakes. The OS
-MCP database login must own the migrations/result function (or receive an explicit
+read credentials/policy, submit source results or enqueue arbitrary wakes. The MCP
+service's database login must own the migrations/result function (or receive an explicit
 EXECUTE grant on `accept_watch_poll_result(uuid,text,jsonb,text)` from its owner).
 Do not grant that port to `daimon_sidecar`. The separate `watch-executor` service
 listens on private port 8767, with no published port or proxy route. It has no MCP
@@ -1750,7 +1748,7 @@ Sidecar sends only the service secret and short-lived lease, never owner credent
 For MCP server watches the executor needs outbound HTTPS to the listed server URLs.
 
 Sidecar checks due work every five seconds, at most four polls per tick. A poll
-lease lasts 60 seconds, independently of the durable wake's lease. Each OS executor
+lease lasts 60 seconds, independently of the durable wake's lease. Each watch executor
 call has a 25-second deadline; the sidecar transport has 30 seconds, follows no
 redirects and ignores proxy environment variables. `DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN`
 accepts only `http://watch-executor:8767` (Compose) or `http://127.0.0.1:8767` (local processes).
@@ -1783,8 +1781,8 @@ for a native reader, otherwise an `https` MCP server URL compared in canonical f
 never a server name), `tool`, `credential`, `returns_chat` (required) and optional
 `max_interval_floor_s` and `label`. Native entries must be the reviewed `read_thread`
 or `read_channel` with credential `none`; an MCP server entry with `returns_chat:
-true` is refused at startup, as are known chat and archive tools such as
-`connected_archives_search`. An MCP entry with credential `agent` polls with the
+true` is refused at startup, as are Daimon's own chat readers and any tool named in
+[`DAIMON_WATCHES__CHAT_TOOLS`](configuration.md#daimon_watches__chat_tools). An MCP entry with credential `agent` polls with the
 agent's stored credential for that exact URL; `owner` entries are not polled yet.
 The default lists `read_thread` and `read_channel` with a 60-second floor, which is
 today's behaviour. A server's read-only annotation never makes a tool pollable; only
@@ -1807,7 +1805,7 @@ exact-tool card proof server-side via `session_card_gap`; unsupported backends a
 ungated/unreadable sessions refuse, including with tool safety off.
 `read_thread` and `read_channel` arguments must name a source distinct from the
 reporting thread. The agent must have the read enabled without approval on its
-canonical OS MCP toolset. An MCP server poll needs the server still attached at
+Daimon MCP toolset. An MCP server poll needs the server still attached at
 the same URL, under any name, with the tool enabled and not denied. The tool's
 always-ask or always-allow setting does not stop a poll; an agent rule that asks
 or denies does. Its listing
@@ -1863,22 +1861,22 @@ checks the owner's DM for the earlier message, so a send cut off by a restart or
 timeout is not sent twice. If that check cannot read the DM, nothing is sent and the
 notice retries five minutes later.
 
-#### Offline internal-watch import
+#### Importing watches from a JSON manifest
 
-Run `daimon watches import /private/watches.json` only against the intended isolated
-OS database. It reads an export file, never connects to internal. The file must be
-at most 1 MiB, be stored privately, and follow this format (`...` values below must
-be replaced with real reviewed OS bindings):
+`daimon watches import /private/watches.json` loads watch definitions exported
+from another system. It reads only the file and connects to nothing else. Run it
+against the intended database. The file must be at most 1 MiB, stored privately,
+and follow this format (replace the example bindings with reviewed real ones):
 
 ```json
 {
   "version": 1,
   "watches": [{
-    "legacy_id": "internal-watch-4",
+    "legacy_id": "watch-4",
     "source": "poll",
     "instructions": "Report changes.",
-    "tool": "artifact_db_query",
-    "arguments": {"artifact_id": "legacy-page", "collection": "items"},
+    "tool": "example_query",
+    "arguments": {"collection": "items"},
     "projection": ".",
     "rule": "change",
     "interval": 600,
@@ -1902,23 +1900,21 @@ be replaced with real reviewed OS bindings):
 }
 ```
 
-For the internal export, include only the four approved live definitions: source,
-instructions, page ID, tool/arguments, projection, rule, interval, `state.value`
-as `baseline.value`, expiry and daily cap. Map owner and exact destination to
-`os_binding` using the operator's verified OS identities; for callbacks use
-`source: "page_event"` and a mapped OS `page_id`. Never export callback tokens,
-signing keys, saved credentials, active leases or wake prompts. The supplied usage
-snapshot had no unfinished wakes; recheck that independently at cutover. The import
-format deliberately has no unfinished-wake transfer. Expiry must be within thirty
-days; permanent definitions need an explicit finite OS lifetime. Requested daily
-caps above 24 are retained for review but the effective v1 cap is 24.
+`os_binding` names the owner and exact destination: map them to verified Daimon
+identities. For callbacks use `source: "page_event"` and a mapped `page_id`. Never
+export callback tokens, signing keys, saved credentials, active leases or wake
+prompts. The format cannot carry unfinished wakes, so finish or drop them first.
 
-Supported internal Discord polls map during import: `discord_read_messages`
-becomes `read_thread` with `channel_or_thread_id` renamed to `thread_id`.
+Expiry must be within thirty days; give a permanent definition an explicit finite
+lifetime. Requested daily caps above 24 are kept for review, but the effective cap
+is 24.
+
+Two Discord read tools map during import. `discord_read_messages` becomes
+`read_thread` with `channel_or_thread_id` renamed to `thread_id`.
 Only thread IDs work for this mapping; channel and DM IDs are unsupported.
 The CLI warns before confirmation; use `read_channel` for channel sources.
 Message limits default to 20 and larger integer limits are capped at 20;
-legacy baselines reset without firing, and each poll reads the newest messages.
+earlier baselines reset without firing, and each poll reads the newest messages.
 
 `discord_read_channel_since` becomes `read_channel`. Channel imports drop `since`
 because native polling detects changes against its saved baseline. They see live
@@ -1927,25 +1923,23 @@ threads. Bare channel IDs and `discord_channel:<id>` pointers are supported.
 Missing IDs, paging filters (`before`, `after`, `before_message_id`), unsupported
 arguments, non-integer limits and limits below 1 leave the import paused with
 `source_unmapped` and a `mapping_error`, printed by the import CLI. These mapping
-errors do not send the page-data migration notice.
+errors send no owner notice.
 
 All imports start PAUSED and unconfirmed; rerunning the same tenant/legacy ID is
 idempotent. Unknown poll tools import with `source_unmapped`, cannot resume, and
 queue this owner DM through the existing Discord notice path:
-`this watch is paused until page data moves to Daimon OS`. Archived workspaces
+`this watch is paused: its source can't be polled here`. Archived workspaces
 are excluded from notice batches. Watches whose expiry is older than 24 hours
 stay silent so historical rows are not back-notified. Failed deliveries retry
 every five minutes until that cutoff, allowing for sidecar outages, deploys and
 Discord delivery failures. Sending the notice never resumes the watch.
-Notebook/report hosts have no queryable page collection store;
-`artifact_db_query` has no OS mapping in this release. No page store is created.
 
 Unsupported callback projections import with `projection_unmapped` and cannot be
 confirmed. Rewrite them into the supported subset before importing a reviewed
 manifest. Reruns preserve existing definitions; delete a paused projection import
 and re-import a corrected manifest after review. For mapped callback imports, the
 owner first calls `rotate_watch_key` to
-receive a fresh key privately; internal keys are never copied. Confirm each mapped
+receive a fresh key privately; keys are never copied from the other system. Confirm each mapped
 watch only after reviewing every binding field:
 
 ```sh

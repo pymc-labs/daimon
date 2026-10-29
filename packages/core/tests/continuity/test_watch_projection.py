@@ -1,4 +1,4 @@
-"""Projection bounds and internal-compatible watch comparison semantics."""
+"""Projection bounds and watch comparison semantics."""
 
 import json
 import math

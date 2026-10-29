@@ -97,11 +97,9 @@ def test_duplicates_and_bad_json_are_refused():
     assert WatchesSettings(pollable_tools="[]").pollable_tools == []  # pyright: ignore[reportArgumentType]
 
 
-@pytest.mark.parametrize(
-    "tool", ["connected_archives_search", "discord_read_messages", "fetch_attachment"]
-)
-def test_known_chat_tools_are_refused_on_mcp_servers_even_marked_not_chat(tool):
-    # R5: an operator mistake (returns_chat false on an archive reader) is refused at load.
+@pytest.mark.parametrize("tool", ["read_thread", "read_channel", "search_messages"])
+def test_native_chat_readers_are_refused_on_mcp_servers_even_marked_not_chat(tool: str):
+    # An operator mistake (returns_chat false on a chat reader) is refused at load.
     with pytest.raises(ValidationError, match="returns chat"):
         PollableTool.model_validate(
             {
@@ -111,6 +109,46 @@ def test_known_chat_tools_are_refused_on_mcp_servers_even_marked_not_chat(tool):
                 "returns_chat": False,
             }
         )
+
+
+@pytest.mark.parametrize("tool", ["archive_search", "chat_read_messages", "fetch_attachment"])
+def test_operator_chat_tools_are_refused_on_mcp_servers_even_marked_not_chat(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+):
+    entry = {
+        "server": "https://bridge.example/mcp",
+        "tool": tool,
+        "credential": "agent",
+        "returns_chat": False,
+    }
+    chat_tools = json.dumps(["archive_search", "chat_read_messages", "fetch_attachment"])
+    with pytest.raises(ValidationError, match="returns chat"):
+        WatchesSettings(chat_tools=chat_tools, pollable_tools=json.dumps([entry]))  # pyright: ignore[reportArgumentType]
+    monkeypatch.setenv("DAIMON_WATCHES__CHAT_TOOLS", chat_tools)
+    monkeypatch.setenv("DAIMON_WATCHES__POLLABLE_TOOLS", json.dumps([entry]))
+    with pytest.raises(ValidationError, match="returns chat"):
+        load_watches_settings()
+    # Unlisted, the same tool is an ordinary MCP read.
+    monkeypatch.setenv("DAIMON_WATCHES__CHAT_TOOLS", "")
+    assert require_listed("https://bridge.example/mcp", tool)
+
+
+def test_chat_tools_default_to_none_and_refuse_bad_json():
+    assert WatchesSettings().chat_tools == []
+    assert WatchesSettings(chat_tools="").chat_tools == []  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValidationError, match="not valid JSON"):
+        WatchesSettings(chat_tools="[")  # pyright: ignore[reportArgumentType]
+    # Daimon's own readers stay allowed on daimon-mcp whatever the list says.
+    native = [{**NATIVE, "tool": "read_thread"}]
+    assert (
+        WatchesSettings(
+            chat_tools='["read_thread"]',  # pyright: ignore[reportArgumentType]
+            pollable_tools=json.dumps(native),  # pyright: ignore[reportArgumentType]
+        )
+        .pollable_tools[0]
+        .tool
+        == "read_thread"
+    )
 
 
 def test_internationalised_hosts_are_one_entry_and_match_either_spelling(monkeypatch):

@@ -1664,12 +1664,21 @@ server URL, never a server name), tool (exact name), credential ("none" for nati
 readers; "agent" or "owner" for MCP servers), returns_chat (required: true only for
 native readers, which drop Daimon's own messages), max_interval_floor_s (shortest
 interval, at least 60, default 300) and label (shown on the approval card). Native
-entries must be read_thread or read_channel. Known chat and archive tools are refused on
-MCP servers. MCP entries with credential owner are not polled yet. A server's read-only
-annotation never allows a poll; only this list does, and a server can still write when
-it says it only reads. A watch below a raised floor polls at the floor. Default (also
-used when the value is empty): read_thread and read_channel on daimon-mcp, credential
-none, returns_chat true, floor 60. Set [] to allow no polls.
+entries must be read_thread or read_channel. Daimon's chat readers and chat_tools are
+refused on MCP servers. MCP entries with credential owner are not polled yet. A server's
+read-only annotation never allows a poll; only this list does, and a server can still
+write when it says it only reads. A watch below a raised floor polls at the floor.
+Default (also used when the value is empty): read_thread and read_channel on daimon-mcp,
+credential none, returns_chat true, floor 60. Set [] to allow no polls.
+
+### `DAIMON_WATCHES__CHAT_TOOLS`
+
+`list[str]` · optional · default unset
+
+JSON list of tool names on MCP servers that return chat or archive text, such as a chat
+archive search. A watch could fire on its own report through them, so POLLABLE_TOOLS
+refuses them on any MCP server, whatever returns_chat says. Daimon's own read_thread,
+read_channel and search_messages are always refused there. Default: none.
 
 ## Private Channel Messages
 
@@ -1933,16 +1942,16 @@ Read from `daimon.adapters.sidecar.settings.SidecarSettings`. Prefix `DAIMON_SID
 
 `SecretStr` · **required** · secret
 
-Lane database URL for a dedicated login granted only daimon_sidecar. Require TLS for
-remote databases.
+Database URL for a dedicated login granted only daimon_sidecar. Require TLS for remote
+databases.
 
 ### `DAIMON_SIDECAR__SIGNING_KEYS`
 
 `dict[str, SecretStr]` · optional · default unset · secret
 
-OS-host page-event HMAC keys by key ID, each at least 32 random bytes. Supply from lane
-secret management; keys never enter browser HTML or watch rows. Only configured OS page
-hosts may sign events; outside senders are unsupported.
+Page-event HMAC keys for page hosts, by key ID, each at least 32 random bytes. Supply
+from your secret manager; keys never enter browser HTML or watch rows. Only configured
+page hosts may sign events; outside senders are unsupported.
 
 ### `DAIMON_SIDECAR__HOST`
 
@@ -1979,7 +1988,7 @@ disables polling transport.
 
 `'http://watch-executor:8767' | 'http://127.0.0.1:8767'` · optional · default `http://watch-executor:8767`
 
-Fixed private OS executor origin. No outside hosts, redirects or source URLs.
+Fixed private watch executor origin. No outside hosts, redirects or source URLs.
 
 ### `DAIMON_SIDECAR__POLL_INTERVAL_S`
 

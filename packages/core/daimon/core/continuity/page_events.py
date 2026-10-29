@@ -1,4 +1,4 @@
-"""OS hosts sign page events after ACL/CSRF checks; signing keys never reach browsers."""
+"""Page hosts sign page events after ACL/CSRF checks; signing keys never reach browsers."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def signature_for(
     body: bytes,
 ) -> str:
     if not 32 <= len(key.encode()) <= 256 or not KEY_ID.fullmatch(key_id):
-        raise ValueError("Invalid OS signing key or key identity")
+        raise ValueError("Invalid page signing key or key identity")
     canonical = "\n".join(
         (
             "daimon-page-v1",

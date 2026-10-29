@@ -1,4 +1,4 @@
-"""OS-signed page-event watches and a constrained transactional ingress.
+"""Host-signed page-event watches and a constrained transactional ingress.
 
 downgrade: unsupported
 """

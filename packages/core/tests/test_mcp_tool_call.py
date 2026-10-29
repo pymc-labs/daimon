@@ -17,15 +17,15 @@ from daimon.core.mcp_tool_call import (
     resolve_public_address,
 )
 from daimon.testing.asgi import asgi_lifespan
-from daimon.testing.preview_parity_mcp import build_parity_host
+from daimon.testing.mcp_fixture_server import build_fixture_server
 
 TOKEN = "watch-sentinel-" + "s" * 40
-URL = "https://parity.example/mcp"
+URL = "https://fixture.example/mcp"
 PINNED = "93.184.216.34"
 
 
 async def pinned(host: str, port: int) -> str:
-    assert (host, port) == ("parity.example", 443)
+    assert (host, port) == ("fixture.example", 443)
     return PINNED
 
 
@@ -62,8 +62,8 @@ def fake_server(
     return httpx.MockTransport(handler)
 
 
-async def test_reads_the_parity_fixture_through_the_pinned_address_only(tmp_path: Path):
-    app = build_parity_host(token=TOKEN, journal_path=tmp_path / "calls.jsonl")
+async def test_reads_the_fixture_server_through_the_pinned_address_only(tmp_path: Path):
+    app = build_fixture_server(token=TOKEN, journal_path=tmp_path / "calls.jsonl")
     transport = Recording(httpx.ASGITransport(app=app))
     async with (
         asgi_lifespan(app),
@@ -77,8 +77,8 @@ async def test_reads_the_parity_fixture_through_the_pinned_address_only(tmp_path
     for request in transport.requests:
         # Connect to the pinned address; TLS and Host still name the registered host.
         assert request.url.host == PINNED and request.url.path == "/mcp"
-        assert request.headers["host"] == "parity.example"
-        assert request.extensions["sni_hostname"] == "parity.example"
+        assert request.headers["host"] == "fixture.example"
+        assert request.extensions["sni_hostname"] == "fixture.example"
         assert request.headers["authorization"] == f"Bearer {TOKEN}"
         assert "cookie" not in request.headers
 
@@ -230,12 +230,12 @@ async def test_refusals_are_a_class(status: int):
 @pytest.mark.parametrize(
     "url",
     [
-        "http://parity.example/mcp",
+        "http://fixture.example/mcp",
         "https://127.0.0.1/mcp",
         "https://169.254.169.254/latest",
         "https://[::ffff:10.0.0.1]/mcp",
         "https://localhost/mcp",
-        "https://user:pw@parity.example/mcp",
+        "https://user:pw@fixture.example/mcp",
         "https://Bücher.example/mcp",
     ],
 )
@@ -276,7 +276,7 @@ async def test_names_resolving_to_any_non_public_address_are_refused(
     loop = __import__("asyncio").get_running_loop()
     monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
     with pytest.raises(McpCallError) as failure:
-        await resolve_public_address("parity.example", 443)
+        await resolve_public_address("fixture.example", 443)
     assert failure.value.kind == "address"
 
 
@@ -286,7 +286,7 @@ async def test_a_public_name_resolves_to_its_first_address(monkeypatch: pytest.M
 
     loop = __import__("asyncio").get_running_loop()
     monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
-    assert await resolve_public_address("parity.example", 443) == "93.184.216.34"
+    assert await resolve_public_address("fixture.example", 443) == "93.184.216.34"
 
 
 async def test_environment_proxies_are_never_used(monkeypatch: pytest.MonkeyPatch):

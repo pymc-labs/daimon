@@ -221,13 +221,13 @@ async def poll_once(
     origin: str,
     executor_secret: str | None = None,
 ) -> int:
-    """Schedule at most four reads; only a registered OS executor receives leases."""
+    """Schedule at most four reads; only the registered watch executor receives leases."""
     if not load_watches_settings().enabled:
         return 0
     if executor_secret is None:
         return 0
     if origin not in {"http://watch-executor:8767", "http://127.0.0.1:8767"}:
-        raise ValueError("Poll executor must be the private OS service")
+        raise ValueError("Poll executor must be the private watch executor")
     async with sessions.begin() as db:
         leases = await claim_poll_watches(db)
 

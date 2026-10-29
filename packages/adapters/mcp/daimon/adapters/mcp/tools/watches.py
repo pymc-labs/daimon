@@ -1,6 +1,6 @@
 """Owner-bound watch management. Secrets travel only in a private owner DM.
 
-I2 (enrollment): Every create, resume and signing-key rotation requires a
+Enrollment: every create, resume and signing-key rotation requires a
 verified attended owner origin and server-side proof of that owner's card
 approval for that exact tool via session_card_gap before any mutation or secret
 delivery. Backend or session gating alone is not proof. A backend without
@@ -185,9 +185,9 @@ async def private_key_delivery(
             raise ToolError("Watch keys require a human owner")
         dm = await member.create_dm()
         await dm.send(
-            f"Daimon OS page signing key for watch {watch.id}, page {watch.page_id}:\n"
+            f"Page signing key for watch {watch.id}, page {watch.page_id}:\n"
             f"key_id={key_id}\nkey={key}\n"
-            "Install privately on the OS page host and sidecar. This key is shown once.",
+            "Install it privately on the page host and sidecar. This key is shown once.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -365,7 +365,7 @@ async def create_mcp_watch(
     key: str | None,
     evidence: list[str] | None,
 ) -> WatchSummary:
-    """A watch on a listed read tool of a server this agent attaches (I3, I4, I9).
+    """A watch on a listed read tool of a server this agent attaches.
 
     `server` is the server's URL or its name on this agent; the canonical URL is
     what gets stored and checked, never the name. The tool's live listing is read
@@ -687,7 +687,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"discord"})
     async def rotate_watch_key(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
-        """Rotate an OS page signing key, revoke the old key and cancel queued wakes. The fresh
+        """Rotate a page signing key, revoke the old key and cancel queued wakes. The fresh
         key goes to its owner by private DM once. Requires an attended owner turn;
         an admin cannot rotate another owner's key. Server-side owner card proof is
         required; backends without tool confirmation refuse.

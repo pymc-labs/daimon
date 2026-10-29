@@ -1,4 +1,4 @@
-"""Code-reviewed OS polling catalogue. Never infer enrollment from a tool name.
+"""Code-reviewed polling catalogue. Never infer enrollment from a tool name.
 
 Entries are reviewed with their adapter implementation and live authorization.
 The READ and NO_WATCH flags are independent: a read may be unsuitable to poll.
@@ -9,7 +9,7 @@ The catalogue says what *can* be polled; the operator's registry
 (`DAIMON_WATCHES__POLLABLE_TOOLS`) says what *is* polled in this deployment.
 A watch needs both, checked at create, at resume and before and after each read.
 
-I1 (loops): A poll never fires on content Daimon itself wrote. Bot- and
+Loops: a poll never fires on content Daimon itself wrote. Bot- and
 assistant-authored rows are excluded before the human-message window and before
 projection; pagination metadata never enters a poll document. A bounded scan
 that cannot establish that window saves no baseline or evidence. Source IDs must
@@ -94,7 +94,7 @@ def catalogue_digest(entry: Mapping[str, JsonValue]) -> str:
 
 
 def require_read_only_listing(entry: Mapping[str, JsonValue]) -> None:
-    """I4.3: the server itself must say the tool only reads. This can refuse, never allow."""
+    """The server itself must say the tool only reads. This can refuse, never allow."""
     annotations = entry.get("annotations")
     if (
         not isinstance(annotations, dict)

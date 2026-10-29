@@ -1,4 +1,4 @@
-"""I1 prevents output feedback cycles; I2 proves the owner's card inside each tool."""
+"""Watches never trigger on their own output, and each tool proves the owner's card itself."""
 
 # ruff: noqa: F811
 
@@ -60,7 +60,7 @@ async def enrolling_holds_watch_lock(other, pid) -> bool:
 
 
 @pytest.mark.parametrize("identifier", ["0", "04242", "+4242", " 4242", "١٢٣", "1" * 21])
-def test_i1_source_has_exactly_one_boundary_spelling(identifier):
+def test_no_self_trigger_source_has_exactly_one_boundary_spelling(identifier):
     with pytest.raises(ValueError, match="canonical"):
         validate_poll(
             "read_thread", {"thread_id": identifier}, projection=".", rule="change", interval=60
@@ -89,7 +89,7 @@ def message(identity, *, bot=False, webhook_id=None, application_id=None):
     )
 
 
-async def test_i1_bot_reports_cannot_evict_humans_or_change_poll_metadata():
+async def test_no_self_trigger_bot_reports_cannot_evict_humans_or_change_poll_metadata():
     human = message(1)
     before = await _history_page(history([human]), limit=1, before=None, poll_humans_only=True)
     after = await _history_page(
@@ -103,7 +103,7 @@ async def test_i1_bot_reports_cannot_evict_humans_or_change_poll_metadata():
     assert after[1:] == (None, None)
 
 
-async def test_i1_scan_overflow_refuses_a_partial_human_window():
+async def test_no_self_trigger_scan_overflow_refuses_a_partial_human_window():
     with pytest.raises(ValueError, match="bounded history scan"):
         await _history_page(
             history([message(i, bot=True) for i in range(201)] + [message(999)]),
@@ -127,7 +127,7 @@ async def test_automated_posts_without_bot_flag_do_not_displace_humans(automated
 
 
 @pytest.mark.fresh_schema
-async def test_i1_two_watches_cannot_wake_each_other_with_reports(runtime_watch):
+async def test_no_self_trigger_two_watches_cannot_wake_each_other_with_reports(runtime_watch):
     runtime, first, _ = runtime_watch
     async with runtime.session_factory.begin() as db:
         await create_thread_session(
@@ -204,7 +204,7 @@ async def test_i1_two_watches_cannot_wake_each_other_with_reports(runtime_watch)
 @pytest.mark.fresh_schema
 @pytest.mark.parametrize("action", ["create_watch", "resume_watch", "rotate_watch_key"])
 @pytest.mark.parametrize("proof", ["ungated", "unsupported"])
-async def test_i2_each_enrollment_requires_actual_server_side_card_proof(
+async def test_card_proof_each_enrollment_requires_actual_server_side_card_proof(
     attended_owner, monkeypatch, action, proof
 ):
     runtime, watch, auth, origin = attended_owner
@@ -291,7 +291,7 @@ async def test_create_page_event_watch_is_refused(attended_owner, monkeypatch):
 
 
 @pytest.mark.fresh_schema
-async def test_i1_legacy_bot_baseline_is_reestablished_without_firing(runtime_watch):
+async def test_no_self_trigger_legacy_bot_baseline_is_reestablished_without_firing(runtime_watch):
     runtime, watch, _ = runtime_watch
     async with runtime.session_factory.begin() as db:
         await db.execute(
@@ -322,7 +322,7 @@ async def test_i1_legacy_bot_baseline_is_reestablished_without_firing(runtime_wa
 
 @pytest.mark.fresh_schema
 @pytest.mark.parametrize("action", ["create_watch", "resume_watch", "rotate_watch_key"])
-async def test_i2_unsupported_bound_profile_refuses_even_a_claimed_gated_snapshot(
+async def test_card_proof_unsupported_bound_profile_refuses_even_a_claimed_gated_snapshot(
     attended_owner, monkeypatch, action
 ):
     runtime, watch, auth, origin = attended_owner
@@ -352,7 +352,7 @@ async def test_i2_unsupported_bound_profile_refuses_even_a_claimed_gated_snapsho
 
 
 @pytest.mark.fresh_schema
-async def test_i1_resolved_place_identity_refuses_a_raw_distinct_source(runtime_watch):
+async def test_no_self_trigger_resolved_place_identity_refuses_a_raw_distinct_source(runtime_watch):
     from daimon.core.authz import Place
 
     runtime, watch, _ = runtime_watch
@@ -720,7 +720,7 @@ async def test_concurrent_executions_of_one_lease_fire_once(runtime_watch):
     ("tool", "arguments", "projection", "rule"),
     [
         ("send_message", {"channel_id": "1"}, ".", "change"),
-        ("artifact_db_query", {}, ".", "change"),
+        ("example_query", {}, ".", "change"),
         ("READ_THREAD", {"thread_id": "1"}, ".", "change"),
         ("read_thread", {}, ".", "change"),
         ("read_thread", {"thread_id": "1", "before": "2"}, ".", "change"),
@@ -764,7 +764,7 @@ def _msg(identity, *, bot=False, webhook_id=None):
     )
 
 
-async def test_i1_webhook_post_is_excluded_even_without_bot_flag():
+async def test_no_self_trigger_webhook_post_is_excluded_even_without_bot_flag():
     """Daimon answers through webhooks; exclusion must not rest on one inferred flag."""
     rows, _, _ = await _history_page(
         _history([_msg(2, webhook_id=777), _msg(1)]),
@@ -776,8 +776,8 @@ async def test_i1_webhook_post_is_excluded_even_without_bot_flag():
 
 
 @pytest.mark.fresh_schema
-async def test_i2_shared_slot_unsupported_profile_refuses(attended_owner, monkeypatch):
-    """Admission reads the shared slot first on ever-shared threads; so must I2."""
+async def test_card_proof_shared_slot_unsupported_profile_refuses(attended_owner, monkeypatch):
+    """Admission reads the shared slot first on ever-shared threads; so must the card proof."""
     runtime, _, auth, origin = attended_owner
     monkeypatch.setattr(_session_gate, "session_card_gap", AsyncMock(return_value=None))
 
@@ -798,7 +798,9 @@ async def test_i2_shared_slot_unsupported_profile_refuses(attended_owner, monkey
 
 @pytest.mark.fresh_schema
 @pytest.mark.parametrize("approved", ["resume_watch", "rotate_watch_key", "add_skill"])
-async def test_i2_proof_for_another_tool_cannot_create(attended_owner, monkeypatch, approved):
+async def test_card_proof_proof_for_another_tool_cannot_create(
+    attended_owner, monkeypatch, approved
+):
     runtime, _, auth, origin = attended_owner
 
     async def proof(runtime, auth, origin, *, tool_name, **kw):
@@ -818,7 +820,9 @@ async def test_i2_proof_for_another_tool_cannot_create(attended_owner, monkeypat
 
 @pytest.mark.fresh_schema
 @pytest.mark.parametrize("action", ["resume", "rotate"])
-async def test_i2_proof_lookup_does_not_hold_global_watch_lock(attended_owner, monkeypatch, action):
+async def test_card_proof_proof_lookup_does_not_hold_global_watch_lock(
+    attended_owner, monkeypatch, action
+):
     """The card proof makes provider calls; the global firing lock must not be held meanwhile."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
