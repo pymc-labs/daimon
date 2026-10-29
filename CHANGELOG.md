@@ -181,7 +181,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- Remove staffing threads from Daimon.
+- Staffing threads are removed from Daimon.
 
 ### Added
 
@@ -1260,7 +1260,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output write; a failed check latches delivery off through cleanup. Startup audits
   resolve the real ingress schema and refuse unsafe effective database privileges.
   Expired batches never absorb fresh events.
-- Add deterministic polling of reviewed OS read tools, bounded projections, saved
+- Add deterministic polling of reviewed Daimon read tools, bounded projections, saved
   baselines, separate poll leases and error backoff. Owner MCP tools manage watches
   and deliver page signing keys privately once. Offline imports remain paused until
   their exact owner and destination are confirmed; unmapped page-data polls stay
