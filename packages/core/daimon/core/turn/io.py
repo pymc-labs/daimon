@@ -422,6 +422,13 @@ def neutral_inputs(events: Sequence[BetaManagedAgentsEventParams]) -> tuple[Inpu
     return tuple(inputs)
 
 
+def _input_id(event: Event) -> str | None:
+    """The native id of a recorded user.message, the only input that opens a turn."""
+    if event.authority == "preview" or event.native.event_type != "user.message":
+        return None
+    return event.native.event_id
+
+
 def _send_kind(inputs: Sequence[InputEvent]) -> str:
     if any(isinstance(event, UserMessage) for event in inputs):
         return "send"
@@ -465,14 +472,36 @@ class MuxTurnIO:
         self._turn_id: str | None = None
         self._operation_id = str(uuid4())
         self._persistence = persistence
+        # This turn's own input (F12): the receipt's native ids, or, after this
+        # process posted it and lost the answer, proof found on replay. A
+        # receipt restored without posting has nothing to compare against.
+        self._own_inputs: tuple[str, ...] = ()
+        self._unconfirmed = False
+        # The journal's inputs before the first replay after an unconfirmed
+        # send, kept across retried walks: a walk that journals this turn's
+        # input and then fails must not hide it from the next one.
+        self._journaled_before: set[str] | None = None
+        # Every user.message this IO saw on its live stream. The stream carries
+        # only new events, so one seen there is this turn's.
+        self._live_inputs: set[str] = set()
         if persistence is not None:
             persistence.check_session(scope, session)
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         inputs = neutral_inputs(events)
         kind = _send_kind(inputs)
+        # Checked only with a journal to compare against, and only for a send
+        # this process posts: a restored receipt replays as before.
+        checked = (
+            self._persistence is not None
+            and not self._own_inputs
+            and any(isinstance(event, UserMessage) and event.mode == "new_turn" for event in inputs)
+        )
+        posted = False
 
         async def deliver(key: str) -> SendReceipt:
+            nonlocal posted
+            posted = True
             return await self._backend.events.send(self._scope, self._session, inputs, key=key)
 
         try:
@@ -488,8 +517,16 @@ class MuxTurnIO:
                     lambda receipt: "accepted" if receipt.status == "queued" else receipt.status,
                 )
             )
-        except UncertainSend as error:
-            raise TurnConnectionLost(str(error)) from error
+        except BaseException as error:
+            # Posted from this process with no answer: a reconnect must find it.
+            self._unconfirmed = self._unconfirmed or (checked and posted)
+            if isinstance(error, UncertainSend):
+                raise TurnConnectionLost(str(error)) from error
+            raise
+        if checked and posted and receipt.input_ids:
+            self._own_inputs = receipt.input_ids
+        elif checked and posted and receipt.status == "outcome_unknown":
+            self._unconfirmed = True
         if receipt.status == "outcome_unknown":
             # Never acknowledge acceptance or repeat this batch. The existing
             # reconnect machinery will replay before attaching another stream.
@@ -537,9 +574,11 @@ class MuxTurnIO:
         if self._persistence is not None:
             await self._persistence.gap(self._session)
 
-    async def _record(self, event: Event) -> None:
+    async def _record(self, event: Event, *, live: bool = True) -> None:
         if self._persistence is not None:
             await self._persistence.record(self._session, event)
+        if live and (input_id := _input_id(event)) is not None:
+            self._live_inputs.add(input_id)
         if event.authority != "preview":
             self._remember_root(event)
 
@@ -556,6 +595,11 @@ class MuxTurnIO:
 
         async def walk() -> list[BetaManagedAgentsSessionEvent]:
             events: list[BetaManagedAgentsSessionEvent] = []
+            # What the journal held before the first walk; see _find_own_input.
+            if self._unconfirmed and self._journaled_before is None:
+                self._journaled_before = await self._journaled_ids()
+            journaled = self._journaled_before if self._unconfirmed else None
+            walked: list[tuple[str | None, bool]] = []
             source = history.walk(self._scope, self._session)
             try:
                 while True:
@@ -563,9 +607,10 @@ class MuxTurnIO:
                         event = await _native_error_edge(source.__anext__())
                     except StopAsyncIteration:
                         break
-                    await self._record(event)
+                    await self._record(event, live=False)
                     if event.authority == "preview":
                         continue
+                    walked.append((event.native.event_id, _input_id(event) is not None))
                     record = event.native.record
                     if event.native.provider != "anthropic" or not isinstance(record, dict):
                         raise UnsupportedCapability(("legacy_event_codec",), "daimon.turn")
@@ -579,6 +624,7 @@ class MuxTurnIO:
                 close = getattr(source, "aclose", None)
                 if callable(close):
                     await cast(Callable[[], Awaitable[None]], close)()
+            self._find_own_input(walked, journaled)
             return events
 
         try:
@@ -587,6 +633,59 @@ class MuxTurnIO:
             raise TurnError(
                 kind="upstream", message=f"MA event replay did not complete within {timeout_s}s"
             ) from error
+
+    async def _journaled_ids(self) -> set[str] | None:
+        if self._persistence is None:
+            return None
+        found: set[str] = set()
+        after = -1
+        while page := await self._persistence.store.read_events(self._session.id, after=after):
+            found.update(e.native.event_id for e in page if e.native.event_id is not None)
+            after = page[-1].sequence
+        return found
+
+    def _find_own_input(
+        self, walked: Sequence[tuple[str | None, bool]], journaled: set[str] | None
+    ) -> None:
+        """A replay must show this turn's own input before it reads an answer (F12).
+
+        Without it, an earlier turn's ending would read as this turn's answer.
+        Missing input is a lost connection: the person asks what was done.
+        """
+        inputs = [event_id for event_id, is_input in walked if is_input and event_id]
+        # A confirmed send is proven by its receipt; only an unconfirmed one
+        # needs the history.
+        if not self._unconfirmed or journaled is None:
+            return
+        # Only an input after the newest event the journal already held can be
+        # this turn's (or one its live stream saw): a hole earlier in the
+        # journal is not new. With nothing journaled (a new session's first
+        # turn, the designed reattach) a session whose sole input is this one
+        # proves it; with earlier unjournaled turns nothing can, and the replay
+        # runs unchecked as before. A one-turn unjournaled session whose input
+        # was lost reads like a new one whose input landed: that residue needs
+        # a pre-send read, which the mux-equals-legacy wire forbids.
+        anchor = max(
+            (i for i, (event_id, _) in enumerate(walked) if event_id in journaled), default=None
+        )
+        if anchor is None:
+            if len(inputs) > 1 and not set(inputs) & self._live_inputs:
+                # Unjournaled earlier turns: nothing to compare against, so
+                # replay as before rather than refuse an input that may have
+                # landed.
+                self._unconfirmed = False
+                return
+            mine = inputs
+        else:
+            mine = [
+                event_id
+                for i, (event_id, is_input) in enumerate(walked)
+                if is_input and event_id and i > anchor
+            ]
+        mine += [event_id for event_id in inputs if event_id in self._live_inputs]
+        if not mine:
+            raise TurnConnectionLost("this turn's input did not reach the session")
+        self._own_inputs, self._unconfirmed = (mine[-1],), False
 
     async def interrupt(self, *, timeout_s: float) -> StopObservation:
         turn_id = self._turn_id or (
