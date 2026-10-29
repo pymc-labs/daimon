@@ -1757,7 +1757,15 @@ Run the separate private listener with
 `uvicorn daimon.adapters.mcp.watch_executor:create_watch_executor_app --factory --host 127.0.0.1 --port 8767 --no-access-log`.
 `DAIMON_SIDECAR__POLL_INTERVAL_S` controls the 1–60 second tick interval. Both producer
 gates must be on before any poll runs. Source errors back off exponentially from
-the registered interval to a maximum of one day. Revoked owner/source/destination
+the registered interval to a maximum of one day. A poll that fails at least five
+times in a row over at least 24 hours (counted from the first error since its last
+success or resume) stops: it is paused with reason `failed`, its queued wakes are
+cancelled and the owner gets one private message. The owner resumes it with the
+usual attended approval, which resets the error count. When a per-watch or
+per-owner daily cap blocks a firing, the watch stays active, polls at its normal
+interval and fires again once older firings leave the rolling day; the owner gets
+one private message per watch per rolling day, kept across restarts. Event-rate and
+storage quotas stay silent. Revoked owner/source/destination
 access pauses polling and cancels queued work. Expired watches stop automatically.
 
 `create_watch`, `list_watches`, `show_watch`, `pause_watch`, `resume_watch`,

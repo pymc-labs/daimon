@@ -567,9 +567,11 @@ async def resume_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
         "notice_pending": False,
         "notice_lease": None,
         "notice_lease_until": None,
+        "failing_since": None,
     }
     row.next_check_at = now
     row.backoff_until = None
+    row.consecutive_errors = 0
     await session.flush()
 
 
@@ -714,7 +716,9 @@ async def poll_failed(
     revoked: bool,
     now: datetime,
     capped: bool = False,
+    daily_cap: bool = False,
 ) -> None:
+    """Back off on errors, stop a watch that kept failing, note a reached daily cap."""
     # Invalid capabilities never contend on the global firing lock.
     current = await get_watch(session, watch_id)
     if current is None or current.lease_owner != lease:
@@ -730,14 +734,45 @@ async def poll_failed(
     if capped:
         row.backoff_until = None
         row.next_check_at = now + timedelta(seconds=interval)
+        noticed = row.source_state.get("daily_cap_at")
+        if daily_cap and (
+            noticed is None or datetime.fromisoformat(str(noticed)) <= now - timedelta(days=1)
+        ):
+            # One owner notice per rolling day; the watch keeps polling and fires again
+            # once older firings leave the window.
+            row.source_state = {
+                **row.source_state,
+                "daily_cap_at": now.isoformat(),
+                "notice_state": "daily_cap",
+                "notice_pending": True,
+            }
     else:
+        if row.consecutive_errors == 0 or row.source_state.get("failing_since") is None:
+            row.source_state = {**row.source_state, "failing_since": now.isoformat()}
         row.consecutive_errors += 1
         delay = min(86400, interval * 2 ** min(row.consecutive_errors, 10))
         row.backoff_until = now + timedelta(seconds=delay)
         row.next_check_at = row.backoff_until
+        failing_since = datetime.fromisoformat(str(row.source_state["failing_since"]))
+        if is_failed(row.consecutive_errors, failing_since=failing_since, now=now):
+            await pause_watch(session, watch_id, reason="failed")
+            return
     row.lease_owner = None
     row.lease_expires_at = None
     await session.flush()
+
+
+FAIL_AFTER_ERRORS = 5
+FAIL_AFTER_FAILING = timedelta(hours=24)
+
+
+def is_failed(consecutive_errors: int, *, failing_since: datetime, now: datetime) -> bool:
+    """Stop a poll that kept failing: five errors in a row spanning at least a day.
+
+    `failing_since` is the first error since the last success or resume, so short
+    outages only back off.
+    """
+    return consecutive_errors >= FAIL_AFTER_ERRORS and now - failing_since >= FAIL_AFTER_FAILING
 
 
 async def import_watch(
@@ -876,12 +911,20 @@ async def claim_import_notice(
     lifecycle = or_(
         Watch.status == "expired",
         (Watch.status == "paused")
-        & or_(reason.in_(("access_revoked", "cap_reached")), reason.startswith("Watch paused:")),
+        & or_(
+            reason.in_(("access_revoked", "cap_reached", "failed")),
+            reason.startswith("Watch paused:"),
+        ),
     )
     capped = (
         (Watch.status == "active")
         & Watch.max_fires.is_not(None)
         & (Watch.fire_count >= Watch.max_fires)
+    )
+    daily_capped = (
+        (Watch.status == "active")
+        & pending
+        & (Watch.source_state["notice_state"].astext == "daily_cap")
     )
     row = await session.scalar(
         select(Watch)
@@ -903,6 +946,7 @@ async def claim_import_notice(
                     pending,
                     Watch.source_state["notice_state"].astext.is_distinct_from("cap_reached"),
                 ),
+                daily_capped,
             ),
             or_(
                 Watch.source_state["notice_lease_until"].astext.is_(None),
@@ -920,10 +964,16 @@ async def claim_import_notice(
     if until is not None and datetime.fromisoformat(str(until)) > now:
         return None
     token = str(uuid.uuid4())
+    if row.status != "active":
+        notice_state = row.status
+    elif row.max_fires is not None and row.fire_count >= row.max_fires:
+        notice_state = "cap_reached"
+    else:
+        notice_state = "daily_cap"
     row.source_state = {
         **state,
         "notice_pending": True,
-        "notice_state": "cap_reached" if row.status == "active" else row.status,
+        "notice_state": notice_state,
         "notice_lease": token,
         "notice_lease_until": (now + timedelta(minutes=2)).isoformat(),
     }

@@ -402,3 +402,185 @@ async def test_old_lease_release_cannot_clear_new_poll_claim(db_session_factory,
         await watches.release_poll_lease(db, watch.id, token)
     async with db_session_factory() as db:
         assert (await watches.get_watch(db, watch.id)).lease_owner == replacement
+
+
+async def fail_once(factory, watch, *, errors_before, failing_for, now):
+    """One more poll error after `errors_before` errors that began `failing_for` ago."""
+    async with factory.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE watches SET consecutive_errors=:errors, backoff_until=NULL,"
+                " source_state=source_state || jsonb_build_object('failing_since', CAST(:since AS text))"
+                " WHERE id=:id"
+            ),
+            {"errors": errors_before, "since": (now - failing_for).isoformat(), "id": watch.id},
+        )
+    lease = await claim(factory, watch.id)
+    async with factory.begin() as db:
+        await watches.poll_failed(db, watch.id, lease, revoked=False, now=now)
+        return await watches.get_watch(db, watch.id)
+
+
+@pytest.mark.parametrize(
+    ("errors", "failing_for", "stopped"),
+    [
+        (4, timedelta(days=3), False),
+        (5, timedelta(hours=23, minutes=59), False),
+        (5, timedelta(hours=24), True),
+        (9, timedelta(days=2), True),
+    ],
+)
+async def test_a_poll_stops_after_five_errors_spanning_a_day(
+    db_session_factory, poll_watch, errors, failing_for, stopped
+):
+    watch, _ = poll_watch
+    now = datetime.now(UTC)
+    current = await fail_once(
+        db_session_factory, watch, errors_before=errors - 1, failing_for=failing_for, now=now
+    )
+    assert current.consecutive_errors == errors
+    if stopped:
+        assert current.status == "paused" and current.source_state["reason"] == "failed"
+        assert current.lease_owner is None
+    else:
+        assert current.status == "active" and current.source_state.get("reason") is None
+        assert current.backoff_until is not None and current.backoff_until > now
+
+
+async def test_first_error_starts_the_failing_clock_and_success_restarts_it(
+    db_session_factory, poll_watch
+):
+    watch, _ = poll_watch
+    now = datetime.now(UTC)
+    lease = await claim(db_session_factory, watch.id)
+    async with db_session_factory.begin() as db:
+        await watches.poll_failed(db, watch.id, lease, revoked=False, now=now)
+        assert (await watches.get_watch(db, watch.id)).source_state["failing_since"] == (
+            now.isoformat()
+        )
+        await db.execute(
+            text("UPDATE watches SET backoff_until=NULL WHERE id=:id"), {"id": watch.id}
+        )
+    # A success clears the count; the next error restarts the clock instead of
+    # inheriting the old start.
+    lease = await claim(db_session_factory, watch.id)
+    await result(db_session_factory, watch, lease, [], None)
+    later = now + timedelta(days=2)
+    lease = await claim(db_session_factory, watch.id)
+    async with db_session_factory.begin() as db:
+        await watches.poll_failed(db, watch.id, lease, revoked=False, now=later)
+        current = await watches.get_watch(db, watch.id)
+    assert current.consecutive_errors == 1 and current.status == "active"
+    assert current.source_state["failing_since"] == later.isoformat()
+
+
+async def test_a_stopped_watch_cancels_wakes_notifies_once_and_resumes_clean(
+    db_session_factory, poll_watch
+):
+    from daimon.core.continuity.watch_notices import poll_watch_notices
+
+    watch, _ = poll_watch
+    lease = await claim(db_session_factory, watch.id)
+    await result(db_session_factory, watch, lease, [], None)
+    lease = await claim(db_session_factory, watch.id)
+    wake = await result(db_session_factory, watch, lease, [1], "[1]")
+    now = datetime.now(UTC)
+    current = await fail_once(
+        db_session_factory, watch, errors_before=4, failing_for=timedelta(days=1), now=now
+    )
+    assert current.status == "paused" and current.source_state["reason"] == "failed"
+    async with db_session_factory() as db:
+        assert (await get_continuation(db, idempotency_key=wake)).status == "cancelled"
+        assert await watches.claim_poll_watches(db) == []
+
+    deliver = AsyncMock(return_value=True)
+    for _ in range(3):
+        await poll_watch_notices(db_session_factory, deliver=deliver)
+    deliver.assert_awaited_once()
+    recipient, _, message = deliver.await_args.args
+    assert recipient.owner_external_id == watch.owner_external_id
+    assert watch.instructions in message and "stopped" in message and "resume" in message
+
+    async with db_session_factory.begin() as db:
+        await watches.resume_watch(db, watch.id, now=now)
+        current = await watches.get_watch(db, watch.id)
+    assert current.status == "active" and current.consecutive_errors == 0
+    assert current.source_state.get("failing_since") is None
+    # After a resume one error is only a backoff again, and no second notice goes out.
+    current = await fail_once(
+        db_session_factory, watch, errors_before=0, failing_for=timedelta(0), now=now
+    )
+    assert current.status == "active" and current.consecutive_errors == 1
+    await poll_watch_notices(db_session_factory, deliver=deliver)
+    deliver.assert_awaited_once()
+
+
+async def test_daily_cap_notice_goes_out_once_per_rolling_day(db_session_factory, poll_watch):
+    from daimon.core.continuity.watch_notices import poll_watch_notices
+
+    watch, _ = poll_watch
+    deliver = AsyncMock(return_value=True)
+
+    async def capped(now, *, daily_cap=True):
+        lease = await claim(db_session_factory, watch.id)
+        async with db_session_factory.begin() as db:
+            await watches.poll_failed(
+                db, watch.id, lease, revoked=False, now=now, capped=True, daily_cap=daily_cap
+            )
+            return await watches.get_watch(db, watch.id)
+
+    now = datetime.now(UTC)
+    # Rate and quota limits stay silent.
+    await capped(now, daily_cap=False)
+    await poll_watch_notices(db_session_factory, deliver=deliver)
+    deliver.assert_not_awaited()
+
+    current = await capped(now)
+    assert current.status == "active" and current.consecutive_errors == 0
+    for _ in range(2):
+        await poll_watch_notices(db_session_factory, deliver=deliver)
+    deliver.assert_awaited_once()
+    _, _, message = deliver.await_args.args
+    assert watch.instructions in message and "daily limit" in message
+
+    # Later ticks in the same window, including after a restart re-claims the poll,
+    # send nothing more.
+    await capped(now + timedelta(hours=23))
+    await poll_watch_notices(db_session_factory, deliver=deliver)
+    deliver.assert_awaited_once()
+
+    # Once the window rolls, a new cap gets one new notice.
+    current = await capped(now + timedelta(hours=24))
+    assert current.status == "active"
+    for _ in range(2):
+        await poll_watch_notices(db_session_factory, deliver=deliver)
+    assert deliver.await_count == 2
+
+
+async def test_undelivered_daily_cap_notice_retries_without_repeating(
+    db_session_factory, poll_watch
+):
+    from daimon.core.continuity.watch_notices import poll_watch_notices
+
+    watch, _ = poll_watch
+    now = datetime.now(UTC)
+    lease = await claim(db_session_factory, watch.id)
+    async with db_session_factory.begin() as db:
+        await watches.poll_failed(
+            db, watch.id, lease, revoked=False, now=now, capped=True, daily_cap=True
+        )
+    failing = AsyncMock(return_value=False)
+    await poll_watch_notices(db_session_factory, deliver=failing)
+    failing.assert_awaited_once()
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE watches SET source_state=source_state || "
+                "'{\"notice_lease_until\": null}'::jsonb WHERE id=:id"
+            ),
+            {"id": watch.id},
+        )
+    deliver = AsyncMock(return_value=True)
+    for _ in range(2):
+        await poll_watch_notices(db_session_factory, deliver=deliver)
+    deliver.assert_awaited_once()
