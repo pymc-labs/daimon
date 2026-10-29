@@ -407,3 +407,45 @@ async def test_a_turn_that_never_posted_replays_unchecked() -> None:
     history = _History(*_PREVIOUS)
     io, _ = _io(history)
     assert [e.id for e in await io.replay()][-1] == "idle-2"
+
+
+async def test_a_walk_that_journals_the_input_then_fails_finds_it_on_retry() -> None:
+    history = _History(*_PREVIOUS, ack="outcome_unknown")
+    io, journal = _io(history)
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    walk = history.walk
+
+    async def broken(scope: Scope, session: ResourceRef) -> AsyncIterator[Event]:
+        async for event in walk(scope, session):
+            yield event
+        raise ProviderError("transient_network", retryable=True)
+
+    history.walk = broken  # type: ignore[method-assign]
+    with pytest.raises(TurnConnectionLost):
+        await io.replay()
+    assert journal.rows[-1].id == "user-3"  # the failed walk journaled it
+    history.walk = walk  # type: ignore[method-assign]
+    assert [e.id for e in await io.replay()][-1] == "user-3"
+
+
+async def test_a_restored_receipt_is_not_checked() -> None:
+    # Another process posted; the stored receipt comes back without a post.
+    history = _History(*_PREVIOUS)
+    io, journal = _io(history)
+
+    async def restored(session, kind, request, call, response, status):
+        return SendReceipt(operation_id="stored", status="processed", input_ids=("elsewhere",))
+
+    journal.mutate = restored  # type: ignore[method-assign]
+    await io.send(_QUESTION)
+    assert history.sent == 0
+    assert [e.id for e in await io.replay()][-1] == "idle-2"
+
+
+async def test_without_a_journal_nothing_is_checked() -> None:
+    history = _History(*_PREVIOUS, ack="outcome_unknown", lands=False)
+    io = MuxTurnIO(history.backend(), SCOPE, SESSION)
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    assert [e.id for e in await io.replay()][-1] == "idle-2"

@@ -477,6 +477,10 @@ class MuxTurnIO:
         # receipt restored without posting has nothing to compare against.
         self._own_inputs: tuple[str, ...] = ()
         self._unconfirmed = False
+        # The journal's inputs before the first replay after an unconfirmed
+        # send, kept across retried walks: a walk that journals this turn's
+        # input and then fails must not hide it from the next one.
+        self._journaled_before: set[str] | None = None
         # Every user.message this IO saw on its live stream. The stream carries
         # only new events, so one seen there is this turn's.
         self._live_inputs: set[str] = set()
@@ -486,8 +490,12 @@ class MuxTurnIO:
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         inputs = neutral_inputs(events)
         kind = _send_kind(inputs)
-        opens_turn = not self._own_inputs and any(
-            isinstance(event, UserMessage) and event.mode == "new_turn" for event in inputs
+        # Checked only with a journal to compare against, and only for a send
+        # this process posts: a restored receipt replays as before.
+        checked = (
+            self._persistence is not None
+            and not self._own_inputs
+            and any(isinstance(event, UserMessage) and event.mode == "new_turn" for event in inputs)
         )
         posted = False
 
@@ -511,13 +519,13 @@ class MuxTurnIO:
             )
         except BaseException as error:
             # Posted from this process with no answer: a reconnect must find it.
-            self._unconfirmed = self._unconfirmed or (opens_turn and posted)
+            self._unconfirmed = self._unconfirmed or (checked and posted)
             if isinstance(error, UncertainSend):
                 raise TurnConnectionLost(str(error)) from error
             raise
-        if opens_turn and receipt.input_ids:
+        if checked and posted and receipt.input_ids:
             self._own_inputs = receipt.input_ids
-        elif opens_turn and posted:
+        elif checked and posted and receipt.status == "outcome_unknown":
             self._unconfirmed = True
         if receipt.status == "outcome_unknown":
             # Never acknowledge acceptance or repeat this batch. The existing
@@ -589,7 +597,9 @@ class MuxTurnIO:
             events: list[BetaManagedAgentsSessionEvent] = []
             # Inputs journaled before this walk are other turns', unless this
             # IO saw them on its live stream.
-            journaled = await self._journaled_inputs() if self._unconfirmed else None
+            if self._unconfirmed and self._journaled_before is None:
+                self._journaled_before = await self._journaled_inputs()
+            journaled = self._journaled_before if self._unconfirmed else None
             walked: list[str] = []
             source = history.walk(self._scope, self._session)
             try:
