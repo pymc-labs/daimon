@@ -19,6 +19,8 @@ Both producer gates remain default off. See
 [self-hosting](../../../docs/self-hosting.md#polling-and-owner-management) for owner
 tools and offline paused imports.
 
+Start the watch executor with `uvicorn daimon.adapters.mcp.watch_executor:create_watch_executor_app --factory --port 8767`.
+
 The poll-only ASGI app runs separately on `watch-executor:8767`, without published
 ports or proxy routes. The public MCP app has no executor route. Configure the
 same random secret in `DAIMON_WATCHES__EXECUTOR_SECRET` on the executor and

@@ -1748,6 +1748,8 @@ precede rate accounting, so invalid requests cannot consume the real-poll budget
 Sidecar sends only the service secret and short-lived lease, never owner credentials.
 For MCP server watches the executor needs outbound HTTPS to the listed server URLs.
 
+Start the watch executor with `uvicorn daimon.adapters.mcp.watch_executor:create_watch_executor_app --factory --port 8767`.
+
 Sidecar checks due work every five seconds, at most four polls per tick. A poll
 lease lasts 60 seconds, independently of the durable wake's lease. Each watch executor
 call has a 25-second deadline; the sidecar transport has 30 seconds, follows no
