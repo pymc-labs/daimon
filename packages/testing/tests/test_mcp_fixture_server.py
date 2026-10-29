@@ -58,7 +58,9 @@ async def test_catalogue_execution_and_persistent_readback(tmp_path: Path) -> No
         assert tools["lead_fixture_submit"]["annotations"]["destructiveHint"] is False
         assert (await c.get("/calls")).json() == {"calls": [], "write_count": 0}
         for name in tools:
-            result = await rpc("tools/call", {"name": name, "arguments": {"marker": "fixture-15"}})
+            result = await rpc(
+                "tools/call", {"name": name, "arguments": {"marker": "fixture-marker"}}
+            )
             assert not result["result"].get("isError")
         # Invalid arguments and unknown tools must never count as executed writes.
         result = await rpc("tools/call", {"name": "lead_fixture_submit", "arguments": {}})
@@ -78,7 +80,7 @@ async def test_catalogue_execution_and_persistent_readback(tmp_path: Path) -> No
         assert len(evidence["calls"]) == 6
         executed = [e for e in evidence["calls"] if e["phase"] == "executed"]
         assert [e["tool"] for e in executed] == list(tools)
-        assert all(e["args"] == {"marker": "fixture-15"} for e in executed)
+        assert all(e["args"] == {"marker": "fixture-marker"} for e in executed)
         assert all(e["caller"] == "mcp-fixture" for e in evidence["calls"])
         assert TOKEN not in path.read_text()
     restarted = build_fixture_server(token=TOKEN, journal_path=path)
