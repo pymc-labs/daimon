@@ -168,10 +168,17 @@ class SelfHostedEvents:
             observation.turn_id == raw.turn_id for observation in self.observations(ref)
         ):
             self.unresolved_turns.setdefault(ref, set()).add(raw.turn_id)
+            interrupted = raw.data.get("outcome") == "interrupted"
+            error = raw.data.get("error")
+            # The harness's own deadline keeps its name: it is not a Stop, even
+            # when it cut the turn off before its first measured model call.
+            deadline = (
+                interrupted and isinstance(error, dict) and error.get("kind") == "deadline_exceeded"
+            )
             payload = TurnEndedPayload(
                 root_turn_id=raw.turn_id,
-                outcome="interrupted" if raw.data.get("outcome") == "interrupted" else "errored",
-                native_reason="turn_usage_required",
+                outcome="interrupted" if interrupted else "errored",
+                native_reason="deadline_exceeded" if deadline else "turn_usage_required",
             )
             normalized = normalized.model_copy(update={"payload": payload.model_dump(mode="json")})
         if raw.type == "requires_action":

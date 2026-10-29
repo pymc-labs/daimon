@@ -46,6 +46,7 @@ class Wire:
         self.unmatched_start = False
         self.pending_checkpoint_warning = False
         self.ended: dict[str, object] = {"outcome": "completed"}
+        self.metered = True
 
     def handle(self, request):
         assert request.headers["authorization"] == "Bearer offline"
@@ -82,6 +83,8 @@ class Wire:
                 ),
                 ("turn_ended", self.ended),
             ]
+            if not self.metered:
+                del events[1]
             if self.unmatched_start:
                 events[1] = (
                     "model_request_started",
@@ -364,6 +367,7 @@ DEADLINE = {
 }
 
 
+@pytest.mark.parametrize("metered", [True, False])
 @pytest.mark.parametrize(
     ("ended", "reason"),
     [
@@ -378,7 +382,7 @@ DEADLINE = {
         ),
     ],
 )
-async def test_harness_deadline_ends_as_ceiling_not_a_stop(composed, ended, reason):
+async def test_harness_deadline_ends_as_ceiling_not_a_stop(composed, ended, reason, metered):
     # F13: the harness's own time limit is not the person pressing Stop. It is
     # stored and shown as CEILING, so it never counts as an interrupt.
     from daimon.core.turn.notices import render_termination_notice
@@ -386,6 +390,8 @@ async def test_harness_deadline_ends_as_ceiling_not_a_stop(composed, ended, reas
 
     request, wire, _, _ = composed
     wire.ended = ended
+    # Unmetered: the deadline cut the turn off before its first measured call.
+    wire.metered = metered
     prepared = await prepare_selfhosted(request)
     lifecycle = RecordingLifecycle()
 

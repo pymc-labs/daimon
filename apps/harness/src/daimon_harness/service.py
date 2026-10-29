@@ -504,9 +504,11 @@ class Supervisor:
                 request.session_id,
                 cast(list[JsonValue], redact(history, credentials)),
             )
-        except (asyncio.CancelledError, TimeoutError):
+        except (asyncio.CancelledError, TimeoutError) as exc:
             outcome = "interrupted"
-            if deadline is not None and deadline.expired():
+            # The deadline turns only its own cancellation into TimeoutError; a
+            # Stop arriving with it stays a CancelledError and stays a Stop.
+            if isinstance(exc, TimeoutError) and deadline is not None and deadline.expired():
                 interruption = {
                     "kind": "deadline_exceeded",
                     "message": "Turn reached its time limit",

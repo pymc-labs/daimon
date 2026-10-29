@@ -31,7 +31,7 @@ class FakeModelAdapter:
             "model_request_started",
             {"request_id": f"req-{self.calls}", "model": context.request.model},
         )
-        if mode != "unmetered":
+        if not mode.startswith("unmetered"):
             await context.emit(
                 "usage",
                 {
@@ -44,8 +44,10 @@ class FakeModelAdapter:
                 },
             )
         self.started.set()
-        if mode == "wait":
+        if mode in {"wait", "unmetered_wait"}:
             await asyncio.Event().wait()
+        if mode == "timeout":
+            raise TimeoutError("an adapter's own timeout, not the turn deadline")
         if mode in {"tool", "approval"}:
 
             async def execute() -> JsonValue:

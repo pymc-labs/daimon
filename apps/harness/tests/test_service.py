@@ -237,11 +237,12 @@ async def test_invocation_sse_and_direct_json_acceptance(
     assert model.calls == 1
 
 
+@pytest.mark.parametrize("mode", ["wait", "unmetered_wait"])
 async def test_deadline_interrupts_background_turn(
-    harness: tuple[httpx.AsyncClient, FakeModelAdapter, Path],
+    harness: tuple[httpx.AsyncClient, FakeModelAdapter, Path], mode: str
 ) -> None:
     client, _, _ = harness
-    body = turn("wait")
+    body = turn(mode)
     body["limits"] = {"max_tool_calls": 1, "deadline_s": 0.05}
     response = await client.post("/v0/turns", json=body, headers={"Accept": "application/json"})
     assert response.status_code == 202
@@ -255,6 +256,15 @@ async def test_deadline_interrupts_background_turn(
     # F13: the turn's own time limit is named, so it is not shown as a Stop.
     assert ended["outcome"] == "interrupted"
     assert ended["error"]["kind"] == "deadline_exceeded"
+
+
+async def test_an_adapter_timeout_is_not_the_turn_deadline(
+    harness: tuple[httpx.AsyncClient, FakeModelAdapter, Path],
+) -> None:
+    client, _, _ = harness
+    events = stream_events(await client.post("/v0/turns", json=turn("timeout")))
+    assert events[-1].data["outcome"] == "interrupted"
+    assert "error" not in events[-1].data
 
 
 def test_gateway_mode_refuses_startup_even_with_platform_headers(tmp_path, monkeypatch):
