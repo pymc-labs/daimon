@@ -1666,8 +1666,9 @@ native readers, which drop Daimon's own messages), max_interval_floor_s (shortes
 interval, at least 60, default 300) and label (shown on the approval card). Native
 entries must be read_thread or read_channel. MCP server entries are checked here but are
 not polled yet. A server's read-only annotation never allows a poll; only this list
-does. Default: read_thread and read_channel on daimon-mcp, credential none, returns_chat
-true, floor 60.
+does. A watch below a raised floor polls at the floor. Default (also used when the value
+is empty): read_thread and read_channel on daimon-mcp, credential none, returns_chat
+true, floor 60. Set [] to allow no polls.
 
 ## Private Channel Messages
 

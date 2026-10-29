@@ -91,4 +91,7 @@ def test_duplicates_and_bad_json_are_refused():
         WatchesSettings(pollable_tools=json.dumps([{**NATIVE, "tool": "read_thread"}] * 2))  # pyright: ignore[reportArgumentType]
     with pytest.raises(ValidationError, match="not valid JSON"):
         WatchesSettings(pollable_tools="[{")  # pyright: ignore[reportArgumentType]
-    assert WatchesSettings(pollable_tools="").pollable_tools == []  # pyright: ignore[reportArgumentType]
+    # Blank means the default; only an explicit [] allows nothing.
+    default = WatchesSettings().pollable_tools
+    assert WatchesSettings(pollable_tools="").pollable_tools == default  # pyright: ignore[reportArgumentType]
+    assert WatchesSettings(pollable_tools="[]").pollable_tools == []  # pyright: ignore[reportArgumentType]

@@ -1181,3 +1181,64 @@ async def test_frozen_sql_enforces_the_kept_bounds_exactly(runtime_watch):
     with pytest.raises(DBAPIError, match="poll evidence bounds"):
         await accept(10, "p" * 16385)
     assert await accept(10, "p" * 16384) is not None
+
+
+async def test_raised_floor_slows_existing_watches_without_pausing(runtime_watch, monkeypatch):
+    import json
+
+    runtime, watch, _ = runtime_watch
+    monkeypatch.setenv(
+        "DAIMON_WATCHES__POLLABLE_TOOLS",
+        json.dumps(
+            [
+                {
+                    "server": "daimon-mcp",
+                    "tool": "read_thread",
+                    "credential": "none",
+                    "returns_chat": True,
+                    "max_interval_floor_s": 600,
+                }
+            ]
+        ),
+    )
+    source = AsyncMock(return_value=_rows({"role": "user", "content": "1"}))
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
+        before = datetime.now(UTC)
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.side_effect = RuntimeError("source down")
+        assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
+    async with runtime.session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+    # Approved at 60 s, now held to the operator's 600 s floor, and still running.
+    assert current.status == "active"
+    assert current.source_state["interval"] == 60
+    assert current.next_check_at >= before + timedelta(seconds=600)
+
+
+async def test_quote_heavy_full_firing_still_seeds_newest_events(runtime_watch):
+    import json
+
+    from daimon.core.continuity.watch_projection import payload as evidence_payload
+
+    runtime, watch, _ = runtime_watch
+    source = AsyncMock(return_value=_rows({"role": "user", "content": "1"}))
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.return_value = _rows({"role": "user", "content": "2"})
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+    # Twenty maximal payloads made of quotes escape again inside the seed.
+    text_payload = evidence_payload({"content": '"' * 40000}, items=False)
+    assert len(text_payload) <= 16384
+    events = [{"event_id": f"event-{n}", "text": text_payload} for n in range(20)]
+    assert len(json.dumps(events).encode()) > watches.SEED_BYTES
+    async with runtime.session_factory.begin() as db:
+        [evidence] = await watches.list_evidence(db, watch.id)
+        await db.execute(
+            text("UPDATE watch_firings SET events=CAST(:events AS jsonb) WHERE wake_key=:key"),
+            {"events": json.dumps(events), "key": evidence.wake_key},
+        )
+        wake = await get_continuation(db, idempotency_key=evidence.wake_key)
+        seed = await watches.watch_seed(db, wake, now=datetime.now(UTC))
+    assert seed is not None
+    assert "event-19" in seed and "event-0" not in seed
+    assert len(seed.encode()) < 2 * watches.SEED_BYTES

@@ -2223,8 +2223,10 @@ class WatchesSettings(BaseModel):
             "least 60, default 300) and label (shown on the approval card). Native "
             "entries must be read_thread or read_channel. MCP server entries are checked "
             "here but are not polled yet. A server's read-only annotation never allows a "
-            "poll; only this list does. Default: read_thread and read_channel on "
-            "daimon-mcp, credential none, returns_chat true, floor 60."
+            "poll; only this list does. A watch below a raised floor polls at the "
+            "floor. Default (also used when the value is empty): read_thread and "
+            "read_channel on daimon-mcp, credential none, returns_chat true, floor 60. "
+            "Set [] to allow no polls."
         ),
     )
 
@@ -2234,7 +2236,8 @@ class WatchesSettings(BaseModel):
         if not isinstance(value, str):
             return value
         if not value.strip():
-            return []
+            # A blanked variable means "use the default", never "allow nothing".
+            return _default_pollable_tools()
         try:
             return json.loads(value)
         except json.JSONDecodeError as err:

@@ -68,6 +68,7 @@ from daimon.core.stores.watches import (
     DailyCap,
     PollBindingRevoked,
     finish_poll,
+    hold_to_floor,
     leased_poll,
     pause_unlisted,
     poll_failed,
@@ -267,6 +268,7 @@ async def authorize_poll(
 async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool:
     if not load_watches_settings().enabled:
         return False
+    floor = 0
     try:
         async with asyncio.timeout(25):
             async with runtime.session_factory() as db:
@@ -277,6 +279,8 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     await release_poll_lease(db, watch_id, lease)
                 return False
             tool = str(watch.source_state["tool"])
+            # The operator's current floor, not the one in place at approval.
+            floor = require_listed(DAIMON_SERVER_NAME, tool).max_interval_floor_s
             arguments = TypeAdapter(dict[str, JsonValue]).validate_python(
                 watch.source_state["arguments"]
             )
@@ -357,6 +361,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     if evidence is None
                     else evidence_payload(evidence, items=key is not None or bool(evidence_fields)),
                 )
+                await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
             return True
     except ToolUnlisted:
         # The operator took the tool off the registry: pause and tell the owner.
@@ -390,6 +395,8 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 ),
                 now=datetime.now(UTC),
             )
+            if floor:
+                await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
         return False
 
 

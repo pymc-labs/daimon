@@ -295,14 +295,15 @@ def _clip(value: JsonValue, limit: int) -> JsonValue:
     text = _text(value)
     if len(text) <= limit:
         return value
-    cut = limit
-    while True:
-        # Escaping can grow the cut text, so shrink until the wrapper fits.
-        clipped: JsonValue = {"truncated": text[:cut]}
-        excess = len(_text(clipped)) - limit
-        if excess <= 0:
-            return clipped
-        cut -= max(excess, 1)
+    # Escaping can grow the cut text, so find the longest prefix whose wrapper fits.
+    low, high = 0, min(len(text), limit)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(_text({"truncated": text[:middle]})) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return {"truncated": text[:low]}
 
 
 def payload(found: JsonValue, *, items: bool) -> str:

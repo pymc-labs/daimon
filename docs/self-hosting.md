@@ -1788,8 +1788,10 @@ today's behaviour. A server's read-only annotation never makes a tool pollable; 
 this list does. The list is read fresh at create, at resume, and before and after
 each read: an unlisted tool is refused at create and resume, and a watch whose tool
 is removed pauses at its next poll with reason `tool_unlisted` and its owner gets
-one private message. Poll intervals are the listed floor (at least 60 seconds) to
-86400 seconds, with 1–30 day lifetime and at most 25 live watches per owner.
+one private message. An empty value means the default; `[]` allows no polls. Poll
+intervals are the listed floor (at least 60 seconds) to 86400 seconds, with 1–30 day
+lifetime and at most 25 live watches per owner. Raising a floor slows existing
+watches to it from their next poll; they keep running.
 The first successful poll establishes the baseline without waking the agent.
 Polls select human-authored rows before the message limit; bots/assistants and
 pagination metadata never enter projections. Self-reports and cross-watch reports
@@ -1820,7 +1822,8 @@ compares items by that field and the baseline keeps only 24-character SHA-256
 fingerprints of at most 2,000 keys, never the keys; optional `evidence` (at most 8
 field paths such as `.content`) chooses what each new item reports. Deletions
 alone do not fire. The latest 20 events plus an omitted count are retained per
-pending firing. Daily caps (24/watch, 100/owner), evidence quotas and seven-day
+pending firing. If those events exceed 512 KiB as the watch turn receives them, the
+oldest are left out and counted as omitted. Daily caps (24/watch, 100/owner), evidence quotas and seven-day
 retention are shared across callbacks and polls. No additional turn path exists.
 
 Fresh page signing keys are sent only to the owner's private DM, once; the MCP

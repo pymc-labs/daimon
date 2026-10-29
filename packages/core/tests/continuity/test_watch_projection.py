@@ -214,3 +214,12 @@ def test_adversarial_trees_are_refused_or_bounded():
         found = compare([], projected, rule="added", key=None)
         if found is not None:
             assert len(payload(found, items=True)) <= PAYLOAD_BYTES
+
+
+def test_clipping_escape_heavy_text_keeps_as_much_as_fits():
+    for value in ({"content": '"' * 20000}, '"\\' * 20000):
+        text = payload(value, items=False)
+        assert len(text) <= PAYLOAD_BYTES
+        assert len(json.loads(text)["truncated"]) > PAYLOAD_BYTES // 4
+    item = json.loads(payload([{"content": '"' * 3000}], items=True))["items"][0]
+    assert len(json.dumps(item)) <= ITEM_BYTES and len(item["truncated"]) > ITEM_BYTES // 4
