@@ -28,6 +28,11 @@ from daimon.core.turn.io import TurnConnectionLost, TurnEvent, TurnStream
 from daimon.core.turn.persistence import UncertainSend
 from daimon.core.turn.selfhosted_codec import PROFILE, PROFILES, DisplayEvent, display_batch
 from daimon.core.turn.selfhosted_state import journal_source
+from daimon.core.turn.termination import (
+    ProviderTerminalFailure,
+    TerminationReason,
+    is_harness_deadline,
+)
 from mux.contracts.actions import InputEvent, UserMessage, UserToolConfirmation
 from mux.contracts.events import (
     Event,
@@ -578,6 +583,14 @@ class SelfHostedTurnIO:
             # paths; neither retries delivery or sends another cancel.
             if "errored" in outcomes:
                 raise ProviderError("upstream", retryable=False, native_code="host_root_failed")
+            if any(
+                is_harness_deadline(value)
+                and value.turn_id == self._root
+                and value.thread_id is None
+                and value.authority in ("record", "reconciled")
+                for value in values
+            ):
+                raise ProviderTerminalFailure(TerminationReason.CEILING)
             if "interrupted" in outcomes:
                 from daimon.core.turn.driver import InterruptedDuringRecovery
 

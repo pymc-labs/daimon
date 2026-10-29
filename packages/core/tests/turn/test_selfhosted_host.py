@@ -45,6 +45,7 @@ class Wire:
         self.posts = 0
         self.unmatched_start = False
         self.pending_checkpoint_warning = False
+        self.ended: dict[str, object] = {"outcome": "completed"}
 
     def handle(self, request):
         assert request.headers["authorization"] == "Bearer offline"
@@ -79,7 +80,7 @@ class Wire:
                         "parts": [{"type": "text", "text": f"answer {self.posts}"}],
                     },
                 ),
-                ("turn_ended", {"outcome": "completed"}),
+                ("turn_ended", self.ended),
             ]
             if self.unmatched_start:
                 events[1] = (
@@ -355,6 +356,94 @@ async def test_two_real_host_turns_keep_roots_and_usage_separate(composed, prior
     assert all(row["model_id"] == "gpt-6-luna" for row in observations)
     events = await store.read_events(prepared.session_ref.id)
     assert sum(e.type == "session.turn_ended" for e in events) == 2
+
+
+DEADLINE = {
+    "outcome": "interrupted",
+    "error": {"kind": "deadline_exceeded", "message": "Turn reached its time limit"},
+}
+
+
+@pytest.mark.parametrize(
+    ("ended", "reason"),
+    [
+        (DEADLINE, "ceiling"),
+        ({"outcome": "interrupted"}, "interrupted"),
+        (
+            {
+                "outcome": "interrupted",
+                "error": {"kind": "process_interrupted", "message": "Harness restarted"},
+            },
+            "interrupted",
+        ),
+    ],
+)
+async def test_harness_deadline_ends_as_ceiling_not_a_stop(composed, ended, reason):
+    # F13: the harness's own time limit is not the person pressing Stop. It is
+    # stored and shown as CEILING, so it never counts as an interrupt.
+    from daimon.core.turn.notices import render_termination_notice
+    from daimon.core.turn.termination import TerminationReason
+
+    request, wire, _, _ = composed
+    wire.ended = ended
+    prepared = await prepare_selfhosted(request)
+    lifecycle = RecordingLifecycle()
+
+    async def reseed():
+        return "question"
+
+    outcome = await run_prepared_turn(
+        request.deps,
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id=request.thread_id,
+        external_user_id="caller",
+        user_message="a long question",
+        lifecycle=lifecycle,
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        render_interval_s=0.01,
+        operation_key="selfhosted-deadline",
+    )
+    assert outcome.state.termination is TerminationReason(reason)
+    if reason == "ceiling":
+        assert outcome.state.error is not None and lifecycle.terminal_failures
+        notice = render_termination_notice(outcome.state.termination, state=outcome.state)
+        assert notice is not None and "took too long" in notice.title
+        assert "Stopped" not in notice.title
+
+
+async def test_harness_deadline_found_by_replay_ends_as_ceiling(composed):
+    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+    from daimon.core.turn.termination import ProviderTerminalFailure, TerminationReason
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+
+    request, wire, _, _ = composed
+    wire.ended = DEADLINE
+    prepared = await prepare_selfhosted(request)
+    recorded = []
+
+    class Persistence:
+        async def record(self, session, event, *, source_key=None):
+            recorded.append(event)
+
+    io = SelfHostedTurnIO(prepared.backend, SCOPE, prepared.session_ref, persistence=Persistence())
+    # The live path takes its history baseline before it sends.
+    await io._baseline()
+    io._input_started = True
+    await prepared.backend.events.send(
+        SCOPE,
+        prepared.session_ref,
+        [UserMessage(content=(TextPart(text="a long question"),))],
+        key="deadline-replay",
+    )
+    with pytest.raises(ProviderTerminalFailure) as raised:
+        await io.replay()
+    assert raised.value.reason is TerminationReason.CEILING
+    assert any(e.type == "session.turn_ended" for e in recorded)
 
 
 @pytest.mark.parametrize("composed", ["postgres"], indirect=True)

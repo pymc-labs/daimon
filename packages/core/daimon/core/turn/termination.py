@@ -173,7 +173,11 @@ class ProviderTerminalFailure(ProviderError):
     """
 
     def __init__(self, reason: TerminationReason) -> None:
-        if reason not in {TerminationReason.UPSTREAM, TerminationReason.SESSION_TERMINATED}:
+        if reason not in {
+            TerminationReason.UPSTREAM,
+            TerminationReason.SESSION_TERMINATED,
+            TerminationReason.CEILING,
+        }:
             raise ValueError("provider terminal failure requires a failed root outcome")
         super().__init__("upstream", retryable=False, native_code="host_root_failed")
         self.reason = reason
@@ -257,6 +261,18 @@ def normalized_stop_reason(event: Event) -> str | None:
     return None
 
 
+def is_harness_deadline(event: Event) -> bool:
+    """A self-hosted harness stopped the turn at its own time limit, not on a Stop.
+
+    It is stored and shown as CEILING, so it never reads as the person pressing
+    Stop and never counts as an interrupt.
+    """
+    if event.type != "session.turn_ended" or event.native.provider != "selfhosted":
+        return False
+    payload = TurnEndedPayload.model_validate(event.payload)
+    return payload.outcome == "interrupted" and payload.native_reason == "deadline_exceeded"
+
+
 def normalized_termination_reason(event: Event) -> TerminationReason | None:
     """Map the neutral root outcome; host failure refinements still take precedence."""
     if event.authority not in {"record", "reconciled"}:
@@ -268,6 +284,8 @@ def normalized_termination_reason(event: Event) -> TerminationReason | None:
     payload = TurnEndedPayload.model_validate(event.payload)
     if payload.outcome == "errored" and payload.native_reason == "refusal":
         return TerminationReason.REFUSED
+    if is_harness_deadline(event):
+        return TerminationReason.CEILING
     return {
         "completed": TerminationReason.COMPLETED,
         "interrupted": TerminationReason.INTERRUPTED,

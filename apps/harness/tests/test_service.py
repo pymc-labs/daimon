@@ -84,6 +84,7 @@ async def test_cancel_and_active_session_conflict(
     assert (await client.post("/v0/turns/turn-1/cancel")).json() == {"cancelled": True}
     events = stream_events(await stream)
     assert events[-1].data["outcome"] == "interrupted"
+    assert "error" not in events[-1].data  # a cancel is a plain Stop
     assert sum(e.type == "turn_ended" for e in events) == 1
     assert (await client.post("/v0/turns/turn-1/cancel")).json() == {"cancelled": False}
 
@@ -250,7 +251,10 @@ async def test_deadline_interrupts_background_turn(
             if replay["complete"]:
                 break
             await asyncio.sleep(0.01)
-    assert replay["events"][-1]["data"]["outcome"] == "interrupted"
+    ended = replay["events"][-1]["data"]
+    # F13: the turn's own time limit is named, so it is not shown as a Stop.
+    assert ended["outcome"] == "interrupted"
+    assert ended["error"]["kind"] == "deadline_exceeded"
 
 
 def test_gateway_mode_refuses_startup_even_with_platform_headers(tmp_path, monkeypatch):
