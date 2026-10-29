@@ -1,0 +1,53 @@
+name: Staging canary
+
+# One tiny real turn per staging backend every hour (scripts/staging_canary.py).
+# Staging only: there is no production job and no production input. A failed
+# turn writes an ERROR `daimon-canary` log entry, which the staging alert policy
+# "staging-daimon: canary turn failed" watches, and turns this run red.
+#
+# The deploy service account needs secretAccessor on DISCORD_QA_BOT_TOKEN and
+# log writing in the staging project; both grants live in the operator's cloud
+# configuration, outside this repository, like the contract workflow's.
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_fail:
+        description: "Judge against a 1 s limit so every backend fails and the alert fires"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    name: Canary turn per backend (staging)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+        with:
+          skip_install: true
+
+      - name: One turn per backend
+        env:
+          FORCE_FAIL: ${{ inputs.force_fail && '--force-fail' || '' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/staging_canary.py --run-url "$RUN_URL" $FORCE_FAIL
