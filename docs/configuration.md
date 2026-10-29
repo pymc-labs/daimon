@@ -1442,6 +1442,15 @@ normalized usage, verified rates and root accounting. Incomplete totals display 
 unknown or Cost partial, never an estimate. Off by default; Anthropic footers are
 unchanged with either value.
 
+### `DAIMON_TURN__ANTHROPIC_IDLE_CHECK_S`
+
+`float` · optional · default `60.0`
+
+Seconds an Anthropic turn's stream may yield nothing (keep-alives only) before Daimon
+asks Managed Agents whether the turn is still running, so a missed end is noticed in
+about a minute rather than at the stream's 10-minute close. A failed check never ends
+the turn. 0 turns it off.
+
 ### `DAIMON_TURN__CHANNEL_BACKENDS`
 
 `bool` · optional · default `True`

@@ -1801,6 +1801,17 @@ class TurnSettings(BaseModel):
         ),
     )
 
+    anthropic_idle_check_s: float = Field(
+        default=60.0,
+        ge=0,
+        description=(
+            "Seconds an Anthropic turn's stream may yield nothing (keep-alives only) "
+            "before Daimon asks Managed Agents whether the turn is still running, so a "
+            "missed end is noticed in about a minute rather than at the stream's "
+            "10-minute close. A failed check never ends the turn. 0 turns it off."
+        ),
+    )
+
     channel_backends: bool = Field(
         default=True,
         description=(

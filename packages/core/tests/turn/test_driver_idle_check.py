@@ -178,3 +178,45 @@ async def test_an_io_without_the_opt_in_is_never_polled(monkeypatch: pytest.Monk
     final = await _run(fake, RecordingLifecycle())
     assert io.checks == 0 and fake.beta.sessions.retrieve_calls == []
     assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+
+
+async def test_an_event_during_an_idle_verdict_is_folded_then_the_verdict_stands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F14: an event that lands while the check reads "idle" is folded, not dropped,
+    and the idle verdict still finishes the turn through the replay."""
+    fake = FakeAnthropic()
+    answer = make_agent_message(event_id="answer", text="ok")
+    more = make_agent_message(event_id="more", text="also")
+    done = make_status_idle(event_id="done", stop_reason=make_end_turn())
+    fake.beta.sessions.events.stream_scripts = [
+        [YieldEvent(answer), DelayThenYield(seconds=0.08, event=more), BlockForever()]
+    ]
+    fake.beta.sessions.events.replay_events = [answer, more, done]
+    fake.beta.sessions.retrieve_statuses = ["idle", "idle"]
+    io = IdleChecked(fake, slow_s=0.05)
+    _install(monkeypatch, io)
+    lifecycle = RecordingLifecycle()
+    final = await _run(fake, lifecycle)
+    assert io.replays == 1, "the idle verdict stood after the folded event"
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+    assert [block.text for block in final.content if block.kind == "text"] == ["okalso"]
+    assert "more" in [e.id for e in lifecycle.sse_events]
+
+
+async def test_a_terminal_event_during_an_idle_verdict_ends_the_turn_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeAnthropic()
+    answer = make_agent_message(event_id="answer", text="ok")
+    done = make_status_idle(event_id="done", stop_reason=make_end_turn())
+    fake.beta.sessions.events.stream_scripts = [
+        [YieldEvent(answer), DelayThenYield(seconds=0.08, event=done)]
+    ]
+    fake.beta.sessions.events.replay_events = []
+    fake.beta.sessions.retrieve_statuses = ["idle"]
+    io = IdleChecked(fake, slow_s=0.05)
+    _install(monkeypatch, io)
+    final = await _run(fake, RecordingLifecycle())
+    assert io.replays == 0, "the stream's own terminal ended it"
+    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
