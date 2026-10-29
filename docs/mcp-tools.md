@@ -565,7 +565,7 @@ Owner-bound watch management.
 | --- | --- | --- |
 | `create_watch` | Discord callers | Watch a reviewed Discord read tool from this conversation. |
 | `delete_watch` | Discord callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
-| `list_watches` | Discord callers | List your watches in this workspace, including paused imports and expiry; no signing secrets. |
+| `list_watches` | Discord callers | List your watches in this workspace; admins may list every owner's with scope "all". |
 | `pause_watch` | Discord callers | Pause your watch and cancel its queued wakes. |
 | `resume_watch` | Discord callers | Resume your paused watch from an attended owner turn after fresh access checks. |
 | `rotate_watch_key` | Discord callers | Rotate an OS page signing key, revoke the old key and cancel queued wakes. |

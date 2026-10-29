@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
@@ -494,6 +495,53 @@ async def list_owned_watches(
         .limit(100)
     )
     return [WatchRow.model_validate(row) for row in rows]
+
+
+@dataclass(frozen=True)
+class WatchActivity:
+    """A watch with its firings in the past day (the cap window) and its latest firing."""
+
+    watch: WatchRow
+    fires_today: int
+    last_fired_at: datetime | None
+
+
+async def list_tenant_watches(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    now: datetime,
+    owner_account_id: uuid.UUID | None = None,
+) -> list[WatchActivity]:
+    """Every watch in one tenant, or one owner's, with firing counts; never another tenant's.
+
+    The caller authorizes: only a fresh tenant admin or a host operator lists every owner.
+    """
+    fired = (
+        select(
+            WatchFiring.watch_id,
+            func.count()
+            .filter(WatchFiring.created_at > now - timedelta(days=1))
+            .label("fires_today"),
+            func.max(WatchFiring.created_at).label("last_fired_at"),
+        )
+        .group_by(WatchFiring.watch_id)
+        .subquery()
+    )
+    query = (
+        select(Watch, fired.c.fires_today, fired.c.last_fired_at)
+        .outerjoin(fired, fired.c.watch_id == Watch.id)
+        .where(Watch.tenant_id == tenant_id)
+        .order_by(Watch.created_at, Watch.id)
+        .limit(500)
+    )
+    if owner_account_id is not None:
+        query = query.where(Watch.owner_account_id == owner_account_id)
+    rows = await session.execute(query)
+    return [
+        WatchActivity(WatchRow.model_validate(watch), fires_today or 0, last_fired_at)
+        for watch, fires_today, last_fired_at in rows.all()
+    ]
 
 
 async def require_owned_watch(

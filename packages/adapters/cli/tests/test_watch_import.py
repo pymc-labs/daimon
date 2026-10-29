@@ -91,3 +91,69 @@ def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
         assert "require a thread ID" in result.output
         assert "Channel and DM IDs are unsupported" in result.output
         confirm.assert_awaited_once()
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_watch_list_shows_one_tenant_without_instructions_or_evidence(monkeypatch, as_json):
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.core.stores.platform_names import KnownName
+    from daimon.core.stores.watches import WatchActivity
+
+    @asynccontextmanager
+    async def session():
+        yield object()
+
+    @asynccontextmanager
+    async def runtime(_settings):
+        yield SimpleNamespace(sessionmaker=session)
+
+    tenant = uuid.uuid4()
+    row = SimpleNamespace(
+        id=uuid.uuid4(),
+        owner_external_id="456",
+        platform="discord",
+        parent_channel_id="11",
+        thread_id="12",
+        agent_id="agent",
+        instructions="SECRET INSTRUCTIONS",
+        baseline={"value": "EVIDENCE"},
+        status="paused",
+        source="poll",
+        source_state={"tool": "read_channel", "arguments": {"channel_id": "SRC"}, "reason": "x"},
+        expires_at=datetime.now(UTC) + timedelta(days=1),
+        consecutive_errors=2,
+        backoff_until=None,
+    )
+    listing = AsyncMock(return_value=[WatchActivity(row, 3, None)])  # type: ignore[arg-type]
+    monkeypatch.setattr(watch_commands, "build_runtime", runtime)
+    monkeypatch.setattr(watch_commands, "load_settings", lambda: None)
+    monkeypatch.setattr(watch_commands, "get_tenant", AsyncMock(return_value=object()))
+    monkeypatch.setattr(watch_commands, "list_tenant_watches", listing)
+    monkeypatch.setattr(
+        watch_commands, "get_user_names", AsyncMock(return_value={"456": KnownName("Ada")})
+    )
+    args = ["list", "--tenant", str(tenant), *(["--json"] if as_json else [])]
+    result = CliRunner().invoke(watches_app, args)
+    assert result.exit_code == 0, result.output
+    assert listing.await_args.kwargs["tenant_id"] == tenant
+    assert str(row.id) in result.output and "Ada" in result.output and "456" in result.output
+    assert "paused" in result.output and "read_channel" in result.output
+    for secret in ("SECRET", "EVIDENCE", "SRC"):
+        assert secret not in result.output
+
+
+def test_watch_list_refuses_unknown_tenant(monkeypatch):
+    @asynccontextmanager
+    async def session():
+        yield object()
+
+    @asynccontextmanager
+    async def runtime(_settings):
+        yield SimpleNamespace(sessionmaker=session)
+
+    monkeypatch.setattr(watch_commands, "build_runtime", runtime)
+    monkeypatch.setattr(watch_commands, "load_settings", lambda: None)
+    monkeypatch.setattr(watch_commands, "get_tenant", AsyncMock(return_value=None))
+    result = CliRunner().invoke(watches_app, ["list", "--tenant", str(uuid.uuid4())])
+    assert result.exit_code == 2 and "No such tenant" in result.output

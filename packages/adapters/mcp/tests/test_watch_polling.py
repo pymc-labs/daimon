@@ -829,3 +829,105 @@ async def test_owner_and_key_delivery_pauses_send_no_lifecycle_notice(runtime_wa
     await poll_watch_notices(runtime.session_factory, deliver=deliver)
     await poll_watch_notices(runtime.session_factory, deliver=deliver)
     deliver.assert_not_awaited()
+
+
+async def _seed_watch(db, tenant_id, external_id, *, thread_id="5252", channel_id="5251"):
+    principal = await get_or_create_platform_principal(
+        db, tenant_id=tenant_id, platform="discord", external_id=external_id
+    )
+    await create_thread_session(
+        db,
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id=thread_id,
+        channel_id=channel_id,
+        account_id=principal.account_id,
+        ma_session_id=f"session-{external_id}",
+        ma_agent_id="agent-bound",
+    )
+    now = datetime.now(UTC)
+    return await watches.register_poll_watch(
+        db,
+        ContinuationRequest(
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id=channel_id,
+            thread_id=thread_id,
+            requester_account_id=principal.account_id,
+            requester_external_user_id=external_id,
+            target_ma_agent_id="agent-bound",
+            target_name="analyst",
+            requested_work=None,
+            reason="watch_fired",
+            idempotency_key=uuid.uuid4(),
+        ),
+        instructions=f"secret instructions of {external_id}",
+        tool="read_channel",
+        arguments={"channel_id": "6161"},
+        projection=".rows",
+        rule="change",
+        interval=60,
+        expires_at=now + timedelta(days=2),
+        now=now,
+    )
+
+
+async def test_admin_lists_every_watch_in_own_tenant_only(runtime_watch):
+    from dataclasses import replace
+
+    from daimon.adapters.mcp.tools.watches import list_watches_impl
+    from daimon.core.stores.platform_names import KnownName, upsert_user_names
+
+    runtime, watch, auth = runtime_watch
+    async with runtime.session_factory.begin() as db:
+        other = await _seed_watch(db, watch.tenant_id, "456")
+        await upsert_user_names(
+            db, tenant_id=watch.tenant_id, platform="discord", names={"456": KnownName("Ada")}
+        )
+        elsewhere = await make_tenant(db)
+        foreign = await _seed_watch(db, elsewhere.id, "123")
+    source = AsyncMock(
+        return_value=SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "1"}]}
+        )
+    )
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.return_value = SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "2"}]}
+        )
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+    async with runtime.session_factory.begin() as db:
+        await watches.pause_watch(db, other.id)
+
+    admin = replace(auth, account_id=uuid.uuid4(), role=Role.ADMIN)
+    with patch("daimon.adapters.mcp.tools.watches.fresh_admin", AsyncMock(return_value=True)):
+        listed = await list_watches_impl(runtime, admin, scope="all")
+    by_id = {entry.watch_id: entry for entry in listed}
+    assert set(by_id) == {watch.id, other.id}
+    assert foreign.id not in by_id
+    assert by_id[other.id].owner == "Ada" and by_id[other.id].owner_id == "456"
+    assert by_id[other.id].status == "paused" and by_id[other.id].reason == "owner_paused"
+    assert by_id[other.id].source == "poll" and by_id[other.id].source_tool == "read_channel"
+    assert by_id[other.id].destination == "discord thread"
+    assert by_id[other.id].fires_today == 0 and by_id[other.id].last_fired_at is None
+    assert by_id[watch.id].owner == "another member"
+    assert by_id[watch.id].fires_today == 1 and by_id[watch.id].last_fired_at is not None
+    dumped = str([entry.model_dump() for entry in listed])
+    assert "secret instructions" not in dumped and "Report changes." not in dumped
+    assert "'content'" not in dumped and "6161" not in dumped
+
+    mine = await list_watches_impl(runtime, auth)
+    assert [entry.watch_id for entry in mine] == [watch.id]
+    assert mine[0].owner == "you"
+
+
+async def test_non_admin_cannot_list_every_watch(runtime_watch):
+    from daimon.adapters.mcp.tools.watches import list_watches_impl
+
+    runtime, _, auth = runtime_watch
+    with (
+        patch("daimon.adapters.mcp.tools.watches.fresh_admin", AsyncMock(return_value=False)),
+        pytest.raises(ToolError, match="Ask an admin"),
+    ):
+        await list_watches_impl(runtime, auth, scope="all")

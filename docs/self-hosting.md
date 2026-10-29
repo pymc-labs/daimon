@@ -1804,6 +1804,16 @@ result contains a key ID but no key. Rotation revokes the old key and cancels
 its queued wakes. A failed private delivery pauses the watch;
 rotate again to retry with fresh material. List/show never reveal the secret.
 
+#### Listing a tenant's watches
+
+`daimon watches list --tenant TENANT_UUID` (add `--json` for machine output) is
+read-only. It prints every watch in that one tenant: owner (platform ID and stored
+name), status and pause reason, source and destination kind, expiry, firings in the
+past 24 hours (the daily-cap window), last firing and consecutive errors. It never
+prints instructions, keys, baselines or source evidence. In chat, a workspace admin
+gets the same view with `list_watches(scope="all")`; the admin check is rechecked
+live, as for admin show, pause and delete, and anyone else is refused.
+
 #### Offline internal-watch import
 
 Run `daimon watches import /private/watches.json` only against the intended isolated

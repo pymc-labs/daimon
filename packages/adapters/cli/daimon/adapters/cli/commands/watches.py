@@ -3,19 +3,100 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Annotated
 
 import typer
+from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.continuity.watch_imports import WatchExport
-from daimon.core.stores.watches import confirm_import, get_watch, import_watch
+from daimon.core.stores.platform_names import get_user_names
+from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.watches import (
+    WatchActivity,
+    confirm_import,
+    get_watch,
+    import_watch,
+    list_tenant_watches,
+)
 
 watches_app = typer.Typer(
-    help="Import paused watches and confirm reviewed owner/destination bindings."
+    help="List a tenant's watches, import paused watches and confirm reviewed bindings."
 )
+
+
+def _listed(item: WatchActivity, names: dict[tuple[str, str], str | None]) -> dict[str, object]:
+    """The operator view of one watch. Never its instructions, keys, baseline or evidence."""
+    row = item.watch
+    reason, tool = row.source_state.get("reason"), row.source_state.get("tool")
+    return {
+        "watch_id": str(row.id),
+        "owner_id": row.owner_external_id,
+        "owner": names.get((row.platform, row.owner_external_id)),
+        "status": row.status,
+        "reason": str(reason) if reason else None,
+        "source": row.source,
+        "source_tool": str(tool) if tool else None,
+        "destination": f"{row.platform} thread",
+        "parent_channel_id": row.parent_channel_id,
+        "thread_id": row.thread_id,
+        "agent_id": row.agent_id,
+        "expires_at": row.expires_at.isoformat(),
+        "fires_today": item.fires_today,
+        "last_fired_at": item.last_fired_at.isoformat() if item.last_fired_at else None,
+        "errors": row.consecutive_errors,
+        "retry_after": row.backoff_until.isoformat() if row.backoff_until else None,
+    }
+
+
+@watches_app.command("list")
+def list_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """List every watch in --tenant, read-only: owner, status, source, expiry and firings."""
+
+    async def run() -> list[dict[str, object]]:
+        async with build_runtime(load_settings()) as runtime, runtime.sessionmaker() as db:
+            if await get_tenant(db, tenant) is None:
+                raise typer.BadParameter("No such tenant", param_hint="--tenant")
+            listed = await list_tenant_watches(db, tenant_id=tenant, now=datetime.now(UTC))
+            names: dict[tuple[str, str], str | None] = {}
+            for platform in {item.watch.platform for item in listed}:
+                found = await get_user_names(
+                    db,
+                    tenant_id=tenant,
+                    platform=platform,
+                    user_ids={
+                        item.watch.owner_external_id
+                        for item in listed
+                        if item.watch.platform == platform
+                    },
+                )
+                names.update({(platform, user): name.label for user, name in found.items()})
+        return [_listed(item, names) for item in listed]
+
+    rows = asyncio.run(run())
+    if as_json:
+        typer.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        typer.echo("No watches.")
+        return
+    for row in rows:
+        owner = f"{row['owner']} ({row['owner_id']})" if row["owner"] else row["owner_id"]
+        status = f"{row['status']}: {row['reason']}" if row["reason"] else row["status"]
+        source = f"{row['source']}/{row['source_tool']}" if row["source_tool"] else row["source"]
+        last = row["last_fired_at"] or "never"
+        typer.echo(
+            f"{row['watch_id']}  owner={owner}  status={status}  source={source}  "
+            f"to={row['destination']} {row['thread_id']}  expires={row['expires_at']}  "
+            f"fires_today={row['fires_today']}  last_fired={last}  errors={row['errors']}"
+        )
 
 
 @watches_app.command("import")
