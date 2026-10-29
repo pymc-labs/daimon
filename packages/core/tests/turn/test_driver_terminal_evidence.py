@@ -259,12 +259,13 @@ async def test_a_reconnect_after_an_uncertain_send_on_a_turn_scoped_replay_carri
     assert len(lifecycle.terminal_success) == 1
 
 
+@pytest.mark.parametrize("narration_text", ["   ", "I'll check that."])
 async def test_a_turn_that_only_called_a_tool_and_ended_with_no_sign_is_lost(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, narration_text: str
 ) -> None:
     """Narration and a tool call are not an answer: no terminal, no answer, lost."""
     fake = FakeAnthropic()
-    narration = make_agent_message(event_id="sevt_1", text="   ")
+    narration = make_agent_message(event_id="sevt_1", text=narration_text)
     call = make_tool_use(event_id="sevt_2", name="bash")
     fake.beta.sessions.events.stream_scripts = [[YieldEvent(narration), YieldEvent(call)]]
     fake.beta.sessions.events.replay_events = [_user("u1", "hi"), narration, call]

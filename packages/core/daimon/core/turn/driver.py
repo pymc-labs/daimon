@@ -2049,6 +2049,16 @@ def _has_text_answer(state: TurnState) -> bool:
     return any(isinstance(block, TextBlock) and block.text.strip() for block in state.content)
 
 
+def _has_final_answer(state: TurnState) -> bool:
+    """Answer text after the last tool call: narration before a call is not an answer."""
+    for block in reversed(state.content):
+        if not isinstance(block, TextBlock):
+            return False
+        if block.text.strip():
+            return True
+    return False
+
+
 async def _finalize_success_or_error(
     *,
     normalized_reason: TerminationReason | None = None,
@@ -2134,7 +2144,7 @@ async def _finalize_success_or_error(
         # Nothing ended this turn: no stop reason, no outcome, no error. A quiet
         # stream, an idle status and a replay without the turn's end look like
         # this. With answer text on screen it stands, logged so it can be counted.
-        # With no answer (nothing, or only tool calls and narration before one)
+        # With no answer (nothing, or nothing after the last tool call)
         # it is not a finished reply: say the connection
         # was lost, so the person asks what was done instead of reading an
         # empty answer as complete.
@@ -2142,9 +2152,9 @@ async def _finalize_success_or_error(
             "turn.no_terminal_evidence",
             session_id=session_id,
             events_folded=events_folded,
-            answered=_has_text_answer(final_state),
+            answered=_has_final_answer(final_state),
         )
-        if not _has_text_answer(final_state):
+        if not _has_final_answer(final_state):
             err = TurnError(
                 kind="connection_lost", message="the turn ended with no sign it finished"
             )
