@@ -2894,7 +2894,7 @@ back off exponentially to one day; revoked access pauses the watch and cancels w
 
 MCP enrollment requires an attended turn origin and binds its tenant, owner, agent,
 thread, parent and session. Owner/admin management cancels queued wakes on pause,
-rotation and deletion. Fresh signing keys go only to the owner's private DM, once;
+rotation and deletion. `list_watches(scope="all")` lists every watch in the caller's tenant for a freshly rechecked admin only (`fresh_admin`), and `daimon watches list --tenant` gives operators the same read-only view; neither shows instructions, keys, baselines or evidence. Fresh signing keys go only to the owner's private DM, once;
 MCP results and stored rows contain no plaintext key. The offline CLI importer
 accepts no signing keys, imports everything paused, and requires explicit exact-binding confirmation before
 activation. An unmapped source cannot be confirmed or resumed. The existing Discord

@@ -7245,12 +7245,25 @@
     }),
     'list_watches': dict({
       'description': '''
-        List your watches in this workspace, including paused imports and expiry; no signing
-        secrets.
+        List your watches in this workspace; admins may list every owner's with scope "all".
+        <blank line>
+        Includes paused imports and expiry. `scope="all"` stays within this workspace and
+        rechecks admin live, like admin show, pause and delete; anyone else is refused. Each entry
+        names its owner, status and pause reason, source and destination kind, expiry, fires
+        in the past day, last firing and consecutive errors. Never instructions, signing
+        secrets or source evidence.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'scope': dict({
+            'default': 'mine',
+            'enum': list([
+              'mine',
+              'all',
+            ]),
+            'type': 'string',
+          }),
         }),
         'type': 'object',
       }),

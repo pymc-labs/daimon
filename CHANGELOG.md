@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `daimon routines link-internal` to link a paused, never-fired routine to its internal original before `seed-first-run`, with a dry run by default and refusal of existing or conflicting links. Linking and seeding share never-fired validation, allowing paused DM routines with edit-only skipped delivery markers.
 
 - Stop a polled watch that keeps failing: after at least five errors in a row over at least a day it pauses, cancels its queued wakes and sends its owner one private message; resuming it with the usual approval resets the count. Owners also get one private message per watch per rolling day when a daily cap holds back a firing; the watch keeps running and fires again when the day rolls.
+- Admins can list every watch in their workspace with `list_watches(scope="all")`, and operators with `daimon watches list --tenant TENANT_UUID`: owner, status and pause reason, source and destination, expiry, firings today, last firing and errors. Non-admins are refused; instructions, keys and source evidence are never shown.
 
 - Fly sessions can run long commands in the background: `fly_run_bash` with `run_in_background` returns a task id, `fly_task_status` and `fly_task_result` read it, and the original conversation gets one short message when it ends. Running commands keep their session alive up to the maximum lifetime; a machine restart reports them lost and never reruns them.
 

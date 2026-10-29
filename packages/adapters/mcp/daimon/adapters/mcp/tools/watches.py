@@ -69,6 +69,78 @@ def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
     )
 
 
+class WatchListEntry(WatchSummary):
+    """One listed watch: who owns it and how it is doing. No instructions, keys or evidence."""
+
+    owner: str
+    owner_id: str
+    source_tool: str | None
+    destination: str
+    fires_today: int
+    last_fired_at: datetime | None
+    errors: int
+    retry_after: datetime | None
+
+
+#: A watch owner with no stored name on this platform.
+OWNER_UNNAMED = "another member"
+
+
+async def list_watches_impl(
+    runtime: McpRuntime, auth: AuthIdentity, *, scope: Literal["mine", "all"] = "mine"
+) -> list[WatchListEntry]:
+    from daimon.core.stores.platform_names import get_user_names
+
+    if scope == "all" and not await fresh_admin(runtime, auth):
+        raise ToolError("Only an admin can see every watch. Ask an admin or an owner.")
+    async with runtime.session_factory() as db:
+        listed = await watches.list_tenant_watches(
+            db,
+            tenant_id=auth.tenant_id,
+            now=datetime.now(UTC),
+            owner_account_id=auth.account_id if scope == "mine" else None,
+        )
+        names: dict[tuple[str, str], str | None] = {}
+        for platform in {item.watch.platform for item in listed}:
+            found = await get_user_names(
+                db,
+                tenant_id=auth.tenant_id,
+                platform=platform,
+                user_ids={
+                    item.watch.owner_external_id
+                    for item in listed
+                    if item.watch.platform == platform
+                },
+            )
+            names.update({(platform, user): name.label for user, name in found.items()})
+    return [list_entry(item, auth=auth, names=names) for item in listed]
+
+
+def list_entry(
+    item: watches.WatchActivity,
+    *,
+    auth: AuthIdentity,
+    names: dict[tuple[str, str], str | None],
+) -> WatchListEntry:
+    row = item.watch
+    tool = row.source_state.get("tool")
+    if row.owner_account_id == auth.account_id:
+        owner = "you"
+    else:
+        owner = names.get((row.platform, row.owner_external_id)) or OWNER_UNNAMED
+    return WatchListEntry(
+        **summary(row).model_dump(),
+        owner=owner,
+        owner_id=row.owner_external_id,
+        source_tool=str(tool) if tool else None,
+        destination=f"{row.platform} thread",
+        fires_today=item.fires_today,
+        last_fired_at=item.last_fired_at,
+        errors=row.consecutive_errors,
+        retry_after=row.backoff_until,
+    )
+
+
 async def private_key_delivery(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -393,18 +465,18 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         )
 
     @mcp.tool(tags={"discord"})
-    async def list_watches(ctx: Context) -> list[WatchSummary]:  # pyright: ignore[reportUnusedFunction]
-        """List your watches in this workspace, including paused imports and expiry; no signing
-        secrets.
+    async def list_watches(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, scope: Literal["mine", "all"] = "mine"
+    ) -> list[WatchListEntry]:
+        """List your watches in this workspace; admins may list every owner's with scope "all".
+
+        Includes paused imports and expiry. `scope="all"` stays within this workspace and
+        rechecks admin live, like admin show, pause and delete; anyone else is refused. Each entry
+        names its owner, status and pause reason, source and destination kind, expiry, fires
+        in the past day, last firing and consecutive errors. Never instructions, signing
+        secrets or source evidence.
         """
-        auth = await _auth(ctx)
-        async with runtime.session_factory() as db:
-            return [
-                summary(row)
-                for row in await watches.list_owned_watches(
-                    db, tenant_id=auth.tenant_id, account_id=auth.account_id
-                )
-            ]
+        return await list_watches_impl(runtime, await _auth(ctx), scope=scope)
 
     @mcp.tool(tags={"discord"})
     async def show_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
