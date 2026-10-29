@@ -521,7 +521,7 @@ async def test_daily_cap_notice_goes_out_once_per_rolling_day(db_session_factory
     watch, _ = poll_watch
     deliver = AsyncMock(return_value=True)
 
-    async def capped(now, *, daily_cap=True):
+    async def capped(now, *, daily_cap="watch"):
         lease = await claim(db_session_factory, watch.id)
         async with db_session_factory.begin() as db:
             await watches.poll_failed(
@@ -531,7 +531,7 @@ async def test_daily_cap_notice_goes_out_once_per_rolling_day(db_session_factory
 
     now = datetime.now(UTC)
     # Rate and quota limits stay silent.
-    await capped(now, daily_cap=False)
+    await capped(now, daily_cap=None)
     await poll_watch_notices(db_session_factory, deliver=deliver)
     deliver.assert_not_awaited()
 
@@ -567,7 +567,7 @@ async def test_undelivered_daily_cap_notice_retries_without_repeating(
     lease = await claim(db_session_factory, watch.id)
     async with db_session_factory.begin() as db:
         await watches.poll_failed(
-            db, watch.id, lease, revoked=False, now=now, capped=True, daily_cap=True
+            db, watch.id, lease, revoked=False, now=now, capped=True, daily_cap="watch"
         )
     failing = AsyncMock(return_value=False)
     await poll_watch_notices(db_session_factory, deliver=failing)
@@ -584,3 +584,106 @@ async def test_undelivered_daily_cap_notice_retries_without_repeating(
     for _ in range(2):
         await poll_watch_notices(db_session_factory, deliver=deliver)
     deliver.assert_awaited_once()
+
+
+async def test_capped_polls_end_a_run_of_errors(db_session_factory, poll_watch):
+    watch, _ = poll_watch
+    start = datetime.now(UTC)
+    current = await fail_once(
+        db_session_factory, watch, errors_before=3, failing_for=timedelta(0), now=start
+    )
+    assert current.consecutive_errors == 4
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            text("UPDATE watches SET backoff_until=NULL WHERE id=:id"), {"id": watch.id}
+        )
+    # The source recovers, but a day of capped polls re-detects the same held-back change.
+    for hours in range(1, 25):
+        lease = await claim(db_session_factory, watch.id)
+        async with db_session_factory.begin() as db:
+            await watches.poll_failed(
+                db,
+                watch.id,
+                lease,
+                revoked=False,
+                now=start + timedelta(hours=hours),
+                capped=True,
+                daily_cap="watch",
+            )
+    async with db_session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+    assert current.consecutive_errors == 0
+    assert current.source_state.get("failing_since") is None
+    # One transient error after that is a fresh backoff, not a stop.
+    later = start + timedelta(hours=25)
+    lease = await claim(db_session_factory, watch.id)
+    async with db_session_factory.begin() as db:
+        await watches.poll_failed(db, watch.id, lease, revoked=False, now=later)
+        current = await watches.get_watch(db, watch.id)
+    assert current.status == "active" and current.consecutive_errors == 1
+    assert current.source_state["failing_since"] == later.isoformat()
+
+
+async def test_owner_cap_notice_goes_out_once_per_owner_per_rolling_day(
+    db_session_factory, poll_watch
+):
+    from daimon.core.continuity.watch_notices import poll_watch_notices
+
+    watch, binding = poll_watch
+    async with db_session_factory.begin() as db:
+        other = await watches.register_poll_watch(
+            db,
+            binding,
+            instructions="Another owner watch.",
+            tool="read_thread",
+            arguments={"thread_id": "4343"},
+            projection=".",
+            rule="change",
+            interval=60,
+            expires_at=watch.expires_at,
+            now=datetime.now(UTC),
+        )
+
+    async def capped(target, now, kind):
+        async with db_session_factory.begin() as db:
+            await db.execute(
+                text(
+                    "UPDATE watches SET next_check_at = CASE WHEN id=:id"
+                    " THEN now()-interval '1 second' ELSE now()+interval '1 day' END"
+                    " WHERE id IN (:id, :other_id)"
+                ),
+                {"id": target, "other_id": other.id if target == watch.id else watch.id},
+            )
+            (item,) = await watches.claim_poll_watches(db)
+            assert item["watch_id"] == str(target)
+        async with db_session_factory.begin() as db:
+            await watches.poll_failed(
+                db, target, item["lease"], revoked=False, now=now, capped=True, daily_cap=kind
+            )
+
+    deliver = AsyncMock(return_value=True)
+
+    async def drain():
+        for _ in range(2):
+            await poll_watch_notices(db_session_factory, deliver=deliver)
+
+    now = datetime.now(UTC)
+    await capped(watch.id, now, "owner")
+    await capped(other.id, now + timedelta(hours=1), "owner")
+    await drain()
+    deliver.assert_awaited_once()
+    recipient, _, message = deliver.await_args.args
+    assert recipient.owner_external_id == watch.owner_external_id
+    assert "across all of them" in message
+
+    # A watch's own cap is a different limit, so it still gets its own notice.
+    await capped(other.id, now + timedelta(hours=2), "watch")
+    await drain()
+    assert deliver.await_count == 2
+    _, _, message = deliver.await_args.args
+    assert "Another owner watch." in message and "across all of them" not in message
+
+    # Once the owner's window rolls, the next owner cap gets one new notice.
+    await capped(other.id, now + timedelta(hours=24, minutes=1), "owner")
+    await drain()
+    assert deliver.await_count == 3

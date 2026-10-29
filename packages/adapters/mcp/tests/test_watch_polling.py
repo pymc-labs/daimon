@@ -655,7 +655,7 @@ async def test_poll_honors_agents_own_live_os_toolset(runtime_watch, mode):
         assert (await watches.get_watch(db, watch.id)).status == "paused"
 
 
-async def test_daily_cap_keeps_normal_poll_interval_and_error_count(runtime_watch):
+async def test_daily_cap_keeps_normal_poll_interval_and_clears_errors(runtime_watch):
     runtime, watch, _ = runtime_watch
     source = AsyncMock(
         return_value=SimpleNamespace(
@@ -670,8 +670,12 @@ async def test_daily_cap_keeps_normal_poll_interval_and_error_count(runtime_watc
         assert await run_poll(runtime, watch.id, await lease(runtime, watch))
         async with runtime.session_factory.begin() as db:
             await db.execute(
-                text("UPDATE watches SET max_turns_per_day=1, consecutive_errors=3 WHERE id=:id"),
-                {"id": watch.id},
+                text(
+                    "UPDATE watches SET max_turns_per_day=1, consecutive_errors=3,"
+                    " source_state=source_state || jsonb_build_object('failing_since', CAST(:since AS text))"
+                    " WHERE id=:id"
+                ),
+                {"id": watch.id, "since": datetime.now(UTC).isoformat()},
             )
             await db.execute(text("UPDATE task_continuations SET status='delivered'"))
         source.return_value = SimpleNamespace(
@@ -683,7 +687,9 @@ async def test_daily_cap_keeps_normal_poll_interval_and_error_count(runtime_watc
     async with runtime.session_factory() as db:
         current = await watches.get_watch(db, watch.id)
         assert current.status == "active"
-        assert current.consecutive_errors == 3
+        # The capped poll read its source, so the earlier errors no longer count.
+        assert current.consecutive_errors == 0
+        assert current.source_state.get("failing_since") is None
         assert current.backoff_until is None
         assert (
             before + timedelta(seconds=60) <= current.next_check_at <= after + timedelta(seconds=60)
@@ -723,6 +729,65 @@ async def test_daily_cap_tells_the_owner_once(runtime_watch):
     async with runtime.session_factory() as db:
         current = await watches.get_watch(db, watch.id)
         assert current.status == "active" and current.consecutive_errors == 0
+
+
+@pytest.mark.parametrize(
+    ("refusal", "kind"),
+    [
+        ("watch daily cap", "watch"),
+        ("owner daily cap", "owner"),
+        ("watch event rate", None),
+        ("owner event rate", None),
+        ("evidence quota", None),
+    ],
+)
+async def test_only_daily_caps_tell_the_owner_and_say_which(runtime_watch, refusal, kind):
+    from daimon.core.continuity.watch_notices import poll_watch_notices
+
+    runtime, watch, _ = runtime_watch
+    source = AsyncMock(
+        return_value=SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "first"}]}
+        )
+    )
+
+    async def refused(db, *_args, **_kwargs):
+        # The real driver error, as the firing SQL raises it.
+        await db.execute(
+            text(f"DO $$ BEGIN RAISE EXCEPTION '{refusal}' USING ERRCODE='54000'; END $$")
+        )
+
+    deliver = AsyncMock(return_value=True)
+    with (
+        patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source),
+        patch("daimon.adapters.mcp.watch_polling.finish_poll", refused),
+    ):
+        assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
+    await poll_watch_notices(runtime.session_factory, deliver=deliver)
+    async with runtime.session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+    assert current.status == "active" and current.backoff_until is None
+    assert current.source_state.get("daily_cap_kind") == kind
+    if kind is None:
+        deliver.assert_not_awaited()
+        return
+    deliver.assert_awaited_once()
+    recipient, _, message = deliver.await_args.args
+    assert recipient.owner_external_id == watch.owner_external_id
+    assert watch.instructions in message
+    assert ("across all of them" in message) is (kind == "owner")
+
+
+def test_daily_cap_messages_match_the_firing_sql():
+    from pathlib import Path
+
+    import daimon.core
+    from daimon.adapters.mcp.watch_polling import DAILY_CAPS
+
+    versions = Path(daimon.core.__file__).parents[2] / "alembic" / "versions"
+    sql = (versions / "0143_watch_polling.py").read_text()
+    for message in DAILY_CAPS:
+        assert f"RAISE EXCEPTION '{message}' USING ERRCODE='54000'" in sql
 
 
 @pytest.mark.parametrize(

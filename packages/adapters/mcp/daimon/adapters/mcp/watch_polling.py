@@ -50,6 +50,7 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import (
+    DailyCap,
     PollBindingRevoked,
     finish_poll,
     leased_poll,
@@ -66,6 +67,22 @@ from starlette.responses import Response
 
 class PollAccessRevoked(ValueError):
     pass
+
+
+# The exact messages the firing SQL raises with SQLSTATE 54000 for each daily cap
+# (alembic 0143). Rate and quota limits share the SQLSTATE and stay silent.
+DAILY_CAPS: dict[str, DailyCap] = {"watch daily cap": "watch", "owner daily cap": "owner"}
+
+
+def daily_cap(exc: DBAPIError) -> DailyCap | None:
+    """Which daily cap the firing SQL refused with, from its primary message."""
+    orig = exc.orig
+    diag = getattr(orig, "diag", None)  # psycopg
+    # asyncpg's own error, which SQLAlchemy's adapter chains as the cause.
+    message = getattr(diag, "message_primary", None) or getattr(
+        getattr(orig, "__cause__", None), "message", None
+    )
+    return DAILY_CAPS.get(message) if isinstance(message, str) else None
 
 
 async def poll_read_place(
@@ -319,8 +336,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 watch_id,
                 lease,
                 capped=capped,
-                # The firing SQL names its own limits; rate and quota limits stay silent.
-                daily_cap=capped and "daily cap" in str(getattr(exc, "orig", "")),
+                daily_cap=daily_cap(exc) if capped and isinstance(exc, DBAPIError) else None,
                 revoked=isinstance(
                     exc,
                     (

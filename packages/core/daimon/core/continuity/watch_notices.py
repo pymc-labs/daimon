@@ -36,6 +36,14 @@ async def poll_watch_notices(
                     f"{label} stopped: it could not check its source for a day.\n"
                     "Fix the source, then ask me to resume it."
                 )
+            elif watch.source_state.get("notice_state") == "daily_cap" and (
+                watch.source_state.get("daily_cap_kind") == "owner"
+            ):
+                message = (
+                    f"{label} and your other watches reached your daily limit across all of "
+                    "them, so they are waiting before they report again.\n"
+                    "Nothing to do: they carry on by themselves within a day."
+                )
             elif watch.source_state.get("notice_state") == "daily_cap":
                 message = (
                     f"{label} reached its daily limit, so it is waiting before it reports again.\n"
