@@ -22,10 +22,12 @@ single structured exempt-billing log line at turn start and meters nothing.
   (`daimon.core.turn.ceiling`), enforced at `bind_session` and
   `run_prepared_turn` for the chat paths and, for callers that bypass those,
   `run_turn`'s own optional `deadline`, is the sole backstop.
-- Inner `AsyncRetrying` block — the bounded 2-attempt budget for
-  `_CONNECTION_LOST` (a dropped connection, a genuinely different failure
-  mode from silence). Each outer iteration gets a fresh `AsyncRetrying`, so
-  this budget is per stream generation, not per turn.
+- Inner `AsyncRetrying` block — the bounded budget for `_CONNECTION_LOST`
+  (a dropped connection, a genuinely different failure mode from silence):
+  two drops in a row with no new event between them end the turn, and a
+  reconnect that delivers new events starts a fresh budget (N1), up to
+  `_DROP_ATTEMPTS_PER_GENERATION` attempts. Each outer iteration gets a fresh
+  `AsyncRetrying`, so this budget is per stream generation, not per turn.
 
 What the pump may do inline: the consume loop in `_consume_with_reconnect`
 awaits `lifecycle.on_sse_event(event)` synchronously, so per the hook
@@ -47,7 +49,7 @@ import contextlib
 import dataclasses
 import functools
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence, Set
 from contextlib import AbstractAsyncContextManager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -123,7 +125,7 @@ from mux.contracts.ports import ManagedAgents
 from mux.contracts.usage import UsageObservation
 from mux.drivers.anthropic import LegacyTurnTransport
 from mux.errors import ProviderError
-from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
+from tenacity import AsyncRetrying, RetryCallState, retry_if_exception_type
 
 log = structlog.get_logger(__name__)
 
@@ -525,6 +527,44 @@ async def _watch_silence(
 # clients retry reads eight times) could otherwise hold the turn until its
 # ceiling on a single question; a read that runs out is a transient failure.
 _STATUS_READ_TIMEOUT_S = 30.0
+
+
+_DROPS_WITHOUT_PROGRESS = 2
+"""Dropped connections in a row, with no new event delivered between them,
+that end a turn as lost."""
+_DROP_ATTEMPTS_PER_GENERATION = 8
+"""Hard cap on stream attempts in one generation, however much each delivers:
+a provider that sends one event and drops every time still gives up."""
+
+
+def _drop_budget(delivered: Set[str], session_id: str) -> Callable[[RetryCallState], bool]:
+    """Tenacity `stop` for dropped connections (N1).
+
+    The budget used to be two attempts per stream generation, so a long turn
+    whose reconnect delivered new events and then dropped again was lost.
+    Progress now resets it: only `_DROPS_WITHOUT_PROGRESS` drops in a row with
+    no new delivered event stop, under a hard per-generation cap.
+    """
+    seen = len(delivered)
+    in_a_row = 0
+
+    def stop(state: RetryCallState) -> bool:
+        nonlocal seen, in_a_row
+        progressed = len(delivered) > seen
+        seen = len(delivered)
+        in_a_row = 1 if progressed else in_a_row + 1
+        if progressed:
+            log.info(
+                "turn.drop_budget_reset",
+                session_id=session_id,
+                attempt=state.attempt_number,
+            )
+        return (
+            in_a_row >= _DROPS_WITHOUT_PROGRESS
+            or state.attempt_number >= _DROP_ATTEMPTS_PER_GENERATION
+        )
+
+    return stop
 
 
 def _transient_read_error(error: BaseException) -> bool:
@@ -1165,10 +1205,11 @@ async def _pump(
     #   `run_prepared_turn` for the chat paths and, for callers that bypass
     #   those, `run_turn`'s own optional `deadline`, is the sole backstop
     #   on this loop.
-    # - Inner `AsyncRetrying` block: the bounded 2-attempt budget for
-    #   `_CONNECTION_LOST` (a dropped connection, not silence). Each outer
-    #   iteration gets a FRESH `AsyncRetrying`, so the budget is per stream
-    #   generation, not per turn.
+    # - Inner `AsyncRetrying` block: the bounded budget for `_CONNECTION_LOST`
+    #   (a dropped connection, not silence): two drops in a row with no new
+    #   event between them, reset by progress (N1), capped per generation.
+    #   Each outer iteration gets a FRESH `AsyncRetrying`, so the budget is
+    #   per stream generation, not per turn.
     #
     # Open + initial-send happen inside the retryable unit on attempt 1 of
     # the FIRST generation only. On any later attempt (a connection-error
@@ -1185,7 +1226,7 @@ async def _pump(
             while True:
                 try:
                     async for attempt in AsyncRetrying(
-                        stop=stop_after_attempt(2),
+                        stop=_drop_budget(delivered_event_ids, session_id),
                         retry=retry_if_exception_type(_CONNECTION_LOST),
                         reraise=True,
                     ):
