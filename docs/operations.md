@@ -236,6 +236,7 @@ These events carry identifiers, counts and durations, never message text:
 | `runtime.health` | info | `process` and the window's measurements, every [`DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S`](configuration.md#daimon_observability__health_interval_s) seconds |
 | `scheduler.tick_completed` | info | `duration_ms`; at most once a minute |
 | `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `backend`, `release`, `turn_id`, `tenant_id`; once for a turn that ended without an answer |
+| `turn.would_stall` | warning | `step_s`, `silent_s`, `frame_silent_s`, `tool_open`, `last_status`, `session_id`; once per step (5, 10, 15, 30 minutes) a turn's provider sends nothing. Measurement only: it never ends a turn |
 
 `turn.user_failure` covers upstream errors, lost connections, the turn
 ceiling, failed recovery and queue-full shedding. Its `backend` names the
