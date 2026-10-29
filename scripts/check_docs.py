@@ -83,7 +83,7 @@ def check(path: Path) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description="Check docs pages against their length budgets.")
     parser.add_argument("root", nargs="?", default="docs", type=Path)
     args = parser.parse_args()
     pages = sorted(p for p in args.root.glob("*.md") if p.name not in GENERATED)
