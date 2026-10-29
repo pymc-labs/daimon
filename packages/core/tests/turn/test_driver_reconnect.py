@@ -763,14 +763,17 @@ async def test_a_mux_backends_retryable_failure_is_retried_unless_its_replay_sen
         assert len(lc.terminal_success) == 1
 
 
-async def test_stop_while_a_failed_status_read_waits_ends_the_turn_as_interrupted(
+async def test_stop_while_a_failed_status_read_waits_interrupts_the_running_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from daimon.core.turn import driver
 
     monkeypatch.setattr(driver, "_QUIET_READ_RETRY_DELAYS_S", (5.0, 5.0))
     fa = FakeAnthropic()
-    fa.beta.sessions.events.stream_scripts = [[]]
+    fa.beta.sessions.events.stream_scripts = [
+        [],  # a clean close: the status read follows
+        [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))],
+    ]
     fa.beta.sessions.retrieve_statuses = [_dropped(), _dropped(), _dropped()]
     cancel = asyncio.Event()
 
@@ -781,7 +784,7 @@ async def test_stop_while_a_failed_status_read_waits_ends_the_turn_as_interrupte
 
     lc = RecordingLifecycle()
     async with asyncio.timeout(3):  # far less than one retry pause
-        _, final = await asyncio.gather(
+        await asyncio.gather(
             press_stop(),
             run_turn_on_leg(
                 anthropic=_cast(fa),
@@ -790,10 +793,39 @@ async def test_stop_while_a_failed_status_read_waits_ends_the_turn_as_interrupte
                 lifecycle=lc,
                 cancel=cancel,
                 render_interval_s=0.001,
+                interrupt_timeout_s=5.0,
                 now=_now,
                 billing=_EXEMPT,
             ),
         )
 
     assert fa.beta.sessions.retrieve_calls == ["sess_1"], "no read after Stop"
-    assert final.termination == TerminationReason.INTERRUPTED
+    assert lc.interrupts == ["cancel_event"]
+    sent_types = [
+        ev["type"] for _sid, payload in fa.beta.sessions.events.sent_events for ev in payload
+    ]
+    assert "user.interrupt" in sent_types, "the provider is told to stop"
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_raw_transport_error_that_outlasts_the_retries_ends_the_turn_as_lost() -> None:
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
+    fa.beta.sessions.retrieve_raises = httpx.ReadTimeout("slow", request=request)
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert len(fa.beta.sessions.retrieve_calls) == 3
+    assert final.termination == TerminationReason.CONNECTION_LOST
+    assert len(lc.terminal_failures) == 1

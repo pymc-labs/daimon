@@ -154,18 +154,21 @@ async def _read_after_quiet[R](
 
     Only for reads that are safe to repeat: a status read, or a replay that at
     most journals by source key (an IO whose replay can send opts out with
-    `replay_may_send`). Any other error (a scope violation, a 4xx) and the last
-    attempt's failure propagate unchanged. Stop pressed while a failed read
-    waits for its retry ends the turn as interrupted, not lost.
+    `replay_may_send`). Any other error (a scope violation, a 4xx) propagates
+    unchanged; a transport error that outlasts the retries is a lost connection.
+    Stop pressed once a read has failed is the live turn's interrupt: the
+    provider is told to stop, as it is mid-stream.
     """
-    for delay in _QUIET_READ_RETRY_DELAYS_S:
+    for attempt, delay in enumerate((*_QUIET_READ_RETRY_DELAYS_S, None)):
+        if attempt and cancel.is_set():
+            raise _InterruptInConsume()
         try:
-            return await read()
+            value = await read()
         except Exception as error:
-            if not _transient_read_error(error):
+            if delay is None or not _transient_read_error(error):
+                if isinstance(error, httpx.TransportError) and delay is None:
+                    raise TurnConnectionLost(f"{name} read kept failing") from error
                 raise
-            if cancel.is_set():
-                raise _InterruptedDuringRecovery(phase="replay") from error
             log.warning(
                 "turn.quiet_read_retry",
                 read=name,
@@ -175,9 +178,11 @@ async def _read_after_quiet[R](
             )
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(cancel.wait(), timeout=delay)
-            if cancel.is_set():
-                raise _InterruptedDuringRecovery(phase="replay") from error
-    return await read()
+            continue
+        if attempt and cancel.is_set():
+            raise _InterruptInConsume()
+        return value
+    raise AssertionError("unreachable: the last attempt returns or raises")
 
 
 def _answers_in_turn(tool_confirmation: ToolConfirmation) -> bool:
