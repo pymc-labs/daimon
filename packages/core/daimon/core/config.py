@@ -111,8 +111,8 @@ class AnthropicSettings(BaseModel):
         default=None,
         description=(
             "Anthropic API key used to authenticate all Managed Agents SDK calls. "
-            "Required unless this deployment is OpenAI-only (see docs/self-hosting.md's "
-            "'Self-host on OpenAI'), in which case leave it unset."
+            "Required unless this deployment is OpenAI-only (see docs/providers.md's "
+            "'Run on OpenAI'), in which case leave it unset."
         ),
     )
     base_url: HttpUrl = Field(

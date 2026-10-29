@@ -19,9 +19,9 @@ back into the thread.
 or self-host it from this repo.
 
 [Documentation site](https://pymc-labs.github.io/daimon/) ·
-[Self-hosting guide](docs/self-hosting.md) ·
+[Quickstart](docs/quickstart.md) ·
 [Slack setup](docs/slack.md) ·
-[Teams setup](docs/self-hosting.md#microsoft-teams-optional) ·
+[Teams setup](docs/teams.md) ·
 [Claude Code plugin](plugin/README.md) ·
 [Changelog](CHANGELOG.md)
 
@@ -67,8 +67,9 @@ prefer them; on Teams they are plain words (`setup`, `routines`, `help`) sent in
 
 ## Quickstart
 
-You need [Docker](https://docs.docker.com/get-docker/) and an Anthropic API
-key in a workspace dedicated to this deployment. Want to run on just an
+The [quickstart](docs/quickstart.md) has the full walkthrough. In short, you
+need [Docker](https://docs.docker.com/get-docker/) and an Anthropic API key in
+a workspace dedicated to this deployment. Want to run on just an
 OpenAI key instead, no Anthropic account at all? Skip to
 [Run on OpenAI](#run-on-openai) below.
 
@@ -113,16 +114,16 @@ docker compose run --rm init "daimon agents backend set <agent-name-or-id> opena
 
 The first command creates an OpenAI agent, a hosted environment and seeds
 the default skill set; the second routes that agent's channels to it. See
-[Self-host on OpenAI](docs/self-hosting.md#self-host-on-openai) for the OpenAI
+[Run on OpenAI](docs/providers.md#run-on-openai) for the OpenAI
 key setup, per-channel routing, verifying the install, and what's different
 on OpenAI (no multi-agent delegation, no cross-turn memory, and a few other
 gaps listed there).
 
-The [self-hosting guide](docs/self-hosting.md) covers Discord permissions in
-detail, running without Docker, Slack, Microsoft Teams, the Claude Code login
-mounts, chart storage and connecting MCP servers. Prefer to skip all of that? The hosted
-version at [daimon.decision.ai](https://daimon.decision.ai/) installs in one
-click, no API key or server required.
+The [documentation](https://pymc-labs.github.io/daimon/) covers production
+setup, Slack, Microsoft Teams, GitHub, MCP servers and the Claude Code plugin.
+Prefer to skip all of that? The hosted version at
+[daimon.decision.ai](https://daimon.decision.ai/) installs in one click, no
+API key or server required.
 
 ## How it works
 
