@@ -108,7 +108,8 @@ No Anthropic account needed — leave `DAIMON_ANTHROPIC__API_KEY` unset and
 provision an OpenAI agent instead, after step 3 above. First add
 `DAIMON_CHANNEL_OPENAI_KEY=<key>` and
 `DAIMON_TURN__PROVIDER_RUNTIME_FILE=/app/runtime/openai.json` to `.env`.
-Find your tenant UUID with `daimon tenants list`.
+Your tenant UUID is the `id` field in the output of
+`docker compose run --rm init "daimon tenants list --json"`.
 
 ```bash
 docker compose run --rm init "daimon openai init --tenant-id <your-tenant-uuid> --project <openai-project-id> --model <openai-model-id>"

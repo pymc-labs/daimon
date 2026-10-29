@@ -152,7 +152,7 @@ daimon agents owner remove <agent> <person>
 daimon agents owner show <agent>
 ```
 
-`daimon agents fork <agent> [<new-name>]` copies an agent without its MCP
+`daimon agents fork <agent> <new-name>` copies an agent without its MCP
 credentials.
 
 A co-owner can do everything the primary owner can. An owner may also manage

@@ -85,7 +85,7 @@ DAIMON_TEAMS__ADMIN_TEAM_ID=<groupId of the admin team>
 ```
 
 Set the credentials together: a half-filled `DAIMON_TEAMS__` block stops every
-Daimon process.
+Daimon process. The MCP server reads the same values.
 Also set [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys). Then
 start the service:
 
@@ -126,7 +126,7 @@ endpoint**, including the `/api/messages` suffix:
 https://teams.example.com/api/messages
 ```
 
-A missing suffix is the most common reason a bot never answers. Check that
+A missing suffix is the usual reason a bot never answers. Check that
 **Microsoft App ID** and **App Tenant ID** match step 1 and **App type** is
 SingleTenant, then select **Apply**.
 
@@ -249,7 +249,7 @@ Shared channels hosted by another organisation cannot be subscribed.
 | Every Daimon process fails at startup | A `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_TEAM_ID` is not a group ID. |
 | Nobody is an admin | `DAIMON_TEAMS__ADMIN_TEAM_ID` is unset, or the app is not installed in that team. `teams.admin_team.lookup_failed` in the logs gives the reason. After a failed read the last owners count for up to an hour. |
 | `teams.tenant_reconcile_failed` in the logs | Daimon could not finish setting up your organisation and refuses turns until it does. The log line says why. |
-| It stopped answering after months | The client secret has probably expired. Create a new one (step 1), update `.env` and run `docker compose --profile teams up -d`, which also recreates `mcp`. |
+| It stopped answering after months | The client secret has likely expired. Create a new one (step 1), update `.env` and run `docker compose --profile teams up -d`, which also recreates `mcp`. |
 
 ### Update the app
 
@@ -269,9 +269,9 @@ Discord and Slack. Only the commercial Microsoft 365 cloud is supported.
 
 - **1:1 chat.** Every message is a turn.
 - **Channels.** A message that @mentions the bot or replies to one of its
-  messages. Each root post is its own thread and session. A followed thread
+  messages. Each root post is a thread and session. A followed thread
   also gets unprompted replies. Private and shared channels send only posts
-  that mention the bot, unless you enabled private-channel messages.
+  that mention the bot, unless private-channel messages are enabled.
 - **Group chats.** One session per chat, answering a mention, reply or command
   while everyone in the chat is from your organisation. It never joins in
   unprompted, and everyone sees each answer.

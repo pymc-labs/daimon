@@ -167,8 +167,8 @@ answer text. The bot must be in the channel. Leave it unset to hide the
 button. External Slack Connect members cannot use it.
 
 [`DAIMON_SUPPORT__CREDITS_PER_USER`](configuration.md#daimon_support__credits_per_user)
-sets the credits, 20 per person per workspace by default and shared with
-Discord. Zero turns the button off.
+sets the credits, 20 per person per workspace by default and shared across
+platforms. Zero turns the button off.
 
 In a channel with its own admins, the request goes to them by DM first, then
 to the server admins. The support channel gets it only if no DM landed.

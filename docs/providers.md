@@ -73,7 +73,8 @@ container defaults with no Daimon model settings.
    init` reads the same variable, or takes `--manifest`.
 
 3. Invite the Discord bot first: Daimon creates your server's tenant when
-   the bot joins. `daimon tenants list` then shows its UUID. Provision the
+   the bot joins. Its UUID is the `id` field in the output of
+   `docker compose run --rm init "daimon tenants list --json"`. Provision the
    agent, environment and default skills:
 
    ```bash
