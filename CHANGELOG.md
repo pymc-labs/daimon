@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Watches can report in their owner's DM or in a new public thread for each report: pass `delivery="dm"` or `delivery="new_thread"` to `create_watch` (Discord only; the default stays the watch's own thread). A DM always goes to the owner who made the watch, runs read-and-report only like any watch turn, and stops, pausing the watch, when DMs are turned off or the owner may no longer get them. A watch made in a DM reports there, and one made in a private thread cannot start new threads. A new-thread report pauses the watch when the owner can no longer start threads there, and a retried report reuses its thread (migration `0163_watch_delivery`).
+
 - Watches can read an MCP server tool with the owner's own key: an operator lists it in `DAIMON_WATCHES__POLLABLE_TOOLS` with credential `owner`, and `request_watch_credential` posts a private form only the requester can fill in. The key is stored encrypted, used only by that owner's watches and sent only to that exact URL, for example a read-scoped API key the person creates on that server. A new key takes effect at the next check, `forget_watch_credential` deletes it, a watch without its key pauses as `credential_missing` and its owner is told, and account erasure removes the keys (migration `0162_watch_credentials`).
 
 - Watch owner notices (expired, paused, stopped, cap reached) go out once even if the bot restarts mid-send: each attempt leaves a receipt, and a resumed send first looks for the earlier DM. Operators count them with `daimon watches notices --watch WATCH_UUID [--json]`; receipts hold ids, times and outcome, never the message text, and are kept 30 days, also after the watch is deleted.

@@ -161,6 +161,11 @@ class ContinuationDecision(BaseModel):
     seed_user_message: str | None = None
 
 
+#: A watch's wake: `watch_fired` reports in its bound thread; `watch_report` in the
+#: owner's DM or a new thread, and is never listed by the thread wake path.
+WATCH_REASONS: tuple[ContinuationReason, ...] = ("watch_fired", "watch_report")
+
+
 class ContinuationReasonUnavailable(DaimonError):
     """A reason is readable but not yet safe to produce during a rolling release."""
 
@@ -174,7 +179,7 @@ def require_writable_reason(reason: ContinuationReason) -> None:
     """
     if reason not in get_args(ContinuationReason):
         raise ContinuationReasonUnavailable("Unknown continuation reason")
-    if reason == "watch_fired":
+    if reason in WATCH_REASONS:
         from daimon.core.config import load_watches_settings
 
         if not load_watches_settings().enabled:
@@ -495,7 +500,7 @@ async def decide_continuation(
     # A timer is the agent's own appointment: the person talking in the
     # meantime is expected, not a newer request that replaces it.
     if (
-        request.reason not in ("timer", "watch_fired", "job_finished")
+        request.reason not in ("timer", "watch_fired", "watch_report", "job_finished")
         and latest_user_message_at is not None
         and latest_user_message_at > row.created_at
     ):
@@ -509,7 +514,7 @@ async def decide_continuation(
             ),
         )
 
-    if request.reason == "watch_fired":
+    if request.reason in WATCH_REASONS:
         from daimon.core.stores.watches import watch_seed
 
         async with sessionmaker() as session:
@@ -531,5 +536,6 @@ def continuation_attended(row: TaskContinuationRow) -> bool:
         "timer",
         "worker_finished",
         "watch_fired",
+        "watch_report",
         "job_finished",
     )

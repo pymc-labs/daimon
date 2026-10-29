@@ -49,7 +49,8 @@ from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.stores import mux_state, watches
-from daimon.core.stores.domain import ChatPlatform, TurnOriginRow, WatchRow
+from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX, dm_enabled
+from daimon.core.stores.domain import ChatPlatform, TurnOriginRow, WatchDelivery, WatchRow
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -72,6 +73,7 @@ class WatchSummary(BaseModel):
     expires_at: datetime
     key_id: str | None = None
     source_host: str | None = None
+    delivery: WatchDelivery = "thread"
 
 
 def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
@@ -88,6 +90,7 @@ def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
         expires_at=row.expires_at,
         key_id=key_id,
         source_host=urlsplit(str(server_url)).hostname if server_url else None,
+        delivery=row.delivery,
     )
 
 
@@ -103,6 +106,13 @@ class WatchListEntry(WatchSummary):
     errors: int
     retry_after: datetime | None
 
+
+#: How a listed watch names where it reports.
+DESTINATIONS: dict[WatchDelivery, str] = {
+    "thread": "{platform} thread",
+    "dm": "owner's DM",
+    "new_thread": "new {platform} thread each time",
+}
 
 #: A watch owner with no stored name on this platform.
 OWNER_UNNAMED = "another member"
@@ -155,7 +165,7 @@ def list_entry(
         owner=owner,
         owner_id=row.owner_external_id,
         source_tool=str(tool) if tool else None,
-        destination=f"{row.platform} thread",
+        destination=DESTINATIONS[row.delivery].format(platform=row.platform),
         fires_today=item.fires_today,
         last_fired_at=item.last_fired_at,
         errors=row.consecutive_errors,
@@ -270,6 +280,45 @@ async def require_attended_owner(
     return origin
 
 
+async def require_delivery_allowed(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow, delivery: WatchDelivery
+) -> None:
+    """The owner can get this watch's reports where `delivery` says, checked before saving.
+
+    A DM always goes to the owner, never anyone else. A new thread is refused when
+    the watch is made in a private thread, so private talk never moves into a
+    channel others can read.
+    """
+    if delivery == "thread":
+        return
+    if auth.platform != "discord" or auth.platform_user_id is None:
+        raise ToolError("Watches here can only report in this thread. Leave delivery as thread.")
+    if origin.thread_id.startswith(DM_SCOPE_PREFIX):
+        raise ToolError("A watch made in a DM reports in that DM. Leave delivery as thread.")
+    if delivery == "dm":
+        policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
+        async with runtime.session_factory() as db:
+            enabled = await dm_enabled(db, tenant_id=auth.tenant_id)
+        if not enabled or not policy.allows(auth.platform_user_id):
+            raise ToolError("Daimon cannot DM you here. Ask an admin or an owner.")
+        await require_dm_recipient_allowed(runtime, auth, recipient_id=auth.platform_user_id)
+        return
+    async with rest_client(_require_bot_token(runtime)) as client:
+        try:
+            thread = await client.fetch_channel(int(origin.thread_id))
+            parent = await client.fetch_channel(int(origin.parent_channel_id))
+        except (discord.HTTPException, ValueError):
+            raise ToolError("Could not check this channel. Try again later.") from None
+    if not isinstance(thread, discord.Thread) or str(thread.parent_id) != origin.parent_channel_id:
+        raise ToolError("New threads can only be started from a thread. Leave delivery as thread.")
+    if thread.type is discord.ChannelType.private_thread:
+        raise ToolError(
+            "This is a private thread, so its reports stay here. Leave delivery as thread."
+        )
+    if not isinstance(parent, discord.TextChannel):
+        raise ToolError("Threads cannot be started in this channel. Leave delivery as thread.")
+
+
 async def create_watch_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -286,6 +335,7 @@ async def create_watch_impl(
     lifetime_days: int = 7,
     key: str | None = None,
     evidence: list[str] | None = None,
+    delivery: WatchDelivery = "thread",
 ) -> WatchSummary:
     origin = await require_attended_owner(
         runtime, auth, origin_context_id, tool_name="create_watch"
@@ -309,6 +359,7 @@ async def create_watch_impl(
         reason="watch_fired",
         idempotency_key=uuid.uuid4(),
     )
+    await require_delivery_allowed(runtime, auth, origin, delivery)
     if server != DAIMON_SERVER_NAME:
         return await create_mcp_watch(
             runtime,
@@ -325,6 +376,7 @@ async def create_watch_impl(
             now=now,
             key=key,
             evidence=evidence,
+            delivery=delivery,
         )
     try:
         async with runtime.session_factory.begin() as db:
@@ -341,6 +393,7 @@ async def create_watch_impl(
                 now=now,
                 key=key,
                 evidence=evidence,
+                delivery=delivery,
             )
             # Current owner/agent/seal policy, independently of the origin grant.
             await authorize_poll(runtime, watch)
@@ -365,6 +418,7 @@ async def create_mcp_watch(
     now: datetime,
     key: str | None,
     evidence: list[str] | None,
+    delivery: WatchDelivery = "thread",
 ) -> WatchSummary:
     """A watch on a listed read tool of a server this agent attaches.
 
@@ -455,6 +509,7 @@ async def create_mcp_watch(
                 now=now,
                 key=key,
                 evidence=evidence,
+                delivery=delivery,
             )
             # Current owner/agent/seal policy, independently of the origin grant.
             await authorize_poll(runtime, watch)
@@ -599,10 +654,16 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         lifetime_days: int = 7,
         key: str | None = None,
         evidence: list[str] | None = None,
+        delivery: Literal["thread", "dm", "new_thread"] = "thread",
     ) -> WatchSummary:
         """Watch a listed read tool from this conversation: a Discord reader or an MCP server's.
 
         Binds the current human owner, tenant, agent and exact Discord thread.
+        `delivery` says where each report goes: "thread" (this thread, the default),
+        "dm" (the owner's DM, never anyone else's) or "new_thread" (a new public thread
+        under this thread's channel for each report). A watch made in a DM reports there,
+        and one made in a private thread cannot use "new_thread". With "dm" each report
+        stops, and the watch pauses, when Daimon may no longer DM its owner.
         Requires an attended turn origin and verified owner card approval.
         Backends without tool confirmation refuse enrollment.
         Polls run without an AI turn; firings
@@ -648,6 +709,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             lifetime_days=lifetime_days,
             key=key,
             evidence=evidence,
+            delivery=delivery,
         )
 
     @mcp.tool(tags={"discord"})

@@ -40,6 +40,12 @@ from sqlalchemy.sql.elements import ColumnElement
 # Filter unsupported reasons in SQL, before batching or decoding. Keep all other
 # fields under the existing strict row validation.
 _READABLE_REASON = TaskContinuation.reason.in_(get_args(ContinuationReason))
+# A watch report goes to its owner's DM or a new thread, never to the thread its
+# row names, so nothing that lists a thread's rows may see one.
+_REPORT_REASON = TaskContinuation.reason == "watch_report"
+_THREAD_REASON = TaskContinuation.reason.in_(
+    [reason for reason in get_args(ContinuationReason) if reason != "watch_report"]
+)
 
 
 async def record_continuation(
@@ -115,7 +121,7 @@ async def claim_continuation(
         await session.execute(
             update(TaskContinuation)
             .where(
-                _READABLE_REASON,
+                _THREAD_REASON,
                 TaskContinuation.idempotency_key == idempotency_key,
                 TaskContinuation.status == "pending",
                 or_(TaskContinuation.available_at.is_(None), TaskContinuation.available_at <= now),
@@ -217,7 +223,7 @@ async def list_pending_continuations(
         await session.execute(
             select(TaskContinuation)
             .where(
-                _READABLE_REASON,
+                _THREAD_REASON,
                 TaskContinuation.tenant_id == tenant_id,
                 TaskContinuation.platform == platform,
                 TaskContinuation.thread_id == thread_id,
@@ -234,8 +240,10 @@ async def list_pending_continuations(
     return [TaskContinuationRow.model_validate(row) for row in rows]
 
 
-def _dispatchable(now: datetime, *, max_attempts: int) -> ColumnElement[bool]:
-    """Rows a dispatcher may claim at `now`.
+def _dispatchable(
+    now: datetime, *, max_attempts: int, reasons: ColumnElement[bool] = _THREAD_REASON
+) -> ColumnElement[bool]:
+    """Rows a dispatcher may claim at `now`; thread-path reasons unless `reasons` says.
 
     Pending and due, or claimed by a process whose lease ran out before it
     committed the start fence — nothing can have run for such a row, so taking
@@ -243,7 +251,7 @@ def _dispatchable(now: datetime, *, max_attempts: int) -> ColumnElement[bool]:
     dispatchable again, however stale.
     """
     return and_(
-        _READABLE_REASON,
+        reasons,
         or_(
             and_(
                 TaskContinuation.status == "pending",
@@ -280,7 +288,8 @@ async def claim_wake_row(
             update(TaskContinuation)
             .where(
                 TaskContinuation.idempotency_key == idempotency_key,
-                _dispatchable(now, max_attempts=max_attempts),
+                # By key: the caller listed it from its own path.
+                _dispatchable(now, max_attempts=max_attempts, reasons=_READABLE_REASON),
             )
             .values(
                 status="claimed",
@@ -589,6 +598,34 @@ async def list_due_wake_rows(
         await session.execute(
             select(TaskContinuation)
             .where(TaskContinuation.id.in_(select(first_per_thread.c.id)))
+            .order_by(TaskContinuation.available_at.nulls_first(), TaskContinuation.id)
+            .limit(limit)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]
+
+
+async def list_due_watch_report_rows(
+    session: AsyncSession,
+    *,
+    platform: str,
+    now: datetime,
+    max_attempts: int,
+    limit: int,
+) -> list[TaskContinuationRow]:
+    """Due watch reports (or claims to take over), oldest first; only their own dispatcher
+    reads these, since they never run in the thread their row names."""
+    rows = (
+        await session.execute(
+            select(TaskContinuation)
+            .where(
+                TaskContinuation.platform == platform,
+                _dispatchable(now, max_attempts=max_attempts, reasons=_REPORT_REASON),
+                or_(
+                    TaskContinuation.status == "claimed",
+                    TaskContinuation.available_at.is_not(None),
+                ),
+            )
             .order_by(TaskContinuation.available_at.nulls_first(), TaskContinuation.id)
             .limit(limit)
         )

@@ -101,7 +101,10 @@ NOTICE_RECEIPTS_HEAD = "0157_watch_notice_receipts"
 ROUTINE_SOURCE_HEAD = "0161_routine_source_id"
 
 
-HEAD = "0162_watch_credentials"
+CREDENTIALS_HEAD = "0162_watch_credentials"
+
+
+HEAD = "0163_watch_delivery"
 
 
 CHAIN = [
@@ -133,6 +136,7 @@ CHAIN = [
     NOTICE_RECEIPTS_HEAD,
     "0158_watch_mcp_claim",
     ROUTINE_SOURCE_HEAD,
+    CREDENTIALS_HEAD,
     HEAD,
 ]
 
@@ -494,8 +498,9 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 command.downgrade(config, COMPUTE_TASKS_HEAD)
             version = sync.scalar(text("SELECT version_num FROM alembic_version"))
             assert version == WATCH_MCP_HEAD
-            command.upgrade(config, HEAD)
-            _assert_head(sync)
+            command.upgrade(config, CREDENTIALS_HEAD)
+            version = sync.scalar(text("SELECT version_num FROM alembic_version"))
+            assert version == CREDENTIALS_HEAD
             # 0162 drops the owner watch keys and the form kind that collects them.
             command.downgrade(config, ROUTINE_SOURCE_HEAD)
             version = sync.scalar(text("SELECT version_num FROM alembic_version"))
@@ -510,6 +515,10 @@ async def test_deployed_upgrade_and_downgrade_paths(
             with pytest.raises(NotImplementedError, match="Watch evidence"):
                 command.downgrade(config, NOTICE_RECEIPTS_HEAD)
             command.upgrade(config, HEAD)
+            _assert_head(sync)
+            # 0163 keeps watch history: no downgrade past it.
+            with pytest.raises(NotImplementedError, match="Watch evidence"):
+                command.downgrade(config, CREDENTIALS_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)

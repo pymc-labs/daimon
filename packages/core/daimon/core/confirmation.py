@@ -389,6 +389,14 @@ _LEAD_CONFIRMATIONS = (
 )
 
 
+#: Where a watch's reports go, as its approval card says it.
+_WATCH_DELIVERY: Final[dict[str, str]] = {
+    "thread": "this thread",
+    "dm": "your DM",
+    "new_thread": "a new public thread each time",
+}
+
+
 def prompt_for_tool_call(
     call: ToolCall,
     *,
@@ -626,6 +634,15 @@ def prompt_for_tool_call(
             f"Agent: {_short(agent)}",
             f"Source: {source_label}",
         )
+    elif call.tool_name == "create_watch" and own_server:
+        action = "Create watch"
+        title = "Create this watch?"
+        denied_action = "Watch not created"
+        delivery = data.get("delivery") or "thread"
+        # Always the first line, whatever order the fields came in.
+        reports_to = _WATCH_DELIVERY.get(str(delivery), _one_line(delivery, limit=40))
+        rest = {key: value for key, value in data.items() if key != "delivery"}
+        detail_lines = (f"Reports to: {reports_to}", *_generic_details(rest))
     else:
         verb = call.tool_name.replace("_", " ").capitalize()
         subject = title_value or name

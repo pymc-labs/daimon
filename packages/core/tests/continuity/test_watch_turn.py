@@ -724,3 +724,238 @@ def test_review_management_endpoint_aliases_are_excluded_without_becoming_truste
 
     assert same_mcp_endpoint(url, "https://daimon.invalid/mcp")
     assert not same_mcp_url(url, "https://daimon.invalid/mcp")
+
+
+def _report_row(reason: str = "watch_report", **changes):
+    from datetime import UTC, datetime
+
+    from daimon.core.stores.domain import TaskContinuationRow
+
+    return TaskContinuationRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        thread_id="4242",
+        parent_channel_id="4241",
+        requester_account_id=uuid.uuid4(),
+        requester_external_user_id="555",
+        target_ma_agent_id="ag_target",
+        target_name="target-agent",
+        requested_work="report",
+        reason=reason,
+        status="claimed",
+        skip_reason=None,
+        idempotency_key=uuid.uuid4(),
+        created_at=datetime.now(UTC),
+        claimed_at=None,
+        delivered_at=None,
+    ).model_copy(update=changes)
+
+
+async def test_watch_report_turn_also_requires_explicit_unattended():
+    from daimon.core.turn.run import run_prepared_turn_impl
+
+    row = _report_row()
+    with pytest.raises(ValueError, match="explicitly unattended"):
+        await run_prepared_turn_impl(
+            MagicMock(),
+            MagicMock(),
+            tenant_id=row.tenant_id,
+            platform="discord",
+            thread_id="dm:x",
+            external_user_id="555",
+            user_message="report",
+            lifecycle=MagicMock(),
+            cancel=MagicMock(),
+            watch_row=row,
+            attended=None,
+            reseed_user_message=AsyncMock(),
+            recovery_lifecycle=MagicMock(),
+        )
+
+
+async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkeypatch):
+    """The DM report turn hands its wake row to the shared turn, unattended: that row
+    selects watch capabilities and `watch_posture` there (no daimon-mcp, no sandbox, no
+    built-ins, reads only), never the DM routine's session authority."""
+    from contextlib import asynccontextmanager
+
+    from daimon.core import direct_messages
+    from daimon.core.direct_messages import (
+        _run_admitted_dm_turn,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.stores.domain import Role
+    from daimon.core.turn.state import TerminationReason
+
+    row = _report_row()
+    run = AsyncMock(
+        return_value=MagicMock(
+            state=MagicMock(error=None, termination=TerminationReason.COMPLETED, content=[]),
+            ma_session_id="sess_dm",
+        )
+    )
+
+    @asynccontextmanager
+    async def origin(*_args, **kwargs):
+        assert kwargs["attended"] is False
+        yield MagicMock()
+
+    monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
+    monkeypatch.setattr(direct_messages, "turn_origin", origin)
+    monkeypatch.setattr(direct_messages, "render_turn_origin", lambda *_a, **_k: "controls")
+    monkeypatch.setattr(direct_messages, "extract_final_response", lambda _content: "report")
+    prepared = MagicMock()
+    prepared.admission.hold = None
+    text, session_id = await _run_admitted_dm_turn(
+        MagicMock(),
+        prepared,
+        tenant_id=row.tenant_id,
+        platform="discord",
+        parent_channel_id="dm:scope",
+        scope_id="dm:scope",
+        external_user_id="555",
+        role=Role.USER,
+        prompt="seed",
+        deadline=MagicMock(),
+        on_sealed=AsyncMock(),
+        origin="routine",
+        watch_row=row,
+    )
+    assert (text, session_id) == ("report", "sess_dm")
+    kwargs = run.await_args.kwargs
+    assert kwargs["watch_row"] is row and kwargs["attended"] is False
+
+
+@pytest.mark.parametrize(
+    "row",
+    [_report_row("watch_fired"), _report_row(requester_external_user_id="777")],
+)
+async def test_dm_watch_refuses_a_thread_wake_or_another_recipient(row):
+    from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_watch
+    from daimon.core.turn.admission import DmSource
+
+    with pytest.raises(DirectMessageAccessRevoked):
+        await run_dm_watch(
+            MagicMock(),
+            row,
+            owner_user_id="555",
+            prompt="seed",
+            source=DmSource(channel_id="4241", thread_id="4242"),
+            budget_channel_id="4241",
+        )
+
+
+def _send_world(monkeypatch, *, delivery, row, origin_place, session_id="sess_new", **firing):
+    """Patch the stores `require_watch_send` reads, around one watch and its firing."""
+    from contextlib import asynccontextmanager
+    from datetime import UTC, datetime
+
+    from daimon.core.stores.domain import WatchFiringRow
+    from daimon.core.turn_origin import current_execution_origin_id
+
+    watch = MagicMock(delivery=delivery, session_id="sess_bound" if delivery == "thread" else None)
+    record = WatchFiringRow(
+        wake_key=row.idempotency_key,
+        watch_id=uuid.uuid4(),
+        revision=1,
+        generation=0,
+        events=[],
+        omitted=0,
+        created_at=datetime.now(UTC),
+        **firing,
+    )
+    parent, thread = origin_place
+    origin = MagicMock(
+        attended=False,
+        chat_session_id="chat",
+        responder_ma_agent_id="ag_target",
+        parent_channel_id=parent,
+        thread_id=thread,
+    )
+    live = MagicMock(ma_session_id=session_id)
+    live.effective_config.chat_session_id = "chat"
+    monkeypatch.setattr(watch_turn, "watch_seed", AsyncMock(return_value="seed"))
+    monkeypatch.setattr(watch_turn, "get_firing", AsyncMock(return_value=record))
+    monkeypatch.setattr(watch_turn, "get_watch", AsyncMock(return_value=watch))
+    monkeypatch.setattr(watch_turn, "get_active_origin", AsyncMock(return_value=origin))
+    monkeypatch.setattr(watch_turn, "get_live_thread_session", AsyncMock(return_value=live))
+    current_execution_origin_id.set(uuid.uuid4())
+
+    @asynccontextmanager
+    async def sessions():
+        yield MagicMock()
+
+    admission = MagicMock(account_id=row.requester_account_id)
+    admission.agent.id = "ag_target"
+    return sessions, admission
+
+
+@pytest.mark.parametrize(
+    "recorded,place,allowed",
+    [
+        ("sess_new", "dm:scope", True),
+        (None, "dm:scope", False),  # not the session this firing made
+        ("sess_other", "dm:scope", False),
+        ("sess_new", "4242", False),  # never the thread the watch was made in
+    ],
+)
+async def test_dm_report_sends_only_on_the_session_its_firing_recorded(
+    monkeypatch, recorded, place, allowed
+):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    row = _report_row()
+    sessions, admission = _send_world(
+        monkeypatch,
+        delivery="dm",
+        row=row,
+        origin_place=(place, place),
+        delivery_session_id=recorded,
+    )
+    send = watch_turn.require_watch_send(
+        sessions,
+        row,
+        admission,
+        session_id="sess_new",
+        tenant_id=row.tenant_id,
+        platform="discord",
+        thread_id=place,
+    )
+    if allowed:
+        await send
+    else:
+        with pytest.raises(AdmissionDenied):
+            await send
+
+
+@pytest.mark.parametrize(
+    "recorded,turn_thread,allowed",
+    [("9001", "9001", True), (None, "9001", False), ("9001", "4242", False)],
+)
+async def test_new_thread_report_sends_only_in_the_thread_its_firing_made(
+    monkeypatch, recorded, turn_thread, allowed
+):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    row = _report_row(thread_id=turn_thread)
+    sessions, admission = _send_world(
+        monkeypatch,
+        delivery="new_thread",
+        row=row,
+        origin_place=("4241", turn_thread),
+        delivery_thread_id=recorded,
+    )
+    send = watch_turn.require_watch_send(
+        sessions,
+        row,
+        admission,
+        session_id="sess_new",
+        tenant_id=row.tenant_id,
+        platform="discord",
+        thread_id=turn_thread,
+    )
+    if allowed:
+        await send
+    else:
+        with pytest.raises(AdmissionDenied):
+            await send

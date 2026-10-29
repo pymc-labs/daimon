@@ -12,6 +12,7 @@ import uuid
 from datetime import UTC, datetime
 
 from anthropic.types.beta import BetaManagedAgentsSession
+from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.stores.turn_origins import get_active_origin
@@ -88,6 +89,7 @@ async def require_watch_send(
 
     if (
         seed is None
+        or firing is None
         or origin is None
         or origin.attended
         or not origin.chat_session_id
@@ -95,19 +97,32 @@ async def require_watch_send(
         or live.ma_session_id != session_id
         or live.effective_config is None
         or live.effective_config.chat_session_id != origin.chat_session_id
-        or (origin.parent_channel_id, origin.thread_id, origin.responder_ma_agent_id)
-        != (row.parent_channel_id, thread_id, admission.agent.id)
+        or origin.responder_ma_agent_id != admission.agent.id
         or watch is None
-        or watch.session_id != session_id
-        or (
-            row.tenant_id,
-            row.platform,
-            row.thread_id,
-            row.requester_account_id,
-            row.target_ma_agent_id,
-        )
-        != (tenant_id, platform, thread_id, admission.account_id, admission.agent.id)
+        or (row.tenant_id, row.platform, row.requester_account_id, row.target_ma_agent_id)
+        != (tenant_id, platform, admission.account_id, admission.agent.id)
     ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
+    if watch.delivery == "dm":
+        # A private scope of the owner's, on the session this firing made and recorded.
+        place_ok = (
+            thread_id.startswith(DM_SCOPE_PREFIX)
+            and (origin.parent_channel_id, origin.thread_id) == (thread_id, thread_id)
+            and firing.delivery_session_id == session_id
+        )
+    elif watch.delivery == "new_thread":
+        # The thread this firing made, under the watch's own parent, on its live session.
+        place_ok = firing.delivery_thread_id == thread_id == row.thread_id and (
+            origin.parent_channel_id,
+            origin.thread_id,
+        ) == (row.parent_channel_id, thread_id)
+    else:
+        place_ok = (
+            watch.session_id == session_id
+            and row.thread_id == thread_id
+            and (origin.parent_channel_id, origin.thread_id) == (row.parent_channel_id, thread_id)
+        )
+    if not place_ok:
         raise AdmissionDenied(reason="invoker_not_allowed")
 
 

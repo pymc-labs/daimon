@@ -51,6 +51,9 @@ with the owner’s ordinary credentials and tools, and can read and write the
 owner’s personal memory under the normal live-DM memory policy. Execution is unattended;
 permitted tools retain ordinary DM side-effect risk, and nobody watches intermediate actions.
 
+A watch that reports by DM runs each report through the same cold-DM
+admission, but read-and-report only (see [watches](architecture.md#signed-page-event-watch-entry-point)).
+
 The host queues the final reply through the outbox and sends chunks of at
 most 2,000 characters with mentions disabled. The notification includes the
 routine label and run identity. It neither selects a cold-DM tenant nor adds

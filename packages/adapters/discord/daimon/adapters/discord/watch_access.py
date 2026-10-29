@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from daimon.core.continuity.continuation import WATCH_REASONS
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import get_firing, pause_watch
@@ -118,7 +119,7 @@ async def require_watch_thread_access(
     except (discord.Forbidden, discord.NotFound, ValueError):
         reason = "Watch paused: reporting thread or owner membership is unavailable."
     if reason is not None:
-        if row.reason == "watch_fired":
+        if row.reason in WATCH_REASONS:
             async with sessions.begin() as db:
                 firing = await get_firing(db, row.idempotency_key)
                 if firing is not None:
@@ -126,3 +127,73 @@ async def require_watch_thread_access(
         raise AdmissionDenied(reason="invoker_not_allowed")
     assert member is not None
     return WatchThreadAccess(member=member, category_id=category_id)
+
+
+async def require_watch_parent_access(
+    sessions: async_sessionmaker[AsyncSession],
+    row: TaskContinuationRow,
+    client: discord.Client,
+) -> None:
+    """Before a new-thread report makes its thread: the owner may start and post in public
+    threads under the watch's parent, and the channel rules let Daimon post there.
+
+    Every input comes over REST into an empty state, as in `require_watch_thread_access`.
+    A proved loss pauses the watch; a transient failure refuses this report alone.
+    """
+    reason: str | None = None
+    try:
+        async with sessions() as db:
+            tenant = await get_tenant(db, row.tenant_id)
+        if tenant is None or tenant.archived_at is not None:
+            raise ValueError("Watch guild is unavailable")
+        guild_id = int(tenant.external_id)
+        state = ConnectionState(
+            dispatch=_discard_event,
+            handlers={},
+            hooks={},
+            http=client.http,
+            intents=discord.Intents.none(),
+        )
+        guild = discord.Guild(
+            data=await client.http.get_guild(guild_id, with_counts=False), state=state
+        )
+        if guild.id != guild_id or guild.owner_id is None:
+            raise ValueError("Watch guild binding changed")
+        roles = await guild.fetch_roles()
+        guild._roles = {role.id: role for role in roles}  # pyright: ignore[reportPrivateUsage]
+        if not any(role.id == guild_id for role in roles):
+            raise ValueError("Watch guild roles are incomplete")
+        member = await guild.fetch_member(int(row.requester_external_user_id))
+        if str(member.id) != row.requester_external_user_id:
+            raise ValueError("Watch member binding changed")
+        parent = await guild.fetch_channel(int(row.parent_channel_id))
+        if not isinstance(parent, discord.TextChannel) or str(parent.id) != row.parent_channel_id:
+            reason = "Watch paused: the channel it starts threads in is unavailable."
+        else:
+            category_id = str(parent.category_id) if parent.category_id is not None else None
+
+            async def rest_category() -> tuple[str | None, bool]:
+                return category_id, False
+
+            protection = await protection_state(
+                sessions,
+                tenant_id=row.tenant_id,
+                channel_id=row.parent_channel_id,
+                thread_id=None,
+                resolve_category=rest_category,
+            )
+            permissions = parent.permissions_for(member)
+            if not protection.may_post:
+                reason = "Watch paused: channel/category rules block or cannot verify output."
+            elif not (permissions.view_channel and permissions.send_messages):
+                reason = "Watch paused: owner can no longer post in the reporting channel."
+            elif not (permissions.create_public_threads and permissions.send_messages_in_threads):
+                reason = "Watch paused: owner can no longer start threads in the reporting channel."
+    except (discord.Forbidden, discord.NotFound, ValueError):
+        reason = "Watch paused: reporting channel or owner membership is unavailable."
+    if reason is not None:
+        async with sessions.begin() as db:
+            firing = await get_firing(db, row.idempotency_key)
+            if firing is not None:
+                await pause_watch(db, firing.watch_id, reason=reason)
+        raise AdmissionDenied(reason="invoker_not_allowed")

@@ -2464,6 +2464,7 @@ class TestCredentialButtonRegistration:
 
         for name in (
             "run_wake_poller",
+            "run_watch_report_poller",
             "run_request_expiry_poller",
             "run_connect_notice_poller",
             "run_delivery_poller",

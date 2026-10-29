@@ -2270,6 +2270,11 @@
         Watch a listed read tool from this conversation: a Discord reader or an MCP server's.
         <blank line>
         Binds the current human owner, tenant, agent and exact Discord thread.
+        `delivery` says where each report goes: "thread" (this thread, the default),
+        "dm" (the owner's DM, never anyone else's) or "new_thread" (a new public thread
+        under this thread's channel for each report). A watch made in a DM reports there,
+        and one made in a private thread cannot use "new_thread". With "dm" each report
+        stops, and the watch pauses, when Daimon may no longer DM its owner.
         Requires an attended turn origin and verified owner card approval.
         Backends without tool confirmation refuse enrollment.
         Polls run without an AI turn; firings
@@ -2314,6 +2319,15 @@
               }),
             ]),
             'default': None,
+          }),
+          'delivery': dict({
+            'default': 'thread',
+            'enum': list([
+              'thread',
+              'dm',
+              'new_thread',
+            ]),
+            'type': 'string',
           }),
           'evidence': dict({
             'anyOf': list([

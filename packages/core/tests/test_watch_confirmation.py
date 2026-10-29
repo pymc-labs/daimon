@@ -69,3 +69,37 @@ def test_watch_confirmation_table_protects_policy_enabled_callers(tool, argument
         ).outcome
         == "ask"
     )
+
+
+@pytest.mark.parametrize(
+    "delivery,shown",
+    [
+        (None, "this thread"),
+        ("thread", "this thread"),
+        ("dm", "your DM"),
+        ("new_thread", "a new public thread each time"),
+    ],
+)
+def test_create_watch_card_always_says_where_reports_go(delivery, shown):
+    # Many fields before `delivery` must not push it off the card.
+    arguments: dict[str, object] = {
+        "instructions": "Tell me about new rows.",
+        "source": "poll",
+        "projection": ".",
+        "rule": "change",
+        "interval": 300,
+        "lifetime_days": 7,
+    }
+    if delivery is not None:
+        arguments["delivery"] = delivery
+    call = ToolCall(
+        tool_use_id="watch",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="create_watch",
+        input=arguments,
+    )
+    prompt = prompt_for_tool_call(call, requester_platform_user_id="owner", now=datetime.now(UTC))
+    assert prompt.detail_lines[0] == f"Reports to: {shown}"
+    assert sum(line.startswith("Reports to:") for line in prompt.detail_lines) == 1
+    assert not any(line.startswith("Delivery:") for line in prompt.detail_lines)
+    assert prompt.title == "Create this watch?"
