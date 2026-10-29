@@ -46,6 +46,86 @@ from sqlalchemy.ext.asyncio import AsyncSession
 #: `render_untrusted` wraps it.
 SEED_BYTES = 524288
 
+#: The longest dated lifetime; past it a watch must be permanent.
+MAX_LIFETIME = timedelta(days=30)
+#: A permanent watch paused this long expires (the claim function's own rule).
+PAUSED_PERMANENT_EXPIRY = timedelta(days=30)
+#: Permanent watches one owner may have live at once.
+MAX_PERMANENT_PER_OWNER = 5
+#: Daily firing limits with no ceiling stored, and the hard limits no ceiling passes.
+#: The firing SQL (0164) holds the same numbers.
+DEFAULT_WATCH_CAP = 24
+DEFAULT_OWNER_CAP = 100
+HARD_WATCH_CAP = 240
+HARD_OWNER_CAP = 1000
+
+
+def is_expired(expires_at: datetime | None, now: datetime) -> bool:
+    """Whether a watch's lifetime is over at `now`. None is permanent: never by date."""
+    return expires_at is not None and expires_at <= now
+
+
+def _live_at(now: datetime):
+    """SQL for "not expired at `now`", keeping permanent (NULL) watches."""
+    return or_(Watch.expires_at.is_(None), Watch.expires_at > now)
+
+
+@dataclass(frozen=True)
+class WatchCeilings:
+    """The daily firing limits in force: a tenant row's, else the global row's, else defaults."""
+
+    per_watch: int
+    per_owner: int
+
+
+async def watch_ceilings(session: AsyncSession, tenant_id: uuid.UUID) -> WatchCeilings:
+    """Read the limits the firing SQL applies, so tools can refuse what it would cap."""
+    rows = {
+        scope: (per_watch, per_owner)
+        for scope, per_watch, per_owner in (
+            await session.execute(
+                select(
+                    WatchControl.scope,
+                    WatchControl.max_turns_per_watch_per_day,
+                    WatchControl.max_turns_per_owner_per_day,
+                ).where(WatchControl.scope.in_(("global", f"tenant:{tenant_id}")))
+            )
+        ).tuples()
+    }
+    tenant = rows.get(f"tenant:{tenant_id}", (None, None))
+    default = rows.get("global", (None, None))
+    per_watch = next((v for v in (tenant[0], default[0]) if v is not None), DEFAULT_WATCH_CAP)
+    per_owner = next((v for v in (tenant[1], default[1]) if v is not None), DEFAULT_OWNER_CAP)
+    return WatchCeilings(min(per_watch, HARD_WATCH_CAP), min(per_owner, HARD_OWNER_CAP))
+
+
+async def set_watch_limits(
+    session: AsyncSession, *, scope: str, per_watch: int | None, per_owner: int | None
+) -> None:
+    """Store the daily ceilings for `global` or `tenant:<UUID>`; None clears one to its default.
+
+    Firings read them live, so a lowered ceiling caps the next firing. Never
+    changes a gate: a new tenant row is enabled, a missing global row disabled.
+    """
+    from sqlalchemy.dialects.postgresql import insert
+
+    if scope != "global":
+        kind, value = scope.split(":", 1)
+        if kind != "tenant":
+            raise ValueError("Daily limits are set for global or tenant:<id>")
+        uuid.UUID(value)
+    if per_watch is not None and not 1 <= per_watch <= HARD_WATCH_CAP:
+        raise ValueError(f"A watch's daily limit must be 1 to {HARD_WATCH_CAP}")
+    if per_owner is not None and not 1 <= per_owner <= HARD_OWNER_CAP:
+        raise ValueError(f"An owner's daily limit must be 1 to {HARD_OWNER_CAP}")
+    await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
+    limits = {"max_turns_per_watch_per_day": per_watch, "max_turns_per_owner_per_day": per_owner}
+    await session.execute(
+        insert(WatchControl)
+        .values(scope=scope, enabled=scope != "global", **limits)
+        .on_conflict_do_update(index_elements=[WatchControl.scope], set_=limits)
+    )
+
 
 async def register_page_watch(
     session: AsyncSession,
@@ -53,16 +133,26 @@ async def register_page_watch(
     *,
     instructions: str,
     page_id: uuid.UUID,
-    expires_at: datetime,
+    expires_at: datetime | None,
     now: datetime,
-    max_turns_per_day: int = 24,
+    max_turns_per_day: int = DEFAULT_WATCH_CAP,
+    source: Literal["page_event", "poll", "mcp_poll"] = "page_event",
+    permanent_approved_by: uuid.UUID | None = None,
 ) -> WatchRow:
-    """Register a human-admitted owner's exact live binding; never called by ingress."""
+    """Register a human-admitted owner's exact live binding; never called by ingress.
+
+    `expires_at=None` is a permanent polled watch; the caller has checked a fresh
+    admin approved it, named in `permanent_approved_by`.
+    """
     if binding.platform != "discord":
         raise ValueError("Page-event enrollment currently requires a Discord thread")
-    if not 0 < len(instructions) <= 2000 or not now < expires_at <= now + timedelta(days=30):
+    if not 0 < len(instructions) <= 2000:
         raise ValueError("Instructions or watch lifetime out of bounds")
-    if not 1 <= max_turns_per_day <= 24:
+    if expires_at is None and (permanent_approved_by is None or source == "page_event"):
+        raise ValueError("Only an admin can approve a permanent watch")
+    if expires_at is not None and not now < expires_at <= now + MAX_LIFETIME:
+        raise ValueError("Instructions or watch lifetime out of bounds")
+    if not 1 <= max_turns_per_day <= HARD_WATCH_CAP:
         raise ValueError("Invalid watch caps")
     principal = await find_platform_principal(
         session,
@@ -98,11 +188,13 @@ async def register_page_watch(
         .where(
             Watch.owner_account_id == binding.requester_account_id,
             Watch.status.in_(("active", "paused")),
-            Watch.expires_at > now,
+            _live_at(now),
         )
     )
     if count is not None and count >= 25:
         raise ValueError("Owner live watch cap exceeded")
+    if expires_at is None:
+        await require_permanent_room(session, binding.requester_account_id)
     row = Watch(
         tenant_id=binding.tenant_id,
         owner_account_id=binding.requester_account_id,
@@ -116,7 +208,9 @@ async def register_page_watch(
         instructions=instructions,
         page_id=page_id,
         rule={},
+        source=source,
         expires_at=expires_at,
+        permanent_approved_by=None if expires_at is not None else permanent_approved_by,
         producer=f"watch:{uuid.uuid4()}",
         max_turns_per_day=max_turns_per_day,
     )
@@ -124,6 +218,27 @@ async def register_page_watch(
     await session.flush()
     await session.refresh(row)
     return WatchRow.model_validate(row)
+
+
+async def require_permanent_room(
+    session: AsyncSession, owner_account_id: uuid.UUID, *, excluding: uuid.UUID | None = None
+) -> None:
+    """At most `MAX_PERMANENT_PER_OWNER` live permanent watches per owner."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Watch)
+        .where(
+            Watch.owner_account_id == owner_account_id,
+            Watch.status.in_(("active", "paused")),
+            Watch.expires_at.is_(None),
+            *([Watch.id != excluding] if excluding is not None else []),
+        )
+    )
+    if count is not None and count >= MAX_PERMANENT_PER_OWNER:
+        raise ValueError(
+            f"You already have {MAX_PERMANENT_PER_OWNER} permanent watches. "
+            "Delete one or give this one an end date."
+        )
 
 
 async def count_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
@@ -181,7 +296,9 @@ async def rotate_signing_key(
     if not 32 <= len(key.encode()) <= 256 or not KEY_ID.fullmatch(key_id):
         raise ValueError("Invalid page signing key")
     watch = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
-    if watch is None or not now < expires_at <= watch.expires_at:
+    # The key's own expiry: within the watch's lifetime, or 30 days for a permanent one.
+    key_until = expires_at
+    if watch is None or not now < key_until <= (watch.expires_at or now + MAX_LIFETIME):
         raise ValueError("Key must expire within its watch lifetime")
     digest = hashlib.sha256(key.encode()).hexdigest()
     if (
@@ -373,7 +490,7 @@ async def watch_seed(
     if (
         watch is None
         or watch.status != "active"
-        or watch.expires_at <= now
+        or is_expired(watch.expires_at, now)
         or not await is_watch_enabled(session, watch)
     ):
         return None
@@ -638,6 +755,9 @@ async def pause_watch(
     if row is None:
         raise ValueError("Watch not found")
     await _cancel_queued(session, [watch_id])
+    if row.status != "paused" or row.paused_at is None:
+        # A permanent watch expires 30 days after it was first paused.
+        row.paused_at = datetime.now(UTC)
     row.status = "paused"
     row.revision += 1
     row.lease_owner = None
@@ -653,7 +773,7 @@ async def pause_watch(
 
 async def resume_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datetime) -> None:
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
-    if row is None or row.status != "paused" or row.expires_at <= now:
+    if row is None or row.status != "paused" or is_expired(row.expires_at, now):
         raise ValueError("Watch cannot resume")
     if (
         row.source_state.get("confirmed") is False
@@ -673,6 +793,7 @@ async def resume_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
         if key is None:
             raise ValueError("Issue a fresh page signing key before resuming")
     row.status = "active"
+    row.paused_at = None
     row.revision += 1
     row.source_state = {
         **row.source_state,
@@ -697,13 +818,17 @@ async def delete_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
 
 def require_delivery(binding: ContinuationRequest, delivery: WatchDelivery) -> None:
     """A DM or a new thread per fire is for Discord watches made outside a DM."""
+    require_delivery_place(binding.platform, binding.thread_id, binding.parent_channel_id, delivery)
+
+
+def require_delivery_place(
+    platform: str, thread_id: str, parent_channel_id: str, delivery: WatchDelivery
+) -> None:
     if delivery == "thread":
         return
-    if binding.platform != "discord":
+    if platform != "discord":
         raise ValueError("Watches here can only report in this thread. Leave delivery as thread.")
-    if binding.thread_id.startswith(DM_SCOPE_PREFIX) or binding.parent_channel_id.startswith(
-        DM_SCOPE_PREFIX
-    ):
+    if thread_id.startswith(DM_SCOPE_PREFIX) or parent_channel_id.startswith(DM_SCOPE_PREFIX):
         raise ValueError("A watch made in a DM reports in that DM")
 
 
@@ -722,11 +847,13 @@ async def register_poll_watch(
     projection: str,
     rule: str,
     interval: int,
-    expires_at: datetime,
+    expires_at: datetime | None,
     now: datetime,
     key: str | None = None,
     evidence: list[str] | None = None,
     delivery: WatchDelivery = "thread",
+    max_turns_per_day: int = DEFAULT_WATCH_CAP,
+    permanent_approved_by: uuid.UUID | None = None,
 ) -> WatchRow:
     from daimon.core.continuity.poll_tools import (
         require_distinct_source,
@@ -760,6 +887,9 @@ async def register_poll_watch(
         page_id=uuid.uuid4(),
         expires_at=expires_at,
         now=now,
+        max_turns_per_day=max_turns_per_day,
+        source="poll",
+        permanent_approved_by=permanent_approved_by,
     )
     await session.execute(
         update(Watch)
@@ -796,11 +926,13 @@ async def register_mcp_poll_watch(
     rule: str,
     interval: int,
     catalogue_digest: str,
-    expires_at: datetime,
+    expires_at: datetime | None,
     now: datetime,
     key: str | None = None,
     evidence: list[str] | None = None,
     delivery: WatchDelivery = "thread",
+    max_turns_per_day: int = DEFAULT_WATCH_CAP,
+    permanent_approved_by: uuid.UUID | None = None,
 ) -> WatchRow:
     """A watch on a read tool of an attached MCP server, keyed by its canonical URL.
 
@@ -829,6 +961,9 @@ async def register_mcp_poll_watch(
         page_id=uuid.uuid4(),
         expires_at=expires_at,
         now=now,
+        max_turns_per_day=max_turns_per_day,
+        source="mcp_poll",
+        permanent_approved_by=permanent_approved_by,
     )
     await session.execute(
         update(Watch)
@@ -860,6 +995,192 @@ async def register_mcp_poll_watch(
     return result
 
 
+#: What `WatchEdit.lifetime` sets: a new end date, or permanent.
+Lifetime = datetime | Literal["permanent"]
+
+
+@dataclass(frozen=True)
+class WatchEdit:
+    """New values for what an owner may change on a polled watch; None keeps a field.
+
+    `key=""` and `evidence=[]` remove them. Owner, tenant, agent, tool and server
+    never change: a different source is a new watch.
+    """
+
+    instructions: str | None = None
+    arguments: dict[str, object] | None = None
+    projection: str | None = None
+    rule: str | None = None
+    key: str | None = None
+    evidence: list[str] | None = None
+    interval: int | None = None
+    lifetime: Lifetime | None = None
+    max_turns_per_day: int | None = None
+    delivery: WatchDelivery | None = None
+
+
+async def update_watch(
+    session: AsyncSession,
+    watch_id: uuid.UUID,
+    *,
+    tenant_id: uuid.UUID,
+    owner_account_id: uuid.UUID,
+    expected_revision: int,
+    edit: WatchEdit,
+    now: datetime,
+    admin_account_id: uuid.UUID | None = None,
+) -> WatchRow:
+    """Change an owner's polled watch in place, at the revision the owner approved.
+
+    The revision moves on, so wakes queued before the edit never run, and the
+    baseline is dropped, so the next poll saves a new one without firing. A
+    permanent watch or one above the default daily limit names the fresh admin
+    who approved the edit in `admin_account_id`; the caller checks it.
+    """
+    from daimon.core.continuity.poll_tools import (
+        require_distinct_source,
+        require_listed,
+        validate_mcp_poll,
+        validate_poll,
+        watch_server,
+    )
+    from pydantic import JsonValue, TypeAdapter
+
+    current = await require_owned_watch(
+        session, watch_id, tenant_id=tenant_id, account_id=owner_account_id
+    )
+    if current.revision != expected_revision:
+        raise ValueError("Watch changed during approval. Ask me to show the change again.")
+    if (
+        current.source not in ("poll", "mcp_poll")
+        or current.status not in ("active", "paused")
+        or is_expired(current.expires_at, now)
+        or current.source_state.get("confirmed") is False
+        or current.source_state.get("reason") in {"source_unmapped", "projection_unmapped"}
+    ):
+        raise ValueError("This watch cannot be changed. Make a new one instead.")
+    state = current.source_state
+    tool = str(state.get("tool"))
+    arguments = TypeAdapter(dict[str, JsonValue]).validate_python(
+        edit.arguments if edit.arguments is not None else state.get("arguments", {})
+    )
+    interval = edit.interval if edit.interval is not None else int(str(state.get("interval")))
+    projection = edit.projection if edit.projection is not None else str(current.rule["projection"])
+    kind = edit.rule if edit.rule is not None else str(current.rule["kind"])
+    old_key = current.rule.get("key")
+    key = (
+        (edit.key or None) if edit.key is not None else (None if old_key is None else str(old_key))
+    )
+    old_evidence = cast(list[str], current.rule.get("evidence") or [])
+    evidence = list(edit.evidence if edit.evidence is not None else old_evidence)
+    instructions = edit.instructions if edit.instructions is not None else current.instructions
+    if not 0 < len(instructions) <= 2000:
+        raise ValueError("Instructions must be 1 to 2000 characters")
+    listed = require_listed(watch_server(current.source, state), tool)
+    if interval < listed.max_interval_floor_s:
+        raise ValueError(
+            "This tool can be checked no more often than every "
+            f"{listed.max_interval_floor_s} seconds"
+        )
+    if current.source == "poll":
+        validate_poll(
+            tool,
+            arguments,
+            projection=projection,
+            rule=kind,
+            interval=interval,
+            key=key,
+            evidence=evidence,
+        )
+        require_distinct_source(cast(dict[str, object], arguments), current.thread_id)
+    else:
+        validate_mcp_poll(
+            arguments,
+            projection=projection,
+            rule=kind,
+            interval=interval,
+            key=key,
+            evidence=evidence,
+        )
+    expires_at = current.expires_at
+    if edit.lifetime == "permanent":
+        expires_at = None
+    elif edit.lifetime is not None:
+        if not now < edit.lifetime <= now + MAX_LIFETIME:
+            raise ValueError("Watch lifetime must be 1 to 30 days")
+        expires_at = edit.lifetime
+    max_turns = (
+        edit.max_turns_per_day if edit.max_turns_per_day is not None else current.max_turns_per_day
+    )
+    if not 1 <= max_turns <= HARD_WATCH_CAP:
+        raise ValueError("Invalid watch caps")
+    admin_level = expires_at is None or max_turns > DEFAULT_WATCH_CAP
+    if admin_level and admin_account_id is None:
+        raise ValueError("Only an admin can approve that. Ask an admin or an owner.")
+    if expires_at is None:
+        await require_permanent_room(session, current.owner_account_id, excluding=current.id)
+    delivery = edit.delivery or current.delivery
+    session_id = current.session_id
+    if delivery != current.delivery:
+        require_delivery_place(
+            current.platform, current.thread_id, current.parent_channel_id, delivery
+        )
+        session_id = None
+        if delivery == "thread":
+            # Back into its own thread: bind the owner's live conversation there now.
+            live = await get_live_thread_session(
+                session,
+                tenant_id=current.tenant_id,
+                platform=current.platform,
+                thread_id=current.thread_id,
+                account_id=current.owner_account_id,
+            )
+            if (
+                live is None
+                or live.ma_agent_id != current.agent_id
+                or live.channel_id != current.parent_channel_id
+            ):
+                raise ValueError(
+                    "To report in its thread again, talk to the agent in that thread first"
+                )
+            session_id = live.ma_session_id
+    await _cancel_queued(session, [current.id])
+    row = await session.get(Watch, current.id)
+    assert row is not None
+    row.instructions = instructions
+    row.source_state = {
+        **state,
+        "arguments": arguments,
+        "interval": interval,
+        "failing_since": None,
+    }
+    row.rule = {
+        "projection": projection,
+        "kind": kind,
+        **({"key": key} if key is not None else {}),
+        **({"evidence": evidence} if evidence else {}),
+    }
+    row.expires_at = expires_at
+    row.permanent_approved_by = admin_account_id if expires_at is None else None
+    row.max_turns_per_day = max_turns
+    row.delivery = delivery
+    row.session_id = session_id
+    row.revision += 1
+    # The next poll saves a new baseline without firing (`run_poll`'s re-baseline path).
+    row.baseline = {}
+    row.lease_owner = None
+    row.lease_expires_at = None
+    row.consecutive_errors = 0
+    row.backoff_until = None
+    if row.status == "active":
+        row.next_check_at = now
+    await session.flush()
+    session.expire_all()
+    result = await get_watch(session, current.id)
+    assert result is not None
+    return result
+
+
 async def claim_poll_watches(session: AsyncSession) -> list[dict[str, str]]:
     if not load_watches_settings().enabled:
         return []
@@ -880,7 +1201,7 @@ async def leased_poll(
         watch is None
         or watch.source not in ("poll", "mcp_poll")
         or watch.status != "active"
-        or watch.expires_at <= now
+        or is_expired(watch.expires_at, now)
         or watch.lease_owner != lease
         or watch.lease_expires_at is None
         or watch.lease_expires_at <= now
@@ -1135,7 +1456,7 @@ async def import_watch(
         page_id=uuid.UUID(definition.page_id) if definition.page_id else uuid.uuid4(),
         expires_at=definition.expires_at,
         now=now,
-        max_turns_per_day=min(definition.max_turns_per_day, 24),
+        max_turns_per_day=min(definition.max_turns_per_day, DEFAULT_WATCH_CAP),
     )
     await session.execute(
         update(Watch)
@@ -1143,6 +1464,7 @@ async def import_watch(
         .values(
             source=definition.source,
             status="paused",
+            paused_at=now,
             baseline=definition.baseline,
             rule={"projection": definition.projection, "kind": definition.rule},
             source_state={
@@ -1250,7 +1572,12 @@ async def claim_import_notice(
             Watch.platform == "discord",
             # Keep expiries older than 24 hours silent; failed deliveries retry every
             # five minutes within this window, allowing for outages and deploys.
-            or_(Watch.status != "expired", Watch.expires_at >= now - timedelta(hours=24)),
+            or_(
+                Watch.status != "expired",
+                # A permanent watch expired 30 days after it was paused.
+                func.coalesce(Watch.expires_at, Watch.paused_at + PAUSED_PERMANENT_EXPIRY)
+                >= now - timedelta(hours=24),
+            ),
             Watch.tenant_id.in_(select(Tenant.id).where(Tenant.archived_at.is_(None))),
             or_(
                 pending & (reason == "source_unmapped"),

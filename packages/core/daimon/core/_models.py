@@ -4258,6 +4258,13 @@ class Watch(Base):
             "delivery = 'thread' OR source IN ('poll', 'mcp_poll')",
             name="ck_watches_delivery_source",
         ),
+        # Only an admin-approved polled watch may be permanent (no expiry).
+        CheckConstraint(
+            "expires_at IS NOT NULL OR "
+            "(permanent_approved_by IS NOT NULL AND source IN ('poll', 'mcp_poll'))",
+            name="ck_watches_permanent",
+        ),
+        CheckConstraint("max_turns_per_day BETWEEN 1 AND 240", name="ck_watches_max_turns"),
     )
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -4295,7 +4302,11 @@ class Watch(Base):
     source_state: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # NULL is a permanent watch; it expires only after 30 days paused (`paused_at`).
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The admin whose fresh admin check allowed a permanent watch, kept for audit.
+    permanent_approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lease_owner: Mapped[str | None] = mapped_column(Text)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -4386,8 +4397,22 @@ class WatchControl(Base):
     """Durable global producer gate and owner/tenant stops, outside sidecar authority."""
 
     __tablename__ = "watch_controls"
+    __table_args__ = (
+        CheckConstraint(
+            "(max_turns_per_watch_per_day IS NULL OR max_turns_per_watch_per_day BETWEEN 1 AND 240)"
+            " AND (max_turns_per_owner_per_day IS NULL"
+            " OR max_turns_per_owner_per_day BETWEEN 1 AND 1000)"
+            " AND (scope = 'global' OR scope LIKE 'tenant:%'"
+            " OR (max_turns_per_watch_per_day IS NULL AND max_turns_per_owner_per_day IS NULL))",
+            name="ck_watch_controls_ceilings",
+        ),
+    )
     scope: Mapped[str] = mapped_column(Text, primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # Daily firing ceilings, on the global row or a tenant row (which overrides it);
+    # NULL is the default, 24 per watch and 100 per owner.
+    max_turns_per_watch_per_day: Mapped[int | None] = mapped_column(Integer)
+    max_turns_per_owner_per_day: Mapped[int | None] = mapped_column(Integer)
 
 
 class WatchNoticeReceipt(Base):

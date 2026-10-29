@@ -1367,7 +1367,10 @@ class WatchRow(BaseModel):
     revision: int
     source: str
     status: str
-    expires_at: datetime
+    # None is a permanent watch.
+    expires_at: datetime | None
+    permanent_approved_by: uuid.UUID | None = None
+    paused_at: datetime | None = None
     max_turns_per_day: int
     max_fires: int | None
     fire_count: int

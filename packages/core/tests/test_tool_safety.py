@@ -283,6 +283,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "resume_watch",
                 "rotate_watch_key",
                 "start_long_job",
+                "update_watch",
             )
         ]
     }, "Daimon confirms skill installation and standing watch authority"
@@ -423,6 +424,7 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
             "resume_watch",
             "rotate_watch_key",
             "start_long_job",
+            "update_watch",
         )
     ], "confirmation gates must not enable a disabled toolset"
 
@@ -756,6 +758,7 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
         "resume_watch",
         "rotate_watch_key",
         "start_long_job",
+        "update_watch",
     }
     assert has_confirmation_gate(out, tool_name="call_tool")
     assert not has_confirmation_gate(out, tool_name="search_tools"), "search never asks"
@@ -782,6 +785,7 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
         "resume_watch",
         "rotate_watch_key",
         "start_long_job",
+        "update_watch",
     ]
 
 
@@ -834,6 +838,7 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         "resume_watch",
         "rotate_watch_key",
         "start_long_job",
+        "update_watch",
     ]
     both = session_tools_for_policy(
         _RULES_ON,
@@ -852,6 +857,7 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         "resume_watch",
         "rotate_watch_key",
         "start_long_job",
+        "update_watch",
     ]
 
 

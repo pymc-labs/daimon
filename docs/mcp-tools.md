@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 178 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 180 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -569,9 +569,11 @@ Owner-bound watch management.
 | `delete_watch` | Discord callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
 | `list_watches` | Discord callers | List your watches in this workspace; admins may list every owner's with scope "all". |
 | `pause_watch` | Discord callers | Pause your watch and cancel its queued wakes. |
+| `preview_watch_edit` | Discord callers | Show what an edit to your watch would change, old and new, without changing it. |
 | `resume_watch` | Discord callers | Resume your paused watch from an attended owner turn after fresh access checks. |
 | `rotate_watch_key` | Discord callers | Rotate a page signing key, revoke the old key and cancel queued wakes. |
 | `show_watch` | Discord callers | Show your watch's immutable destination, source, status and expiry. |
+| `update_watch` | Discord callers | Change your watch in place, after `preview_watch_edit`, with the same changes. |
 
 ## `wizard`
 

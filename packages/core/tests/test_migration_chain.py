@@ -104,7 +104,10 @@ ROUTINE_SOURCE_HEAD = "0161_routine_source_id"
 CREDENTIALS_HEAD = "0162_watch_credentials"
 
 
-HEAD = "0163_watch_delivery"
+DELIVERY_HEAD = "0163_watch_delivery"
+
+
+HEAD = "0164_watch_lifetime_caps"
 
 
 CHAIN = [
@@ -137,6 +140,7 @@ CHAIN = [
     "0158_watch_mcp_claim",
     ROUTINE_SOURCE_HEAD,
     CREDENTIALS_HEAD,
+    DELIVERY_HEAD,
     HEAD,
 ]
 
@@ -516,9 +520,9 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 command.downgrade(config, NOTICE_RECEIPTS_HEAD)
             command.upgrade(config, HEAD)
             _assert_head(sync)
-            # 0163 keeps watch history: no downgrade past it.
+            # 0163 and 0164 keep watch history: no downgrade past them.
             with pytest.raises(NotImplementedError, match="Watch evidence"):
-                command.downgrade(config, CREDENTIALS_HEAD)
+                command.downgrade(config, DELIVERY_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)

@@ -2918,6 +2918,12 @@ Removals alone do not fire added/updated rules. Per-watch/owner caps, coalescing
 retention and the read-and-report turn path are shared with page events. Poll errors
 back off exponentially to one day; revoked access pauses the watch and cancels wakes.
 
+`0164_watch_lifetime_caps` lets a watch be permanent (`expires_at` NULL), approved by a
+freshly rechecked admin who is also its owner; every expiry check keeps the NULL arm,
+in SQL and Python. The claim expires a permanent watch paused for 30 days. Daily caps
+come from `watch_controls` ceilings, read on every firing: a tenant row, else the
+global row, else 24 per watch and 100 per owner, never above 240 and 1000.
+
 A polled watch reports where `delivery` says: its own thread, the owner's DM, or a
 new public thread per report. The last two queue a `watch_report` wake, which the
 thread wake path never lists; `0163_watch_delivery` adds it. The Discord report
@@ -2930,7 +2936,10 @@ pause the watch.
 
 MCP enrollment requires an attended turn origin and binds its tenant, owner, agent,
 thread and parent; a watch that reports in its thread also binds that thread's session. Owner/admin management cancels queued wakes on pause,
-rotation and deletion. `list_watches(scope="all")` lists every watch in the caller's tenant for a freshly rechecked admin only (`fresh_admin`), and `daimon watches list --tenant` gives operators the same read-only view; neither shows instructions, keys, baselines or evidence. Fresh signing keys go only to the owner's private DM, once;
+rotation, editing and deletion. Only the owner edits, through `preview_watch_edit` then
+`update_watch` with the previewed revision and old values; the card shows each change
+old → new, and the old values must match the stored row. An edit moves the revision on
+and drops the baseline, so the next poll re-baselines without firing. `list_watches(scope="all")` lists every watch in the caller's tenant for a freshly rechecked admin only (`fresh_admin`), and `daimon watches list --tenant` gives operators the same read-only view; neither shows instructions, keys, baselines or evidence. Fresh signing keys go only to the owner's private DM, once;
 MCP results and stored rows contain no plaintext key. The offline CLI importer
 accepts no signing keys, imports everything paused, and requires explicit exact-binding confirmation before
 activation. An unmapped source cannot be confirmed or resumed. The existing Discord

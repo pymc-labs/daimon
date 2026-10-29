@@ -1770,10 +1770,13 @@ and the spacing is kept across restarts. Event-rate and storage quotas stay sile
 access pauses polling and cancels queued work. Expired watches stop automatically.
 
 `create_watch`, `list_watches`, `show_watch`, `pause_watch`, `resume_watch`,
-`rotate_watch_key` and `delete_watch` are owner MCP tools (tenant admins may show, pause or delete
-another owner's watch). Creation, resume and signing-key rotation require an attended
-owner `origin_context_id` and a human confirmation card even with tool safety off;
-admins cannot resume or rotate for someone else. Creation never takes a
+`preview_watch_edit`, `update_watch`, `rotate_watch_key` and `delete_watch` are owner
+MCP tools (tenant admins may show, pause or delete another owner's watch). Creation,
+resume, editing and signing-key rotation require an attended owner
+`origin_context_id` and a human confirmation card even with tool safety off; admins
+cannot resume, edit or rotate for someone else. An edit card shows each change as
+old → new; queued reports from before it are dropped, and the next poll saves a new
+baseline without reporting. Creation never takes a
 caller-selected owner or recipient: `delivery` picks only this thread, the owner's
 own DM or a new public thread per report. Only tools on the deployment's watch list,
 `DAIMON_WATCHES__POLLABLE_TOOLS`, are pollable; no arbitrary HTTP or external sender
@@ -1795,8 +1798,10 @@ tools you trust. The list is read fresh at create, at resume, and before and aft
 each read: an unlisted tool is refused at create and resume, and a watch whose tool
 is removed pauses at its next poll with reason `tool_unlisted` and its owner gets
 one private message. An empty value means the default; `[]` allows no polls. Poll
-intervals are the listed floor (at least 60 seconds) to 86400 seconds, with 1–30 day
-lifetime and at most 25 live watches per owner. Raising a floor slows existing
+intervals are the listed floor (at least 60 seconds) to 86400 seconds, with a 1–30 day
+lifetime and at most 25 live watches per owner. A watch with `permanent=true` has no
+end date. Only an owner who is a freshly checked admin can make one, at most 5 each.
+A permanent watch paused for 30 days expires. Raising a floor slows existing
 watches to it from their next poll; they keep running.
 The first successful poll establishes the baseline without waking the agent.
 Polls select human-authored rows before the message limit; bots/assistants and
@@ -1834,7 +1839,8 @@ fingerprints of at most 2,000 keys, never the keys; optional `evidence` (at most
 field paths such as `.content`) chooses what each new item reports. Deletions
 alone do not fire. The latest 20 events plus an omitted count are retained per
 pending firing. If those events exceed 512 KiB as the watch turn receives them, the
-oldest are left out and counted as omitted. Daily caps (24/watch, 100/owner), evidence quotas and seven-day
+oldest are left out and counted as omitted. Daily caps (see
+[Setting daily limits](#setting-daily-limits)), evidence quotas and seven-day
 retention are shared across callbacks and polls. No additional turn path exists.
 
 Fresh page signing keys are sent only to the owner's private DM, once; the MCP
@@ -1851,6 +1857,23 @@ past 24 hours (the daily-cap window), last firing and consecutive errors. It nev
 prints instructions, keys, baselines or source evidence. In chat, a workspace admin
 gets the same view with `list_watches(scope="all")`; the admin check is rechecked
 live, as for admin show, pause and delete, and anyone else is refused.
+
+#### Setting daily limits
+
+By default a watch reports at most 24 times a day and one owner's watches 100 times
+a day. An operator changes these ceilings for every watch or for one tenant:
+
+```bash
+daimon watches limits set --scope global --per-watch 48 --per-owner 200
+daimon watches limits set --scope tenant:TENANT_UUID --per-watch 2
+daimon watches limits show --tenant TENANT_UUID
+```
+
+A tenant's ceilings override the global ones; a limit left out returns to its
+default. They never pass 240 per watch and 1,000 per owner. Each firing reads them,
+so a lower ceiling holds from the next firing: a capped watch waits, and its owner
+gets the usual daily limit message. An owner asks for more than 24 a day with
+`max_turns_per_day`, up to the ceiling, only if they are an admin.
 
 #### Checking owner notices
 
