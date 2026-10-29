@@ -993,19 +993,23 @@ async def run_prepared_turn(
             )
         raise
     finally:
-        SEND_ATTEMPTED.reset(marking)
-        finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
-        if finalize is not None:
-            # Credential revocation must survive a second cancel of this task:
-            # the shielded call keeps running even if this wait is cancelled.
-            pending = asyncio.ensure_future(finalize())
-            _PENDING_FINALIZERS.add(pending)
-            pending.add_done_callback(_finalizer_done)
-            try:
-                await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
-            except TimeoutError:
-                log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
-        structlog.contextvars.reset_contextvars(**bound)
+        try:
+            SEND_ATTEMPTED.reset(marking)
+            finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
+            if finalize is not None:
+                # Credential revocation must survive a second cancel of this task:
+                # the shielded call keeps running even if this wait is cancelled.
+                pending = asyncio.ensure_future(finalize())
+                _PENDING_FINALIZERS.add(pending)
+                pending.add_done_callback(_finalizer_done)
+                try:
+                    await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
+                except TimeoutError:
+                    log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
+        finally:
+            # Even when a second cancel or the finalizer itself raises: a caller
+            # that carries on in this task must not inherit this turn's fields.
+            structlog.contextvars.reset_contextvars(**bound)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
     if seeded is not None and not sent and result.state.error is not None:
@@ -1443,6 +1447,9 @@ async def run_prepared_turn_impl(
 
             active_record_cell[0] = new_record
             active_admission_cell[0] = recovery.admission or prepared.admission
+            # The replacement's lines name its own model; `run_prepared_turn`'s
+            # reset still restores the caller's values afterwards.
+            structlog.contextvars.bind_contextvars(model=recovery.model_id)
 
             log.info(
                 "turn.session_recovered",
