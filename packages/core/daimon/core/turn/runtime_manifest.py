@@ -807,10 +807,14 @@ async def _capture_source_capabilities(
         # Said once here, though: without it the agent silently loses its MCP
         # on the new provider (J2's Argon preview). Only our own fixed
         # sentences are logged, never a provider's or a validator's text.
+        from daimon.core.channel_backend import backend_refusal_causes
+
         log.warning(
             "source_capture.representation_skipped",
             error=type(error).__name__,
             reason=_own_sentence(error),
+            # Fixed labels (class, our frame, SQLSTATE) for the whole chain.
+            causes=backend_refusal_causes(error),
             tenant_id=str(source.tenant_id),
             agent_id=str(source.agent_id),
             profile=revision.profile if revision is not None else None,
@@ -828,13 +832,16 @@ def _own_sentence(error: BaseException) -> str | None:
     frame = error.__traceback__
     while frame is not None and frame.tb_next is not None:
         frame = frame.tb_next
-    if (
-        type(error) is not ValueError
-        or frame is None
-        or frame.tb_frame.f_code is not _capture_source_capabilities.__code__
-    ):
+    if type(error) is not ValueError or frame is None:
         return None
-    return str(error)
+    # The capture's own sentences, and the MCP catalogue reader's (J6: the live
+    # catalogue read is the step that fails only in a deployment), are fixed
+    # strings; nothing deeper is trusted.
+    if frame.tb_frame.f_code is _capture_source_capabilities.__code__ or (
+        frame.tb_frame.f_globals.get("__name__") == "daimon.core.mcp_oauth.discovery"
+    ):
+        return str(error)
+    return None
 
 
 def source_instructions_preserved(required: str | None, system: str | None) -> bool:
