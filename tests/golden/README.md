@@ -9,7 +9,7 @@ Configure `DAIMON_DATABASE__TEST_URL` for an isolated, migrated local test datab
 
 The SYNC-5 fixture supports main #824 (`0733181847dc775bda444d51c2467016780b8d5d`): `build_turn_router` serves the session's previously scripted stream events through `GET /v1/sessions/{id}/events`. History reads preserve event IDs, timestamps and usage, apply the catch-up's type/time/order filters, and return the native `{data, next_page}` page. An unstreamed session has empty history; reads never generate a new span. The same session constraint covers send, stream and history routes, and unsupported history queries still fail closed. Catch-up HTTP requests remain in the complete golden capture. [SYNC-5 provenance](RERECORD-SYNC5.md) accounts for changed records.
 
-The preview's unattended handoff recordings add four session reads; [S1-PREVIEW-PROVENANCE.md](S1-PREVIEW-PROVENANCE.md) attributes each one.
+The unattended handoff recordings verify session authorization with four reads; [REQUEST-PROVENANCE.md](REQUEST-PROVENANCE.md) explains what each request proves.
 
 That fixture route claims only `beta=true`, `order=asc`, `limit=100`, and exactly `types[]=span.model_request_end`, with the optional catch-up date bounds. Generic transcript or idle-detection reads fall through to later caller-owned routes via `NotHandled`; exhausted routes still raise the original unscripted-request assertion. The six SYNC-5 composition regressions exposed why this query boundary is required.
 

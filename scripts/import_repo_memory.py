@@ -15,14 +15,15 @@ Runbook:
    per-repo row counts and content digests (which include personal directives).
 4. Repeat with --apply. Require its manifest to match the successful dry run.
    Exact replays are idempotent; destination edits cause a refusal, never overwrite.
-5. Configure repo_memory.legacy_mcp_server_names, drain/retire old OS sessions,
+5. Configure repo_memory.legacy_mcp_server_names, drain/retire old Daimon sessions,
    enable repo_memory.enabled on all participating processes, start fresh sessions
    and verify the four native tools show the imported shared/personal lists while
    the legacy memory readers are disabled. Leave old writes frozen.
 
-No production cutover is performed by this script. Before OS writes, rollback
-means disable native memory and restore the old service. After an OS write,
-rollback needs reverse reconciliation; never just re-enable the stale readers.
+This script does not switch production traffic to the imported memory.
+Before Daimon writes, rollback means disabling native memory and restoring the
+old service. After a Daimon write, rollback needs reverse reconciliation;
+never just re-enable the stale readers.
 The manifest contains counts/digests only; memory text and identities stay local.
 """
 

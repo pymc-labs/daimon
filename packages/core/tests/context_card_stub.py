@@ -1,4 +1,4 @@
-"""Test-only in-process provider; no organization schema/policy in OS runtime."""
+"""Test-only in-process provider; no organization schema/policy in application runtime."""
 
 from __future__ import annotations
 

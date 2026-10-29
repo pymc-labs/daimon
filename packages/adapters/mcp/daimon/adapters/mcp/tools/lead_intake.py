@@ -136,7 +136,7 @@ async def authorize_effect_destination(
     access: IntakeAccess,
     origin_ids: frozenset[str],
 ) -> None:
-    """Check the current destination's native and OS write rules, including its thread.
+    """Check the current destination's platform and Daimon write rules, including its thread.
 
     Writes only: every read goes through `authorize_lead_read`.
     """
@@ -360,8 +360,8 @@ async def service(
         if not access.write:
             # Reads authorize each record or discovery through `reads`.
             return
-        # Re-read destination membership, thread visibility and OS rules before
-        # every recovery and immediately before each write.
+        # Re-read destination membership and thread visibility, and check platform
+        # and Daimon write rules before every recovery and each write.
         async with rest_client(token) as client:
             _, member = await _resolve_member(client, config.guild_id, user_id)
             await authorize_effect_destination(
