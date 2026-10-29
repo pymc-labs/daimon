@@ -46,6 +46,7 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
+import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextlib import AbstractAsyncContextManager
 from contextvars import ContextVar
@@ -106,7 +107,7 @@ from daimon.core.turn.posture import (
 )
 from daimon.core.turn.provider_actions import ProviderActionApproval
 from daimon.core.turn.reducers import apply, apply_usage_observation
-from daimon.core.turn.state import TextBlock, TurnState
+from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import (
     ProviderTerminalFailure,
     TerminationReason,
@@ -463,6 +464,62 @@ _CONNECTION_LOST = (
 # 429 or a 5xx on one of them says nothing about the turn, so it is retried
 # after these pauses before it may end the turn.
 _QUIET_READ_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 2.0)
+
+# Silence the turn has sat through, logged once per step as `turn.would_stall`
+# for every backend. Measurement only: it never ends or changes a turn; the
+# numbers decide whether, and where, a stall cap may later end one.
+_WOULD_STALL_STEPS_S: tuple[float, ...] = (300.0, 600.0, 900.0, 1800.0)
+_WOULD_STALL_TICK_S = 15.0
+
+
+@dataclasses.dataclass
+class _Silence:
+    """When this turn last heard from its provider, for the would-stall measurement."""
+
+    last_frame: float = dataclasses.field(default_factory=time.monotonic)
+    last_native: float = dataclasses.field(default_factory=time.monotonic)
+    # The last status a read returned: a rescheduling session is not silent.
+    status: str | None = None
+
+    def heard(self, *, native: bool) -> None:
+        self.last_frame = time.monotonic()
+        if native:
+            self.last_native = self.last_frame
+
+
+def _tool_open(state: TurnState) -> bool:
+    return any(isinstance(b, ToolUseBlock) and b.status == "pending" for b in state.content)
+
+
+async def _watch_silence(
+    silence: _Silence, state_cell: list[TurnState], *, session_id: str
+) -> None:
+    """Log `turn.would_stall` once per step per turn, at that much provider silence.
+
+    Silence is time since the last event the provider sent; usage-only frames
+    do not count. Every step is logged, with whether a tool call was open and
+    the last status read, so a long healthy tool run or a rescheduling session
+    can be told apart when the numbers are read. A backend that hides its own
+    tool previews (OpenAI's provider-side tools) shows `tool_open` false.
+    """
+    fired = set[float]()
+    while True:
+        await asyncio.sleep(_WOULD_STALL_TICK_S)
+        now = time.monotonic()
+        silent_s = now - silence.last_native
+        for step in _WOULD_STALL_STEPS_S:
+            if silent_s >= step and step not in fired:
+                fired.add(step)
+                log.warning(
+                    "turn.would_stall",
+                    session_id=session_id,
+                    step_s=int(step),
+                    silent_s=round(silent_s),
+                    frame_silent_s=round(now - silence.last_frame),
+                    tool_open=_tool_open(state_cell[0]),
+                    last_status=silence.status,
+                )
+
 
 # One status read may take this long. A client that retries internally (MA's
 # clients retry reads eight times) could otherwise hold the turn until its
@@ -1081,12 +1138,19 @@ async def _pump(
             await _deliver(state_cell[0])
 
     render_task = asyncio.create_task(_render_loop(), name="turn.render_loop")
+    silence = _Silence()
+    silence_task = asyncio.create_task(
+        _watch_silence(silence, state_cell, session_id=session_id), name="turn.silence_watch"
+    )
 
     async def _cancel_render() -> None:
         stop_rendering(lifecycle)
         render_task.cancel()
+        silence_task.cancel()
         with _suppress_task_exc():
             await render_task
+        with _suppress_task_exc():
+            await silence_task
 
     # Two-level reconnect structure:
     #
@@ -1154,6 +1218,7 @@ async def _pump(
                                 delivered_provider_event_ids=delivered_provider_event_ids,
                                 billed_event_ids=billed_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
+                                silence=silence,
                             )
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
@@ -1164,6 +1229,7 @@ async def _pump(
                         cancel=cancel,
                         timeout_s=_STATUS_READ_TIMEOUT_S,
                     )
+                    silence.status = status
                     if status in {"running", "rescheduling"}:
                         log.info(
                             "turn.eventless_cycle",
@@ -1398,6 +1464,7 @@ async def _pump(
             tool_confirmation=tool_confirmation,
         )
     finally:
+        silence_task.cancel()
         if not render_task.done():
             # Cancel without draining, unlike `_cancel_render()` on the normal
             # paths. This `finally` also runs while the ceiling's `wait_for` is
@@ -1677,6 +1744,7 @@ async def _consume_with_reconnect(
     delivered_provider_event_ids: set[str],
     billed_event_ids: set[str],
     stream_read_timeout_s: float,
+    silence: _Silence | None = None,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
     if cancel.is_set():
@@ -1822,6 +1890,8 @@ async def _consume_with_reconnect(
                         error_type=type(error).__name__,
                     )
                     continue
+                if silence is not None:
+                    silence.status = status
                 if status in {"running", "rescheduling"}:
                     continue
                 log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
@@ -1835,6 +1905,8 @@ async def _consume_with_reconnect(
             try:
                 item = fetched.result()
                 event = item.native
+                if silence is not None:
+                    silence.heard(native=event is not None)
             except StopAsyncIteration:
                 # Clean close, no terminal event: not itself completion.
                 # The `finally` below closes the abandoned stream; hand the
