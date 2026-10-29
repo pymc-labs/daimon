@@ -662,14 +662,22 @@ class MuxTurnIO:
         # Only an input after the newest event the journal already held can be
         # this turn's (or one its live stream saw): a hole earlier in the
         # journal is not new. With nothing journaled (a new session's first
-        # turn, the designed reattach) only a session whose sole input is this
-        # one can prove it. A session whose earlier turns were never journaled
-        # reads the same; that residue needs a pre-send read the wire forbids.
+        # turn, the designed reattach) a session whose sole input is this one
+        # proves it; with earlier unjournaled turns nothing can, and the replay
+        # runs unchecked as before. A one-turn unjournaled session whose input
+        # was lost reads like a new one whose input landed: that residue needs
+        # a pre-send read, which the mux-equals-legacy wire forbids.
         anchor = max(
             (i for i, (event_id, _) in enumerate(walked) if event_id in journaled), default=None
         )
         if anchor is None:
-            mine = inputs if len(inputs) == 1 else []
+            if len(inputs) > 1 and not set(inputs) & self._live_inputs:
+                # Unjournaled earlier turns: nothing to compare against, so
+                # replay as before rather than refuse an input that may have
+                # landed.
+                self._unconfirmed = False
+                return
+            mine = inputs
         else:
             mine = [
                 event_id

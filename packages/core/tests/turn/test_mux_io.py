@@ -479,3 +479,13 @@ async def test_a_hole_in_the_journal_still_finds_a_landed_input() -> None:
     with pytest.raises(TurnConnectionLost):
         await io.send(_QUESTION)
     assert [e.id for e in await io.replay()][-1] == "user-3"
+
+
+async def test_a_landed_input_after_unjournaled_history_still_reattaches() -> None:
+    # The first mux turn of a session whose earlier turns were never journaled.
+    history = _History(*_PREVIOUS, ack="outcome_unknown")
+    io, journaled = _io(history)
+    journaled.rows = []
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    assert [e.id for e in await io.replay()][-1] == "user-3"
