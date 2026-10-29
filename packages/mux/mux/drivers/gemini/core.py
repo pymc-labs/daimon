@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import logging
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
@@ -78,6 +79,8 @@ from mux.errors import (
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
 from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore
+
+log = logging.getLogger(__name__)
 
 BASE_AGENT = "antigravity-preview-05-2026"
 INTERACTION_READ_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
@@ -387,15 +390,18 @@ class Base:
                     # running forever. Compare a whole-second read in whole seconds.
                     watermark = watermark.replace(microsecond=0)
                 if watermark is not None and stamp < watermark:
+                    self._held(record, raw, root, "older_stamp", stamp, watermark)
                     return
                 if (
                     watermark is not None
                     and stamp == watermark
                     and self._regresses(record, raw, root)
                 ):
+                    self._held(record, raw, root, "regresses", stamp, watermark)
                     return
                 record.native_updated[interaction] = stamp
             elif self._regresses(record, raw, root):
+                self._held(record, raw, root, "regresses", None, None)
                 return
             env = raw.get("environment_id")
             if env is not None:
@@ -437,6 +443,47 @@ class Base:
                     now=now(),
                 )
                 self._append(record, (usage_event,))
+            self._lifecycle(record, raw, root)
+        except (KeyError, ValueError, TypeError):
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_interaction"
+            ) from None
+
+    def _held(
+        self,
+        record: SessionRecord,
+        raw: Object,
+        root: str,
+        reason: str,
+        stamp: datetime | None,
+        watermark: datetime | None,
+    ) -> None:
+        """A read the ordering discards. One that finishes the current interaction
+        still ends it (F7): a clock, stamp precision or a missing meter must never
+        hold a finished turn at running. Its usage stays as recorded, exactly as
+        for any discarded read, so billing sees what it saw before."""
+        interaction = string(raw["id"])
+        prior = record.observations.get(interaction)
+        finishes = (
+            interaction == record.current
+            and string(raw["status"]) in (*OUTCOMES, "requires_action")
+            and (prior is None or not prior.final)
+        )
+        log.info(
+            "gemini.read_discarded interaction=%s reason=%s stamp=%s watermark=%s "
+            "lifecycle_applied=%s",
+            interaction,
+            reason,
+            None if stamp is None else stamp.isoformat(),
+            None if watermark is None else watermark.isoformat(),
+            finishes,
+        )
+        if finishes:
+            self._lifecycle(record, raw, root)
+
+    def _lifecycle(self, record: SessionRecord, raw: Object, root: str) -> None:
+        try:
+            interaction = string(raw["id"])
             normalized = saved_events(
                 raw,
                 record.session.ref,
@@ -945,11 +992,51 @@ class GeminiEvents(Base):
         key: str,
         expected_turn: str | None = None,
     ) -> SendReceipt:
+        # A record still running may only be one whose finishing read never
+        # landed (R4WRRK): read it once before the send decides this is a steer,
+        # so a stuck record heals on the next message instead of refusing it.
+        await self.retrying(lambda: self._heal_running(scope, session, key))
         # Every history read precedes begin_operation, so a retried attempt
         # starts from a rolled-back transaction and can never dispatch twice.
         return await self.retrying(
             lambda: self._send(scope, session, events, key=key, expected_turn=expected_turn)
         )
+
+    async def _heal_running(self, scope: Scope, session: ResourceRef, key: str) -> None:
+        """Read `current` holding no lock, only where main would refuse a steer.
+
+        A retried key never reads: it returns its saved receipt. The read applies
+        in a short transaction only if the record is still running on the same
+        interaction, so nothing that moved meanwhile is overwritten.
+        """
+        async with read_records(self._storage) as snapshot:
+            seen = self._record(snapshot, scope, session)
+            interaction = seen.current
+            if (
+                (*owner(scope), key) in snapshot.sends
+                or seen.session.state != "running"
+                or interaction is None
+            ):
+                return
+            root = seen.interactions[interaction]
+            expected = self._mcp_request(snapshot, scope, seen.spec)
+            connections = snapshot.agents[seen.spec.agent.id].spec.mcp_servers or ()
+        if any(c.credential_ref is not None for c in connections):
+            # Admission/authentication precedes this native history read.
+            await authenticated_template(
+                scope,
+                seen.request,
+                expected,
+                connections,
+                self._mcp_secrets,
+                overrides={},
+                gcs_secrets=self._gcs_secrets,
+            )
+        raw = await self._get(seen, interaction)
+        async with self._storage.transaction() as records:
+            record = self._record(records, scope, session)
+            if record.session.state == "running" and record.current == interaction:
+                self._apply_fetched(record, ((interaction, root, raw),))
 
     async def _send(
         self,

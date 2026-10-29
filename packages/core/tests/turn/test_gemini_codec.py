@@ -8,9 +8,11 @@ from datetime import UTC, datetime
 import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsEventParams
 from daimon.core.mux_backend import TurnBackendRequest
+from daimon.core.turn import gemini as gemini_turn
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.gemini import PROFILE, GeminiTurnIO
 from daimon.core.turn.io import TurnConnectionLost
+from daimon.core.turn.persistence import UncertainSend
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -21,7 +23,7 @@ from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRe
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.transport import Object, OwnedStream
-from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
@@ -602,3 +604,216 @@ def test_argon_runs_as_its_own_channel_model() -> None:
         usage_store=None,
     )
     assert _runtime_model(runtime) == "gemini-4-argon"  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_an_uncertain_send_never_adopts_the_previous_turns_answer(
+    harness: Harness,
+) -> None:
+    """F12: a first send whose acceptance is unknown leaves only the previous turn in
+    history. The reconnect replay must not take that turn's root as this one's."""
+    first = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    harness.transport.responses.append(interaction("previous"))
+    await first.send([{"type": "user.message", "content": [{"type": "text", "text": "one"}]}])
+    await first.replay()
+
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    harness.transport.responses.append(ProviderError("transient_network", retryable=True))
+    with pytest.raises(TurnConnectionLost, match="unknown"):
+        await io.send([{"type": "user.message", "content": [{"type": "text", "text": "two"}]}])
+    await io.open_stream(read_timeout_s=1)
+    with pytest.raises(TurnConnectionLost, match="this turn's input"):
+        await io.replay()
+    assert io.root is None
+    with pytest.raises(ProviderError) as refused:
+        await io.retained_usage()
+    assert refused.value.native_code == "missing_usage_root"
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_io_still_reattaches_to_the_accepted_turn(harness: Harness) -> None:
+    """The designed reattach (restart, or a reconnect after an accepted send) is kept:
+    only this IO's own uncertain send blocks adopting a root from history."""
+    sender = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    harness.transport.responses.append(interaction("accepted"))
+    await sender.send([{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}])
+    restarted = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    await restarted.replay()
+    assert restarted.root == sender.root
+
+
+@pytest.mark.asyncio
+async def test_an_uncertain_send_drops_a_stale_root_picked_before_it(harness: Harness) -> None:
+    """Terra PR 2 r1: a root an earlier stream open picked from history survived the
+    uncertain send, so the replay still returned the previous turn's answer."""
+    first = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    harness.transport.responses.append(interaction("previous"))
+    await first.send([{"type": "user.message", "content": [{"type": "text", "text": "one"}]}])
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    io.root = first.root
+    harness.transport.responses.append(ProviderError("transient_network", retryable=True))
+    with pytest.raises(TurnConnectionLost):
+        await io.send([{"type": "user.message", "content": [{"type": "text", "text": "two"}]}])
+    assert io.root is None
+    with pytest.raises(TurnConnectionLost, match="this turn's input"):
+        await io.replay()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accepted", [False, True], ids=["never_sent", "sent_meanwhile"])
+async def test_an_uncertain_claim_reattaches_only_to_a_root_newer_than_the_send(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, accepted: bool
+) -> None:
+    """Terra PR 2 r2: a host delivery timeout (`UncertainSend` from TimeoutError)
+    bypassed the guard and the replay showed the previous turn's answer. Roots are
+    now snapshotted before the send: an older root is never this turn's, one
+    recorded since still is."""
+    first = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    harness.transport.responses.append(interaction("previous"))
+    await first.send([{"type": "user.message", "content": [{"type": "text", "text": "one"}]}])
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    send = harness.backend.events.send
+
+    async def claimed(*args: object, **kwargs: object) -> object:
+        if accepted:
+            harness.transport.responses.append(interaction("meanwhile"))
+            await send(*args, **kwargs)  # type: ignore[arg-type]
+        raise UncertainSend("send delivery timed out") from TimeoutError()
+
+    monkeypatch.setattr(harness.backend.events, "send", claimed)
+    with pytest.raises(TurnConnectionLost, match="claimed"):
+        await io.send([{"type": "user.message", "content": [{"type": "text", "text": "two"}]}])
+    if accepted:
+        await io.replay()
+        assert io.root is not None and io.root != first.root
+    else:
+        with pytest.raises(TurnConnectionLost, match="this turn's input"):
+            await io.replay()
+
+
+@pytest.mark.asyncio
+async def test_an_uncertain_tool_result_keeps_the_turns_root(harness: Harness) -> None:
+    """Terra PR 2 r3: a tool result continues the turn's known root, so an uncertain
+    result send must not clear it the way an uncertain new turn does."""
+    reply = interaction("action", status="requires_action")
+    reply["steps"] = [
+        {"type": "function_call", "id": "native-call", "name": "weather", "arguments": {}}
+    ]
+    harness.transport.responses.extend([reply, ProviderError("transient_network", retryable=True)])
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    await io.send([{"type": "user.message", "content": [{"type": "text", "text": "question"}]}])
+    frames = await io.replay_turn_events()
+    tool = next(
+        f.native
+        for f in frames
+        if f.native is not None and f.native.type == "agent.custom_tool_use"
+    )
+    root = io.root
+    with pytest.raises(TurnConnectionLost, match="unknown"):
+        await io.send(
+            [
+                {
+                    "type": "user.custom_tool_result",
+                    "custom_tool_use_id": tool.id,
+                    "content": [{"type": "text", "text": "cold"}],
+                }
+            ]
+        )
+    assert io.root == root is not None
+    await io.replay()
+    assert io.root == root
+
+
+@pytest.mark.asyncio
+async def test_a_claim_held_by_an_earlier_attempt_reattaches_to_its_root(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terra PR 2 r4: an earlier attempt of the same host operation recorded this
+    turn's root before this attempt's snapshot, then lost its host receipt. The
+    retry is refused as already claimed and must still reattach to that root."""
+    first = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    harness.transport.responses.append(interaction("previous"))
+    await first.send([{"type": "user.message", "content": [{"type": "text", "text": "one"}]}])
+    earlier = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    harness.transport.responses.append(interaction("accepted"))
+    await earlier.send([{"type": "user.message", "content": [{"type": "text", "text": "two"}]}])
+
+    async def claimed(*args: object, **kwargs: object) -> object:
+        raise UncertainSend("send was already claimed; reconcile before delivery")
+
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    monkeypatch.setattr(harness.backend.events, "send", claimed)
+    with pytest.raises(TurnConnectionLost, match="claimed"):
+        await io.send([{"type": "user.message", "content": [{"type": "text", "text": "two"}]}])
+    await io.replay()
+    assert io.root == earlier.root != first.root
+
+
+@pytest.mark.asyncio
+async def test_a_late_correction_to_the_previous_turn_never_hides_this_turns_root(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terra PR 2 r4: replay took the newest event's root before dropping stale ones,
+    so a late usage event of the previous turn hid the root accepted since."""
+    first = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    harness.transport.responses.append(interaction("previous"))
+    await first.send([{"type": "user.message", "content": [{"type": "text", "text": "one"}]}])
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    send = harness.backend.events.send
+    history = io._history  # pyright: ignore[reportPrivateUsage]
+
+    async def claimed(*args: object, **kwargs: object) -> object:
+        harness.transport.responses.append(interaction("meanwhile"))
+        await send(*args, **kwargs)  # type: ignore[arg-type]
+        raise UncertainSend("send delivery timed out") from TimeoutError()
+
+    async def late_correction() -> list[object]:
+        records = await history()
+        stale = next(e for e in records if e.turn_id == first.root)
+        return [*records, stale]
+
+    monkeypatch.setattr(harness.backend.events, "send", claimed)
+    with pytest.raises(TurnConnectionLost):
+        await io.send([{"type": "user.message", "content": [{"type": "text", "text": "two"}]}])
+    monkeypatch.setattr(io, "_history", late_correction)
+    await io.replay_turn_events(reconcile=False)
+    assert io.root is not None and io.root != first.root
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snapshot", ["fails", "slow"])
+async def test_without_a_snapshot_an_uncertain_send_keeps_mains_reattach(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, snapshot: str
+) -> None:
+    """Terra PR 2 r7: a failed (or slow) pre-send snapshot made the guard reject even
+    the root recorded by this send, and a slow one delayed dispatch. Without a
+    snapshot within its bound, the turn keeps main's reattach."""
+    first = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    harness.transport.responses.append(interaction("previous"))
+    await first.send([{"type": "user.message", "content": [{"type": "text", "text": "one"}]}])
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    history = io._history  # pyright: ignore[reportPrivateUsage]
+    send = harness.backend.events.send
+    snapshots: list[bool] = []
+
+    async def unreadable() -> list[object]:
+        if not snapshots:
+            snapshots.append(True)
+            if snapshot == "fails":
+                raise ProviderError("transient_network", retryable=True)
+            await asyncio.sleep(30)
+        return await history()
+
+    async def claimed(*args: object, **kwargs: object) -> object:
+        harness.transport.responses.append(interaction("meanwhile"))
+        await send(*args, **kwargs)  # type: ignore[arg-type]
+        raise UncertainSend("send delivery timed out") from TimeoutError()
+
+    monkeypatch.setattr(gemini_turn, "ROOT_SNAPSHOT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(io, "_history", unreadable)
+    monkeypatch.setattr(harness.backend.events, "send", claimed)
+    async with asyncio.timeout(5):
+        with pytest.raises(TurnConnectionLost):
+            await io.send([{"type": "user.message", "content": [{"type": "text", "text": "two"}]}])
+    await io.replay()
+    assert io.root is not None and io.root != first.root
