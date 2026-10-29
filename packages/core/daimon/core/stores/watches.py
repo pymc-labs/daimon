@@ -700,7 +700,7 @@ def require_delivery(binding: ContinuationRequest, delivery: WatchDelivery) -> N
     if delivery == "thread":
         return
     if binding.platform != "discord":
-        raise ValueError("Only Discord watches can report in a DM or a new thread")
+        raise ValueError("Watches here can only report in this thread. Leave delivery as thread.")
     if binding.thread_id.startswith(DM_SCOPE_PREFIX) or binding.parent_channel_id.startswith(
         DM_SCOPE_PREFIX
     ):

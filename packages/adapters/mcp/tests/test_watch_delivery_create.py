@@ -69,7 +69,7 @@ async def test_a_watch_made_in_a_dm_reports_in_that_dm(discord_rest, delivery):
 
 async def test_other_platforms_refuse_dm_and_new_thread(discord_rest):
     slack = SimpleNamespace(platform="slack", platform_user_id="U1", tenant_id=TENANT)
-    with pytest.raises(ToolError, match="Only Discord"):
+    with pytest.raises(ToolError, match="only report in this thread"):
         await require_delivery_allowed(_runtime(), slack, _origin(), "dm")  # type: ignore[arg-type]
 
 

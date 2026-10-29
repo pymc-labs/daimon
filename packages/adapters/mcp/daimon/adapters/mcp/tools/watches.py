@@ -292,7 +292,7 @@ async def require_delivery_allowed(
     if delivery == "thread":
         return
     if auth.platform != "discord" or auth.platform_user_id is None:
-        raise ToolError("Only Discord watches can report in a DM or a new thread")
+        raise ToolError("Watches here can only report in this thread. Leave delivery as thread.")
     if origin.thread_id.startswith(DM_SCOPE_PREFIX):
         raise ToolError("A watch made in a DM reports in that DM. Leave delivery as thread.")
     if delivery == "dm":
