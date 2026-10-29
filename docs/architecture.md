@@ -2905,7 +2905,7 @@ must match the digest approved at create and keep `readOnlyHint`; the hint can o
 refuse, since the registry is what allows a poll. The credential is the agent-wide
 one for that URL, or for an `owner` entry the watch owner's own key. That key
 arrives only through the requester-only `request_watch_credential` form, is stored
-encrypted in `watch_credentials` (`0159_watch_credentials`), and is looked up by
+encrypted in `watch_credentials` (`0162_watch_credentials`), and is looked up by
 tenant, owner and URL. A missing key pauses the watch as `credential_missing` and
 tells its owner. Each URL gets two polls at once
 and 30 a minute, and a busy URL's watches step back in the

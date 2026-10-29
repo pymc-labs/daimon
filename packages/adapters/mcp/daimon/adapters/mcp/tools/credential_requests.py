@@ -382,6 +382,7 @@ async def _supersede_live_siblings(
     requester_platform_user_id: str,
     origin_thread_id: str,
     now: datetime,
+    kind: CredentialRequestKind,
 ) -> list[CredentialRequestRow]:
     """Retire every form this person already has open here, and return them.
 
@@ -405,6 +406,9 @@ async def _supersede_live_siblings(
     )
     retired: list[CredentialRequestRow] = []
     for row in live:
+        # A watch key is the person's own, not the agent's: neither kind retires the other.
+        if (row.kind == "watch_credential") != (kind == "watch_credential"):
+            continue
         if await supersede_credential_request(session, token=row.token, now=now) is not None:
             retired.append(row)
     return retired
@@ -470,6 +474,7 @@ async def _mint_and_post(
             requester_platform_user_id=requester_platform_user_id,
             origin_thread_id=origin.thread_id,
             now=now,
+            kind=kind,
         )
         row = await create_credential_request(
             session,
@@ -828,7 +833,7 @@ async def _request_watch_credential_impl(
 ) -> RequestCredentialResult:
     requester = _require_requestable_platform(auth)
     if auth.platform != "discord":
-        raise ToolError("Watches work in Discord only.")
+        raise ToolError("This chat app can't collect a watch key yet.")
     if runtime.fernet is None:
         raise ToolError(
             "This Daimon cannot store keys yet, so no form was posted. "
@@ -1073,7 +1078,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         tool arguments. It is stored encrypted, used only by that person's own watches,
         and sent only to that exact server URL. It should be read-only: for example a
         read-scoped API key the person creates on that server. Sending a new key replaces
-        the old one from the next check. Discord only; needs an attended conversation."""
+        the old one from the next check. Needs an attended conversation where watches run."""
         return await _request_watch_credential_impl(
             runtime, await _auth(ctx), server=server, origin_context_id=origin_context_id
         )

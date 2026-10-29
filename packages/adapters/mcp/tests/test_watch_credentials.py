@@ -329,3 +329,47 @@ async def test_an_owner_keyed_entry_switched_to_agent_pauses_the_watch(owner_ser
     current = await get(fx, watch.id)
     assert current.status == "paused" and current.source_state["reason"] == "access_revoked"
     assert len(fx.transport.requests) == before, "the changed entry is refused before any read"
+
+
+async def test_a_watch_key_form_and_an_agent_form_never_retire_each_other(owner_server):
+    from daimon.adapters.mcp.tools.credential_requests import (
+        _supersede_live_siblings,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.stores.credential_requests import peek_credential_request
+
+    fx = owner_server
+    agent_id = uuid.uuid4()
+    tokens: dict[str, str] = {}
+    async with fx.runtime.session_factory.begin() as db:
+        for kind in ("env", "watch_credential"):
+            row = await create_credential_request(
+                db,
+                token=mint_request_token(),
+                kind=kind,
+                tenant_id=fx.native.tenant_id,
+                agent_id=agent_id,
+                account_id=fx.native.owner_account_id,
+                target="KEY" if kind == "env" else "fixture.example",
+                mcp_server_url=None if kind == "env" else BRIDGE,
+                requester_platform_user_id=fx.native.owner_external_id,
+                channel_id=fx.native.thread_id,
+                origin_thread_id=fx.native.thread_id,
+                expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                idempotency_key=uuid.uuid4(),
+                target_ma_agent_id=fx.native.agent_id,
+                target_name="analyst",
+                requested_work=None,
+            )
+            tokens[kind] = row.token
+        retired = await _supersede_live_siblings(
+            db,
+            tenant_id=fx.native.tenant_id,
+            agent_id=agent_id,
+            requester_platform_user_id=fx.native.owner_external_id,
+            origin_thread_id=fx.native.thread_id,
+            now=datetime.now(UTC),
+            kind="watch_credential",
+        )
+        assert [row.token for row in retired] == [tokens["watch_credential"]]
+        env = await peek_credential_request(db, token=tokens["env"])
+    assert env is not None and env.used_at is None, "the agent key form stays live"

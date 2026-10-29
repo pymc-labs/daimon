@@ -9377,7 +9377,7 @@
         tool arguments. It is stored encrypted, used only by that person's own watches,
         and sent only to that exact server URL. It should be read-only: for example a
         read-scoped API key the person creates on that server. Sending a new key replaces
-        the old one from the next check. Discord only; needs an attended conversation.
+        the old one from the next check. Needs an attended conversation where watches run.
       ''',
       'parameters': dict({
         'additionalProperties': False,
