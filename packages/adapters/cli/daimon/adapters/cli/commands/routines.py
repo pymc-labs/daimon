@@ -170,6 +170,9 @@ def create_command(
     trigger: Annotated[str, typer.Option("--trigger")],
     destination: Annotated[Literal["dm"], typer.Option("--destination")],
     source_channel: Annotated[str | None, typer.Option("--source-channel")] = None,
+    paused: Annotated[
+        bool, typer.Option("--paused", help="Create paused, with no next fire time scheduled.")
+    ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
     """Create a Discord owner-DM routine; --owner is the sole recipient."""
@@ -192,6 +195,7 @@ def create_command(
                 timezone=timezone,
                 trigger=trigger,
                 source_channel=source_channel,
+                paused=paused,
                 dry_run=dry_run,
                 resolver=DiscordRestMembershipResolver(bot_token),
             )
@@ -213,6 +217,7 @@ async def run_create_dm_routine(
     dry_run: bool,
     resolver: MembershipResolver,
     source_transport: httpx.AsyncBaseTransport | None = None,
+    paused: bool = False,
 ) -> None:
     """Verify the selected owner and source before writing, including in dry-run."""
     next_fire = validated_next_slot(schedule, timezone, datetime.now(UTC))
@@ -266,7 +271,10 @@ async def run_create_dm_routine(
         f"Owner / recipient: {owner}; budget source: {source_channel or 'tenant/account'}"
     )
     if dry_run:
-        console.print("Dry run: no routine created.")
+        console.print(
+            "Dry run: no routine created. "
+            + ("Would be created paused." if paused else "Would be created enabled.")
+        )
         return
     async with rt.sessionmaker.begin() as session:
         row = await create_routine(
@@ -283,7 +291,8 @@ async def run_create_dm_routine(
             source_thread_id=source_thread_id,
             source_channel_id=source_channel,
             source_provenance_known=True,
-            next_fire_at=next_fire,
+            enabled=not paused,
+            next_fire_at=None if paused else next_fire,
         )
     console.print(f"Created routine {row.id}.")
 

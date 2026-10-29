@@ -72,8 +72,11 @@ daimon routines create --tenant TENANT_UUID --owner DISCORD_USER_ID \
   --trigger 'Summarize my tasks' --destination dm --dry-run
 ```
 
-Remove `--dry-run` to write it. Dry-run still verifies the live owner and
-agent, and prints the resolved recipient and budget source. An optional
+Remove `--dry-run` to write it. Add `--paused` to create it disabled with no
+next fire time; without that flag it starts enabled. Resuming a paused routine
+computes its first slot from the resume time. Dry-run still verifies the live
+owner and agent, and prints the resolved recipient, budget source and whether
+the routine would be created paused or enabled. An optional
 `--source-channel` must resolve to a supported channel or thread in the selected
 tenant's Discord guild. Threads retain their parent for budgeting and their own
 ID for source restriction checks. Dry-run performs the same source verification
@@ -285,7 +288,13 @@ claimed run; catch-up applies to slots still pending in `next_fire_at`.
 
 Use the operator CLI with database credentials. Before moving from the internal
 bot to Daimon, pause the internal bot's scheduler and drain its runs; take each
-routine's last **completed scheduled slot** T from the internal bot. Keep the matching Daimon routines paused and never fired.
+routine's last **completed scheduled slot** T from the internal bot. Recreate
+owner-DM routines ahead of the switch with `daimon routines create --paused`
+and the required creation options above. Then use
+`daimon routines link-internal --apply` to set each routine's internal ID before
+`daimon routines seed-first-run --apply` enables it. Keep the matching Daimon
+routines paused and never fired until seeding.
+
 The seed command is a dry run unless `--apply` is given:
 
 ```sh
@@ -321,9 +330,12 @@ Migration `0151_routine_claimed_slot` backfills only a first line exactly matchi
 `internal-routine-import-v1:<uuid>` in `trigger_message` (LF or CRLF); similarly named tags,
 suffixes and tags on later lines do not count. Duplicate imports within a team
 refuse the migration rather than choosing a match. Later prompt edits preserve
-this stored identity. `seed-first-run` needs this stored identity. For a later
-import or a routine recreated by its owner, link the paused Daimon routine to its internal original
-before seeding; a prompt tag alone no longer links a new routine:
+this stored identity. `seed-first-run` needs this stored identity.
+`daimon routines create --paused` leaves `internal_routine_id` unset. For a later
+import or a routine recreated by its owner, first create it with `--paused`, then
+use `daimon routines link-internal --apply` to set the internal ID, and finally
+run `daimon routines seed-first-run --apply`. A prompt tag alone no longer links
+a new routine:
 
 ```bash
 daimon routines link-internal --tenant TENANT_UUID --routine DAIMON_ROUTINE_UUID --internal-id INTERNAL_UUID
@@ -337,9 +349,9 @@ an existing link (even to the same ID), or an internal ID already linked to
 another routine in that team. Linking and seeding share the same never-fired
 check: an edit-only `skipped` delivery status and its note, and skip-window
 bookkeeping, do not count as a fire. It preserves the schedule, prompt and
-owner. Pause a newly created routine before linking, and use a never-fired
-routine for the move. Seed refuses both missing and ambiguous matches, and never
-matches a Daimon routine UUID against the input.
+owner. Create with `--paused` so it stays never-fired before linking and seeding.
+Seed refuses both missing and ambiguous matches, and never matches a Daimon
+routine UUID against the input.
 
 The seed command prints T, Daimon's cron/timezone, the first slot strictly after T (computed in the routine's
 zone), the catch-up policy and freshness window, and one of: `wait`, `fire next tick`,

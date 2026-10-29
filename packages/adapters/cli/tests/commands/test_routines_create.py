@@ -1,26 +1,43 @@
 """Operator creation binds the only recipient to a live tenant owner."""
 
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from io import StringIO
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
+import daimon.adapters.cli.commands.routines as routines_cli
 import pytest
 from daimon.adapters.cli.commands.routines import run_create_dm_routine
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import UserFacingError
 from daimon.core.membership import CachedMembershipResolver, Membership
+from daimon.core.routine_move import RoutineSeedEntry
 from daimon.core.stores.direct_messages import set_dm_enabled
-from daimon.core.stores.routines import list_routines_for_tenant
+from daimon.core.stores.routine_move import seed_routines
+from daimon.core.stores.routines import (
+    get_routine,
+    link_internal_routine,
+    list_routines_for_tenant,
+    resume_routine,
+)
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
 from mux.testing.drivers.anthropic.ma import list_response
+from pydantic import SecretStr
 from rich.console import Console
+from typer.testing import CliRunner
 
 from ..harness import build_cli_runtime
 
 
+@pytest.mark.parametrize("paused", [None, True])
 @pytest.mark.parametrize("dry_run", [True, False])
-async def test_create_dm_verifies_owner_and_dry_run_does_not_write(db_session_factory, dry_run):
+async def test_create_dm_verifies_owner_and_dry_run_does_not_write(
+    db_session_factory, dry_run, paused
+):
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id="424242")
         await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
@@ -58,6 +75,7 @@ async def test_create_dm_verifies_owner_and_dry_run_does_not_write(db_session_fa
         source_channel=None,
         dry_run=dry_run,
         resolver=CachedMembershipResolver(member),
+        **({"paused": paused} if paused is not None else {}),
     )
     async with db_session_factory() as session:
         rows = await list_routines_for_tenant(session, tenant_id=tenant.id)
@@ -66,9 +84,24 @@ async def test_create_dm_verifies_owner_and_dry_run_does_not_write(db_session_fa
     assert "Owner / recipient: 123; budget source: tenant/account" in output.getvalue()
     if rows:
         assert rows[0].destination_id == rows[0].created_by_user_id == "123"
+        assert rows[0].enabled is (not paused)
+        if paused:
+            assert rows[0].next_fire_at is None
+            # A later resume starts at its current slot, not the creation-time slot.
+            now = datetime(2099, 1, 1, 10, 30, tzinfo=UTC)
+            async with db_session_factory.begin() as session:
+                resumed = await resume_routine(session, rows[0].id, tenant_id=tenant.id, now=now)
+            assert resumed is not None and resumed.enabled is True
+            assert resumed.next_fire_at == datetime(2099, 1, 2, 9, tzinfo=UTC)
+        else:
+            assert rows[0].next_fire_at is not None
+    if dry_run:
+        state = "paused" if paused else "enabled"
+        assert f"Would be created {state}." in output.getvalue()
 
 
-async def test_create_dm_unknown_membership_fails_closed(db_session_factory):
+@pytest.mark.parametrize("paused", [False, True])
+async def test_create_dm_unknown_membership_fails_closed(db_session_factory, paused):
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id="424242")
         await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
@@ -90,6 +123,7 @@ async def test_create_dm_unknown_membership_fails_closed(db_session_factory):
             source_channel=None,
             dry_run=True,
             resolver=CachedMembershipResolver(unknown),
+            paused=paused,
         )
 
 
@@ -197,3 +231,119 @@ async def test_source_is_verified_and_sealed_before_cli_save(db_session_factory,
         assert (rows[0].channel_id, rows[0].source_thread_id) == ("456", "789")
     if case == "nonnumeric":
         assert requests == []
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_create_command_forwards_paused_flag(monkeypatch, paused):
+    settings = SimpleNamespace(discord=SimpleNamespace(bot_token=SecretStr("offline")))
+    runtime = object()
+
+    @asynccontextmanager
+    async def build_runtime(_settings):
+        yield runtime
+
+    create = AsyncMock()
+    monkeypatch.setattr(routines_cli, "load_settings", lambda: settings)
+    monkeypatch.setattr(routines_cli, "build_runtime", build_runtime)
+    monkeypatch.setattr(routines_cli, "run_create_dm_routine", create)
+    args = [
+        "create",
+        "--tenant",
+        "00000000-0000-0000-0000-000000000001",
+        "--owner",
+        "123",
+        "--agent",
+        "daimon",
+        "--schedule",
+        "0 9 * * *",
+        "--timezone",
+        "UTC",
+        "--trigger",
+        "summarize",
+        "--destination",
+        "dm",
+    ]
+    if paused:
+        args.append("--paused")
+    result = CliRunner().invoke(routines_cli.routines_app, args)
+    assert result.exit_code == 0, result.output
+    create.assert_awaited_once()
+    assert create.call_args.kwargs["rt"] is runtime
+    assert create.call_args.kwargs["paused"] is paused
+
+
+async def test_paused_creation_can_be_linked_and_seeded_for_cutover(db_session_factory):
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id="424242")
+        await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
+    agent = ma_agent(
+        id="ag",
+        name="daimon",
+        metadata={MA_METADATA_KEY_NAME: "daimon", MA_METADATA_KEY_TENANT: str(tenant.id)},
+    )
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/agents", lambda _req, _m: list_response([agent.model_dump(mode="json")])
+    )
+    rt = build_cli_runtime(
+        db_session_factory, router=router, settings=SimpleNamespace(direct_message_policies={})
+    )
+
+    async def member(*args):
+        return Membership(is_member=True)
+
+    await run_create_dm_routine(
+        rt=rt,
+        console=Console(file=StringIO()),
+        tenant_id=tenant.id,
+        owner="123",
+        agent_name="daimon",
+        schedule="0 9 * * *",
+        timezone="UTC",
+        trigger="summarize",
+        source_channel=None,
+        dry_run=False,
+        paused=True,
+        resolver=CachedMembershipResolver(member),
+    )
+    async with db_session_factory() as session:
+        [created] = await list_routines_for_tenant(session, tenant_id=tenant.id)
+    assert created.enabled is False
+    assert created.next_fire_at is None
+    assert created.internal_routine_id is None
+
+    internal_id = uuid4()
+    async with db_session_factory.begin() as session:
+        await link_internal_routine(
+            session,
+            tenant_id=tenant.id,
+            routine_id=created.id,
+            internal_routine_id=internal_id,
+            apply=True,
+        )
+    entry = RoutineSeedEntry.model_validate(
+        {
+            "internal_routine_id": internal_id,
+            "last_completed_slot": "2026-10-27T09:00:00Z",
+            "internal_next_run": "2026-10-28T09:00:00Z",
+            "cron_expr": "0 9 * * *",
+            "timezone": "UTC",
+        }
+    )
+    async with db_session_factory.begin() as session:
+        planned = await seed_routines(
+            session,
+            [entry],
+            tenant_id=tenant.id,
+            now=datetime(2026, 10, 28, 8, tzinfo=UTC),
+            apply=True,
+        )
+    assert len(planned) == 1
+    assert planned[0][0].id == created.id
+    async with db_session_factory() as session:
+        seeded = await get_routine(session, created.id, tenant_id=tenant.id)
+    assert seeded is not None
+    assert seeded.internal_routine_id == internal_id
+    assert seeded.enabled is True
+    assert seeded.next_fire_at == datetime(2026, 10, 28, 9, tzinfo=UTC)
+    assert seeded.seeded_after == datetime(2026, 10, 27, 9, tzinfo=UTC)
