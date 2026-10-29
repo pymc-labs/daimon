@@ -392,14 +392,14 @@ async def test_an_input_the_live_stream_already_journaled_is_this_turns() -> Non
     assert [e.id for e in await io.replay()][-1] == "user-3"
 
 
-async def test_a_confirmed_input_must_be_in_the_replayed_history() -> None:
+async def test_a_confirmed_input_is_proven_by_its_receipt() -> None:
+    # The replay list is not documented as complete; a page that omits a
+    # confirmed input must not end the turn.
     history = _History(*_PREVIOUS)
     io, _ = _io(history)
     await io.send(_QUESTION)
-    await io.replay()
-    history.records.pop()  # a history that lost the receipt's own input
-    with pytest.raises(TurnConnectionLost, match="not in the session history"):
-        await io.replay()
+    history.records.pop()
+    assert [e.id for e in await io.replay()][-1] == "idle-2"
 
 
 async def test_a_turn_that_never_posted_replays_unchecked() -> None:
@@ -488,4 +488,18 @@ async def test_a_landed_input_after_unjournaled_history_still_reattaches() -> No
     journaled.rows = []
     with pytest.raises(TurnConnectionLost):
         await io.send(_QUESTION)
+    assert [e.id for e in await io.replay()][-1] == "user-3"
+
+
+async def test_an_unconfirmed_input_a_replay_omits_is_found_on_retry() -> None:
+    # The driver retries a replay that raises; a page that lagged the landed
+    # input does not end the turn by itself.
+    history = _History(*_PREVIOUS, ack="outcome_unknown")
+    io, _ = _io(history)
+    with pytest.raises(TurnConnectionLost):
+        await io.send(_QUESTION)
+    landed = history.records.pop()
+    with pytest.raises(TurnConnectionLost):
+        await io.replay()
+    history.records.append(landed)
     assert [e.id for e in await io.replay()][-1] == "user-3"

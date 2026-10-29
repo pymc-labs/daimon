@@ -653,10 +653,8 @@ class MuxTurnIO:
         Missing input is a lost connection: the person asks what was done.
         """
         inputs = [event_id for event_id, is_input in walked if is_input and event_id]
-        if self._own_inputs:
-            if not set(self._own_inputs) & set(inputs):
-                raise TurnConnectionLost("this turn's input is not in the session history")
-            return
+        # A confirmed send is proven by its receipt; only an unconfirmed one
+        # needs the history.
         if not self._unconfirmed or journaled is None:
             return
         # Only an input after the newest event the journal already held can be
