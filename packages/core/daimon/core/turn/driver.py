@@ -1853,15 +1853,9 @@ async def _consume_with_reconnect(
         # asking for the session's status whenever the stream yields nothing for
         # this long. Managed Agents does not, so its turns are unchanged.
         idle_check_s = cast("float | None", getattr(io, "idle_check_s", None))
-        idle_verdict = False
         while True:
             if cancel.is_set():
                 raise _InterruptInConsume()
-            if idle_verdict and next_task is None:
-                # The event that landed during the idle read is folded; it did not
-                # end the turn, so the idle verdict stands.
-                log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
-                raise _EventlessCycle(reason="read_timeout")
             # A new fetch only once the last one's result was taken: a fetch that
             # finished during a status check still holds its event.
             if next_task is None:
@@ -1899,12 +1893,6 @@ async def _consume_with_reconnect(
                 if silence is not None:
                     silence.status = status
                 if status in {"running", "rescheduling"}:
-                    continue
-                if next_task.done():
-                    # An event that landed during the read is folded first: an idle
-                    # answer may be about the very turn end it carries. If it is not
-                    # the end, the idle verdict stands on the next pass.
-                    idle_verdict = True
                     continue
                 log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
                 raise _EventlessCycle(reason="read_timeout")

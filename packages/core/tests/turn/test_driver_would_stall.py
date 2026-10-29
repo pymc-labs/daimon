@@ -4,18 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Sequence
 from typing import cast
 
 import pytest
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta.sessions import (
-    BetaManagedAgentsEventParams,
-    BetaManagedAgentsSessionEvent,
-)
 from daimon.core.turn import driver
-from daimon.core.turn.io import LegacyTurnIO, TurnStream
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -26,7 +20,6 @@ from daimon.testing.turn_fakes import (
     RecordingLifecycle,
     YieldEvent,
 )
-from mux.contracts.receipts import StopObservation
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle, make_tool_use
 
@@ -117,63 +110,6 @@ async def test_each_step_is_logged_once_a_turn() -> None:
     assert len(_would_stall(logs)) == 2, "each step is logged once a turn, however often it recurs"
 
 
-async def test_an_event_that_lands_during_the_idle_check_is_folded_before_ending(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """F14: the idle answer may be about the very turn end the stream just delivered."""
-    fake = FakeAnthropic()
-    done = make_status_idle(event_id="done", stop_reason=make_end_turn())
-    answer = make_agent_message(event_id="answer", text="ok")
-    fake.beta.sessions.events.stream_scripts = [[YieldEvent(answer), DelayThenYield(0.08, done)]]
-    fake.beta.sessions.events.replay_events = [answer]
-
-    class SlowIdleCheck:
-        idle_check_s = 0.05
-
-        def __init__(self) -> None:
-            self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
-
-        async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
-            return await self.source.open_stream(read_timeout_s=read_timeout_s)
-
-        async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-            await self.source.send(events)
-
-        async def status(self) -> str:
-            await asyncio.sleep(0.06)  # the terminal event lands meanwhile
-            return "idle"
-
-        async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:
-            return await self.source.replay(timeout_s=timeout_s)
-
-        async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
-            return await self.source.interrupt(timeout_s=timeout_s)
-
-        async def archive(self) -> None:
-            await self.source.archive()
-
-    io = SlowIdleCheck()
-
-    def factory(*args: object, **kwargs: object) -> SlowIdleCheck:
-        return io
-
-    monkeypatch.setattr(driver, "turn_io", factory)
-    lifecycle = RecordingLifecycle()
-    async with asyncio.timeout(10):
-        final = await driver.run_turn(
-            anthropic=cast(AsyncAnthropic, fake),
-            session_id="sess_1",
-            user_message="hi",
-            lifecycle=lifecycle,
-            cancel=asyncio.Event(),
-            render_interval_s=0.001,
-            billing=_EXEMPT,
-        )
-
-    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
-    assert len(lifecycle.terminal_success) == 1
-
-
 async def test_the_rendered_line_matches_the_log_metrics_step_extractor(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -202,64 +138,3 @@ async def test_the_rendered_line_matches_the_log_metrics_step_extractor(
     record = json.loads(lines[0])
     assert re.search(r'"step_s": ([0-9]+)', lines[0]) is not None
     assert record["event"] == "turn.would_stall"
-
-
-async def test_events_landing_during_every_idle_read_cannot_postpone_the_idle_verdict(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """F14 folds the event that landed, then the idle verdict stands."""
-    fake = FakeAnthropic()
-    chatter = [
-        DelayThenYield(0.07, make_agent_message(event_id=f"sevt_{i}", text=".")) for i in range(30)
-    ]
-    done = make_status_idle(event_id="done", stop_reason=make_end_turn())
-    fake.beta.sessions.events.stream_scripts = [[*chatter, BlockForever()]]
-    fake.beta.sessions.events.replay_events = [done]
-    fake.beta.sessions.retrieve_statuses = ["idle"]
-    reads: list[str] = []
-
-    class SlowIdleCheck:
-        idle_check_s = 0.05
-
-        def __init__(self) -> None:
-            self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
-
-        async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
-            return await self.source.open_stream(read_timeout_s=read_timeout_s)
-
-        async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-            await self.source.send(events)
-
-        async def status(self) -> str:
-            reads.append("status")
-            await asyncio.sleep(0.03)
-            return "idle"
-
-        async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:
-            return await self.source.replay(timeout_s=timeout_s)
-
-        async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
-            return await self.source.interrupt(timeout_s=timeout_s)
-
-        async def archive(self) -> None:
-            await self.source.archive()
-
-    io = SlowIdleCheck()
-
-    def factory(*args: object, **kwargs: object) -> SlowIdleCheck:
-        return io
-
-    monkeypatch.setattr(driver, "turn_io", factory)
-    async with asyncio.timeout(3):
-        final = await driver.run_turn(
-            anthropic=cast(AsyncAnthropic, fake),
-            session_id="sess_1",
-            user_message="hi",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            render_interval_s=0.001,
-            billing=_EXEMPT,
-        )
-
-    assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
-    assert len(reads) <= 3, "one idle verdict ends the quiet cycle; chatter cannot postpone it"
