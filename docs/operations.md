@@ -9,6 +9,9 @@ installation, see [self-hosting](self-hosting.md).
 Check out the new release, pull or build the image, apply migrations, then
 restart the services. Read the notes below for the releases they apply to.
 
+`daimon smoke` verifies an Anthropic deployment: it provisions a dedicated
+smoke tenant, runs one billed turn and exits non-zero unless it was metered.
+
 Every adapter and MCP process must run a timer-aware build before timers are
 created. Apply migration `0029_feat084_timers` first, then update every
 Discord, Slack and MCP process, and only then let agents create timers. An
@@ -271,13 +274,13 @@ guard against application mistakes, not against a database administrator.
 ## Manage operator tokens
 
 An operator token lets an external integration call a few MCP tools over
-`/mcp` for one server admin. Mint one with scopes:
+`/mcp` for one server admin. Mint one with one or more `--scope` flags:
 
 ```bash
-daimon mcp mint-operator-token
-daimon mcp list-tokens
-daimon mcp revoke-token
-daimon mcp set-token-scopes --jti <jti> --scope <scope>
+daimon mcp mint-operator-token --tenant <tenant-uuid> --account <admin-account-or-user-id> --scope tenant:read [--ttl-days 30] [--label <note>]
+daimon mcp list-tokens [--tenant <tenant-uuid>] [--kind operator] [--all]
+daimon mcp revoke-token <jti>
+daimon mcp set-token-scopes --jti <jti> --scope <scope-to-keep>
 ```
 
 The default lifetime is 30 days and the maximum 90. With `promo:create`, an

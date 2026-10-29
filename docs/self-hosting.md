@@ -94,11 +94,14 @@ export DAIMON_DATABASE__URL=postgresql+asyncpg://daimon:<POSTGRES_PASSWORD>@loca
 uv run alembic upgrade head
 uv run daimon defaults apply
 uv run python -m daimon.adapters.discord
+uv run uvicorn daimon.adapters.mcp.server:create_mcp_app --factory --port 8765
+uv run daimon-scheduler
 ```
 
-The `export` is required: the `alembic` CLI reads the shell environment and
-does not load `.env`. Start Slack and Teams the same way, with
-`python -m daimon.adapters.slack` and `python -m daimon.adapters.teams`.
+Run each of the last three in its own terminal. The `export` is required: the
+`alembic` CLI reads the shell environment and does not load `.env`. The MCP
+server and the scheduler must run too. Start Slack and Teams the same way,
+with `python -m daimon.adapters.slack` and `python -m daimon.adapters.teams`.
 
 ## Run several MCP instances
 

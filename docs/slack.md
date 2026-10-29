@@ -161,13 +161,23 @@ not copied.
 ### Ask a person
 
 Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a person**
-button beside 👍 and 👎. It sends one support request, which spends one of the
-asker's credits (`DAIMON_SUPPORT__CREDITS_PER_USER`), to that channel. The post
-carries the requester and a link, never answer text. The bot must be in the
-channel. Leave it unset to hide the button. External Slack Connect members
-cannot use it. Multi-platform deployments set one channel per platform. For
-several workspaces, `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the
-workspace that owns the channel.
+button beside 👍 and 👎. Each send spends one support credit, and sends one
+request to that channel. The post carries the requester and a link, never
+answer text. The bot must be in the channel. Leave it unset to hide the
+button. External Slack Connect members cannot use it.
+
+[`DAIMON_SUPPORT__CREDITS_PER_USER`](configuration.md#daimon_support__credits_per_user)
+sets the credits, 20 per person per workspace by default and shared with
+Discord. Zero turns the button off.
+
+In a channel with its own admins, the request goes to them by DM first, then
+to the server admins. The support channel gets it only if no DM landed.
+
+Multi-platform deployments set one channel per platform: Discord uses
+`DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` and Teams its own channel. No request
+crosses platforms. For several workspaces,
+`DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID` names the workspace that owns the
+channel.
 
 ### Pick agents and see where they answer
 

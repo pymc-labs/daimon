@@ -35,7 +35,8 @@ your workspaces, or the deployment may have no mount for that platform.
   authenticate each platform you want.
 - **Expect normal billing checks.** A turn started through the hub runs the same
   balance and cap checks as any MCP turn, so a workspace out of credit refuses it
-  up front. It records no metered debit on completion. See [billing](billing.md).
+  up front. Its cost is debited when a later read or the scheduler's usage
+  sweep settles the session, as for any MCP turn. See [billing](billing.md).
 - **Install from a checkout.** Run `claude --plugin-dir ./plugin`. The plugin is
   not published to a marketplace.
 

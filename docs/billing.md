@@ -55,10 +55,12 @@ priced as five-minute writes.
 `DAIMON_BILLING__MARKUP` multiplies the cost before it is debited
 ([configuration.md](configuration.md#daimon_billing__markup)). It applies to
 the ledger and to a finished turn's summary line. Usage panels and
-`get_turn_cost` show provider cost, before markup.
+`get_turn_cost` show cost before markup.
 
-> **Warning:** A model with no pricing row runs free. The debit is zero and
-> Daimon logs `billing.unpriced_model`. Add a row before you enable a model.
+> **Warning:** An Anthropic model with no pricing row runs free: the debit is
+> zero and Daimon logs `billing.unpriced_model`. OpenAI, Gemini and
+> self-hosted turns on an unpriced model are refused instead. Token rates
+> exclude provider tool, container and storage charges.
 
 ## The gates
 
@@ -74,8 +76,8 @@ channel budget.
    [budget](#channel-budgets).
 
 A denial aborts the turn with a plain notice, such as "Your team's Daimon
-credit has run out." The turn never falls back to a cheaper model. MCP tools that start a turn, routine runs and wakes pass the
-same gates. Unprompted thread participation skips silently when one refuses.
+credit has run out." The turn never falls back to a cheaper model. MCP tools that start a turn,
+routine runs and wakes pass the same gates. Unprompted thread participation skips silently when one refuses.
 
 A finished turn ends with one summary line: the agent, the time, what the turn
 was debited and the money left, for example `Ada  12s  $0.042 used  $41.20
@@ -91,7 +93,7 @@ to completion, so a chat tenant can overdraw by up to its concurrent-turn cap
 times one turn's cost. The cap is the adapter's
 `max_concurrent_turns_per_tenant` (default 3), or the tenant's override from
 `daimon tenants turn-cap`. A turn over the cap waits in the queue and runs the
-balance gate again once it holds a slot, so queued turns do not widen the bound.
+balance gate again once it holds a slot.
 
 MCP `start_turn` sessions are worse. Their spend reaches the ledger only when
 a read sees the turn end or the sweep settles it, and MCP turns have no

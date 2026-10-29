@@ -2,8 +2,7 @@
 
 Connect Daimon to Microsoft Teams, then learn how it behaves in 1:1 chats,
 channels and group chats. Read this if you run the deployment or administer a
-Microsoft 365 organisation. Setup spans four Microsoft portals, so plan on an
-hour the first time.
+Microsoft 365 organisation.
 
 ## Before you start
 
@@ -20,8 +19,7 @@ You need:
 - **A Microsoft 365 organisation with Teams, and a work account in it.** Use
   that account for every step. A personal account creates a separate, empty
   Azure directory.
-- **An Azure subscription in the same organisation.** Pay-As-You-Go is enough,
-  and the Azure Bot's F0 tier is free.
+- **An Azure subscription in the same organisation.** Pay-As-You-Go is enough.
 - **A public HTTPS hostname** such as `teams.example.com`.
 - **The right roles**, or someone who has them:
 
@@ -88,9 +86,8 @@ DAIMON_TEAMS__ADMIN_TEAM_ID=<groupId of the admin team>
 
 Set the credentials together: a half-filled `DAIMON_TEAMS__` block stops every
 Daimon process.
-Also set [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys). The
-`mcp` service reads the same values, which Compose handles by sharing `.env`.
-Then start the service:
+Also set [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys). Then
+start the service:
 
 ```bash
 docker compose --profile teams up --build -d
@@ -131,7 +128,7 @@ https://teams.example.com/api/messages
 
 A missing suffix is the most common reason a bot never answers. Check that
 **Microsoft App ID** and **App Tenant ID** match step 1 and **App type** is
-SingleTenant, then select **Apply**. Changes can take a few minutes.
+SingleTenant, then select **Apply**.
 
 ### 5. Build the app package
 
@@ -209,8 +206,6 @@ Microsoft's guide to
    Guests cannot be added; someone with a guest account in your organisation
    is added as an external participant (search `ext:user@domain.com`).
 
-Daimon treats external participants and guests as members.
-
 ### Turn on channel files (optional)
 
 By default the bot reads images in channel messages and handles files in 1:1
@@ -241,8 +236,7 @@ To make followed threads, replies to the bot and typed `@Daimon` work there:
 4. Restart the service. Add the bot to each channel, or @mention it once where
    it already is.
 
-Expect a few seconds of extra latency. Shared channels hosted by another
-organisation cannot be subscribed.
+Shared channels hosted by another organisation cannot be subscribed.
 
 ### If the bot doesn't answer
 
@@ -262,9 +256,8 @@ organisation cannot be subscribed.
 Manifest changes reach Teams only in a new package. Bump `version` in
 `manifest.json`, zip it again and upload it over the existing app in the Teams
 admin center (the app > **Upload file**). A team owner may be asked to accept
-new permissions. Rebuild packages made before template version 0.6.0, which
-lack `/` commands, group chats and activity feed notices, and before manifest
-1.25, which cannot join private or shared channels.
+new permissions. Rebuild packages made before template version 0.6.0 or
+manifest 1.25, which lack `/` commands, group chats and private or shared channels.
 
 ## How Daimon behaves in Teams
 
@@ -327,6 +320,14 @@ The agent can save an edited channel file as a new version with
 `replace_channel_file`. If SharePoint refuses (a locked file, or a retention
 policy or label that blocks app writes), the agent posts a new file instead.
 
+### Keys and sign-ins
+
+When an agent needs an API key, `.env` file or MCP token, it posts a card that
+only the asker can open. The secret goes into a Teams dialog, never the chat.
+Paste `.env` contents into the multi-line field, since dialogs have no file
+input. For an MCP sign-in the agent sends a private link the same way. Once
+the value is saved, the card shows the outcome and waiting work resumes.
+
 ### Microsoft account (optional)
 
 Each person can connect their own Microsoft 365 account, so the agent reads and
@@ -346,11 +347,10 @@ Register a single-tenant app in the same Entra tenant:
    `DAIMON_CRYPTO__KEYS` and `DAIMON_MCP__PUBLIC_URL`. Use identical values on
    every service that runs turns and on the MCP server.
 
-With none or only some set, the tools stay absent, and a partial set logs
-`microsoft_accounts.disabled`. When a tool needs an account the person has not
-connected, the agent asks first. If they agree, a single-use link, valid for
-ten minutes, goes to their 1:1 chat. They must sign in as the same
-Entra user. If Conditional Access later demands a new sign-in, the saved
+With none or only some set, the tools stay absent. When a tool needs an
+account the person has not connected, the agent asks first. If they agree, a
+single-use link, valid for ten minutes, goes to their 1:1 chat. They must sign
+in as the same Entra user. If Conditional Access later demands a new sign-in, the saved
 account is dropped and the agent asks again.
 
 Mail, calendar and OneNote work only from the person's 1:1 chat. Sending mail

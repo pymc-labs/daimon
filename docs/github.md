@@ -18,9 +18,15 @@ through a tunnel.
    [configuration](configuration.md#daimon_github_app__app_id).
 2. Set [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys), which
    encrypts the short-lived user tokens.
-3. Restart the services. The connect routes mount only when these values and the
+3. To resync skills on push, set the App's webhook URL to
+   `<root>/webhooks/github`, the content type to `application/json`, and
+   subscribe to **Push**. Put the webhook secret in
+   [`DAIMON_GITHUB_APP__WEBHOOK_SECRET`](configuration.md#daimon_github_app__webhook_secret).
+   The route mounts only when it is set, and boot fails without the App ID,
+   private key and `DAIMON_CRYPTO__KEYS`.
+4. Restart the services. The connect routes mount only when these values and the
    public URL are present.
-4. Keep the scheduler running. It removes expired connection flows and their
+5. Keep the scheduler running. It removes expired connection flows and their
    encrypted tokens.
 
 ### Connect repositories to an agent

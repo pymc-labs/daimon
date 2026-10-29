@@ -107,3 +107,18 @@ from another organisation name no person. Without `workspaces`, every
 workspace's agents reach the server. Request bodies over 4 MiB are refused.
 Only agents on Anthropic Managed Agents can use the relay. Self-hosted harness,
 GPT and Gemini agents cannot.
+
+## Give an agent Google Workspace access
+
+An agent can act as one Workspace user, with scopes you choose. Set
+[`DAIMON_CREDENTIALS__GOOGLE_SA_JSON`](configuration.md#daimon_credentials__google_sa_json)
+to a service-account key, and grant that account domain-wide delegation in
+Google Workspace. Then bind the agent:
+
+```bash
+daimon agents bind-google <agent> <email> --scopes <scope>
+```
+
+Repeat `--scopes` for more scopes. The agent's `get_cli_token(service="gcloud")`
+call then returns a token that impersonates only that user and those scopes.
+An unbound agent gets an error naming the missing binding.

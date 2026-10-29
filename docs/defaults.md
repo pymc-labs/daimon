@@ -188,6 +188,10 @@ drops the rows of skills no longer in the tree. In practice:
   Daimon cannot read the content back, so `verify` calls it in sync.
 - **No row, but the skill exists.** A new version is pushed unconditionally.
 
+`daimon skills delete <name>` refuses while any agent or channel names the
+skill, and lists them. `--force` detaches it everywhere, in every tenant, then
+deletes it. Chat's `delete_skill` has no force.
+
 ## Settings
 
 `DAIMON_DEFAULTS_ROOT` (default `defaults`) points every service at this tree

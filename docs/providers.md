@@ -8,8 +8,8 @@ Read this if you self-host and do not want every turn on Anthropic.
 
 | | Anthropic (default) | OpenAI | Gemini | Self-hosted harness |
 | --- | --- | --- | --- | --- |
-| Needs | Anthropic API key | OpenAI key and project | Gemini key and a runtime file row | Your own harness service and Azure OpenAI |
-| Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash` | The deployment you name (default `gpt-6.1-sol`) |
+| Needs | Anthropic API key | OpenAI key and project | Gemini key | Your own harness service and Azure OpenAI |
+| Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash`, `gemini-4-argon` (priced through 2026-11-30, then refused) | The deployment you name (default `gpt-6.1-sol`) |
 | Shared threads | Yes | No | No | No |
 | Multi-agent delegation | Yes | No | Not documented | Not documented |
 | Memory across turns | Yes | No | Not documented | No |
@@ -38,7 +38,7 @@ from chat by asking Daimon to clear the channel's pin and confirming the card.
 Existing threads keep their model.
 
 A refused turn names the cause in chat: the channel's pin, a tenant allowlist
-that does not enable the provider, or an agent whose provider cannot serve the
+that does not enable the provider ([enable it](#enable-providers-for-a-tenant)), or an agent whose provider cannot serve the
 channel yet. Backend selection is on by default
 ([`DAIMON_TURN__CHANNEL_BACKENDS`](configuration.md#daimon_turn__channel_backends)).
 Setting it to `false` sends every turn back to Anthropic, as an emergency
@@ -94,6 +94,26 @@ container defaults with no Daimon model settings.
    The smoke test provisions its own agent, runs one billed turn that must call
    one tool, and exits non-zero unless it completes.
 
+## Enable providers for a tenant
+
+A tenant may use Anthropic plus every provider whose deployment key is set,
+such as `DAIMON_CHANNEL_OPENAI_KEY` or `DAIMON_CHANNEL_GEMINI_KEY`. A key
+under another name through `--api-key-env` does not count. Self-hosted
+backends are never on by default. An admin's own choice always wins.
+
+An admin changes the list in chat by asking Daimon and confirming the card.
+On Discord, an operator can do the same from the CLI. Each call checks that
+the named user is a current server admin, and other platforms refuse it.
+
+```bash
+daimon tenants backend-policy snapshot discord <guild-id> --actor-user <admin-user-id> --output before.json
+daimon tenants backend-policy apply discord <guild-id> --actor-user <admin-user-id> --snapshot before.json --backends anthropic,openai,gemini --yes
+```
+
+`--dry-run` previews a change, and `--backends default` returns to following
+the keyed providers. To undo, run `revert` with `--snapshot` and
+`--expected-revision <applied-revision>`.
+
 ## Edit the runtime file
 
 The runtime file is a JSON list that you own. Each row authorizes provisioned
@@ -130,8 +150,10 @@ runtimes so ambient headers cannot replace the channel's key or project.
 
 ## Run on Gemini
 
-Gemini has no provisioning command. Install the extra, `daimon-mux[gemini]`,
-and add a row to the same runtime file, which can hold both providers:
+Gemini has no provisioning command. Install the extra, `daimon-mux[gemini]`.
+With `DAIMON_CHANNEL_GEMINI_KEY` set, Gemini runs with no runtime file row.
+Add a row to the runtime file, which can hold both providers, only to override
+project, spend holds or storage:
 
 ```json
 {
@@ -168,8 +190,8 @@ and add a row to the same runtime file, which can hold both providers:
 - **Growth.** Records and holds have no size bound or compaction, so monitor
   database storage before raising load.
 
-Gemini has no default profile, so name `gemini.inline_reuse` and the
-model `gemini-3.8-flash` when you configure a channel.
+In a row, name the profile `gemini.inline_reuse` and the model
+`gemini-3.8-flash`.
 
 ## Run a self-hosted harness
 
