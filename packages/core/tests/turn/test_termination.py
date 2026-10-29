@@ -42,7 +42,12 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.termination import denial_termination_reason, normalized_termination_reason
+from daimon.core.turn.termination import (
+    ProviderTerminalFailure,
+    denial_termination_reason,
+    is_harness_deadline,
+    normalized_termination_reason,
+)
 from daimon.testing.turn_fakes import (
     BlockForever,
     FakeAnthropic,
@@ -383,6 +388,54 @@ def test_a_neutral_refusal_end_maps_to_refused() -> None:
     # A free-form native reason can read "refusal" on a turn that still completed.
     other = ended.model_copy(update={"payload": {**ended.payload, "outcome": "completed"}})
     assert normalized_termination_reason(other) is TerminationReason.COMPLETED
+
+
+def test_a_harness_deadline_is_ceiling_not_a_stop() -> None:
+    """F13: the self-hosted harness's own time limit is not the person pressing Stop."""
+    session = ResourceRef(
+        id="sess_1",
+        kind="session",
+        provider="anthropic",
+        account_scope_id="workspace",
+        tenant_id="tenant",
+        account_id="account",
+    )
+    normalizer = EventNormalizer(session)
+    native = {"id": "e", "processed_at": "2026-10-09T00:00:00+00:00"}
+    normalizer.normalize({**native, "type": "session.status_running"}, observed_at=_FROZEN_NOW)
+    ended = normalizer.normalize(
+        {
+            **native,
+            "id": "ended",
+            "type": "session.status_idle",
+            "stop_reason": {"type": "end_turn"},
+        },
+        observed_at=_FROZEN_NOW,
+    )
+
+    def harness(native_reason: str | None, provider: str = "selfhosted"):
+        return ended.model_copy(
+            update={
+                "payload": {
+                    **ended.payload,
+                    "outcome": "interrupted",
+                    "native_reason": native_reason,
+                },
+                "native": ended.native.model_copy(update={"provider": provider}),
+            }
+        )
+
+    assert normalized_termination_reason(harness("deadline_exceeded")) is TerminationReason.CEILING
+    assert is_harness_deadline(harness("deadline_exceeded"))
+    # A Stop, a restart, or another provider's reason of the same name stays an interrupt.
+    for other in (
+        harness(None),
+        harness("process_interrupted"),
+        harness("deadline_exceeded", "openai"),
+    ):
+        assert normalized_termination_reason(other) is TerminationReason.INTERRUPTED
+        assert not is_harness_deadline(other)
+    assert ProviderTerminalFailure(TerminationReason.CEILING).reason is TerminationReason.CEILING
 
 
 def test_only_completed_and_interrupted_are_not_failures() -> None:

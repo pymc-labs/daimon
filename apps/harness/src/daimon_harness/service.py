@@ -454,6 +454,10 @@ class Supervisor:
             self.changed.set()
 
         outcome = "completed"
+        # Why an interrupted turn stopped, when it was not a cancel: the turn's
+        # own deadline is not the person pressing Stop (F13).
+        interruption: dict[str, JsonValue] | None = None
+        deadline: asyncio.Timeout | None = None
         context: TurnContext | None = None
         workers_stopped = False
         try:
@@ -490,7 +494,8 @@ class Supervisor:
                     ),
                 ),
             )
-            async with asyncio.timeout(request.limits.deadline_s):
+            deadline = asyncio.timeout(request.limits.deadline_s)
+            async with deadline:
                 history = await self.adapter.run(context, previous)
             if not usage_count:
                 raise HarnessError("usage_missing", "Turn completed without measured usage")
@@ -499,8 +504,15 @@ class Supervisor:
                 request.session_id,
                 cast(list[JsonValue], redact(history, credentials)),
             )
-        except (asyncio.CancelledError, TimeoutError):
+        except (asyncio.CancelledError, TimeoutError) as exc:
             outcome = "interrupted"
+            # The deadline turns only its own cancellation into TimeoutError; a
+            # Stop arriving with it stays a CancelledError and stays a Stop.
+            if isinstance(exc, TimeoutError) and deadline is not None and deadline.expired():
+                interruption = {
+                    "kind": "deadline_exceeded",
+                    "message": "Turn reached its time limit",
+                }
         except Exception as exc:
             outcome = "errored"
             # SDK exception messages can include credentials and request bodies.
@@ -537,6 +549,8 @@ class Supervisor:
                 if original_failure is not None:
                     failure = original_failure
                 data: dict[str, JsonValue] = {"outcome": outcome}
+                if outcome == "interrupted" and interruption is not None:
+                    data["error"] = interruption
                 if outcome == "errored":
                     error = failure or {"kind": "harness", "message": "Harness turn failed"}
                     if error.get("kind") == "durability_unavailable":
@@ -554,7 +568,7 @@ class Supervisor:
                     try:
                         await asyncio.shield(finalization)
                     except asyncio.CancelledError:
-                        outcome = "interrupted"
+                        outcome, interruption = "interrupted", None
                 await finalization
             finally:
                 credentials.clear()
