@@ -1,4 +1,4 @@
-"""Versioned, offline watch migration manifest. Never exports or accepts secrets."""
+"""Versioned, offline watch import manifest. Never exports or accepts secrets."""
 
 from datetime import datetime
 from typing import Literal
@@ -7,7 +7,7 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import require_poll_tool
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-UNMAPPED_NOTICE = "this watch is paused until page data moves to Daimon OS"
+UNMAPPED_NOTICE = "this watch is paused: its source can't be polled here"
 
 
 class ImportedWatch(BaseModel):
@@ -34,7 +34,7 @@ class WatchExport(BaseModel):
 
 
 def map_poll_source(name: str, arguments: dict[str, JsonValue]) -> tuple[str, dict[str, JsonValue]]:
-    """Translate only representable internal arguments; native validation still applies."""
+    """Translate only representable source arguments; native validation still applies."""
     if name == "discord_read_messages":
         if set(arguments) - {"channel_or_thread_id", "limit"}:
             raise ValueError("Unsupported imported message-read arguments")

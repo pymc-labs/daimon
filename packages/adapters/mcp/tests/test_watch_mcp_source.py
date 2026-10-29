@@ -1,6 +1,6 @@
-"""Watches on a listed read tool of an attached MCP server (I3, I4, I8, I9).
+"""Watches on a listed read tool of an attached MCP server.
 
-The fake server is the real preview parity fixture, served in process. Its
+The fake server is the real MCP fixture server, served in process. Its
 `fixture_mislabeled_write` says it only reads and writes anyway: the registry,
 never the hint, is what allows a poll.
 """
@@ -39,7 +39,7 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing import ma_agent
 from daimon.testing.asgi import INIT_BODY, asgi_lifespan
-from daimon.testing.preview_parity_mcp import build_parity_host
+from daimon.testing.mcp_fixture_server import build_fixture_server
 from fastmcp.exceptions import ToolError
 from sqlalchemy import text
 
@@ -48,7 +48,7 @@ from .test_watch_polling import attended_owner, runtime_watch  # noqa: F401
 pytestmark = pytest.mark.fresh_schema
 
 TOKEN = "watch-bearer-sentinel-" + "q" * 40
-BRIDGE = "https://parity.example/mcp"
+BRIDGE = "https://fixture.example/mcp"
 OTHER = "https://elsewhere.example/mcp"
 PINNED = "93.184.216.34"
 OS_URL = "https://os.example/mcp"
@@ -114,7 +114,7 @@ class Recording(httpx.AsyncBaseTransport):
 
 
 async def pinned(host: str, port: int) -> str:
-    assert host == "parity.example"
+    assert host == "fixture.example"
     return PINNED
 
 
@@ -136,12 +136,12 @@ async def bridge(attended_owner, monkeypatch, tmp_path: Path) -> AsyncIterator[S
         mcp_server_url=BRIDGE,
         plaintext_token=TOKEN,
     )
-    app = build_parity_host(token=TOKEN, journal_path=tmp_path / "calls.jsonl")
+    app = build_fixture_server(token=TOKEN, journal_path=tmp_path / "calls.jsonl")
     transport = Recording(httpx.ASGITransport(app=app))
     monkeypatch.setattr(
         watch_polling, "open_source", partial(mcp_tool_session, resolve=pinned, transport=transport)
     )
-    agent = AsyncMock(return_value=agent_with(("parity-bridge", BRIDGE)))
+    agent = AsyncMock(return_value=agent_with(("fixture-bridge", BRIDGE)))
     monkeypatch.setattr("daimon.adapters.mcp.watch_polling.retrieve_agent", agent)
     monkeypatch.setattr("daimon.adapters.mcp.tools.watches.retrieve_agent", agent)
     # A fresh per-URL budget per test.
@@ -204,7 +204,7 @@ async def create(fx: SimpleNamespace, tool: str = "fixture_counter_read", **kwar
         origin_context_id=fx.origin,
         instructions="Report new markers.",
         source="poll",
-        server=kwargs.pop("server", "parity-bridge"),
+        server=kwargs.pop("server", "fixture-bridge"),
         tool=tool,
         arguments=kwargs.pop("arguments", {}),
         projection=kwargs.pop("projection", ".markers"),
@@ -226,11 +226,11 @@ def executed(calls: dict[str, Any], tool: str) -> int:
 async def test_a_listed_read_fires_once_per_new_marker_and_quotes_it_as_evidence(bridge):
     fx = bridge
     created = await create(fx)
-    assert created.source == "mcp_poll" and created.source_host == "parity.example"
+    assert created.source == "mcp_poll" and created.source_host == "fixture.example"
     watch = await get(fx, created.watch_id)
     # The canonical URL is stored and checked, never the name the owner typed.
     assert watch.source_state["server_url"] == BRIDGE
-    assert watch.source_state["server_name_at_enrollment"] == "parity-bridge"
+    assert watch.source_state["server_name_at_enrollment"] == "fixture-bridge"
     assert watch.source_state["credential"] == "agent"
     assert len(watch.source_state["catalogue_digest"]) == 64
     assert await run_poll(fx.runtime, watch.id, await lease(fx.runtime, watch))
@@ -359,9 +359,9 @@ async def test_a_missing_or_write_annotation_refuses_create(bridge, monkeypatch,
 @pytest.mark.parametrize(
     "policy",
     [
-        ToolSafetyPolicy(denied=("parity-bridge/fixture_counter_read",)),
-        ToolSafetyPolicy(denied=("parity-bridge",)),
-        ToolSafetyPolicy(effects={"parity-bridge/fixture_counter_read": "write"}),
+        ToolSafetyPolicy(denied=("fixture-bridge/fixture_counter_read",)),
+        ToolSafetyPolicy(denied=("fixture-bridge",)),
+        ToolSafetyPolicy(effects={"fixture-bridge/fixture_counter_read": "write"}),
     ],
 )
 async def test_a_denied_entry_or_write_pin_stops_the_poll_before_the_server(bridge, policy):
@@ -390,12 +390,12 @@ async def test_renamed_server_at_the_same_url_keeps_working(bridge):
 @pytest.mark.parametrize(
     "servers",
     [
-        # R2: the listed name now points somewhere else.
-        (("parity-bridge", OTHER),),
+        # The listed name now points somewhere else.
+        (("fixture-bridge", OTHER),),
         # Detached.
         (),
         # Two attachments of one URL are ambiguous.
-        (("parity-bridge", BRIDGE), ("copy", BRIDGE)),
+        (("fixture-bridge", BRIDGE), ("copy", BRIDGE)),
     ],
 )
 async def test_a_moved_or_detached_server_pauses_and_gets_no_bearer(bridge, servers):
@@ -414,7 +414,7 @@ async def test_a_disabled_tool_pauses(bridge):
     fx = bridge
     created = await create(fx)
     watch = await get(fx, created.watch_id)
-    fx.agent.return_value = agent_with(("parity-bridge", BRIDGE), enabled=False)
+    fx.agent.return_value = agent_with(("fixture-bridge", BRIDGE), enabled=False)
     assert not await run_poll(fx.runtime, watch.id, await lease(fx.runtime, watch))
     assert (await get(fx, watch.id)).source_state["reason"] == "access_revoked"
 
@@ -423,7 +423,7 @@ async def test_a_personal_sign_in_server_hidden_for_the_owner_is_refused(bridge,
     fx = bridge
     created = await create(fx)
     watch = await get(fx, created.watch_id)
-    hidden = AsyncMock(return_value=frozenset({"parity-bridge"}))
+    hidden = AsyncMock(return_value=frozenset({"fixture-bridge"}))
     monkeypatch.setattr("daimon.adapters.mcp.watch_polling.resolve_hidden_mcp_server_names", hidden)
     monkeypatch.setattr("daimon.adapters.mcp.tools.watches.resolve_hidden_mcp_server_names", hidden)
     with pytest.raises(ToolError, match="own sign-in"):
@@ -494,7 +494,7 @@ async def test_redirecting_server_gets_the_bearer_only_at_the_registered_url(bri
     )
     assert not await run_poll(fx.runtime, watch.id, await lease(fx.runtime, watch))
     assert len(seen) == 1
-    assert seen[0].url.host == PINNED and seen[0].headers["host"] == "parity.example"
+    assert seen[0].url.host == PINNED and seen[0].headers["host"] == "fixture.example"
     assert (await get(fx, watch.id)).consecutive_errors == 1
 
 
@@ -570,9 +570,9 @@ def test_url_budget_caps_concurrency_and_rate_per_url():
 
 
 def test_attached_server_matches_by_url_whatever_the_name():
-    agent = agent_with(("anything", "https://PARITY.example/mcp/"))
+    agent = agent_with(("anything", "https://FIXTURE.example/mcp/"))
     assert attached_server(agent, BRIDGE, "fixture_counter_read") == "anything"
-    for servers in ((), (("parity-bridge", OTHER),), (("a", BRIDGE), ("b", BRIDGE))):
+    for servers in ((), (("fixture-bridge", OTHER),), (("a", BRIDGE), ("b", BRIDGE))):
         with pytest.raises(watch_polling.PollAccessRevoked):
             attached_server(agent_with(*servers), BRIDGE, "fixture_counter_read")
 
@@ -598,7 +598,7 @@ class SaturatedServer(UrlBudget):
 
 
 async def test_a_saturated_server_cannot_starve_watches_on_another(bridge, monkeypatch):
-    """R10: 20 due watches on a busy server A and one on B; B is polled within a few ticks."""
+    """20 due watches on a busy server A and one on B; B is polled within a few ticks."""
     from daimon.core.continuity.continuation import ContinuationRequest
 
     fx = bridge
@@ -612,7 +612,7 @@ async def test_a_saturated_server_cannot_starve_watches_on_another(bridge, monke
             ]
         ),
     )
-    fx.agent.return_value = agent_with(("parity-bridge", BRIDGE), ("slow", SLOW))
+    fx.agent.return_value = agent_with(("fixture-bridge", BRIDGE), ("slow", SLOW))
     monkeypatch.setattr(watch_polling, "SOURCE_BUDGET", SaturatedServer())
     native = fx.native
     now = datetime.now(UTC)

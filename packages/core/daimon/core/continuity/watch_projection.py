@@ -6,7 +6,7 @@ numeric array indexes and, for polls, one `[]` map step after a field or index
 or other expansion operators. A migrated jq expression outside this subset
 requires an operator rewrite before enrollment; never silently ignore it.
 
-I7 (bounds) has three tiers. A raw source document is checked against
+Bounds have three tiers. A raw source document is checked against
 `SOURCE` before projection and is never kept. What is kept is checked again:
 a baseline against `BASELINE` (keyed `added` keeps at most `MAX_KEYS` key
 digests, never the keys), each evidence item is clipped to `ITEM_BYTES`, and

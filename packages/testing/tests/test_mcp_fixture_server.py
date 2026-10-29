@@ -1,4 +1,4 @@
-"""HTTP-level parity fixture contract: catalogue, bearer, execution evidence."""
+"""HTTP-level MCP fixture server contract: catalogue, bearer, execution evidence."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ from typing import Any
 
 import httpx
 import pytest
+from daimon.testing import preview_parity_mcp
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan
-from daimon.testing.preview_parity_mcp import build_parity_host, create_app
+from daimon.testing.mcp_fixture_server import build_fixture_server, create_app
 
 TOKEN = "fixture-bearer-" + "x" * 32
 
@@ -16,7 +17,7 @@ TOKEN = "fixture-bearer-" + "x" * 32
 @pytest.mark.parametrize("authorization", [None, "Bearer wrong", "Basic " + TOKEN])
 async def test_auth_protects_mcp_and_readback(tmp_path: Path, authorization: str | None) -> None:
     path = tmp_path / "calls.jsonl"
-    app = build_parity_host(token=TOKEN, journal_path=path)
+    app = build_fixture_server(token=TOKEN, journal_path=path)
     headers = {"Authorization": authorization} if authorization else {}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://qa") as c:
         for method, url in [("POST", "/mcp"), ("GET", "/calls")]:
@@ -27,7 +28,7 @@ async def test_auth_protects_mcp_and_readback(tmp_path: Path, authorization: str
 
 async def test_catalogue_execution_and_persistent_readback(tmp_path: Path) -> None:
     path = tmp_path / "calls.jsonl"
-    app = build_parity_host(token=TOKEN, journal_path=path)
+    app = build_fixture_server(token=TOKEN, journal_path=path)
     headers = {**INIT_HEADERS, "Authorization": f"Bearer {TOKEN}"}
     async with (
         asgi_lifespan(app),
@@ -78,37 +79,62 @@ async def test_catalogue_execution_and_persistent_readback(tmp_path: Path) -> No
         executed = [e for e in evidence["calls"] if e["phase"] == "executed"]
         assert [e["tool"] for e in executed] == list(tools)
         assert all(e["args"] == {"marker": "fixture-15"} for e in executed)
-        assert all(e["caller"] == "preview-parity" for e in evidence["calls"])
+        assert all(e["caller"] == "mcp-fixture" for e in evidence["calls"])
         assert TOKEN not in path.read_text()
-    restarted = build_parity_host(token=TOKEN, journal_path=path)
+    restarted = build_fixture_server(token=TOKEN, journal_path=path)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=restarted), base_url="http://qa", headers=headers
     ) as c:
         assert (await c.get("/calls")).json() == evidence
 
 
-def test_factory_refuses_other_lanes_and_missing_or_weak_credentials(
+def test_factory_refuses_unless_enabled_and_missing_or_weak_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("DAIMON_PARITY_CALL_LOG", str(tmp_path / "calls.jsonl"))
-    monkeypatch.setenv("DAIMON_PARITY_LANE", "staging")
-    with pytest.raises(ValueError, match="only run in the preview lane"):
-        create_app()
-    monkeypatch.setenv("DAIMON_PARITY_LANE", "preview")
-    monkeypatch.delenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", raising=False)
+    monkeypatch.setenv("DAIMON_MCP_FIXTURE_CALL_LOG", str(tmp_path / "calls.jsonl"))
+    monkeypatch.setenv("DAIMON_MCP_FIXTURE_TOKEN", TOKEN)
+    for enabled in (None, "false", "1"):
+        if enabled is None:
+            monkeypatch.delenv("DAIMON_MCP_FIXTURE_ENABLED", raising=False)
+        else:
+            monkeypatch.setenv("DAIMON_MCP_FIXTURE_ENABLED", enabled)
+        with pytest.raises(ValueError, match="DAIMON_MCP_FIXTURE_ENABLED"):
+            create_app()
+    monkeypatch.setenv("DAIMON_MCP_FIXTURE_ENABLED", "true")
+    monkeypatch.delenv("DAIMON_MCP_FIXTURE_TOKEN")
     with pytest.raises(KeyError):
         create_app()
     for token in ("", "short", TOKEN + "\n"):
-        monkeypatch.setenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", token)
+        monkeypatch.setenv("DAIMON_MCP_FIXTURE_TOKEN", token)
         with pytest.raises(ValueError, match="bearer"):
             create_app()
-    monkeypatch.setenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", TOKEN)
+    monkeypatch.setenv("DAIMON_MCP_FIXTURE_TOKEN", TOKEN)
     assert create_app()
+
+
+def test_old_entry_point_keeps_its_variables_and_refuses_other_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = preview_parity_mcp.create_app
+    monkeypatch.setenv("DAIMON_PARITY_CALL_LOG", str(tmp_path / "calls.jsonl"))
+    monkeypatch.setenv("DAIMON_PARITY_LANE", "staging")
+    with pytest.raises(ValueError, match="only run in the preview lane"):
+        old()
+    monkeypatch.setenv("DAIMON_PARITY_LANE", "preview")
+    monkeypatch.delenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", raising=False)
+    with pytest.raises(KeyError):
+        old()
+    for token in ("", "short", TOKEN + "\n"):
+        monkeypatch.setenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", token)
+        with pytest.raises(ValueError, match="bearer"):
+            old()
+    monkeypatch.setenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", TOKEN)
+    assert old()
 
 
 async def test_counter_reads_submissions_and_mislabeled_write_counts(tmp_path: Path) -> None:
     path = tmp_path / "calls.jsonl"
-    app = build_parity_host(token=TOKEN, journal_path=path)
+    app = build_fixture_server(token=TOKEN, journal_path=path)
     headers = {**INIT_HEADERS, "Authorization": f"Bearer {TOKEN}"}
     async with (
         asgi_lifespan(app),

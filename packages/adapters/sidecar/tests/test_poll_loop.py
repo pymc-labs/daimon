@@ -21,7 +21,7 @@ async def test_poll_loop_raises_for_misconfigured_executor(monkeypatch: pytest.M
         executor_secret=SecretStr("s" * 32),
     )
     async with asyncio.timeout(1):
-        with pytest.raises(ValueError, match="private OS service"):
+        with pytest.raises(ValueError, match="private watch executor"):
             await poll_loop(async_sessionmaker(), settings)
 
 

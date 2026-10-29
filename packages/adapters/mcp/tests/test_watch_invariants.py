@@ -1,4 +1,4 @@
-"""I1 prevents output feedback cycles; I2 proves the owner's card inside each tool."""
+"""Watches never trigger on their own output, and each tool proves the owner's card itself."""
 
 # ruff: noqa: F811
 
@@ -720,7 +720,7 @@ async def test_concurrent_executions_of_one_lease_fire_once(runtime_watch):
     ("tool", "arguments", "projection", "rule"),
     [
         ("send_message", {"channel_id": "1"}, ".", "change"),
-        ("artifact_db_query", {}, ".", "change"),
+        ("example_query", {}, ".", "change"),
         ("READ_THREAD", {"thread_id": "1"}, ".", "change"),
         ("read_thread", {}, ".", "change"),
         ("read_thread", {"thread_id": "1", "before": "2"}, ".", "change"),
@@ -777,7 +777,7 @@ async def test_i1_webhook_post_is_excluded_even_without_bot_flag():
 
 @pytest.mark.fresh_schema
 async def test_i2_shared_slot_unsupported_profile_refuses(attended_owner, monkeypatch):
-    """Admission reads the shared slot first on ever-shared threads; so must I2."""
+    """Admission reads the shared slot first on ever-shared threads; so must the card proof."""
     runtime, _, auth, origin = attended_owner
     monkeypatch.setattr(_session_gate, "session_card_gap", AsyncMock(return_value=None))
 

@@ -213,7 +213,7 @@ async def test_expired_watch_stops_polling_and_cancels_wake(db_session_factory, 
 
 
 @pytest.mark.parametrize(
-    "name", ["send_message", "create_watch", "http_get", "artifact_db_query", "shell"]
+    "name", ["send_message", "create_watch", "http_get", "example_query", "shell"]
 )
 def test_unreviewed_and_nonread_tools_cannot_enroll(name):
     with pytest.raises(ValueError):
@@ -360,7 +360,7 @@ async def test_poll_transport_requires_private_secret_and_origin(db_session_fact
     monkeypatch.setattr("daimon.adapters.sidecar.main.claim_poll_watches", claim)
     assert await poll_once(db_session_factory, http, origin="http://watch-executor:8767") == 0
     claim.assert_not_called()
-    with pytest.raises(ValueError, match="private OS service"):
+    with pytest.raises(ValueError, match="private watch executor"):
         await poll_once(
             db_session_factory, http, origin="http://mcp:8765", executor_secret="s" * 32
         )

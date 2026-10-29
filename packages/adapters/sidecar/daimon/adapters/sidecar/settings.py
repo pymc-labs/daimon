@@ -14,16 +14,16 @@ class SidecarSettings(BaseSettings):
 
     database_url: SecretStr = Field(
         description=(
-            "Lane database URL for a dedicated login granted only daimon_sidecar. "
+            "Database URL for a dedicated login granted only daimon_sidecar. "
             "Require TLS for remote databases."
         )
     )
     signing_keys: dict[str, SecretStr] = Field(
         default_factory=dict,
         description=(
-            "OS-host page-event HMAC keys by key ID, each at least 32 random bytes. "
-            "Supply from lane secret management; keys never enter browser HTML or watch rows. "
-            "Only configured OS page hosts may sign events; outside senders are unsupported."
+            "Page-event HMAC keys for page hosts, by key ID, each at least 32 random bytes. "
+            "Supply from your secret manager; keys never enter browser HTML or watch rows. "
+            "Only configured page hosts may sign events; outside senders are unsupported."
         ),
     )
     host: str = Field(
@@ -58,7 +58,9 @@ class SidecarSettings(BaseSettings):
     )
     os_executor_origin: Literal["http://watch-executor:8767", "http://127.0.0.1:8767"] = Field(
         default="http://watch-executor:8767",
-        description="Fixed private OS executor origin. No outside hosts, redirects or source URLs.",
+        description=(
+            "Fixed private watch executor origin. No outside hosts, redirects or source URLs."
+        ),
     )
     poll_interval_s: float = Field(
         default=5,
@@ -69,10 +71,12 @@ class SidecarSettings(BaseSettings):
 
     @field_validator("signing_keys")
     @classmethod
-    def bounded_os_keys(cls, keys: dict[str, SecretStr]) -> dict[str, SecretStr]:
+    def bounded_signing_keys(cls, keys: dict[str, SecretStr]) -> dict[str, SecretStr]:
         if len(keys) > 16 or any(
             not KEY_ID.fullmatch(name) or not 32 <= len(key.get_secret_value().encode()) <= 256
             for name, key in keys.items()
         ):
-            raise ValueError("Use at most sixteen OS keys, each 32 to 256 bytes, with safe key IDs")
+            raise ValueError(
+                "Use at most sixteen signing keys, each 32 to 256 bytes, with safe key IDs"
+            )
         return keys

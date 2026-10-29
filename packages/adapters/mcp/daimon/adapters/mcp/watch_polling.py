@@ -1,4 +1,4 @@
-"""Trusted OS executor for sidecar leases, using existing owner-authorized reads.
+"""Trusted watch executor for sidecar leases, using existing owner-authorized reads.
 
 The lease is an opaque short-lived scheduling capability, not a caller-selected
 identity. No source data or tool arguments cross the sidecar transport. Model
@@ -113,7 +113,7 @@ class SourceBusy(Exception):
 
 
 class UrlBudget:
-    """I8: at most `concurrent` polls at once and `per_minute` a minute per server URL,
+    """At most `concurrent` polls at once and `per_minute` a minute per server URL,
     so one slow server cannot use up the executor's shared budget."""
 
     def __init__(self, *, concurrent: int = 2, per_minute: int = 30) -> None:
@@ -163,7 +163,7 @@ def operator_denied(policy: ToolSafetyPolicy, *, server_name: str, tool: str) ->
 
 
 def attached_server(agent: Any, server_url: str, tool: str) -> str:  # noqa: ANN401 - MA agent
-    """I3: the agent still attaches exactly one server at this canonical URL, whatever its
+    """The agent still attaches exactly one server at this canonical URL, whatever its
     name, with the tool enabled. Returns that server's current name."""
     servers = [server for server in agent.mcp_servers if same_ascii_mcp_url(server.url, server_url)]
     if len(servers) != 1 or servers[0].name == DAIMON_SERVER_NAME:
@@ -191,7 +191,7 @@ async def poll_credential(
     server_url: str,
     credential: str,
 ) -> str | None:
-    """I9: decrypt exactly one credential, the agent-wide one for this exact URL, or none."""
+    """Decrypt exactly one credential, the agent-wide one for this exact URL, or none."""
     if credential == "none":
         return None
     if credential != "agent" or runtime.fernet is None:
@@ -275,8 +275,8 @@ async def authorize_source(
     runtime: McpRuntime,
     watch: WatchRow,
 ) -> tuple[AuthIdentity, ChannelReadPolicy, str | None]:
-    """I3 for every poll, before and after the read. Also returns the name the agent
-    attaches an MCP source under now, or None for a native source."""
+    """Recheck access for every poll, before and after the read. Also returns the name
+    the agent attaches an MCP source under now, or None for a native source."""
     server_name: str | None = None
     if watch.source in ("poll", "mcp_poll"):
         # The operator registry, read fresh each time: before and after every read.
@@ -327,7 +327,7 @@ async def authorize_source(
     if watch.source == "poll":
         public_url = runtime.settings.mcp.public_url
         if public_url is None:
-            raise PollAccessRevoked("OS endpoint unavailable")
+            raise PollAccessRevoked("Daimon MCP endpoint unavailable")
         tool = str(watch.source_state.get("tool"))
         servers = [server for server in agent.mcp_servers if server.name == DAIMON_SERVER_NAME]
         toolsets = [
@@ -340,7 +340,7 @@ async def authorize_source(
             or servers[0].url.rstrip("/") != str(public_url).rstrip("/")
             or len(toolsets) != 1
         ):
-            raise PollAccessRevoked("Agent OS toolset unavailable")
+            raise PollAccessRevoked("Agent MCP toolset unavailable")
         toolset = toolsets[0]
         configs = [config for config in toolset.configs if config.name == tool]
         config = configs[0] if len(configs) == 1 else toolset.default_config
@@ -436,7 +436,7 @@ async def authorize_source(
 async def read_native(
     runtime: McpRuntime, auth: AuthIdentity, read: ChannelReadPolicy, watch: WatchRow
 ) -> JsonValue:
-    """A reviewed Discord reader, as the owner, keeping only human-authored rows (I1)."""
+    """A reviewed Discord reader, as the owner, keeping only human-authored rows."""
     arguments = cast(dict[str, JsonValue], watch.source_state["arguments"])
     limit = int(str(arguments.get("limit", 10)))
     if watch.source_state["tool"] == "read_thread":
@@ -468,7 +468,7 @@ async def read_native(
 async def read_mcp(
     runtime: McpRuntime, watch: WatchRow, *, server_name: str, credential: str
 ) -> JsonValue:
-    """One `tools/list` and one `tools/call` on the exact registered URL (I4, I9).
+    """One `tools/list` and one `tools/call` on the exact registered URL.
 
     The listing is read with the poll's own credential. It must still match what
     the owner approved and still say the tool only reads; the hint can only
@@ -502,7 +502,7 @@ async def listed_read_tool(
     tool: str,
     arguments: dict[str, JsonValue],
 ) -> dict[str, JsonValue]:
-    """The tool's live listing, which must say it only reads and fit the arguments (I4)."""
+    """The tool's live listing, which must say it only reads and fit the arguments."""
     listed = [entry for entry in await source.list_tools() if entry.get("name") == tool]
     if len(listed) != 1:
         raise SourceChanged("That tool is not on its server's list")
@@ -576,7 +576,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     runtime, watch, server_name=server_name, credential=listed.credential
                 )
                 kind = "mcp_v1"
-            # The raw read is bounded (I7) and projected; only the projection is kept.
+            # The raw read is bounded and projected; only the projection is kept.
             projected = project(document, expression, limits=SOURCE, allow_map=True)
             value = kept(projected, rule=rule, key=key)
             previous = cast(JsonValue, watch.baseline.get("value"))
@@ -615,7 +615,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
             return True
     except SourceBusy:
         # This server's own budget is spent. Step back in the claim queue, or due
-        # watches on one busy server would fill every claim and starve the rest (R10).
+        # watches on one busy server would fill every claim and starve the rest.
         until = datetime.now(UTC) + timedelta(seconds=BUSY_DEFER_S + random.uniform(0, 30))
         async with runtime.session_factory.begin() as db:
             await defer_busy_poll(db, watch_id, lease, until=until)

@@ -51,11 +51,11 @@ async def definition(db_session_factory, monkeypatch):
         idempotency_key=uuid.uuid4(),
     )
     return ImportedWatch(
-        legacy_id="internal-4",
+        legacy_id="watch-4",
         os_binding=binding,
         source="poll",
         instructions="Report changes.",
-        tool="artifact_db_query",
+        tool="example_query",
         arguments={"collection": "legacy"},
         expires_at=datetime.now(UTC) + timedelta(days=1),
         baseline={"value": False},
@@ -75,7 +75,7 @@ async def test_unmapped_import_is_paused_and_notice_never_resumes(db_session_fac
     assert deliver.await_args.args[0].owner_external_id == "123"
     assert deliver.await_args.args[2].endswith(f": {UNMAPPED_NOTICE}")
     assert str(deliver.await_args.args[0].id) in deliver.await_args.args[2]
-    assert UNMAPPED_NOTICE == "this watch is paused until page data moves to Daimon OS"
+    assert UNMAPPED_NOTICE == "this watch is paused: its source can't be polled here"
     await poll_watch_notices(db_session_factory, deliver=deliver)
     deliver.assert_awaited_once()
     async with db_session_factory.begin() as db:
@@ -101,7 +101,7 @@ async def test_unmapped_import_is_paused_and_notice_never_resumes(db_session_fac
 
 async def test_import_is_idempotent_and_never_copies_a_signing_key(db_session_factory, definition):
     page = definition.model_copy(
-        update={"source": "page_event", "page_id": str(uuid.uuid4()), "legacy_id": "internal-1"}
+        update={"source": "page_event", "page_id": str(uuid.uuid4()), "legacy_id": "watch-1"}
     )
     async with db_session_factory.begin() as db:
         first = await watches.import_watch(db, page, now=datetime.now(UTC))
@@ -119,7 +119,7 @@ async def test_import_is_idempotent_and_never_copies_a_signing_key(db_session_fa
                 now=datetime.now(UTC),
             )
     payload = page.model_dump(mode="json")
-    payload["signing_key"] = "never-copy-internal-secrets"
+    payload["signing_key"] = "never-copy-signing-keys"
     with pytest.raises(ValidationError):
         ImportedWatch.model_validate(payload)
 
@@ -359,43 +359,25 @@ async def test_import_confirmation_cannot_activate_self_reporting_source(
         ),
     ],
 )
-async def test_internal_discord_manifest_import(
+async def test_discord_manifest_import(
     db_session_factory, definition, tool, arguments, expected, error
 ):
-    # Source: daimon-internal/apps/bot/src_v2/db/models/watch.py
-    # WatchDefinition and core/watches/model.py WatchState. The internal checkout
-    # has no exporter; docs/self-hosting.md specifies this operator-built export:
-    # tool_args -> arguments, select_expr -> projection, interval_seconds ->
-    # interval, state.value -> baseline.value, with a verified OS binding.
-    internal = {
-        "id": "00000000-0000-0000-0000-000000000004",
-        "source": "poll",
-        "instructions": "Report changes.",
-        "tool": tool,
-        "tool_args": arguments,
-        "select_expr": ".",
-        "rule": "change",
-        "interval_seconds": 600,
-        "state": {"value": False, "delivery_hashes": []},
-        "expires_at": definition.expires_at.isoformat(),
-        "max_turns_per_day": 24,
-    }
     manifest = {
         "version": 1,
         "watches": [
             {
-                "legacy_id": internal["id"],
+                "legacy_id": "watch-4",
                 "os_binding": definition.os_binding.model_dump(mode="json"),
-                "source": internal["source"],
-                "instructions": internal["instructions"],
-                "tool": internal["tool"],
-                "arguments": internal["tool_args"],
-                "projection": internal["select_expr"],
-                "rule": internal["rule"],
-                "interval": internal["interval_seconds"],
-                "baseline": {"value": internal["state"]["value"]},
-                "expires_at": internal["expires_at"],
-                "max_turns_per_day": internal["max_turns_per_day"],
+                "source": "poll",
+                "instructions": "Report changes.",
+                "tool": tool,
+                "arguments": arguments,
+                "projection": ".",
+                "rule": "change",
+                "interval": 600,
+                "baseline": {"value": False},
+                "expires_at": definition.expires_at.isoformat(),
+                "max_turns_per_day": 24,
             }
         ],
     }
