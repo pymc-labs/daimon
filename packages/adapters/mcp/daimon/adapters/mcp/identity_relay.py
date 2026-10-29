@@ -29,7 +29,7 @@ from daimon.core.mcp_identity import (
     parse_relay_claim,
 )
 from daimon.core.stores.domain import TurnOriginRow
-from daimon.core.stores.thread_sessions import get_live_thread_session, get_thread_session_by_id
+from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import list_active_origins
 from fastmcp.server.auth.auth import TokenVerifier
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -103,7 +103,6 @@ async def _session_turn(
     agent_id: uuid.UUID,
     platform: str,
     now: datetime,
-    require_current: bool = False,
 ) -> TurnOriginRow | None:
     """The person's turn the calling session is running now, or None.
 
@@ -121,16 +120,6 @@ async def _session_turn(
             or (row.tenant_id, row.account_id, row.platform) != (tenant_id, account_id, platform)
         ):
             return None
-        if require_current:
-            current = await get_live_thread_session(
-                session,
-                tenant_id=tenant_id,
-                platform=platform,
-                thread_id=row.thread_id,
-                account_id=account_id,
-            )
-            if current is None or current.id != row.id:
-                return None
         origins = await list_active_origins(
             session, tenant_id=tenant_id, account_id=account_id, platform=platform, now=now
         )
@@ -168,8 +157,6 @@ def build_identity_relay_route(
             return Response(status_code=403)
         if claims.get(TOKEN_KIND_CLAIM) != "agent":
             return Response(status_code=403)
-        if server.isolate_context and not binding.isolated:
-            return Response(status_code=403)
         platform = str(claims.get("platform") or "")
         workspace = claims.get("external_id")
         workspace = workspace if isinstance(workspace, str) else None
@@ -188,20 +175,11 @@ def build_identity_relay_route(
             agent_id=agent_id,
             platform=platform,
             now=now,
-            require_current=server.isolate_context,
         )
         # A sender from another organisation is not one of the workspace's own
         # people: the server must not apply a member's permissions to them.
         if origin is not None and (origin.sender_foreign or FOREIGN_HOME_CLAIM in claims):
             origin = None
-        if server.isolate_context and (
-            origin is None
-            or not isinstance(person, str)
-            or not person
-            or not origin.platform_channel_id
-            or not origin.platform_message_id
-        ):
-            return Response(status_code=403)
         identity = caller_claims(
             issuer=server.issuer,
             audience=server.audience,

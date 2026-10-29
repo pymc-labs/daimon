@@ -18,7 +18,6 @@ from daimon.core.authz import Action, SessionFacts, Subject, Surface, authorize,
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_CHANNEL,
-    MA_METADATA_KEY_CONTEXT_ISOLATED,
     MA_METADATA_KEY_PRIVATE_DM,
     is_private_routine_stamp,
 )
@@ -31,12 +30,6 @@ _SEALED_SESSION_MSG = (
     "this conversation ran in a channel read only from inside: its transcript can only "
     "be read or continued from a conversation inside that channel. Tell the caller. Do not retry."
 )
-
-
-def require_session_content_access(session: BetaManagedAgentsSession) -> None:
-    """Keep an isolated source transcript out of later model-accessible tool reads."""
-    if (session.metadata or {}).get(MA_METADATA_KEY_CONTEXT_ISOLATED) == "true":
-        raise ToolError("This conversation's transcript is unavailable through this tool.")
 
 
 @dataclass(frozen=True)
