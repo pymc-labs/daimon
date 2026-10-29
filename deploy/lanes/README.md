@@ -1,13 +1,30 @@
-# Dev lanes
+# Self-host with Compose
 
-Staging tracks `main`. A lane is separate: a Preview lane deploys a chosen branch on demand, and an agent lane is for agents.
+`compose.lane.yml` runs Postgres, migrations and defaults, the MCP server, the Discord bot, and the scheduler. The Slack adapter is optional. The file publishes no ports; connect the MCP service to your own reverse proxy or add a port mapping in a local Compose override.
 
-Push a branch named `lane/<you>` to deploy its current commit:
+Build an image from the repository root:
 
 ```sh
-git push origin HEAD:lane/yourname
+docker build -t daimon:local .
 ```
 
-From the **Dev lane** GitHub Actions workflow, select that branch and dispatch `deploy`, `status`, `down`, or `reset`. A push deploys automatically. `down` stops the lane. `reset` stops its services, wipes the lane's disposable Anthropic workspace, removes its database volume, then redeploys the recorded image. The workspace must carry the disposable marker used by the contract tests; reset refuses to wipe without it.
+Create `deploy/lanes/.env` with values for your deployment. The Compose file requires these settings:
 
-Each lane uses its own environment and repository variables for deployment. The host keeps the lane's secrets in a root-owned `.env` file. No container ports are published by this Compose file.
+```dotenv
+DAIMON_LANE_IMAGE=daimon:local
+DAIMON_LANE_SHA=local
+POSTGRES_PASSWORD=replace-with-a-database-password
+DAIMON_ANTHROPIC__API_KEY=replace-with-your-api-key
+DAIMON_MCP__JWT_SECRET=replace-with-a-random-secret
+DAIMON_MCP__PUBLIC_URL=https://your-domain.example/mcp
+DAIMON_DISCORD__BOT_TOKEN=replace-with-your-bot-token
+```
+
+Keep `.env` private. See [the environment reference](../../.env.example) for other settings. Then start the services:
+
+```sh
+cd deploy/lanes
+docker compose --env-file .env -f compose.lane.yml up -d
+```
+
+To run Slack, add its credentials from `.env.example` and include `--profile slack` before `up`. For a fuller installation guide, see [self-hosting](../../docs/self-hosting.md).
