@@ -45,10 +45,7 @@ from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
 from daimon.core.confirmation import confirmed_tools_for_turn
-from daimon.core.defaults.metadata import (
-    MA_METADATA_KEY_BUDGET_CHANNEL,
-    MA_METADATA_KEY_CONTEXT_ISOLATED,
-)
+from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
@@ -344,8 +341,6 @@ async def _destination_may_carry(
             session_id=row.ma_session_id,
             error=type(error).__name__,
         )
-        return False
-    if (previous.metadata or {}).get(MA_METADATA_KEY_CONTEXT_ISOLATED) == "true":
         return False
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=row.tenant_id)
@@ -644,7 +639,6 @@ async def prepare_session_for_turn(
     thread_id: str,
     session_account_id: uuid.UUID,
     reuse_existing: bool,
-    isolate_context: bool = False,
     capabilities: MaCapabilities = DEFAULT_MA_CAPABILITIES,
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
@@ -664,7 +658,6 @@ async def prepare_session_for_turn(
                 thread_id=thread_id,
                 session_account_id=session_account_id,
                 reuse_existing=reuse_existing,
-                isolate_context=isolate_context,
                 capabilities=capabilities,
                 transfer=transfer,
                 deadline=deadline,
@@ -736,7 +729,6 @@ async def _prepare_session_for_turn_locked(
     thread_id: str,
     session_account_id: uuid.UUID,
     reuse_existing: bool,
-    isolate_context: bool = False,
     capabilities: MaCapabilities = DEFAULT_MA_CAPABILITIES,
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
@@ -826,7 +818,7 @@ async def _prepare_session_for_turn_locked(
             thread_id=thread_id,
             account_id=session_account_id,
         )
-        if reuse_existing or isolate_context
+        if reuse_existing
         else None
     )
     async with deps.sessionmaker() as db, db.begin():
@@ -849,7 +841,7 @@ async def _prepare_session_for_turn_locked(
                 thread_id=thread_id,
                 account_id=session_account_id,
             )
-            if reuse_existing or isolate_context
+            if reuse_existing
             else None
         )
 
@@ -871,7 +863,6 @@ async def _prepare_session_for_turn_locked(
         handed_over = False
         source_exists = True
         recorded: SessionSnapshot | None = None
-        source_isolated = bool(row.effective_config and row.effective_config.context_isolated)
         try:
             identity = await check_session_agent(
                 deps.anthropic,
@@ -894,10 +885,6 @@ async def _prepare_session_for_turn_locked(
             ):
                 observed = stamp_observation[1]
             if identity.session_exists:
-                source_isolated = source_isolated or bool(
-                    observed is not None
-                    and (observed.metadata or {}).get(MA_METADATA_KEY_CONTEXT_ISOLATED) == "true"
-                )
                 if row.budget_channel_id == "" and stamp_observation is None:
                     # The pre-lock MA read failed. A second read of the same
                     # legacy session must not prevent its turn from running.
@@ -906,11 +893,8 @@ async def _prepare_session_for_turn_locked(
                     recorded = await recorded_snapshot(
                         deps.anthropic, deps.sessionmaker, existing=row, observed=observed
                     )
-                source_isolated = source_isolated or bool(recorded and recorded.context_isolated)
             if (
                 recorded is None
-                and not isolate_context
-                and not source_isolated
                 and not fresh_start
                 and not admission.memory_read_only
                 and admission.hold is None
@@ -968,7 +952,7 @@ async def _prepare_session_for_turn_locked(
             # A held place's memory is its channel's, shared thread or not.
             memory_hold=admission.hold,
         )
-        if isolate_context or source_isolated or fresh_start:
+        if fresh_start:
             decision = ReplaceSession(reasons=())
         elif handed_over:
             decision = ReplaceSession(reasons=("agent_identity",))
@@ -1070,8 +1054,6 @@ async def _prepare_session_for_turn_locked(
                 or "budget_channel" in decision.reasons
                 or tightening_memory
                 or leaving_memory
-                or isolate_context
-                or source_isolated
             )
             and turn_is_active(row, now=moment)
         ):
@@ -1110,9 +1092,7 @@ async def _prepare_session_for_turn_locked(
         if isinstance(decision, ReplaceSession):
             # A handoff carries the old work only to an agent that could read
             # it itself from here; otherwise the new agent starts with nothing.
-            carry = not source_isolated and (
-                not handed_over or await _destination_may_carry(deps, admission, row)
-            )
+            carry = not handed_over or await _destination_may_carry(deps, admission, row)
             await lock_session_mutation(db, row.ma_session_id)
             observed = None
             if source_exists:
@@ -1155,15 +1135,7 @@ async def _prepare_session_for_turn_locked(
                 # A checkpoint executes the old session. Never run it with
                 # a writable mount after the origin has become read-only, and
                 # never carry what it read from a store the place has left.
-                transfer=(
-                    None
-                    if isolate_context
-                    or source_isolated
-                    or tightening_memory
-                    or leaving_memory
-                    or not carry
-                    else transfer
-                ),
+                transfer=None if tightening_memory or leaving_memory or not carry else transfer,
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,
@@ -1173,11 +1145,7 @@ async def _prepare_session_for_turn_locked(
             )
             if isinstance(outcome, PreparationFailure):
                 return outcome
-            return await from_fresh(
-                outcome.fresh,
-                outcome.continuity,
-                None if isolate_context or source_isolated else recorded,
-            )
+            return await from_fresh(outcome.fresh, outcome.continuity, recorded)
 
         assert recorded is not None, "an in-place path always has a recorded snapshot"
         applying: tuple[UpdateOp, ...] = decision.ops if isinstance(decision, UpdateInPlace) else ()

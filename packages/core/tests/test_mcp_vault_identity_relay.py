@@ -19,7 +19,6 @@ from daimon.core.mcp_identity import (
     relay_url,
 )
 from daimon.core.mcp_vault import (
-    RELAY_ISOLATED_METADATA_KEY,
     RELAY_METADATA_KEY,
     archive_relay_vaults,
     chat_mcp_credential,
@@ -196,7 +195,7 @@ async def test_refresh_keeps_the_binding_and_adds_a_relay_attached_since(
 ) -> None:
     key = uuid.uuid4()
     vault, account_id, agent_id = await _relay_vault(
-        db_session_factory, RelayBinding("Helper", key, isolated=True), RELAY
+        db_session_factory, RelayBinding("Helper", key), RELAY
     )
     old = vault.by_url(RELAY)["auth"]["token"]
 
@@ -209,8 +208,6 @@ async def test_refresh_keeps_the_binding_and_adds_a_relay_attached_since(
     assert renewed["auth"]["token"] != old, "a credential near expiry is re-minted"
     assert added["auth"]["token"] == renewed["auth"]["token"], "the new relay gets the same one"
     assert _signed(added)[RELAY_CLAIM]["session"] == str(key), "the binding survives a refresh"
-    assert _signed(added)[RELAY_CLAIM]["isolated"] is True
-    assert renewed["metadata"][RELAY_ISOLATED_METADATA_KEY] == "true"
 
 
 async def test_fresh_relay_vault_and_other_vaults_are_left_alone(
