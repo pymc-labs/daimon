@@ -113,13 +113,15 @@ def answered(text: str) -> bool:
 def ask(discord: Discord, check: Check, label: str, wait_s: float) -> None:
     """Post the canary question and wait for Daimon's settled answer in the thread
     Daimon opens on that message (its id is the message's id)."""
+    # The clock starts before the post, so a slow post response counts too.
+    check.started = time.time()
     sent = discord.call(
         "POST",
         f"/channels/{check.channel}/messages",
         {"content": f"<@{DAIMON_BOT}> {PROMPT} ({label})"},
     )
     assert isinstance(sent, dict)
-    check.sent, check.started = str(sent["id"]), time.time()
+    check.sent = str(sent["id"])
     check.thread = check.sent
     while time.time() - check.started < wait_s:
         time.sleep(5)
@@ -289,9 +291,14 @@ def main() -> int:
     args = parser.parse_args()
     checks = [Check(b, CHANNELS[b]) for b in (args.backend or sorted(CHANNELS))]
     run(checks, 0.0 if args.force_fail else args.limit, args.limit)
+    reported = True
     for check in checks:
-        report(check, args.run_url)
-    return 0 if all(c.ok for c in checks) else 1
+        try:
+            report(check, args.run_url)
+        except Exception as error:
+            print(f"report failed for {check.backend}: {type(error).__name__}", file=sys.stderr)
+            reported = False
+    return 0 if reported and all(c.ok for c in checks) else 1
 
 
 if __name__ == "__main__":

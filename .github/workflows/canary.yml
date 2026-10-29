@@ -61,4 +61,4 @@ jobs:
         run: |
           gcloud logging write daimon-canary \
             "{\"event\": \"canary.turn\", \"env\": \"staging\", \"backend\": \"all\", \"problem\": \"the canary run failed\", \"run_url\": \"$RUN_URL\"}" \
-            --payload-type=json --severity=ERROR --project="${{ vars.GCP_PROJECT_ID }}"
+            --payload-type=json --severity=ERROR --project=pymc-daimon-staging
