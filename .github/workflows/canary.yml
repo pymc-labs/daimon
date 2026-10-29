@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       force_fail:
-        description: "Judge against a 1 s limit so every backend fails and the alert fires"
+        description: "Judge against a 0 s limit so every backend fails and the alert fires"
         type: boolean
         default: false
 
@@ -51,3 +51,14 @@ jobs:
           FORCE_FAIL: ${{ inputs.force_fail && '--force-fail' || '' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python3 scripts/staging_canary.py --run-url "$RUN_URL" $FORCE_FAIL
+
+      # The script reports each backend itself; this catches a run that died
+      # before it could (or whose own log write failed), so the alert still fires.
+      - name: Alert on a run that could not report
+        if: failure()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gcloud logging write daimon-canary \
+            "{\"event\": \"canary.turn\", \"env\": \"staging\", \"backend\": \"all\", \"problem\": \"the canary run failed\", \"run_url\": \"$RUN_URL\"}" \
+            --payload-type=json --severity=ERROR --project="${{ vars.GCP_PROJECT_ID }}"
