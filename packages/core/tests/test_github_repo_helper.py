@@ -525,3 +525,145 @@ def test_push_refuses_a_push_url_redirected_away_from_the_repo(tmp_path: Path) -
         assert "opaque-placeholder" not in refused.stdout + refused.stderr
         subprocess.run([real_git, "-C", str(clone), "config", "--unset", key], check=True)
     assert not (capture / "push-args").exists()
+
+
+_REAL_GIT = shutil.which("git") or ""
+_IDENTITY = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+
+
+def _git(repo: Path, *args: str) -> str:
+    """Run real git in `repo` and return stdout."""
+    return subprocess.run(
+        [_REAL_GIT, "-C", str(repo), *_IDENTITY, *args],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+
+
+def _remote_refs(bare: Path) -> dict[str, str]:
+    """Every ref in the bare repo mapped to the object it points at."""
+    listing = _git(bare, "for-each-ref", "--format=%(refname) %(objectname)")
+    return dict(line.split(" ") for line in listing.splitlines())
+
+
+def _real_push_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
+    """The push fixture, but `git push` really runs and lands in a local bare repo.
+
+    The wrapper adds an `insteadOf` rewrite only to the push command, so the
+    helper's own origin check still sees the GitHub URL while the transfer goes
+    to the bare repo and every `remote.origin.*` / `push.*` setting still applies.
+    The bare repo holds a `main` and a `feature` whose histories diverge from
+    the clone's, plus a `stale` branch the clone does not have.
+    """
+    script, env, _, clone = _push_fixture(tmp_path)
+    assert _REAL_GIT
+    _git(clone, "checkout", "-q", "feature")
+    _git(clone, "commit", "-q", "--allow-empty", "-m", "local feature work")
+    _git(clone, "checkout", "-q", "main")
+    _git(clone, "branch", "-f", "other/nested", "feature")
+
+    bare = tmp_path / "remote.git"
+    subprocess.run([_REAL_GIT, "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    seed = tmp_path / "seed"
+    subprocess.run([_REAL_GIT, "init", "-q", "-b", "main", str(seed)], check=True)
+    _git(seed, "commit", "-q", "--allow-empty", "-m", "remote main")
+    _git(seed, "branch", "stale")
+    _git(seed, "branch", "remote-feature")
+    _git(seed, "checkout", "-q", "remote-feature")
+    _git(seed, "commit", "-q", "--allow-empty", "-m", "remote feature work")
+    _git(
+        seed,
+        "push",
+        "-q",
+        str(bare),
+        "main:refs/heads/main",
+        "stale:refs/heads/stale",
+        "remote-feature:refs/heads/remote-feature",
+    )
+
+    wrapper = tmp_path / "bin" / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = push ]; then\n'
+        f"    exec {_REAL_GIT} -c url.{bare}.insteadOf=https://github.com/ownerb/REPOB.git "
+        '"$@"\n'
+        "  fi\n"
+        "done\n"
+        f'exec {_REAL_GIT} "$@"\n'
+    )
+    return script, env, clone, bare
+
+
+def test_real_push_lands_the_named_branches_in_the_remote(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    before = _remote_refs(bare)
+
+    pushed = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature", "other/nested")
+    assert pushed.returncode == 0, pushed.stderr
+    feature = _git(clone, "rev-parse", "refs/heads/feature")
+    assert _remote_refs(bare) == {
+        **before,
+        "refs/heads/feature": feature,
+        "refs/heads/other/nested": feature,
+    }
+
+
+def test_real_push_ignores_a_configured_forcing_remapping_refspec(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    _git(clone, "config", "remote.origin.push", "+refs/heads/feature:refs/heads/main")
+    before = _remote_refs(bare)
+
+    pushed = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    assert pushed.returncode == 0, pushed.stderr
+    after = _remote_refs(bare)
+    assert after["refs/heads/main"] == before["refs/heads/main"]
+    assert after == {**before, "refs/heads/feature": _git(clone, "rev-parse", "feature")}
+
+
+def test_real_push_does_not_force_a_diverged_remote_branch(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    _git(clone, "config", "remote.origin.push", "+refs/heads/*:refs/heads/*")
+    _git(clone, "config", "push.default", "matching")
+    diverged = _git(bare, "rev-parse", "refs/heads/remote-feature")
+    _git(bare, "update-ref", "refs/heads/feature", diverged)
+    before = _remote_refs(bare)
+
+    rejected = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    assert rejected.returncode != 0
+    assert "[rejected]" in rejected.stderr
+    assert _remote_refs(bare) == before
+
+
+def test_real_push_with_mirror_config_deletes_and_overwrites_nothing(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    _git(clone, "config", "remote.origin.mirror", "true")
+    before = _remote_refs(bare)
+    assert {"refs/heads/main", "refs/heads/stale", "refs/heads/remote-feature"} <= set(before)
+
+    _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    after = _remote_refs(bare)
+    assert set(before) <= set(after), "no remote ref may be deleted"
+    assert {ref: oid for ref, oid in after.items() if ref in before} == before
+    assert set(after) - set(before) <= {"refs/heads/feature"}
+
+
+def test_real_push_follow_tags_adds_only_new_tags_for_the_pushed_commits(tmp_path: Path) -> None:
+    script, env, clone, bare = _real_push_fixture(tmp_path)
+    _git(clone, "config", "push.followTags", "true")
+    _git(clone, "tag", "-a", "-m", "release", "v1", "feature")
+    _git(clone, "checkout", "-q", "-b", "side", "main")
+    _git(clone, "commit", "-q", "--allow-empty", "-m", "unpushed side work")
+    _git(clone, "tag", "-a", "-m", "elsewhere", "v0", "side")
+    _git(clone, "checkout", "-q", "main")
+    before = _remote_refs(bare)
+
+    pushed = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    assert pushed.returncode == 0, pushed.stderr
+    after = _remote_refs(bare)
+    assert {ref: oid for ref, oid in after.items() if ref in before} == before
+    # Documented git behaviour: followTags adds annotated tags reachable from
+    # the pushed branch. Tags are never moved or deleted, and `v0` (reachable
+    # only from the unpushed `side` branch) stays local.
+    assert set(after) - set(before) == {"refs/heads/feature", "refs/tags/v1"}
