@@ -396,6 +396,69 @@ _WATCH_DELIVERY: Final[dict[str, str]] = {
     "new_thread": "a new public thread each time",
 }
 
+#: The same places on an edit card, which may be shown outside the watch's thread.
+_WATCH_EDIT_DELIVERY: Final[dict[str, str]] = {
+    **_WATCH_DELIVERY,
+    "thread": "its own thread",
+}
+
+#: What an edit card names each changed field, in the order it shows them.
+_WATCH_EDIT_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("instructions", "Instructions"),
+    ("arguments", "Checks"),
+    ("projection", "Looks at"),
+    ("rule", "Reports when"),
+    ("key", "Compares by"),
+    ("evidence", "Shows"),
+    ("interval", "Checks every (seconds)"),
+    ("lasts", "Lasts"),
+    ("max_turns_per_day", "Reports a day at most"),
+)
+
+
+def _watch_lasts(data: dict[str, object]) -> str | None:
+    """How long a watch on this card runs; None when the call leaves it as it is."""
+    if data.get("permanent") is True:
+        return "permanent"
+    days = data.get("lifetime_days")
+    if days is None:
+        return None
+    return f"{_one_line(days, limit=12)} days"
+
+
+def _watch_value(value: object) -> str:
+    if value is None or value in ("", [], {}):
+        return "none"
+    if isinstance(value, dict | list):
+        value = json.dumps(value, separators=(",", ":"), sort_keys=True)
+    return _one_line(value, limit=60)
+
+
+def _watch_edit_lines(data: dict[str, object]) -> tuple[str, ...]:
+    """Where the watch reports, then each change as old → new.
+
+    The old values come from the call, and `update_watch` refuses unless they
+    are exactly what is stored, so the card never shows a made-up "before".
+    """
+    raw = data.get("before")
+    before = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
+    old = str(before.get("delivery") or "thread")
+    new = str(data.get("delivery") or old)
+
+    def place(value: str) -> str:
+        return _WATCH_EDIT_DELIVERY.get(value, _one_line(value, limit=40))
+
+    reports_to = place(new) if new == old else f"{place(old)} → {place(new)}"
+    after = {**data, "lasts": _watch_lasts(data)}
+    return (
+        f"Reports to: {reports_to}",
+        *(
+            f"{label}: {_watch_value(before.get(field))} → {_watch_value(after[field])}"
+            for field, label in _WATCH_EDIT_FIELDS
+            if after.get(field) is not None
+        ),
+    )
+
 
 def prompt_for_tool_call(
     call: ToolCall,
@@ -641,8 +704,21 @@ def prompt_for_tool_call(
         delivery = data.get("delivery") or "thread"
         # Always the first line, whatever order the fields came in.
         reports_to = _WATCH_DELIVERY.get(str(delivery), _one_line(delivery, limit=40))
-        rest = {key: value for key, value in data.items() if key != "delivery"}
-        detail_lines = (f"Reports to: {reports_to}", *_generic_details(rest))
+        shown = {"delivery", "permanent", "lifetime_days", "max_turns_per_day"}
+        rest = {key: value for key, value in data.items() if key not in shown}
+        daily = data.get("max_turns_per_day")
+        detail_lines = (
+            f"Reports to: {reports_to}",
+            f"Lasts: {_watch_lasts(data) or '7 days'}",
+            *(() if daily is None else (f"Reports a day at most: {_one_line(daily, limit=12)}",)),
+            *_generic_details(rest),
+        )
+    elif call.tool_name == "update_watch" and own_server:
+        action = "Change watch"
+        title = "Change this watch?"
+        denied_action = "Watch not changed"
+        consequence = "Reports queued before the change are dropped."
+        detail_lines = _watch_edit_lines(data)
     else:
         verb = call.tool_name.replace("_", " ").capitalize()
         subject = title_value or name

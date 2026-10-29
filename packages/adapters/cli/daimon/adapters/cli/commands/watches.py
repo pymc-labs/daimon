@@ -24,12 +24,16 @@ from daimon.core.stores.watches import (
     import_watch,
     list_notice_receipts,
     list_tenant_watches,
+    set_watch_limits,
+    watch_ceilings,
 )
 
 watches_app = typer.Typer(
-    help="List a tenant's watches and their owner-notice receipts, import paused watches "
-    "and confirm reviewed bindings."
+    help="List a tenant's watches and their owner-notice receipts, import paused watches, "
+    "confirm reviewed bindings and set daily firing limits."
 )
+limits_app = typer.Typer(help="Daily firing limits for every watch, or one tenant's.")
+watches_app.add_typer(limits_app, name="limits")
 
 
 def _listed(item: WatchActivity, names: dict[tuple[str, str], str | None]) -> dict[str, object]:
@@ -48,7 +52,7 @@ def _listed(item: WatchActivity, names: dict[tuple[str, str], str | None]) -> di
         "parent_channel_id": row.parent_channel_id,
         "thread_id": row.thread_id,
         "agent_id": row.agent_id,
-        "expires_at": row.expires_at.isoformat(),
+        "expires_at": row.expires_at.isoformat() if row.expires_at else "permanent",
         "fires_today": item.fires_today,
         "last_fired_at": item.last_fired_at.isoformat() if item.last_fired_at else None,
         "errors": row.consecutive_errors,
@@ -217,3 +221,58 @@ def confirm_command(
             typer.echo(f"{row.id} {row.status}")
 
     asyncio.run(run())
+
+
+ScopeOption = Annotated[
+    str, typer.Option("--scope", help="global, or tenant:TENANT_UUID to override it for one tenant")
+]
+
+
+@limits_app.command("set")
+def limits_set_command(
+    scope: ScopeOption,
+    per_watch: Annotated[
+        int | None,
+        typer.Option("--per-watch", min=1, max=240, help="Most reports one watch makes a day"),
+    ] = None,
+    per_owner: Annotated[
+        int | None,
+        typer.Option(
+            "--per-owner", min=1, max=1000, help="Most reports one owner's watches make a day"
+        ),
+    ] = None,
+) -> None:
+    """Set the daily limits for --scope; a limit left out returns to its default (24 and 100).
+
+    Every firing reads them, so a lowered limit holds from the next firing. A watch
+    can ask for more than 24 a day only up to this limit, and only with an admin.
+    """
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime, runtime.sessionmaker.begin() as db:
+            await set_watch_limits(db, scope=scope, per_watch=per_watch, per_owner=per_owner)
+
+    try:
+        asyncio.run(run())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--scope") from None
+    typer.echo(f"{scope}: per watch {per_watch or 'default'}, per owner {per_owner or 'default'}")
+
+
+@limits_app.command("show")
+def limits_show_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Show the daily limits in force for --tenant: its own, else the global ones, else defaults."""
+
+    async def run() -> dict[str, int]:
+        async with build_runtime(load_settings()) as runtime, runtime.sessionmaker() as db:
+            ceilings = await watch_ceilings(db, tenant)
+        return {"per_watch": ceilings.per_watch, "per_owner": ceilings.per_owner}
+
+    limits = asyncio.run(run())
+    if as_json:
+        typer.echo(json.dumps(limits))
+        return
+    typer.echo(f"per watch {limits['per_watch']}, per owner {limits['per_owner']}")

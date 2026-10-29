@@ -164,6 +164,8 @@ async def _recorded_as_gated(
     Non-watch actions also recognize the pre-watch hash format, omitting only
     the newly added watch gates. The requested action must still ask in that
     exact recorded template. Watch enrollment never uses this compatibility path.
+    A session bound before `update_watch` was gated proves every other card it
+    gated, never an edit.
     """
     recorded = live.effective_config
     if recorded is None:
@@ -218,8 +220,13 @@ async def _recorded_as_gated(
     for confirmed_tools, pre_watch in dict.fromkeys(
         (candidate | lead_tools | watch_tools, not watch_tools)
         for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
-        for watch_tools in (WATCH_CONFIRMED_TOOLS, frozenset[str]())
-        if watch_tools or tool_name not in WATCH_CONFIRMED_TOOLS
+        for watch_tools in (
+            WATCH_CONFIRMED_TOOLS,
+            WATCH_CONFIRMED_TOOLS - {"update_watch"},
+            frozenset[str](),
+        )
+        if (watch_tools or tool_name not in WATCH_CONFIRMED_TOOLS)
+        and (tool_name in watch_tools or tool_name != "update_watch")
     ):
         for asks_before_publishing in (False, True):
             for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):

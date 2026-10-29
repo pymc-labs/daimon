@@ -2302,8 +2302,12 @@
         keeps only short fingerprints of the keys, and `evidence` lists up to 8 fields
         (such as `.content`) to report for each new item. One report holds at most 20
         items and counts the rest as omitted.
-        Lifetime is 1–30 days. Producers remain disabled until both operator gates
-        are enabled. Page-event watches are refused until a producer exists.
+        Lifetime is 1–30 days. `permanent=true` has no end date and needs the owner
+        to be a freshly checked admin; a permanent watch paused for 30 days expires,
+        and an owner has at most 5. `max_turns_per_day` (default 24) is how many
+        reports a day this watch may make, up to the ceiling whoever runs Daimon sets;
+        above 24 also needs an admin. Producers remain disabled until both operator
+        gates are enabled. Page-event watches are refused until a producer exists.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2365,8 +2369,23 @@
             'default': 7,
             'type': 'integer',
           }),
+          'max_turns_per_day': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
           'origin_context_id': dict({
             'type': 'string',
+          }),
+          'permanent': dict({
+            'default': False,
+            'type': 'boolean',
           }),
           'projection': dict({
             'default': '.',
@@ -7861,6 +7880,172 @@
         'type': 'object',
       }),
     }),
+    'preview_watch_edit': dict({
+      'description': '''
+        Show what an edit to your watch would change, old and new, without changing it.
+        <blank line>
+        Call this first, then `update_watch` with the same changes, `expected_revision`
+        set to `revision` and `before` exactly as returned. Only the owner can edit; an
+        admin can pause, delete and list another owner's watch but not edit it. Leave
+        a field out to keep it. `key=""` and `evidence=[]` remove them. The tool and its
+        server never change: make a new watch for another source. `lifetime_days`
+        (1–30) counts from approval; `permanent=true` and `max_turns_per_day` above 24
+        need the owner to be an admin (`needs_admin`).
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'JsonValue': dict({
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'arguments': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': dict({
+                  '$ref': '#/$defs/JsonValue',
+                }),
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'delivery': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'thread',
+                  'dm',
+                  'new_thread',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'evidence': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'instructions': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'interval': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'key': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'lifetime_days': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'max_turns_per_day': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'permanent': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'projection': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'rule': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'change',
+                  'added',
+                  'updated',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'watch_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'watch_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'publish_report': dict({
       'description': '''
         Publish a report: a page where the named people can read it and
@@ -11812,6 +11997,186 @@
         }),
         'required': list([
           'routine_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'update_watch': dict({
+      'description': '''
+        Change your watch in place, after `preview_watch_edit`, with the same changes.
+        <blank line>
+        `expected_revision` and `before` come from that preview, unchanged; the owner's
+        card shows each change as old → new and where the watch reports. Requires an
+        attended owner turn and verified owner card approval; backends without tool
+        confirmation refuse. Refused when the watch changed since the preview. Queued
+        reports from before the edit are dropped, and the next check saves a new
+        starting point without reporting, so only later changes report.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'JsonValue': dict({
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'arguments': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': dict({
+                  '$ref': '#/$defs/JsonValue',
+                }),
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'before': dict({
+            'additionalProperties': dict({
+              '$ref': '#/$defs/JsonValue',
+            }),
+            'type': 'object',
+          }),
+          'delivery': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'thread',
+                  'dm',
+                  'new_thread',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'evidence': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'expected_revision': dict({
+            'type': 'integer',
+          }),
+          'instructions': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'interval': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'key': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'lifetime_days': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'max_turns_per_day': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'permanent': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'projection': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'rule': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'change',
+                  'added',
+                  'updated',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'watch_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'watch_id',
+          'origin_context_id',
+          'expected_revision',
+          'before',
         ]),
         'type': 'object',
       }),

@@ -1,6 +1,6 @@
 """Owner-bound watch management. Secrets travel only in a private owner DM.
 
-Enrollment: every create, resume and signing-key rotation requires a
+Enrollment: every create, resume, edit and signing-key rotation requires a
 verified attended owner origin and server-side proof of that owner's card
 approval for that exact tool via session_card_gap before any mutation or secret
 delivery. Backend or session gating alone is not proof. A backend without
@@ -41,7 +41,12 @@ from daimon.core import channel_backend
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.continuity.poll_tools import catalogue_digest, require_listed, validate_mcp_poll
+from daimon.core.continuity.poll_tools import (
+    SourceChanged,
+    catalogue_digest,
+    require_listed,
+    validate_mcp_poll,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_call import McpCallError
@@ -70,10 +75,14 @@ class WatchSummary(BaseModel):
     thread_id: str
     parent_channel_id: str
     agent_id: str
-    expires_at: datetime
+    # None for a permanent watch.
+    expires_at: datetime | None
     key_id: str | None = None
     source_host: str | None = None
     delivery: WatchDelivery = "thread"
+    permanent: bool = False
+    max_turns_per_day: int = watches.DEFAULT_WATCH_CAP
+    revision: int = 0
 
 
 def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
@@ -91,6 +100,9 @@ def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
         key_id=key_id,
         source_host=urlsplit(str(server_url)).hostname if server_url else None,
         delivery=row.delivery,
+        permanent=row.expires_at is None,
+        max_turns_per_day=row.max_turns_per_day,
+        revision=row.revision,
     )
 
 
@@ -281,9 +293,15 @@ async def require_attended_owner(
 
 
 async def require_delivery_allowed(
-    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow, delivery: WatchDelivery
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow | WatchRow,
+    delivery: WatchDelivery,
 ) -> None:
     """The owner can get this watch's reports where `delivery` says, checked before saving.
+
+    `origin` is the place the watch is made: this conversation, or for an edit
+    the watch's own thread.
 
     A DM always goes to the owner, never anyone else. A new thread is refused when
     the watch is made in a private thread, so private talk never moves into a
@@ -319,6 +337,40 @@ async def require_delivery_allowed(
         raise ToolError("Threads cannot be started in this channel. Leave delivery as thread.")
 
 
+#: Plain words for what only an admin may approve.
+ADMIN_ONLY = (
+    "Only an admin can make a watch permanent or let it report more than "
+    f"{watches.DEFAULT_WATCH_CAP} times a day. Ask an admin or an owner."
+)
+
+
+async def admin_approval(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    permanent: bool,
+    max_turns_per_day: int,
+    check_ceiling: bool = True,
+) -> uuid.UUID | None:
+    """The fresh admin a permanent or above-default watch needs, or None when it needs none.
+
+    The caller is the owner, so an admin owner approves their own; anyone else
+    is refused. A daily limit above the operator's ceiling is refused for everyone.
+    """
+    if check_ceiling:
+        async with runtime.session_factory() as db:
+            ceilings = await watches.watch_ceilings(db, auth.tenant_id)
+        if not 1 <= max_turns_per_day <= ceilings.per_watch:
+            raise ToolError(
+                f"A watch here can report 1 to {ceilings.per_watch} times a day. Ask for fewer."
+            )
+    if not permanent and max_turns_per_day <= watches.DEFAULT_WATCH_CAP:
+        return None
+    if not await fresh_admin(runtime, auth):
+        raise ToolError(ADMIN_ONLY)
+    return auth.account_id
+
+
 async def create_watch_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -336,6 +388,8 @@ async def create_watch_impl(
     key: str | None = None,
     evidence: list[str] | None = None,
     delivery: WatchDelivery = "thread",
+    permanent: bool = False,
+    max_turns_per_day: int | None = None,
 ) -> WatchSummary:
     origin = await require_attended_owner(
         runtime, auth, origin_context_id, tool_name="create_watch"
@@ -343,9 +397,20 @@ async def create_watch_impl(
     if source == "page_event":
         raise ToolError("Page-event watches are unavailable until a page-event producer exists")
     assert auth.platform_user_id is not None
-    if not 1 <= lifetime_days <= 30:
+    if not permanent and not 1 <= lifetime_days <= 30:
         raise ToolError("Watch lifetime must be 1 to 30 days")
+    # Left out, the default daily limit; the firing SQL still holds it to the ceiling.
+    approver = await admin_approval(
+        runtime,
+        auth,
+        permanent=permanent,
+        max_turns_per_day=max_turns_per_day or watches.DEFAULT_WATCH_CAP,
+        check_ceiling=max_turns_per_day is not None,
+    )
+    daily = max_turns_per_day or watches.DEFAULT_WATCH_CAP
+    approved_by = approver if permanent else None
     now = datetime.now(UTC)
+    expires_at = None if permanent else now + timedelta(days=lifetime_days)
     binding = ContinuationRequest(
         tenant_id=auth.tenant_id,
         platform=cast(ChatPlatform, auth.platform),
@@ -372,11 +437,13 @@ async def create_watch_impl(
             projection=projection,
             rule=rule,
             interval=interval,
-            expires_at=now + timedelta(days=lifetime_days),
+            expires_at=expires_at,
             now=now,
             key=key,
             evidence=evidence,
             delivery=delivery,
+            max_turns_per_day=daily,
+            permanent_approved_by=approved_by,
         )
     try:
         async with runtime.session_factory.begin() as db:
@@ -389,11 +456,13 @@ async def create_watch_impl(
                 projection=projection,
                 rule=rule,
                 interval=interval,
-                expires_at=now + timedelta(days=lifetime_days),
+                expires_at=expires_at,
                 now=now,
                 key=key,
                 evidence=evidence,
                 delivery=delivery,
+                max_turns_per_day=daily,
+                permanent_approved_by=approved_by,
             )
             # Current owner/agent/seal policy, independently of the origin grant.
             await authorize_poll(runtime, watch)
@@ -414,11 +483,13 @@ async def create_mcp_watch(
     projection: str,
     rule: str,
     interval: int,
-    expires_at: datetime,
+    expires_at: datetime | None,
     now: datetime,
     key: str | None,
     evidence: list[str] | None,
     delivery: WatchDelivery = "thread",
+    max_turns_per_day: int = watches.DEFAULT_WATCH_CAP,
+    permanent_approved_by: uuid.UUID | None = None,
 ) -> WatchSummary:
     """A watch on a listed read tool of a server this agent attaches.
 
@@ -510,6 +581,8 @@ async def create_mcp_watch(
                 key=key,
                 evidence=evidence,
                 delivery=delivery,
+                max_turns_per_day=max_turns_per_day,
+                permanent_approved_by=permanent_approved_by,
             )
             # Current owner/agent/seal policy, independently of the origin grant.
             await authorize_poll(runtime, watch)
@@ -542,7 +615,11 @@ async def rotate_watch_impl(
             )
             require_unchanged_enrollment(watch, current)
             await watches.rotate_signing_key(
-                db, watch.id, key_id=key_id, key=key, expires_at=watch.expires_at
+                db,
+                watch.id,
+                key_id=key_id,
+                key=key,
+                expires_at=watch.expires_at or datetime.now(UTC) + watches.MAX_LIFETIME,
             )
         return await deliver_rotated_key(runtime, auth, watch, key_id=key_id, key=key)
     except ValueError as exc:
@@ -638,6 +715,250 @@ async def manage_watch_impl(
         raise ToolError(str(exc)) from exc
 
 
+#: The fields an edit can change, in the order the card shows them. `lasts` is set
+#: by `lifetime_days` or `permanent`.
+EDITABLE = (
+    "instructions",
+    "arguments",
+    "projection",
+    "rule",
+    "key",
+    "evidence",
+    "interval",
+    "lasts",
+    "max_turns_per_day",
+    "delivery",
+)
+
+
+def lasts(expires_at: datetime | None) -> str:
+    """How long a watch runs, as its edit card shows it."""
+    return "permanent" if expires_at is None else f"until {expires_at:%Y-%m-%d %H:%M} UTC"
+
+
+def editable(row: WatchRow) -> dict[str, JsonValue]:
+    """A watch's current value for every field an edit can change."""
+    return {
+        "instructions": row.instructions,
+        "arguments": cast(JsonValue, row.source_state.get("arguments") or {}),
+        "projection": cast(JsonValue, row.rule.get("projection")),
+        "rule": cast(JsonValue, row.rule.get("kind")),
+        "key": cast(JsonValue, row.rule.get("key")),
+        "evidence": cast(JsonValue, row.rule.get("evidence") or []),
+        "interval": cast(JsonValue, row.source_state.get("interval")),
+        "lasts": lasts(row.expires_at),
+        "max_turns_per_day": row.max_turns_per_day,
+        "delivery": row.delivery,
+    }
+
+
+class WatchEditRequest(BaseModel):
+    """What an owner asked to change; None keeps a field."""
+
+    instructions: str | None = None
+    arguments: dict[str, JsonValue] | None = None
+    projection: str | None = None
+    rule: Literal["change", "added", "updated"] | None = None
+    key: str | None = None
+    evidence: list[str] | None = None
+    interval: int | None = None
+    lifetime_days: int | None = None
+    permanent: bool | None = None
+    max_turns_per_day: int | None = None
+    delivery: WatchDelivery | None = None
+
+    def after(self) -> dict[str, JsonValue]:
+        """The new value of each field this edit changes, keyed like `editable`."""
+        changed: dict[str, JsonValue] = {
+            field: cast(JsonValue, value)
+            for field, value in self.model_dump(
+                exclude={"lifetime_days", "permanent"}, exclude_none=True
+            ).items()
+        }
+        if self.permanent:
+            changed["lasts"] = "permanent"
+        elif self.lifetime_days is not None:
+            changed["lasts"] = f"{self.lifetime_days} days from approval"
+        return {field: changed[field] for field in EDITABLE if field in changed}
+
+    def edit(self, now: datetime) -> watches.WatchEdit:
+        if self.permanent and self.lifetime_days is not None:
+            raise ValueError("A permanent watch has no lifetime. Leave lifetime_days out.")
+        if self.permanent is False and self.lifetime_days is None:
+            raise ValueError("Give lifetime_days for a watch that should end.")
+        if self.lifetime_days is not None and not 1 <= self.lifetime_days <= 30:
+            raise ValueError("Watch lifetime must be 1 to 30 days")
+        lifetime: watches.Lifetime | None = (
+            "permanent"
+            if self.permanent
+            else None
+            if self.lifetime_days is None
+            else now + timedelta(days=self.lifetime_days)
+        )
+        return watches.WatchEdit(
+            instructions=self.instructions,
+            arguments=None if self.arguments is None else dict(self.arguments),
+            projection=self.projection,
+            rule=self.rule,
+            key=self.key,
+            evidence=self.evidence,
+            interval=self.interval,
+            lifetime=lifetime,
+            max_turns_per_day=self.max_turns_per_day,
+            delivery=self.delivery,
+        )
+
+
+class WatchEditPreview(BaseModel):
+    """An edit before approval: pass `revision` and `before` back to `update_watch` as given."""
+
+    watch_id: uuid.UUID
+    revision: int
+    before: dict[str, JsonValue]
+    after: dict[str, JsonValue]
+    needs_admin: bool
+
+
+async def _owned_for_edit(runtime: McpRuntime, auth: AuthIdentity, watch_id: str) -> WatchRow:
+    """Only the owner edits: an admin may pause, delete and list another's watch, never edit."""
+    async with runtime.session_factory() as db:
+        row = await watches.get_watch(db, uuid.UUID(watch_id))
+    if row is None or row.tenant_id != auth.tenant_id or row.owner_account_id != auth.account_id:
+        raise ValueError("Watch not found")
+    return row
+
+
+def _needs_admin(row: WatchRow, request: WatchEditRequest) -> bool:
+    permanent = (
+        request.permanent
+        if request.permanent is not None
+        else row.expires_at is None and request.lifetime_days is None
+    )
+    daily = request.max_turns_per_day or row.max_turns_per_day
+    return permanent or daily > watches.DEFAULT_WATCH_CAP
+
+
+async def preview_watch_edit_impl(
+    runtime: McpRuntime, auth: AuthIdentity, *, watch_id: str, request: WatchEditRequest
+) -> WatchEditPreview:
+    try:
+        row = await _owned_for_edit(runtime, auth, watch_id)
+        after = request.after()
+        if not after:
+            raise ValueError("Nothing to change. Say what should be different.")
+        request.edit(datetime.now(UTC))
+        current = editable(row)
+        before = {field: current[field] for field in EDITABLE if field in after}
+        before["delivery"] = current["delivery"]
+        return WatchEditPreview(
+            watch_id=row.id,
+            revision=row.revision,
+            before=before,
+            after=after,
+            needs_admin=_needs_admin(row, request),
+        )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+async def check_edited_mcp_arguments(
+    runtime: McpRuntime, row: WatchRow, arguments: dict[str, JsonValue]
+) -> None:
+    """New arguments for an MCP server poll must fit the tool the owner approved, as its
+    server lists it now with the poll's own credential."""
+    _, _, server_name = await polling.authorize_source(runtime, row)
+    server_url = str(row.source_state.get("server_url"))
+    tool = str(row.source_state.get("tool"))
+    token = await poll_credential(
+        runtime,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        owner_account_id=row.owner_account_id,
+        server_url=server_url,
+        credential=str(row.source_state.get("credential")),
+    )
+    try:
+        async with asyncio.timeout(25), polling.open_source(server_url, token) as source:
+            entry = await listed_read_tool(
+                runtime, source, server_name=str(server_name), tool=tool, arguments=arguments
+            )
+    except (McpCallError, TimeoutError, RecursionError):
+        raise ValueError("Could not read that server's tool list. Try again later.") from None
+    if catalogue_digest(entry) != row.source_state.get("catalogue_digest"):
+        raise SourceChanged("The tool it checks changed on its server. Make a new watch.")
+
+
+async def update_watch_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    watch_id: str,
+    origin_context_id: str | None,
+    expected_revision: int,
+    before: dict[str, JsonValue],
+    request: WatchEditRequest,
+) -> WatchSummary:
+    """Change the owner's watch exactly as the card they approved showed it."""
+    try:
+        row = await _owned_for_edit(runtime, auth, watch_id)
+        await require_attended_owner(runtime, auth, origin_context_id, tool_name="update_watch")
+        after = request.after()
+        if not after:
+            raise ValueError("Nothing to change. Say what should be different.")
+        current = editable(row)
+        # The card showed `before`; it must be what is stored, or the card misled.
+        if set(before) != set(after) | {"delivery"} or any(
+            before[field] != current[field] for field in before
+        ):
+            raise ValueError("Watch changed during approval. Ask me to show the change again.")
+        if row.revision != expected_revision:
+            raise ValueError("Watch changed during approval. Ask me to show the change again.")
+        now = datetime.now(UTC)
+        edit = request.edit(now)
+        approver: uuid.UUID | None = None
+        if _needs_admin(row, request):
+            approver = await admin_approval(
+                runtime,
+                auth,
+                permanent=True,
+                max_turns_per_day=request.max_turns_per_day or row.max_turns_per_day,
+                check_ceiling=request.max_turns_per_day is not None,
+            )
+        elif request.max_turns_per_day is not None:
+            await admin_approval(
+                runtime, auth, permanent=False, max_turns_per_day=request.max_turns_per_day
+            )
+        if request.delivery is not None and request.delivery != row.delivery:
+            await require_delivery_allowed(runtime, auth, row, request.delivery)
+        if row.source == "mcp_poll" and request.arguments is not None:
+            await check_edited_mcp_arguments(runtime, row, request.arguments)
+        await authorize_poll(runtime, row)
+        async with runtime.session_factory.begin() as db:
+            locked = await watches.require_owned_watch(
+                db, row.id, tenant_id=auth.tenant_id, account_id=auth.account_id
+            )
+            require_unchanged_enrollment(row, locked)
+            updated = await watches.update_watch(
+                db,
+                row.id,
+                tenant_id=auth.tenant_id,
+                owner_account_id=auth.account_id,
+                expected_revision=expected_revision,
+                edit=edit,
+                now=now,
+                admin_account_id=approver,
+            )
+            # Current owner/agent/seal policy for what is saved, before it commits.
+            await authorize_poll(runtime, updated)
+        return summary(updated)
+    except PollAccessRevoked:
+        raise ToolError(
+            "This agent cannot use that tool for a watch. Ask an admin or an owner."
+        ) from None
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"discord"})
     async def create_watch(  # pyright: ignore[reportUnusedFunction]
@@ -655,6 +976,8 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         key: str | None = None,
         evidence: list[str] | None = None,
         delivery: Literal["thread", "dm", "new_thread"] = "thread",
+        permanent: bool = False,
+        max_turns_per_day: int | None = None,
     ) -> WatchSummary:
         """Watch a listed read tool from this conversation: a Discord reader or an MCP server's.
 
@@ -691,8 +1014,12 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         keeps only short fingerprints of the keys, and `evidence` lists up to 8 fields
         (such as `.content`) to report for each new item. One report holds at most 20
         items and counts the rest as omitted.
-        Lifetime is 1–30 days. Producers remain disabled until both operator gates
-        are enabled. Page-event watches are refused until a producer exists.
+        Lifetime is 1–30 days. `permanent=true` has no end date and needs the owner
+        to be a freshly checked admin; a permanent watch paused for 30 days expires,
+        and an owner has at most 5. `max_turns_per_day` (default 24) is how many
+        reports a day this watch may make, up to the ceiling whoever runs Daimon sets;
+        above 24 also needs an admin. Producers remain disabled until both operator
+        gates are enabled. Page-event watches are refused until a producer exists.
         """
         return await create_watch_impl(
             runtime,
@@ -710,6 +1037,103 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             key=key,
             evidence=evidence,
             delivery=delivery,
+            permanent=permanent,
+            max_turns_per_day=max_turns_per_day,
+        )
+
+    @mcp.tool(tags={"discord"})
+    async def preview_watch_edit(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        watch_id: str,
+        instructions: str | None = None,
+        arguments: dict[str, JsonValue] | None = None,
+        projection: str | None = None,
+        rule: Literal["change", "added", "updated"] | None = None,
+        key: str | None = None,
+        evidence: list[str] | None = None,
+        interval: int | None = None,
+        lifetime_days: int | None = None,
+        permanent: bool | None = None,
+        max_turns_per_day: int | None = None,
+        delivery: Literal["thread", "dm", "new_thread"] | None = None,
+    ) -> WatchEditPreview:
+        """Show what an edit to your watch would change, old and new, without changing it.
+
+        Call this first, then `update_watch` with the same changes, `expected_revision`
+        set to `revision` and `before` exactly as returned. Only the owner can edit; an
+        admin can pause, delete and list another owner's watch but not edit it. Leave
+        a field out to keep it. `key=""` and `evidence=[]` remove them. The tool and its
+        server never change: make a new watch for another source. `lifetime_days`
+        (1–30) counts from approval; `permanent=true` and `max_turns_per_day` above 24
+        need the owner to be an admin (`needs_admin`).
+        """
+        return await preview_watch_edit_impl(
+            runtime,
+            await _auth(ctx),
+            watch_id=watch_id,
+            request=WatchEditRequest(
+                instructions=instructions,
+                arguments=arguments,
+                projection=projection,
+                rule=rule,
+                key=key,
+                evidence=evidence,
+                interval=interval,
+                lifetime_days=lifetime_days,
+                permanent=permanent,
+                max_turns_per_day=max_turns_per_day,
+                delivery=delivery,
+            ),
+        )
+
+    @mcp.tool(tags={"discord"})
+    async def update_watch(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        watch_id: str,
+        origin_context_id: str,
+        expected_revision: int,
+        before: dict[str, JsonValue],
+        instructions: str | None = None,
+        arguments: dict[str, JsonValue] | None = None,
+        projection: str | None = None,
+        rule: Literal["change", "added", "updated"] | None = None,
+        key: str | None = None,
+        evidence: list[str] | None = None,
+        interval: int | None = None,
+        lifetime_days: int | None = None,
+        permanent: bool | None = None,
+        max_turns_per_day: int | None = None,
+        delivery: Literal["thread", "dm", "new_thread"] | None = None,
+    ) -> WatchSummary:
+        """Change your watch in place, after `preview_watch_edit`, with the same changes.
+
+        `expected_revision` and `before` come from that preview, unchanged; the owner's
+        card shows each change as old → new and where the watch reports. Requires an
+        attended owner turn and verified owner card approval; backends without tool
+        confirmation refuse. Refused when the watch changed since the preview. Queued
+        reports from before the edit are dropped, and the next check saves a new
+        starting point without reporting, so only later changes report.
+        """
+        return await update_watch_impl(
+            runtime,
+            await _auth(ctx),
+            watch_id=watch_id,
+            origin_context_id=origin_context_id,
+            expected_revision=expected_revision,
+            before=before,
+            request=WatchEditRequest(
+                instructions=instructions,
+                arguments=arguments,
+                projection=projection,
+                rule=rule,
+                key=key,
+                evidence=evidence,
+                interval=interval,
+                lifetime_days=lifetime_days,
+                permanent=permanent,
+                max_turns_per_day=max_turns_per_day,
+                delivery=delivery,
+            ),
         )
 
     @mcp.tool(tags={"discord"})

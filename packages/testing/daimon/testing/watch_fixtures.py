@@ -135,3 +135,31 @@ async def install_poll_ports(session: AsyncSession) -> None:
         text(f"GRANT EXECUTE ON FUNCTION {quoted}.claim_watch_polls() TO daimon_sidecar")
     )
     await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
+    # 0164 replaces all three with NULL (permanent) expiry and the stored daily ceilings.
+    lifetime = runpy.run_path(
+        str(
+            Path(__file__).resolve().parents[3]
+            / "core/alembic/versions/0164_watch_lifetime_caps.py"
+        )
+    )
+    for key in ("POLL_SQL", "CLAIM_SQL", "PAGE_SQL"):
+        await session.execute(text(cast(str, lifetime[key]).format(schema=quoted)))
+    await session.execute(
+        text(
+            f"REVOKE ALL ON FUNCTION {quoted}.accept_watch_poll_result(uuid,text,jsonb,text) "
+            "FROM PUBLIC,daimon_sidecar,daimon_watch_ingress_owner"
+        )
+    )
+    await session.execute(text(f"GRANT CREATE ON SCHEMA {quoted} TO daimon_watch_ingress_owner"))
+    for signature in (
+        "claim_watch_polls()",
+        "accept_watch_page_event(uuid,uuid,text,bigint,uuid,text,text,text)",
+    ):
+        await session.execute(text(f"REVOKE ALL ON FUNCTION {quoted}.{signature} FROM PUBLIC"))
+        await session.execute(
+            text(f"ALTER FUNCTION {quoted}.{signature} OWNER TO daimon_watch_ingress_owner")
+        )
+        await session.execute(
+            text(f"GRANT EXECUTE ON FUNCTION {quoted}.{signature} TO daimon_sidecar")
+        )
+    await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
