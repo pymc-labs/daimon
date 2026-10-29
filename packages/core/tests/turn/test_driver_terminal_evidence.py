@@ -36,7 +36,7 @@ from daimon.testing.turn_fakes import (
 )
 from mux.contracts.receipts import StopObservation
 
-from .conftest import make_agent_message, make_end_turn, make_status_idle
+from .conftest import make_agent_message, make_end_turn, make_status_idle, make_tool_use
 
 _EXEMPT = BillingExempt(reason="cli-operator-run")
 
@@ -219,13 +219,15 @@ class _UncertainFirstSend(_Wrapped):
         await self.source.send(events)
 
 
+@pytest.mark.parametrize("earlier_question", ["the earlier question", "this question"])
 async def test_a_reconnect_after_an_uncertain_send_never_adopts_the_previous_turn(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, earlier_question: str
 ) -> None:
+    """Even when the earlier question had the very same words."""
     fake = FakeAnthropic()
     fake.beta.sessions.events.stream_scripts = [[], []]
     fake.beta.sessions.events.replay_events = [
-        _user("u_prev", "the earlier question"),
+        _user("u_prev", earlier_question),
         make_agent_message(event_id="a_prev", text="the earlier answer"),
         make_status_idle(event_id="idle_prev", stop_reason=make_end_turn()),
     ]
@@ -239,22 +241,36 @@ async def test_a_reconnect_after_an_uncertain_send_never_adopts_the_previous_tur
     assert lifecycle.terminal_success == []
 
 
-async def test_a_reconnect_after_an_uncertain_send_that_landed_carries_on(
+async def test_a_reconnect_after_an_uncertain_send_on_a_turn_scoped_replay_carries_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = FakeAnthropic()
     answer = make_agent_message(event_id="a_now", text="this answer")
     done = make_status_idle(event_id="idle_now", stop_reason=make_end_turn())
     fake.beta.sessions.events.stream_scripts = [[], [YieldEvent(answer), YieldEvent(done)]]
-    fake.beta.sessions.events.replay_events = [
-        _user("u_prev", "the earlier question"),
-        make_status_idle(event_id="idle_prev", stop_reason=make_end_turn()),
-        _user("u_now", "this question"),
-    ]
+    fake.beta.sessions.events.replay_events = [_user("u_now", "this question")]
 
-    final, lifecycle = await _run(
-        monkeypatch, fake, _UncertainFirstSend(fake), user_message="this question"
-    )
+    class Scoped(_UncertainFirstSend):
+        replay_scoped_to_turn = True
+
+    final, lifecycle = await _run(monkeypatch, fake, Scoped(fake), user_message="this question")
 
     assert final.content == [TextBlock(kind="text", text="this answer")]
     assert len(lifecycle.terminal_success) == 1
+
+
+async def test_a_turn_that_only_called_a_tool_and_ended_with_no_sign_is_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Narration and a tool call are not an answer: no terminal, no answer, lost."""
+    fake = FakeAnthropic()
+    narration = make_agent_message(event_id="sevt_1", text="   ")
+    call = make_tool_use(event_id="sevt_2", name="bash")
+    fake.beta.sessions.events.stream_scripts = [[YieldEvent(narration), YieldEvent(call)]]
+    fake.beta.sessions.events.replay_events = [_user("u1", "hi"), narration, call]
+    fake.beta.sessions.retrieve_statuses = ["idle"]
+
+    final, lifecycle = await _run(monkeypatch, fake, _Wrapped(fake))
+
+    assert final.termination == TerminationReason.CONNECTION_LOST
+    assert lifecycle.terminal_success == []

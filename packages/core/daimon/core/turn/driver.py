@@ -198,15 +198,6 @@ async def _read_after_quiet[R](
     raise AssertionError("unreachable: the last attempt returns or raises")
 
 
-def _message_text(event: object) -> str:
-    """The text of a replayed `user.message`, its text blocks joined."""
-    return "".join(
-        getattr(block, "text", "")
-        for block in getattr(event, "content", None) or ()
-        if getattr(block, "type", None) == "text"
-    )
-
-
 def _answers_in_turn(tool_confirmation: ToolConfirmation) -> bool:
     """Whether this posture answers a `requires_action` idle and keeps going."""
     return isinstance(tool_confirmation, AutoApprove | PolicyApproval)
@@ -519,9 +510,9 @@ class _InterruptInConsume(Exception):
 
 
 class _TurnMessageMissing(Exception):
-    """The first send failed with its outcome unknown, and the reconnect replay
-    does not hold this turn's message: whatever it holds belongs to an earlier
-    turn, so nothing in it may finish this one.
+    """The first send failed with its outcome unknown, and nothing shows this
+    turn's message reached the provider: the reconnect replay may hold only an
+    earlier turn, so nothing in it may finish this one.
 
     Module-private sentinel; caught at `_pump`'s top level as a lost connection.
     """
@@ -764,20 +755,16 @@ async def run_turn(
         await acknowledge(lifecycle, "accepted")
 
     # Whether this turn's message is known to have reached the provider. A first
-    # send that failed with its outcome unknown is followed by a reconnect replay,
-    # whose newest message may still be the previous turn's: that replay counts
-    # only if its newest message is this one. An IO whose replay is already
-    # scoped to this turn's own native id needs no such check.
+    # send that failed with its outcome unknown is followed by a reconnect replay
+    # whose newest message may still be the previous turn's, even in the same
+    # words, and nothing was read live before the send failed. Without the send's
+    # own confirmation that replay cannot be trusted for this turn, unless the IO
+    # scopes its replay to this turn's own native id.
     message_sent = [False]
     replay_scoped = bool(getattr(io, "replay_scoped_to_turn", False))
 
-    def _message_landed(replayed: list[Any]) -> bool:
-        if message_sent[0] or replay_scoped:
-            return True
-        last = next(
-            (e for e in reversed(replayed) if getattr(e, "type", None) == "user.message"), None
-        )
-        return last is not None and _message_text(last) == user_message
+    def _send_confirmed() -> bool:
+        return message_sent[0] or replay_scoped
 
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session_id
@@ -788,7 +775,7 @@ async def run_turn(
             anthropic=anthropic,
             session_id=session_id,
             send_initial=_send_initial,
-            message_landed=_message_landed,
+            send_confirmed=_send_confirmed,
             render_anchor=TurnState(),
             seed_state=TurnState(),
             lifecycle=lifecycle,
@@ -1030,7 +1017,7 @@ async def _pump(
     anthropic: AsyncAnthropic,
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
-    message_landed: Callable[[list[Any]], bool] = lambda _replayed: True,
+    send_confirmed: Callable[[], bool] = lambda: True,
     render_anchor: TurnState,
     seed_state: TurnState,
     lifecycle: TurnLifecycle,
@@ -1173,7 +1160,7 @@ async def _pump(
                                 anthropic=anthropic,
                                 session_id=session_id,
                                 send_initial=send_initial,
-                                message_landed=message_landed,
+                                send_confirmed=send_confirmed,
                                 is_retry=attempt_is_retry,
                                 reconnect_reason=attempt_reason,
                                 state_cell=state_cell,
@@ -1699,7 +1686,7 @@ async def _consume_with_reconnect(
     anthropic: AsyncAnthropic,
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
-    message_landed: Callable[[list[Any]], bool],
+    send_confirmed: Callable[[], bool],
     is_retry: bool,
     reconnect_reason: ReconnectReason,
     state_cell: list[TurnState],
@@ -1763,7 +1750,7 @@ async def _consume_with_reconnect(
                     raise _InterruptedDuringRecovery(phase="replay") from None
             if cancel.is_set():
                 raise _InterruptedDuringRecovery(phase="replay")
-            if not message_landed(replayed):
+            if not send_confirmed():
                 raise _TurnMessageMissing()
             current_turn_events = _events_since_last_turn_boundary(
                 replayed, tool_confirmation=tool_confirmation
@@ -2146,17 +2133,18 @@ async def _finalize_success_or_error(
     ):
         # Nothing ended this turn: no stop reason, no outcome, no error. A quiet
         # stream, an idle status and a replay without the turn's end look like
-        # this. With an answer on screen it stands, logged so it can be counted.
-        # With nothing to show it is not a finished reply: say the connection
+        # this. With answer text on screen it stands, logged so it can be counted.
+        # With no answer (nothing, or only tool calls and narration before one)
+        # it is not a finished reply: say the connection
         # was lost, so the person asks what was done instead of reading an
         # empty answer as complete.
         log.warning(
             "turn.no_terminal_evidence",
             session_id=session_id,
             events_folded=events_folded,
-            answered=bool(final_state.content),
+            answered=_has_text_answer(final_state),
         )
-        if not final_state.content:
+        if not _has_text_answer(final_state):
             err = TurnError(
                 kind="connection_lost", message="the turn ended with no sign it finished"
             )
