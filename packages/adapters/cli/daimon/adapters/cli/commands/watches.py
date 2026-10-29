@@ -17,15 +17,18 @@ from daimon.core.continuity.watch_imports import WatchExport
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import (
+    NoticeReceipt,
     WatchActivity,
     confirm_import,
     get_watch,
     import_watch,
+    list_notice_receipts,
     list_tenant_watches,
 )
 
 watches_app = typer.Typer(
-    help="List a tenant's watches, import paused watches and confirm reviewed bindings."
+    help="List a tenant's watches and their owner-notice receipts, import paused watches "
+    "and confirm reviewed bindings."
 )
 
 
@@ -97,6 +100,64 @@ def list_command(
             f"to={row['destination']} {row['thread_id']}  expires={row['expires_at']}  "
             f"fires_today={row['fires_today']}  last_fired={last}  errors={row['errors']}"
         )
+
+
+def _receipt(row: NoticeReceipt) -> dict[str, object]:
+    """One notice attempt: ids, times and outcome. Receipts never hold the notice text."""
+    return {
+        "kind": row.kind,
+        "generation": row.generation,
+        "attempt": row.attempt,
+        "outcome": row.outcome,
+        "attempted_at": row.attempted_at.isoformat(),
+        "settled_at": row.settled_at.isoformat() if row.settled_at else None,
+        "owner_account_id": str(row.owner_account_id),
+        "platform": row.platform,
+        "channel_id": row.channel_id,
+        "message_id": row.message_id,
+    }
+
+
+def _messages_sent(rows: list[NoticeReceipt]) -> dict[str, int]:
+    """Distinct messages sent per notice kind; a sent receipt without a message id counts once."""
+    seen: dict[str, set[str]] = {}
+    for index, row in enumerate(rows):
+        if row.outcome == "sent":
+            seen.setdefault(row.kind, set()).add(row.message_id or f"unknown-{index}")
+    return {kind: len(ids) for kind, ids in sorted(seen.items())}
+
+
+@watches_app.command("notices")
+def notices_command(
+    watch: Annotated[uuid.UUID, typer.Option("--watch")],
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Show --watch's owner-notice receipts, read-only, kept 30 days and after deletion.
+
+    `sent` counts distinct messages per notice kind: an expiry notice delivered
+    exactly once shows `"expired": 1`.
+    """
+
+    async def run() -> list[NoticeReceipt]:
+        async with build_runtime(load_settings()) as runtime, runtime.sessionmaker() as db:
+            return await list_notice_receipts(db, watch_id=watch)
+
+    rows = asyncio.run(run())
+    sent = _messages_sent(rows)
+    if as_json:
+        report = {"watch_id": str(watch), "sent": sent, "receipts": [_receipt(r) for r in rows]}
+        typer.echo(json.dumps(report, indent=2))
+        return
+    if not rows:
+        typer.echo("No notice receipts.")
+        return
+    for row in map(_receipt, rows):
+        typer.echo(
+            f"{row['attempted_at']}  {row['kind']}  generation={row['generation']}  "
+            f"attempt={row['attempt']}  outcome={row['outcome']}  "
+            f"message={row['message_id'] or 'none'}"
+        )
+    typer.echo("sent: " + (", ".join(f"{kind}={n}" for kind, n in sent.items()) or "none"))
 
 
 @watches_app.command("import")

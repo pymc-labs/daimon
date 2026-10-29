@@ -92,7 +92,10 @@ REPO_MEMORY_HEAD = "0154_repo_memory_state"
 COMPUTE_TASKS_HEAD = "0155_compute_tasks"
 
 
-HEAD = "0156_watch_mcp_sources"
+WATCH_MCP_HEAD = "0156_watch_mcp_sources"
+
+
+HEAD = "0157_watch_notice_receipts"
 
 
 CHAIN = [
@@ -120,6 +123,7 @@ CHAIN = [
     "0153_repo_memory",
     REPO_MEMORY_HEAD,
     COMPUTE_TASKS_HEAD,
+    WATCH_MCP_HEAD,
     HEAD,
 ]
 
@@ -140,6 +144,7 @@ TABLES = {
     "repo_memory",
     "repo_memory_sessions",
     "compute_tasks",
+    "watch_notice_receipts",
     "daimon_admins",
     "context_provider_bindings",
     "selfhosted_agents",
@@ -217,6 +222,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             "repo_memory",
             "repo_memory_sessions",
             "compute_tasks",
+            "watch_notice_receipts",
         }
     if expected not in (ADMINS_HEAD, HEAD):
         compared_tables = compared_tables - {"daimon_admins"}
@@ -469,8 +475,15 @@ async def test_deployed_upgrade_and_downgrade_paths(
             assert version == COMPUTE_TASKS_HEAD
             command.upgrade(config, HEAD)
             _assert_head(sync)
+            command.downgrade(config, WATCH_MCP_HEAD)
+            version = sync.scalar(text("SELECT version_num FROM alembic_version"))
+            assert version == WATCH_MCP_HEAD
+            assert not inspect(sync).has_table("watch_notice_receipts")
             with pytest.raises(NotImplementedError, match="Watch evidence"):
                 command.downgrade(config, COMPUTE_TASKS_HEAD)
+            version = sync.scalar(text("SELECT version_num FROM alembic_version"))
+            assert version == WATCH_MCP_HEAD
+            command.upgrade(config, HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)

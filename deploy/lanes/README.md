@@ -532,3 +532,19 @@ a backend with working `tool_confirmation` and the owner's verified card approva
    ```
 
    A resumed poll requires a fresh attended owner origin and another confirmation card.
+
+5. **Count owner notices from receipts.** The step-1 watch expires one day after
+   creation, paused or not. At least 30 minutes after expiry, and again after a
+   restart of the `discord` service, read its receipts in the same shell:
+
+   ```sh
+   dc exec -T discord daimon watches notices --watch "$POLL_WATCH_UUID" --json
+   ```
+
+   Expected: `"sent"` is `{"access_revoked": 1, "expired": 1}` both times. Each
+   `"sent"` receipt carries the DM `message_id`; the owner's DM shows exactly those
+   messages. A second `sent` receipt for one kind is fine only with the same
+   `message_id`: a resumed attempt found the first message. An `interrupted`
+   receipt marks a send cut off by a restart, a timeout or a Discord server
+   error; the next attempt reads the DM before sending. Receipts never hold the message
+   text and are kept 30 days, also after the watch is deleted.

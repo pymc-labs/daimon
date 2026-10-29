@@ -73,7 +73,8 @@ async def test_unmapped_import_is_paused_and_notice_never_resumes(db_session_fac
     await poll_watch_notices(db_session_factory, deliver=deliver)
     deliver.assert_awaited_once()
     assert deliver.await_args.args[0].owner_external_id == "123"
-    assert deliver.await_args.args[2] == UNMAPPED_NOTICE
+    assert deliver.await_args.args[2].endswith(f": {UNMAPPED_NOTICE}")
+    assert str(deliver.await_args.args[0].id) in deliver.await_args.args[2]
     assert UNMAPPED_NOTICE == "this watch is paused until page data moves to Daimon OS"
     await poll_watch_notices(db_session_factory, deliver=deliver)
     deliver.assert_awaited_once()

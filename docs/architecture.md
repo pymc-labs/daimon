@@ -2908,7 +2908,8 @@ MCP results and stored rows contain no plaintext key. The offline CLI importer
 accepts no signing keys, imports everything paused, and requires explicit exact-binding confirmation before
 activation. An unmapped source cannot be confirmed or resumed. The existing Discord
 notice poller sends its owner a private migration notice without running a model or
-resuming the watch. Notebook and report hosts do not provide a page document query
+resuming the watch. Every owner notice records an intent receipt before the send and
+its outcome after, so a restarted poller checks the DM instead of resending. Notebook and report hosts do not provide a page document query
 store; imported `artifact_db_query` sources therefore remain `source_unmapped`.
 Account erasure removes owned registrations, evidence, pending wakes and owner
 stop controls; the privacy preview includes the watches it will erase.

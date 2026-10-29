@@ -210,6 +210,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_recovery_failure,
 )
 from daimon.core.stores.turn_origins import get_active_origin, thread_archive_requested
+from daimon.core.stores.watches import NoticeAttempt, SentNotice, Unclear
 from daimon.core.thread_naming import (
     THREAD_NAME_MAX_CHARS,
     fallback_thread_name,
@@ -4105,18 +4106,23 @@ class DaimonBot(commands.Bot):
             return False
 
     async def _poll_watch_import_notices(self) -> None:
-        from daimon.adapters.discord.budget_notice import send_member_notice
+        from daimon.adapters.discord.budget_notice import send_watch_notice
 
-        async def deliver(watch: WatchRow, workspace_id: str, text: str) -> bool:
-            return await send_member_notice(
+        async def deliver(
+            watch: WatchRow, workspace_id: str, text: str, /, *, attempt: NoticeAttempt
+        ) -> SentNotice | Unclear | bool:
+            sent = await send_watch_notice(
                 self.runtime,
                 self.open_member_dm,
                 self.is_closed,
+                bot_user_id=self.user.id if self.user else None,
                 tenant_id=watch.tenant_id,
                 workspace_id=workspace_id,
                 recipient_id=watch.owner_external_id,
                 text=text,
+                attempt=attempt,
             )
+            return sent if sent is not None else False
 
         await poll_watch_notices(self.runtime.sessionmaker, deliver=deliver)
 

@@ -21,6 +21,7 @@ from daimon.core._models import (
     WatchControl,
     WatchEvidence,
     WatchFiring,
+    WatchNoticeReceipt,
 )
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
@@ -149,6 +150,9 @@ async def delete_for_account(session: AsyncSession, *, account_id: uuid.UUID) ->
     )
     await session.execute(delete(Watch).where(Watch.id.in_(ids)))
     await session.execute(delete(WatchControl).where(WatchControl.scope == f"owner:{account_id}"))
+    await session.execute(
+        delete(WatchNoticeReceipt).where(WatchNoticeReceipt.owner_account_id == account_id)
+    )
     return len(ids)
 
 
@@ -1102,10 +1106,17 @@ async def claim_import_notice(
         notice_state = "cap_reached"
     else:
         notice_state = "daily_cap"
+    kind = notice_kind(row.status, {**state, "notice_state": notice_state})
+    # A retried or resumed notice keeps its generation, so its receipts share one key.
+    generation = int(state.get("notice_generation") or 0)
+    if not state.get("notice_pending") or state.get("notice_open") != kind:
+        generation += 1
     row.source_state = {
         **state,
         "notice_pending": True,
         "notice_state": notice_state,
+        "notice_open": kind,
+        "notice_generation": generation,
         "notice_lease": token,
         "notice_lease_until": (now + timedelta(minutes=2)).isoformat(),
     }
@@ -1132,6 +1143,7 @@ async def settle_import_notice(
     row.source_state = {
         **row.source_state,
         "notice_pending": not delivered,
+        "notice_open": None if delivered else row.source_state.get("notice_open"),
         "notice_lease": None,
         "notice_lease_until": None
         if delivered
@@ -1139,3 +1151,189 @@ async def settle_import_notice(
     }
     # Notice settlement never changes watch status, source mapping, or confirmation.
     await session.flush()
+
+
+NOTICE_RECEIPT_RETENTION = timedelta(days=30)
+
+
+def notice_kind(status: str, state: dict[str, object]) -> str:
+    """The owner notice a claimed watch is due; `notice_text` words each kind."""
+    reason = str(state.get("reason", ""))
+    if status == "expired":
+        return "expired"
+    if reason == "source_unmapped":
+        return "source_unmapped"
+    if reason.startswith("Watch paused:"):
+        return "paused"
+    if reason == "tool_unlisted":
+        return "tool_unlisted"
+    if reason == "access_revoked":
+        return "access_revoked"
+    if status == "paused" and reason == "failed":
+        return "failed"
+    if state.get("notice_state") == "daily_cap":
+        return "owner_daily_cap" if state.get("daily_cap_kind") == "owner" else "daily_cap"
+    return "cap_reached"
+
+
+@dataclass(frozen=True)
+class NoticeAttempt:
+    """One recorded intent to send a claimed notice.
+
+    `nonce` is stable for the notice, so a platform that deduplicates by nonce
+    drops a concurrent resend. `since` is set when there was an earlier attempt
+    for the same notice: delivery must look for that message before sending again.
+    """
+
+    receipt_id: uuid.UUID
+    kind: str
+    generation: int
+    attempt: int
+    nonce: str
+    since: datetime | None
+
+
+Unclear = Literal["unclear"]
+# Delivery's answer when the send may have reached the platform without confirming it.
+UNCLEAR: Unclear = "unclear"
+
+
+@dataclass(frozen=True)
+class SentNotice:
+    """Where a notice landed. Ids are None when the transport cannot report them."""
+
+    channel_id: str | None = None
+    message_id: str | None = None
+
+
+async def open_notice_attempt(
+    session: AsyncSession, notice: WatchRow, *, now: datetime
+) -> NoticeAttempt | None:
+    """Record the intent to send `notice`, in the claim's transaction.
+
+    Returns None, settling the claim, when an earlier attempt already sent it.
+    """
+    kind = str(notice.source_state["notice_open"])
+    generation = int(str(notice.source_state["notice_generation"]))
+    earlier = list(
+        await session.scalars(
+            select(WatchNoticeReceipt)
+            .where(
+                WatchNoticeReceipt.watch_id == notice.id,
+                WatchNoticeReceipt.kind == kind,
+                WatchNoticeReceipt.generation == generation,
+            )
+            .order_by(WatchNoticeReceipt.attempt)
+            .with_for_update()
+        )
+    )
+    if any(row.outcome == "sent" for row in earlier):
+        await settle_import_notice(session, notice, delivered=True)
+        return None
+    for row in earlier:
+        if row.outcome == "pending":
+            row.outcome = "interrupted"
+    receipt = WatchNoticeReceipt(
+        id=uuid.uuid4(),
+        tenant_id=notice.tenant_id,
+        watch_id=notice.id,
+        owner_account_id=notice.owner_account_id,
+        platform=notice.platform,
+        kind=kind,
+        generation=generation,
+        attempt=len(earlier) + 1,
+        claim=str(notice.source_state["notice_lease"]),
+        outcome="pending",
+        attempted_at=now,
+    )
+    session.add(receipt)
+    await session.flush()
+    key = f"watch-notice:{notice.id}:{kind}:{generation}".encode()
+    return NoticeAttempt(
+        receipt_id=receipt.id,
+        kind=kind,
+        generation=generation,
+        attempt=receipt.attempt,
+        # Discord accepts a nonce of at most 25 characters.
+        nonce=hashlib.sha256(key).hexdigest()[:25],
+        # Any earlier attempt may have landed, even one recorded as failed: read the DM first.
+        since=min((row.attempted_at for row in earlier), default=None),
+    )
+
+
+async def close_notice_attempt(
+    session: AsyncSession,
+    notice: WatchRow,
+    attempt: NoticeAttempt,
+    *,
+    sent: SentNotice | None,
+    now: datetime,
+    unclear: bool = False,
+) -> None:
+    """Record what the attempt did, then settle the claim when it still holds it.
+
+    An `unclear` send is recorded as interrupted: it may have landed.
+    """
+    receipt = await session.get(WatchNoticeReceipt, attempt.receipt_id, with_for_update=True)
+    # A later claim may have marked this attempt interrupted; what it really did still counts.
+    if receipt is not None and receipt.outcome in ("pending", "interrupted"):
+        if sent is not None:
+            receipt.outcome = "sent"
+            receipt.channel_id = sent.channel_id
+            receipt.message_id = sent.message_id
+        elif receipt.outcome == "pending":
+            receipt.outcome = "interrupted" if unclear else "failed"
+        receipt.settled_at = now
+    await settle_import_notice(session, notice, delivered=sent is not None)
+
+
+async def prune_notice_receipts(session: AsyncSession, *, now: datetime) -> None:
+    await session.execute(
+        delete(WatchNoticeReceipt).where(
+            WatchNoticeReceipt.attempted_at < now - NOTICE_RECEIPT_RETENTION
+        )
+    )
+
+
+@dataclass(frozen=True)
+class NoticeReceipt:
+    """The operator view of one notice attempt; it never holds the notice text."""
+
+    watch_id: uuid.UUID
+    owner_account_id: uuid.UUID
+    platform: str
+    kind: str
+    generation: int
+    attempt: int
+    outcome: str
+    attempted_at: datetime
+    settled_at: datetime | None
+    channel_id: str | None
+    message_id: str | None
+
+
+async def list_notice_receipts(
+    session: AsyncSession, *, watch_id: uuid.UUID
+) -> list[NoticeReceipt]:
+    """Every kept receipt for `watch_id`, oldest first, including after the watch is deleted."""
+    rows = await session.scalars(
+        select(WatchNoticeReceipt)
+        .where(WatchNoticeReceipt.watch_id == watch_id)
+        .order_by(WatchNoticeReceipt.attempted_at, WatchNoticeReceipt.attempt)
+    )
+    return [
+        NoticeReceipt(
+            watch_id=row.watch_id,
+            owner_account_id=row.owner_account_id,
+            platform=row.platform,
+            kind=row.kind,
+            generation=row.generation,
+            attempt=row.attempt,
+            outcome=row.outcome,
+            attempted_at=row.attempted_at,
+            settled_at=row.settled_at,
+            channel_id=row.channel_id,
+            message_id=row.message_id,
+        )
+        for row in rows
+    ]
