@@ -1849,9 +1849,9 @@ receipt per send attempt. `daimon watches notices --watch WATCH_UUID` (add
 Discord message ID, never the message text. Its `sent` line counts distinct
 messages per kind, so one expiry DM shows `expired=1`.
 
-Receipts are kept 30 days, even after the watch is deleted. A send interrupted by
-a restart is checked against the owner's DM before any resend, so the owner gets
-each notice once. If that check cannot read the DM, nothing is sent and the
+Receipts are kept 30 days, even after the watch is deleted. Every retry first
+checks the owner's DM for the earlier message, so a send cut off by a restart or
+timeout is not sent twice. If that check cannot read the DM, nothing is sent and the
 notice retries five minutes later.
 
 #### Offline internal-watch import

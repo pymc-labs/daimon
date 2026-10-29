@@ -12,7 +12,7 @@ import pytest
 from daimon.adapters.discord.budget_notice import send_member_notice, send_watch_notice
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.watch_imports import UNMAPPED_NOTICE
-from daimon.core.stores.watches import NoticeAttempt, SentNotice
+from daimon.core.stores.watches import UNCLEAR, NoticeAttempt, SentNotice
 
 
 @pytest.mark.parametrize("closed,allowed", [(False, True), (True, True), (False, False)])
@@ -138,3 +138,28 @@ async def test_resumed_watch_notice_sends_nothing_when_it_cannot_check(
     )
     assert result is None
     send.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "status,error,expected",
+    [(500, False, UNCLEAR), (403, False, None), (None, True, UNCLEAR)],
+)
+async def test_watch_notice_send_that_may_have_landed_is_unclear(
+    status: int | None, error: bool, expected: object
+) -> None:
+    tenant_id = uuid.uuid4()
+    response: Any = SimpleNamespace(status=status, reason="x")
+    failure: Exception = TimeoutError() if error else discord.HTTPException(response, "x")
+    dm = SimpleNamespace(send=AsyncMock(side_effect=failure), history=_history())
+    result = await send_watch_notice(
+        _runtime(tenant_id),
+        AsyncMock(return_value=dm),
+        lambda: False,
+        bot_user_id=7,
+        tenant_id=tenant_id,
+        workspace_id="100",
+        recipient_id="123",
+        text="Watch expired.",
+        attempt=_attempt(),
+    )
+    assert result == expected

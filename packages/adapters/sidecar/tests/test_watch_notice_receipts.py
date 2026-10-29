@@ -92,8 +92,9 @@ async def test_failed_send_is_retried_under_the_same_notice(
         await poll_watch_notices(db_session_factory, deliver=deliver)
     deliver.assert_awaited_once()
     assert deliver.await_args is not None
-    # A failed attempt is known not to have landed, so the retry need not look for it.
-    assert deliver.await_args.kwargs["attempt"].since is None
+    # Even a failed attempt may have landed (a refused send cannot be told apart from
+    # every unclear one), so the retry always reads the DM first.
+    assert deliver.await_args.kwargs["attempt"].since is not None
     receipts = await _receipts(db_session_factory, row)
     assert [(r.generation, r.attempt, r.outcome) for r in receipts] == [
         (1, 1, "failed"),
@@ -178,3 +179,33 @@ async def test_receipts_outlive_the_watch_and_are_pruned(
         later = datetime.now(UTC) + watches.NOTICE_RECEIPT_RETENTION + timedelta(minutes=1)
         await watches.prune_notice_receipts(db, now=later)
     assert await _receipts(db_session_factory, row) == []
+
+
+async def test_a_send_that_times_out_after_discord_stored_it_is_not_sent_twice(
+    db_session_factory: async_sessionmaker[AsyncSession], definition: ImportedWatch
+) -> None:
+    row = await _expired(db_session_factory, definition)
+    owner_dm: list[str] = []
+
+    async def stored_then_timed_out(
+        _watch: WatchRow, _workspace: str, message: str, *, attempt: watches.NoticeAttempt
+    ) -> watches.SentNotice | watches.Unclear:
+        if attempt.since is not None and message in owner_dm:
+            # The DM check finds the first message instead of sending again.
+            return watches.SentNotice("900", "901")
+        owner_dm.append(message)
+        raise TimeoutError
+
+    await poll_watch_notices(db_session_factory, deliver=stored_then_timed_out)
+    [first] = await _receipts(db_session_factory, row)
+    assert first.outcome == "interrupted"
+    # Past Discord's nonce window: only the DM check stands between the owner and a repeat.
+    await _expire_lease(db_session_factory, row)
+    for _ in range(2):
+        await poll_watch_notices(db_session_factory, deliver=stored_then_timed_out)
+    assert len(owner_dm) == 1
+    receipts = await _receipts(db_session_factory, row)
+    assert [(r.attempt, r.outcome, r.message_id) for r in receipts] == [
+        (1, "interrupted", None),
+        (2, "sent", "901"),
+    ]

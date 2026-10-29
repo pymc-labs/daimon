@@ -864,6 +864,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
         "watches": "owner_account_id FK; explicit erasure also deletes evidence and pending wakes",
+        "watch_notice_receipts": "owner_account_id FK cascade; watches.delete_for_account deletes receipts",
         "selfhosted_resource_operations": "account UUID stored as account_id text",
         "long_job": "accounts.id FK cascade; cancellation audit cascades from the job",
         "neutral_agent_revisions": "accounts.id FK cascade",

@@ -1157,7 +1157,7 @@ NOTICE_RECEIPT_RETENTION = timedelta(days=30)
 
 
 def notice_kind(status: str, state: dict[str, object]) -> str:
-    """The owner notice a claimed watch is due, in the order its wording is chosen."""
+    """The owner notice a claimed watch is due; `notice_text` words each kind."""
     reason = str(state.get("reason", ""))
     if status == "expired":
         return "expired"
@@ -1165,6 +1165,8 @@ def notice_kind(status: str, state: dict[str, object]) -> str:
         return "source_unmapped"
     if reason.startswith("Watch paused:"):
         return "paused"
+    if reason == "tool_unlisted":
+        return "tool_unlisted"
     if reason == "access_revoked":
         return "access_revoked"
     if status == "paused" and reason == "failed":
@@ -1179,9 +1181,8 @@ class NoticeAttempt:
     """One recorded intent to send a claimed notice.
 
     `nonce` is stable for the notice, so a platform that deduplicates by nonce
-    drops a concurrent resend. `since` is set when an earlier attempt for the
-    same notice never recorded its outcome: delivery must look for that message
-    before sending again.
+    drops a concurrent resend. `since` is set when there was an earlier attempt
+    for the same notice: delivery must look for that message before sending again.
     """
 
     receipt_id: uuid.UUID
@@ -1190,6 +1191,11 @@ class NoticeAttempt:
     attempt: int
     nonce: str
     since: datetime | None
+
+
+Unclear = Literal["unclear"]
+# Delivery's answer when the send may have reached the platform without confirming it.
+UNCLEAR: Unclear = "unclear"
 
 
 @dataclass(frozen=True)
@@ -1224,9 +1230,9 @@ async def open_notice_attempt(
     if any(row.outcome == "sent" for row in earlier):
         await settle_import_notice(session, notice, delivered=True)
         return None
-    unresolved = [row for row in earlier if row.outcome in ("pending", "interrupted")]
-    for row in unresolved:
-        row.outcome = "interrupted"
+    for row in earlier:
+        if row.outcome == "pending":
+            row.outcome = "interrupted"
     receipt = WatchNoticeReceipt(
         id=uuid.uuid4(),
         tenant_id=notice.tenant_id,
@@ -1250,7 +1256,8 @@ async def open_notice_attempt(
         attempt=receipt.attempt,
         # Discord accepts a nonce of at most 25 characters.
         nonce=hashlib.sha256(key).hexdigest()[:25],
-        since=min((row.attempted_at for row in unresolved), default=None),
+        # Any earlier attempt may have landed, even one recorded as failed: read the DM first.
+        since=min((row.attempted_at for row in earlier), default=None),
     )
 
 
@@ -1261,8 +1268,12 @@ async def close_notice_attempt(
     *,
     sent: SentNotice | None,
     now: datetime,
+    unclear: bool = False,
 ) -> None:
-    """Record what the attempt did, then settle the claim when it still holds it."""
+    """Record what the attempt did, then settle the claim when it still holds it.
+
+    An `unclear` send is recorded as interrupted: it may have landed.
+    """
     receipt = await session.get(WatchNoticeReceipt, attempt.receipt_id, with_for_update=True)
     # A later claim may have marked this attempt interrupted; what it really did still counts.
     if receipt is not None and receipt.outcome in ("pending", "interrupted"):
@@ -1271,7 +1282,7 @@ async def close_notice_attempt(
             receipt.channel_id = sent.channel_id
             receipt.message_id = sent.message_id
         elif receipt.outcome == "pending":
-            receipt.outcome = "failed"
+            receipt.outcome = "interrupted" if unclear else "failed"
         receipt.settled_at = now
     await settle_import_notice(session, notice, delivered=sent is not None)
 

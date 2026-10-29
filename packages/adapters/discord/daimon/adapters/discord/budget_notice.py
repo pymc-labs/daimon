@@ -8,11 +8,12 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import cast
 
+import aiohttp
 import structlog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
-from daimon.core.stores.watches import NoticeAttempt, SentNotice
+from daimon.core.stores.watches import UNCLEAR, NoticeAttempt, SentNotice, Unclear
 from daimon.core.turn.deps import TurnDeps
 
 import discord
@@ -125,13 +126,14 @@ async def send_watch_notice(
     recipient_id: str,
     text: str,
     attempt: NoticeAttempt,
-) -> SentNotice | None:
+) -> SentNotice | Unclear | None:
     """The member-notice transport for watch owner notices, sent at most once per notice.
 
     The nonce makes Discord return the first message for a concurrent resend
-    within its dedup window. When an earlier attempt never recorded its
-    outcome, the DM is read first and a matching message from the bot counts
-    as sent. A failed read sends nothing, so the claim retries later.
+    within its dedup window. After an earlier attempt the DM is read first, and a
+    matching message from the bot counts as sent. A failed read sends nothing,
+    so the claim retries later. A timeout or server error on the send itself is
+    `UNCLEAR`: Discord may have stored the message, so the next attempt checks.
     """
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
     if is_closed() or not policy.allows(recipient_id):
@@ -144,9 +146,15 @@ async def send_watch_notice(
             async for earlier in dm.history(after=attempt.since - _HISTORY_SKEW, limit=50):
                 if earlier.author.id == bot_user_id and earlier.content == text:
                     return SentNotice(str(earlier.channel.id), str(earlier.id))
+    except (discord.HTTPException, LookupError, ValueError):
+        return None
+    try:
         message = await dm.send(
             text, allowed_mentions=discord.AllowedMentions.none(), nonce=attempt.nonce
         )
-        return SentNotice(str(message.channel.id), str(message.id))
-    except (discord.HTTPException, LookupError, ValueError):
-        return None
+    except discord.HTTPException as exc:
+        # Discord refused a 4xx outright; a 5xx may have been stored before it failed.
+        return UNCLEAR if exc.status >= 500 else None
+    except (TimeoutError, aiohttp.ClientError, OSError):
+        return UNCLEAR
+    return SentNotice(str(message.channel.id), str(message.id))

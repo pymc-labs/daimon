@@ -545,5 +545,6 @@ a backend with working `tool_confirmation` and the owner's verified card approva
    `"sent"` receipt carries the DM `message_id`; the owner's DM shows exactly those
    messages. A second `sent` receipt for one kind is fine only with the same
    `message_id`: a resumed attempt found the first message. An `interrupted`
-   receipt marks a send cut off by a restart. Receipts never hold the message
+   receipt marks a send cut off by a restart, a timeout or a Discord server
+   error; the next attempt reads the DM before sending. Receipts never hold the message
    text and are kept 30 days, also after the watch is deleted.

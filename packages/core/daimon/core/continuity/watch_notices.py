@@ -18,8 +18,10 @@ from typing import Protocol
 from daimon.core.continuity.watch_imports import UNMAPPED_NOTICE
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.watches import (
+    UNCLEAR,
     NoticeAttempt,
     SentNotice,
+    Unclear,
     claim_import_notice,
     close_notice_attempt,
     open_notice_attempt,
@@ -29,11 +31,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class DeliverNotice(Protocol):
-    """Send `text` to the watch owner; True or a `SentNotice` when it landed."""
+    """Send `text` to the watch owner.
+
+    True or a `SentNotice` when it landed, False when it surely did not, and
+    `UNCLEAR` when the platform may have stored it (a timeout or server error
+    after the request went out).
+    """
 
     def __call__(
         self, watch: WatchRow, workspace_id: str, text: str, /, *, attempt: NoticeAttempt
-    ) -> Awaitable[bool | SentNotice]: ...
+    ) -> Awaitable[bool | SentNotice | Unclear]: ...
 
 
 async def poll_watch_notices(
@@ -54,47 +61,58 @@ async def poll_watch_notices(
             continue  # An earlier attempt sent it; the claim is already settled.
         watch, workspace_id = notice
         try:
-            label = f"Watch {watch.id} ({' '.join(watch.instructions.split())[:80]})"
-            reason = str(watch.source_state.get("reason", ""))
-            if watch.status == "expired":
-                message = f"{label} expired."
-            elif reason == "source_unmapped":
-                message = UNMAPPED_NOTICE
-            elif reason.startswith("Watch paused:"):
-                message = f"{label}: {reason}"
-            elif reason == "tool_unlisted":
-                message = (
-                    f"{label} paused: watches here can no longer check that tool.\n"
-                    "Ask whoever runs this Daimon to add it back, then ask me to resume it."
-                )
-            elif reason == "access_revoked":
-                message = f"{label} paused: owner access was revoked."
-            elif watch.status == "paused" and reason == "failed":
-                message = (
-                    f"{label} stopped: it could not check its source for a day.\n"
-                    "Fix the source, then ask me to resume it."
-                )
-            elif watch.source_state.get("notice_state") == "daily_cap" and (
-                watch.source_state.get("daily_cap_kind") == "owner"
-            ):
-                message = (
-                    f"{label} and your other watches reached your daily limit across all of "
-                    "them, so they are waiting before they report again.\n"
-                    "Nothing to do: they carry on by themselves within a day."
-                )
-            elif watch.source_state.get("notice_state") == "daily_cap":
-                message = (
-                    f"{label} reached its daily limit, so it is waiting before it reports again.\n"
-                    "Nothing to do: it carries on by itself within a day."
-                )
-            else:
-                message = f"{label} reached its firing limit: fired {watch.fire_count} times."
+            message = notice_text(watch, attempt.kind)
             delivered = await deliver(watch, workspace_id, message, attempt=attempt)
         except Exception:
-            delivered = False  # Never log owner details or source content.
+            # The send may have reached the platform; the next attempt reads the DM first.
+            delivered = UNCLEAR  # Never log owner details or source content.
         if isinstance(delivered, SentNotice):
             sent = delivered
         else:
-            sent = SentNotice() if delivered else None
+            sent = SentNotice() if delivered is True else None
         async with sessions.begin() as db:
-            await close_notice_attempt(db, watch, attempt, sent=sent, now=datetime.now(UTC))
+            await close_notice_attempt(
+                db,
+                watch,
+                attempt,
+                sent=sent,
+                unclear=delivered == UNCLEAR,
+                now=datetime.now(UTC),
+            )
+
+
+def notice_text(watch: WatchRow, kind: str) -> str:
+    """The owner's wording for each `notice_kind`; the kind is fixed when the notice is claimed."""
+    label = f"Watch {watch.id} ({' '.join(watch.instructions.split())[:80]})"
+    reason = str(watch.source_state.get("reason", ""))
+    if kind == "expired":
+        return f"{label} expired."
+    if kind == "source_unmapped":
+        # The watch id keeps each owner DM distinct, so a resumed send finds its own message.
+        return f"{label}: {UNMAPPED_NOTICE}"
+    if kind == "paused":
+        return f"{label}: {reason}"
+    if kind == "tool_unlisted":
+        return (
+            f"{label} paused: watches here can no longer check that tool.\n"
+            "Ask whoever runs this Daimon to add it back, then ask me to resume it."
+        )
+    if kind == "access_revoked":
+        return f"{label} paused: owner access was revoked."
+    if kind == "failed":
+        return (
+            f"{label} stopped: it could not check its source for a day.\n"
+            "Fix the source, then ask me to resume it."
+        )
+    if kind == "owner_daily_cap":
+        return (
+            f"{label} and your other watches reached your daily limit across all of "
+            "them, so they are waiting before they report again.\n"
+            "Nothing to do: they carry on by themselves within a day."
+        )
+    if kind == "daily_cap":
+        return (
+            f"{label} reached its daily limit, so it is waiting before it reports again.\n"
+            "Nothing to do: it carries on by itself within a day."
+        )
+    return f"{label} reached its firing limit: fired {watch.fire_count} times."
