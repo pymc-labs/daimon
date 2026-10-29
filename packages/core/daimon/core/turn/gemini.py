@@ -243,6 +243,11 @@ def _display_part(part: object) -> dict[str, object]:
 class GeminiTurnIO:
     """One host turn, retaining the caller's durable driver/session binding."""
 
+    #: A replay can answer the no-tools sentinel, which sends. A retried replay
+    #: would skip the answer the failed one already claimed, so the driver
+    #: retries only this backend's status read after a quiet stream.
+    replay_may_send: bool = True
+
     def __init__(
         self,
         backend: ManagedAgents,

@@ -9,6 +9,7 @@ grouping / the untouched connection-error budget).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import cast
 
@@ -17,19 +18,25 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions import (
+    BetaManagedAgentsEventParams,
+    BetaManagedAgentsSessionEvent,
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
+from daimon.core.turn.io import LegacyTurnIO, TurnStream
 from daimon.core.turn.posture import AutoApprove, BillingExempt, RequireApproval
 from daimon.core.turn.state import TextBlock
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import (
     DelayThenYield,
     FakeAnthropic,
+    RaiseReadError,
     RecordingLifecycle,
     YieldEvent,
     run_turn_on_leg,
 )
+from mux.contracts.receipts import StopObservation
+from mux.errors import ProviderError
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle, make_status_terminated
 
@@ -499,3 +506,394 @@ async def test_connection_error_regression_still_exhausts_at_two_attempts() -> N
     assert fa.beta.sessions.retrieve_calls == [], (
         "connection-error budget must never consult the status check"
     )
+
+
+# --- The reads after a quiet stream are retried before a turn is lost -----
+
+
+def _dropped() -> anthropic.APIConnectionError:
+    request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
+    return anthropic.APIConnectionError(request=request)
+
+
+@pytest.fixture
+def no_quiet_read_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daimon.core.turn import driver
+
+    monkeypatch.setattr(driver, "_QUIET_READ_RETRY_DELAYS_S", (0.0, 0.0))
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_dropped_status_read_after_a_clean_close_is_retried_not_lost() -> None:
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello")
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(pre)], [YieldEvent(done)]]
+    fa.beta.sessions.events.replay_events = [pre]
+    fa.beta.sessions.retrieve_statuses = [_dropped(), "running"]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert fa.beta.sessions.retrieve_calls == ["sess_1", "sess_1"]
+    assert final.stop_reason is not None
+    assert final.stop_reason.type == "end_turn"
+    assert len(lc.terminal_success) == 1
+    assert not lc.terminal_failures
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_dropped_replay_after_a_quiet_idle_stream_is_retried_not_lost() -> None:
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello")
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(pre)]]
+    fa.beta.sessions.events.replay_events = [pre, done]
+    fa.beta.sessions.events.list_raises = [_dropped()]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.content == [TextBlock(kind="text", text="hello")]
+    assert final.stop_reason is not None
+    assert final.stop_reason.type == "end_turn"
+    assert len(lc.terminal_success) == 1
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_status_reads_that_keep_dropping_still_end_the_turn_as_lost() -> None:
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    fa.beta.sessions.retrieve_statuses = [_dropped(), _dropped(), _dropped()]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert fa.beta.sessions.retrieve_calls == ["sess_1"] * 3
+    assert final.termination == TerminationReason.CONNECTION_LOST
+    assert len(lc.terminal_failures) == 1
+
+
+async def test_a_read_error_mid_stream_reconnects() -> None:
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello ")
+    mid = make_agent_message(event_id="sevt_2", text="world")
+    done = make_status_idle(event_id="sevt_3", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre), RaiseReadError()],
+        [YieldEvent(mid), YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [pre, mid]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert lc.reconnects == ["connection_dropped"]
+    assert final.content == [TextBlock(kind="text", text="hello world")]
+    assert len(lc.terminal_success) == 1
+    assert not lc.terminal_failures
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_503_on_the_status_read_after_a_clean_close_is_retried() -> None:
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello")
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(pre)], [YieldEvent(done)]]
+    fa.beta.sessions.events.replay_events = [pre]
+    request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
+    unavailable = anthropic.APIStatusError(
+        "unavailable", response=httpx.Response(503, request=request), body=None
+    )
+    fa.beta.sessions.retrieve_statuses = [unavailable, "running"]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.stop_reason is not None
+    assert final.stop_reason.type == "end_turn"
+    assert len(lc.terminal_success) == 1
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_4xx_on_the_status_read_is_not_retried() -> None:
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
+    fa.beta.sessions.retrieve_raises = anthropic.APIStatusError(
+        "not found", response=httpx.Response(404, request=request), body=None
+    )
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert fa.beta.sessions.retrieve_calls == ["sess_1"]
+    assert final.error is not None
+    assert len(lc.terminal_failures) == 1
+
+
+class _MuxShapedIO:
+    """The legacy IO behind the errors a mux backend raises: a normalized, retryable
+    `ProviderError` on the first status read and on every replay."""
+
+    def __init__(self, fake: FakeAnthropic, *, replay_may_send: bool) -> None:
+        self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+        self.replay_may_send = replay_may_send
+        self.checks = 0
+        self.replays = 0
+
+    async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
+        return await self.source.open_stream(read_timeout_s=read_timeout_s)
+
+    async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
+        await self.source.send(events)
+
+    async def status(self) -> str:
+        self.checks += 1
+        if self.checks == 1:
+            raise ProviderError("overloaded", retryable=True)
+        return await self.source.status()
+
+    async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:
+        self.replays += 1
+        if self.replays == 1:
+            raise ProviderError("overloaded", retryable=True)
+        return await self.source.replay(timeout_s=timeout_s)
+
+    async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
+        return await self.source.interrupt(timeout_s=timeout_s)
+
+    async def archive(self) -> None:
+        await self.source.archive()
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+@pytest.mark.parametrize("replay_may_send", [False, True])
+async def test_a_mux_backends_retryable_failure_is_retried_unless_its_replay_sends(
+    monkeypatch: pytest.MonkeyPatch, replay_may_send: bool
+) -> None:
+    from daimon.core.turn import driver
+
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello")
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(pre)]]
+    fa.beta.sessions.events.replay_events = [pre, done]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+    io = _MuxShapedIO(fa, replay_may_send=replay_may_send)
+
+    def factory(*args: object, **kwargs: object) -> _MuxShapedIO:
+        return io
+
+    monkeypatch.setattr(driver, "turn_io", factory)
+    lc = RecordingLifecycle()
+    async with asyncio.timeout(10):
+        final = await driver.run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+        )
+
+    assert io.checks == 2, "the status read is always retried"
+    if replay_may_send:
+        assert io.replays == 1, "a replay that can send is never repeated"
+        assert len(lc.terminal_failures) == 1
+    else:
+        assert io.replays == 2
+        assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+        assert len(lc.terminal_success) == 1
+
+
+async def test_stop_while_a_failed_status_read_waits_interrupts_the_running_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.turn import driver
+
+    monkeypatch.setattr(driver, "_QUIET_READ_RETRY_DELAYS_S", (5.0, 5.0))
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [],  # a clean close: the status read follows
+        [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))],
+    ]
+    fa.beta.sessions.retrieve_statuses = [_dropped(), _dropped(), _dropped()]
+    cancel = asyncio.Event()
+
+    async def press_stop() -> None:
+        while not fa.beta.sessions.retrieve_calls:
+            await asyncio.sleep(0.001)
+        cancel.set()
+
+    lc = RecordingLifecycle()
+    async with asyncio.timeout(3):  # far less than one retry pause
+        await asyncio.gather(
+            press_stop(),
+            run_turn_on_leg(
+                anthropic=_cast(fa),
+                session_id="sess_1",
+                user_message="hi",
+                lifecycle=lc,
+                cancel=cancel,
+                render_interval_s=0.001,
+                interrupt_timeout_s=5.0,
+                now=_now,
+                billing=_EXEMPT,
+            ),
+        )
+
+    assert fa.beta.sessions.retrieve_calls == ["sess_1"], "no read after Stop"
+    assert lc.interrupts == ["cancel_event"]
+    sent_types = [
+        ev["type"] for _sid, payload in fa.beta.sessions.events.sent_events for ev in payload
+    ]
+    assert "user.interrupt" in sent_types, "the provider is told to stop"
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_raw_transport_error_that_outlasts_the_retries_ends_the_turn_as_lost() -> None:
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
+    fa.beta.sessions.retrieve_raises = httpx.ReadTimeout("slow", request=request)
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert len(fa.beta.sessions.retrieve_calls) == 3
+    assert final.termination == TerminationReason.CONNECTION_LOST
+    assert len(lc.terminal_failures) == 1
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+@pytest.mark.parametrize("retried_read_fails", [False, True])
+async def test_stop_during_a_retried_read_interrupts_the_turn(
+    monkeypatch: pytest.MonkeyPatch, retried_read_fails: bool
+) -> None:
+    from daimon.core.turn import driver
+
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [
+        [],  # a clean close: the status read follows
+        [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))],
+    ]
+    cancel = asyncio.Event()
+    source = LegacyTurnIO(_cast(fa), "sess_1")
+    checks: list[str] = []
+
+    class StoppedDuringRetry:
+        async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
+            return await source.open_stream(read_timeout_s=read_timeout_s)
+
+        async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
+            await source.send(events)
+
+        async def status(self) -> str:
+            checks.append("status")
+            if len(checks) == 1:
+                raise ProviderError("overloaded", retryable=True)
+            cancel.set()  # Stop lands while the retried read is in flight
+            if retried_read_fails:
+                raise ProviderError("overloaded", retryable=True)
+            return "running"
+
+        async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:
+            return await source.replay(timeout_s=timeout_s)
+
+        async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
+            return await source.interrupt(timeout_s=timeout_s)
+
+        async def archive(self) -> None:
+            await source.archive()
+
+    io = StoppedDuringRetry()
+
+    def factory(*args: object, **kwargs: object) -> StoppedDuringRetry:
+        return io
+
+    monkeypatch.setattr(driver, "turn_io", factory)
+    lc = RecordingLifecycle()
+    async with asyncio.timeout(10):
+        await driver.run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=cancel,
+            render_interval_s=0.001,
+            interrupt_timeout_s=5.0,
+            billing=_EXEMPT,
+        )
+
+    assert checks == ["status", "status"]
+    assert lc.interrupts == ["cancel_event"]
+    sent_types = [
+        ev["type"] for _sid, payload in fa.beta.sessions.events.sent_events for ev in payload
+    ]
+    assert "user.interrupt" in sent_types
