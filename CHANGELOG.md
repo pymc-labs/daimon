@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A reply that ends with nothing to show and no sign it finished now says "Lost the connection" instead of passing as done. Checking on a quiet reply has a time limit, its replay is retried like the status check, and a check that keeps failing says the connection was lost rather than that the service failed.
 - On a phone, the agent's GitHub repo page fills the width with its Save changes and Back to Discord buttons, and the saved page is centred. Undo and Remove on a repo row now look the same.
 - A reply no longer ends "Lost the connection" because one status check failed. When the AI service goes quiet mid-reply, Daimon asks it whether the reply is still running. If that question fails for a passing reason, such as a dropped connection or a busy service, Daimon now tries twice more before giving up. A connection that breaks mid-reply also reconnects instead of failing.
 - A Gemini agent's reply no longer goes missing. Gemini stamps a new reply to the microsecond but every later read of it to the second, so Daimon took each later read for an older one and never saw the reply finish: the turn ended "Lost the connection" and the next message in that thread "Something went wrong". Threads stuck this way recover on their next message.

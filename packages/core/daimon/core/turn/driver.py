@@ -148,30 +148,42 @@ T = TypeVar("T")
 
 
 async def _read_after_quiet[R](
-    read: Callable[[], Awaitable[R]], *, name: str, session_id: str, cancel: asyncio.Event
+    read: Callable[[], Awaitable[R]],
+    *,
+    name: str,
+    session_id: str,
+    cancel: asyncio.Event,
+    timeout_s: float | None = None,
 ) -> R:
     """One status or replay read after a quiet stream, retried on a transient failure.
 
     Only for reads that are safe to repeat: a status read, or a replay that at
     most journals by source key (an IO whose replay can send opts out with
-    `replay_may_send`). Any other error (a scope violation, a 4xx) propagates
-    unchanged; a transport error that outlasts the retries is a lost connection.
-    Stop pressed once a read has failed is the live turn's interrupt, whatever
-    the retried read then returns or raises: the provider is told to stop, as it
-    is mid-stream.
+    `replay_may_send`). `timeout_s` bounds each attempt. Any other error (a
+    scope violation, a 4xx) propagates unchanged. A transient failure that
+    outlasts the retries is a lost connection, never the service failing the
+    reply: the answer may still be waiting on the provider. Stop pressed before
+    or during any attempt is the live turn's interrupt, whatever the read
+    returns or raises: the provider is told to stop, as it is mid-stream.
     """
-    for attempt, delay in enumerate((*_QUIET_READ_RETRY_DELAYS_S, None)):
-        if attempt and cancel.is_set():
+    for delay in (*_QUIET_READ_RETRY_DELAYS_S, None):
+        if cancel.is_set():
             raise _InterruptInConsume()
         try:
-            value = await read()
+            if timeout_s is None:
+                value = await read()
+            else:
+                async with asyncio.timeout(timeout_s):
+                    value = await read()
         except Exception as error:
-            if attempt and cancel.is_set():
+            if cancel.is_set():
                 raise _InterruptInConsume() from error
-            if delay is None or not _transient_read_error(error):
-                if isinstance(error, httpx.TransportError) and delay is None:
-                    raise TurnConnectionLost(f"{name} read kept failing") from error
+            if not _transient_read_error(error):
                 raise
+            if delay is None:
+                if isinstance(error, _CONNECTION_LOST):
+                    raise
+                raise TurnConnectionLost(f"{name} read kept failing") from error
             log.warning(
                 "turn.quiet_read_retry",
                 read=name,
@@ -182,7 +194,7 @@ async def _read_after_quiet[R](
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(cancel.wait(), timeout=delay)
             continue
-        if attempt and cancel.is_set():
+        if cancel.is_set():
             raise _InterruptInConsume()
         return value
     raise AssertionError("unreachable: the last attempt returns or raises")
@@ -452,10 +464,15 @@ _CONNECTION_LOST = (
 # after these pauses before it may end the turn.
 _QUIET_READ_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 2.0)
 
+# One status read may take this long. A client that retries internally (MA's
+# clients retry reads eight times) could otherwise hold the turn until its
+# ceiling on a single question; a read that runs out is a transient failure.
+_STATUS_READ_TIMEOUT_S = 30.0
+
 
 def _transient_read_error(error: BaseException) -> bool:
     """A failure of the read itself, not a verdict on the turn: worth one more try."""
-    if isinstance(error, (*_CONNECTION_LOST, httpx.TransportError)):
+    if isinstance(error, (*_CONNECTION_LOST, httpx.TransportError, TimeoutError)):
         return True
     if isinstance(error, _anthropic.APIStatusError):
         return error.status_code == 429 or error.status_code >= 500
@@ -1141,7 +1158,11 @@ async def _pump(
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
                     status = await _read_after_quiet(
-                        io.status, name="status", session_id=session_id, cancel=cancel
+                        io.status,
+                        name="status",
+                        session_id=session_id,
+                        cancel=cancel,
+                        timeout_s=_STATUS_READ_TIMEOUT_S,
                     )
                     if status in {"running", "rescheduling"}:
                         log.info(
@@ -1327,6 +1348,22 @@ async def _pump(
                 rate_limit_until=rate_limit[0] if rate_limit else None,
                 retry_after_s=rate_limit[1] if rate_limit else None,
                 renders_failed=renders_failed_cell[0],
+            )
+        except TurnError as err:
+            # An IO's own verdict (Gemini's replay deadline): its kind names the
+            # end, rather than escaping the driver as an unexpected failure.
+            await _cancel_render()
+            state_cell[0] = dataclasses.replace(
+                state_cell[0], error=err, termination=termination_reason(err)
+            )
+            return await _finalize_success_or_error(
+                state_cell=state_cell,
+                lifecycle=lifecycle,
+                render_once=_render_once,
+                session_id=session_id,
+                events_folded=events_folded_cell[0],
+                renders_failed=renders_failed_cell[0],
+                tool_confirmation=tool_confirmation,
             )
         except (_anthropic.APIError, ProviderError) as err:
             await _cancel_render()
@@ -1676,7 +1713,16 @@ async def _consume_with_reconnect(
                 "turn.reconnect.started", session_id=session_id, reconnect_reason=reconnect_reason
             )
             await lifecycle.on_reconnect(reconnect_reason)
-            replayed = await io.replay()
+            if getattr(io, "replay_may_send", False):
+                replayed = await io.replay()
+            else:
+                try:
+                    replayed = await _read_after_quiet(
+                        io.replay, name="replay", session_id=session_id, cancel=cancel
+                    )
+                except _InterruptInConsume:
+                    # Same as a Stop seen right after the replay, below.
+                    raise _InterruptedDuringRecovery(phase="replay") from None
             if cancel.is_set():
                 raise _InterruptedDuringRecovery(phase="replay")
             current_turn_events = _events_since_last_turn_boundary(
@@ -1759,8 +1805,14 @@ async def _consume_with_reconnect(
                 # Only keep-alives for `idle_check_s`: the same status-checked path
                 # as a clean close. Still running keeps waiting on the same fetch.
                 try:
-                    status = await io.status()
-                except (*_CONNECTION_LOST, _anthropic.APIError, ProviderError) as error:
+                    async with asyncio.timeout(_STATUS_READ_TIMEOUT_S):
+                        status = await io.status()
+                except (
+                    *_CONNECTION_LOST,
+                    _anthropic.APIError,
+                    ProviderError,
+                    TimeoutError,
+                ) as error:
                     # A lost connection or a 429/5xx on the check is no verdict, so it
                     # never ends the turn: keep waiting, and the turn's deadline still
                     # bounds it. A scope violation still propagates.
@@ -1970,6 +2022,16 @@ def _has_text_answer(state: TurnState) -> bool:
     return any(isinstance(block, TextBlock) and block.text.strip() for block in state.content)
 
 
+def _has_final_answer(state: TurnState) -> bool:
+    """Answer text after the last tool call: narration before a call is not an answer."""
+    for block in reversed(state.content):
+        if not isinstance(block, TextBlock):
+            return False
+        if block.text.strip():
+            return True
+    return False
+
+
 async def _finalize_success_or_error(
     *,
     normalized_reason: TerminationReason | None = None,
@@ -2044,6 +2106,33 @@ async def _finalize_success_or_error(
                 final_state,
                 error=final_state.retrying_error,
                 termination=TerminationReason.RETRYING_UNSETTLED,
+            )
+            state_cell[0] = final_state
+    if (
+        final_state.error is None
+        and final_state.stop_reason is None
+        and final_state.termination is None
+        and normalized_reason is None
+    ):
+        # Nothing ended this turn: no stop reason, no outcome, no error. A quiet
+        # stream, an idle status and a replay without the turn's end look like
+        # this. With answer text on screen it stands, logged so it can be counted.
+        # With no answer (nothing, or nothing after the last tool call)
+        # it is not a finished reply: say the connection
+        # was lost, so the person asks what was done instead of reading an
+        # empty answer as complete.
+        log.warning(
+            "turn.no_terminal_evidence",
+            session_id=session_id,
+            events_folded=events_folded,
+            answered=_has_final_answer(final_state),
+        )
+        if not _has_final_answer(final_state):
+            err = TurnError(
+                kind="connection_lost", message="the turn ended with no sign it finished"
+            )
+            final_state = dataclasses.replace(
+                final_state, error=err, termination=TerminationReason.CONNECTION_LOST
             )
             state_cell[0] = final_state
     if final_state.termination is None:

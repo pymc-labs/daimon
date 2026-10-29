@@ -301,9 +301,11 @@ async def test_three_consecutive_eventless_cycles_have_no_attempt_cap() -> None:
     assert len(lc.terminal_success) == 1
 
 
-async def test_status_check_error_finalizes_as_upstream_turn_error() -> None:
-    """`sessions.retrieve` itself erroring must propagate into `_pump`'s
-    existing upstream finalizer, not hang or get swallowed."""
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_status_read_that_keeps_failing_with_a_5xx_ends_as_lost_not_upstream() -> None:
+    """`sessions.retrieve` failing on every retry must finalize, not hang or get
+    swallowed: as a lost connection, since the answer may still be on the
+    provider, never as the service failing the reply."""
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [[]]  # immediate clean close
     fa.beta.sessions.events.replay_events = []
@@ -326,7 +328,7 @@ async def test_status_check_error_finalizes_as_upstream_turn_error() -> None:
     )
 
     assert final.error is not None
-    assert final.error.kind == "upstream"
+    assert final.termination == TerminationReason.CONNECTION_LOST
     assert len(lc.terminal_failures) == 1
 
 
