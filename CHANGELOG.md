@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A long reply no longer ends "Lost the connection" because its connection dropped twice. A reconnect that brings new parts of the reply now resets the count, so only two drops in a row with nothing new between them end it.
 - A turn whose AI service sends nothing for 5, 10, 15 or 30 minutes logs `turn.would_stall` once per step, per backend, saying whether a tool call was open, to measure how long healthy replies go quiet. It changes nothing about how a turn ends.
 - Turn log lines name the backend, profile and model they ran on, and `turn.user_failure` carries `backend`, so failures and lost connections can be counted and alerted on per backend.
 - A reply that ends with nothing to show and no sign it finished now says "Lost the connection" instead of passing as done. Checking on a quiet reply has a time limit, its replay is retried like the status check, and a check that keeps failing says the connection was lost rather than that the service failed.

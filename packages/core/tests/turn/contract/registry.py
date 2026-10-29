@@ -3,10 +3,10 @@
 A backend joins by adding an entry here. `test_registry.py` fails CI when a turn
 profile Daimon can run has no entry.
 
-`pending` names the finding (FINAL-REVIEW.md F1 to F16, plus N1 to N3 found by
+`pending` names the finding (FINAL-REVIEW.md F1 to F16, plus N2 and N3 found by
 this suite) and the PR that fixes it. Each is a strict xfail on an assertion: the
-fixing PR turns the case green and must delete the entry. N1 to N3 have no owner
-yet.
+fixing PR turns the case green and must delete the entry. N2 is parked with L2
+(selfhosted is not on prod); N3 is L4's.
 """
 
 from __future__ import annotations
@@ -32,10 +32,6 @@ class Backend:
     """Case name to why the backend's wire cannot express it. A skip."""
 
 
-N1 = (
-    "N1: the 2-attempt drop budget is per stream generation and never resets after a "
-    "reconnect delivers records (driver.py:1123), so a second drop loses the turn. No owner yet"
-)
 STALLED = (
     "PR 3a enforced: the stall cap ends a stuck turn as CEILING with a turn.stalled line "
     "naming its backend (root decision); the case assumes DAIMON_TURN__STALL_AFTER_S"
@@ -45,10 +41,6 @@ M2 = "M2: no backoff between eventless reconnects (PR 3a enforced)"
 COPY = (
     "Root decision: the CEILING notice says try again, not ask what it finished "
     "(notices.py:105, PR 3a enforced)"
-)
-QUIET_IS_A_DROP = (
-    "PR 4: a quiet OpenAI stream (read timeout) is a dropped connection "
-    "(openai_io.py:84), so it spends the drop budget; with N1 the turn is lost"
 )
 
 
@@ -69,7 +61,6 @@ BACKENDS: dict[str, Backend] = {
         (anthropic_fake.PROFILE,),
         anthropic_fake.run,
         pending={
-            "two_drops_with_progress_between": N1,
             "stuck_running_stalls_out_before_the_ceiling": STALLED,
             "stuck_running_settles_the_native_turn": F6,
             "stuck_running_reconnects_back_off": M2,
@@ -81,13 +72,6 @@ BACKENDS: dict[str, Backend] = {
         (openai_fake.PROFILE,),
         openai_fake.run,
         pending={
-            "same_second_burst": QUIET_IS_A_DROP,
-            "resume_across_many_connections": QUIET_IS_A_DROP,
-            "two_clean_eofs_in_a_row": (
-                "PR 4: a clean EOF raises TurnConnectionLost (openai_io.py:163-167); the "
-                "second one in a row loses the turn"
-            ),
-            "two_drops_with_progress_between": N1,
             "stuck_running_settles_the_native_turn": F6,
             **_after_pr4("a clean EOF on a running OpenAI turn is a dropped connection"),
         },
