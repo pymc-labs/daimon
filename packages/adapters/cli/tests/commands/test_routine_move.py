@@ -8,6 +8,7 @@ from io import StringIO
 import pytest
 from daimon.adapters.cli.commands.routines import (
     read_seed_entries,
+    run_link_internal,
     run_seed_first_run,
 )
 from daimon.core.errors import UserFacingError
@@ -156,3 +157,88 @@ async def test_handback_cli_preview_apply_and_preserve(db_session_factory):
     assert "Dry run: nothing written." in rendered
     assert "Applied atomically." in rendered
     assert "already captured; preserved" in rendered
+
+
+async def test_link_internal_cli_preview_and_apply(db_session_factory):
+    internal_id = uuid.uuid4()
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id=None,
+            agent_id="ag",
+            agent_name="daimon",
+            cron_expr="0 * * * *",
+            timezone_="UTC",
+            trigger_message="run",
+            enabled=False,
+        )
+    output = StringIO()
+    for apply in (False, True):
+        await run_link_internal(
+            rt=build_cli_runtime(db_session_factory),
+            console=Console(file=output, width=300),
+            tenant_id=tenant.id,
+            routine_id=row.id,
+            internal_id=internal_id,
+            apply=apply,
+        )
+        async with db_session_factory() as session:
+            stored = await get_routine(session, row.id, tenant_id=tenant.id)
+            assert stored.internal_routine_id == (internal_id if apply else None)
+            assert stored.model_copy(update={"internal_routine_id": None}) == row
+    assert f"{row.id}: internal_routine_id={internal_id}" in output.getvalue()
+    assert "Dry run: nothing written." in output.getvalue()
+    assert "Applied atomically." in output.getvalue()
+    with pytest.raises(UserFacingError, match="already linked to same internal id"):
+        await run_link_internal(
+            rt=build_cli_runtime(db_session_factory),
+            console=Console(file=output),
+            tenant_id=tenant.id,
+            routine_id=row.id,
+            internal_id=internal_id,
+            apply=True,
+        )
+
+
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("refuse", [False, True])
+def test_link_internal_command_options_and_one_line_refusal(monkeypatch, apply, refuse):
+    from contextlib import asynccontextmanager
+
+    from daimon.adapters.cli.commands import routines
+    from typer.testing import CliRunner
+
+    tenant_id, routine_id, internal_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    @asynccontextmanager
+    async def runtime(_settings):
+        yield None
+
+    async def run_link(**kwargs):
+        assert kwargs["tenant_id"] == tenant_id
+        assert kwargs["routine_id"] == routine_id
+        assert kwargs["internal_id"] == internal_id
+        assert kwargs["apply"] is apply
+        if refuse:
+            raise UserFacingError("routine is enabled; pause it before linking.")
+
+    monkeypatch.setattr(routines, "load_settings", lambda: None)
+    monkeypatch.setattr(routines, "build_runtime", runtime)
+    monkeypatch.setattr(routines, "run_link_internal", run_link)
+    args = [
+        "link-internal",
+        "--tenant",
+        str(tenant_id),
+        "--routine",
+        str(routine_id),
+        "--internal-id",
+        str(internal_id),
+    ]
+    if apply:
+        args.append("--apply")
+    result = CliRunner().invoke(routines.routines_app, args)
+    assert result.exit_code == (1 if refuse else 0), result.output
+    if refuse:
+        assert result.output.strip() == "Error: routine is enabled; pause it before linking."
