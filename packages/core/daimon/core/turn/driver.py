@@ -148,30 +148,40 @@ T = TypeVar("T")
 
 
 async def _read_after_quiet[R](
-    read: Callable[[], Awaitable[R]], *, name: str, session_id: str, cancel: asyncio.Event
+    read: Callable[[], Awaitable[R]],
+    *,
+    name: str,
+    session_id: str,
+    cancel: asyncio.Event,
+    timeout_s: float | None = None,
 ) -> R:
     """One status or replay read after a quiet stream, retried on a transient failure.
 
     Only for reads that are safe to repeat: a status read, or a replay that at
     most journals by source key (an IO whose replay can send opts out with
-    `replay_may_send`). Any other error (a scope violation, a 4xx) propagates
-    unchanged; a transport error that outlasts the retries is a lost connection.
-    Stop pressed once a read has failed is the live turn's interrupt, whatever
-    the retried read then returns or raises: the provider is told to stop, as it
-    is mid-stream.
+    `replay_may_send`). `timeout_s` bounds each attempt. Any other error (a
+    scope violation, a 4xx) propagates unchanged. A transient failure that
+    outlasts the retries is a lost connection, never the service failing the
+    reply: the answer may still be waiting on the provider. Stop pressed before
+    or during any attempt is the live turn's interrupt, whatever the read
+    returns or raises: the provider is told to stop, as it is mid-stream.
     """
-    for attempt, delay in enumerate((*_QUIET_READ_RETRY_DELAYS_S, None)):
-        if attempt and cancel.is_set():
+    for delay in (*_QUIET_READ_RETRY_DELAYS_S, None):
+        if cancel.is_set():
             raise _InterruptInConsume()
         try:
-            value = await read()
+            if timeout_s is None:
+                value = await read()
+            else:
+                async with asyncio.timeout(timeout_s):
+                    value = await read()
         except Exception as error:
-            if attempt and cancel.is_set():
+            if cancel.is_set():
                 raise _InterruptInConsume() from error
-            if delay is None or not _transient_read_error(error):
-                if isinstance(error, httpx.TransportError) and delay is None:
-                    raise TurnConnectionLost(f"{name} read kept failing") from error
+            if not _transient_read_error(error):
                 raise
+            if delay is None:
+                raise TurnConnectionLost(f"{name} read kept failing") from error
             log.warning(
                 "turn.quiet_read_retry",
                 read=name,
@@ -182,10 +192,19 @@ async def _read_after_quiet[R](
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(cancel.wait(), timeout=delay)
             continue
-        if attempt and cancel.is_set():
+        if cancel.is_set():
             raise _InterruptInConsume()
         return value
     raise AssertionError("unreachable: the last attempt returns or raises")
+
+
+def _message_text(event: object) -> str:
+    """The text of a replayed `user.message`, its text blocks joined."""
+    return "".join(
+        getattr(block, "text", "")
+        for block in getattr(event, "content", None) or ()
+        if getattr(block, "type", None) == "text"
+    )
 
 
 def _answers_in_turn(tool_confirmation: ToolConfirmation) -> bool:
@@ -452,10 +471,15 @@ _CONNECTION_LOST = (
 # after these pauses before it may end the turn.
 _QUIET_READ_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 2.0)
 
+# One status read may take this long. A client that retries internally (MA's
+# clients retry reads eight times) could otherwise hold the turn until its
+# ceiling on a single question; a read that runs out is a transient failure.
+_STATUS_READ_TIMEOUT_S = 30.0
+
 
 def _transient_read_error(error: BaseException) -> bool:
     """A failure of the read itself, not a verdict on the turn: worth one more try."""
-    if isinstance(error, (*_CONNECTION_LOST, httpx.TransportError)):
+    if isinstance(error, (*_CONNECTION_LOST, httpx.TransportError, TimeoutError)):
         return True
     if isinstance(error, _anthropic.APIStatusError):
         return error.status_code == 429 or error.status_code >= 500
@@ -491,6 +515,15 @@ class _InterruptInConsume(Exception):
     """User interrupt observed while consuming the live SSE stream.
 
     Module-private sentinel; caught exactly once at `_pump`'s top level.
+    """
+
+
+class _TurnMessageMissing(Exception):
+    """The first send failed with its outcome unknown, and the reconnect replay
+    does not hold this turn's message: whatever it holds belongs to an earlier
+    turn, so nothing in it may finish this one.
+
+    Module-private sentinel; caught at `_pump`'s top level as a lost connection.
     """
 
 
@@ -727,7 +760,24 @@ async def run_turn(
                     unwedge_attempts[0] += 1
                     raise _SessionAwaitingConfirmations() from err
                 raise
+        message_sent[0] = True
         await acknowledge(lifecycle, "accepted")
+
+    # Whether this turn's message is known to have reached the provider. A first
+    # send that failed with its outcome unknown is followed by a reconnect replay,
+    # whose newest message may still be the previous turn's: that replay counts
+    # only if its newest message is this one. An IO whose replay is already
+    # scoped to this turn's own native id needs no such check.
+    message_sent = [False]
+    replay_scoped = bool(getattr(io, "replay_scoped_to_turn", False))
+
+    def _message_landed(replayed: list[Any]) -> bool:
+        if message_sent[0] or replay_scoped:
+            return True
+        last = next(
+            (e for e in reversed(replayed) if getattr(e, "type", None) == "user.message"), None
+        )
+        return last is not None and _message_text(last) == user_message
 
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session_id
@@ -738,6 +788,7 @@ async def run_turn(
             anthropic=anthropic,
             session_id=session_id,
             send_initial=_send_initial,
+            message_landed=_message_landed,
             render_anchor=TurnState(),
             seed_state=TurnState(),
             lifecycle=lifecycle,
@@ -979,6 +1030,7 @@ async def _pump(
     anthropic: AsyncAnthropic,
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
+    message_landed: Callable[[list[Any]], bool] = lambda _replayed: True,
     render_anchor: TurnState,
     seed_state: TurnState,
     lifecycle: TurnLifecycle,
@@ -1121,6 +1173,7 @@ async def _pump(
                                 anthropic=anthropic,
                                 session_id=session_id,
                                 send_initial=send_initial,
+                                message_landed=message_landed,
                                 is_retry=attempt_is_retry,
                                 reconnect_reason=attempt_reason,
                                 state_cell=state_cell,
@@ -1141,7 +1194,11 @@ async def _pump(
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
                     status = await _read_after_quiet(
-                        io.status, name="status", session_id=session_id, cancel=cancel
+                        io.status,
+                        name="status",
+                        session_id=session_id,
+                        cancel=cancel,
+                        timeout_s=_STATUS_READ_TIMEOUT_S,
                     )
                     if status in {"running", "rescheduling"}:
                         log.info(
@@ -1304,8 +1361,9 @@ async def _pump(
                 interrupt_timeout_s=interrupt_timeout_s,
                 renders_failed=renders_failed_cell[0],
             )
-        except _CONNECTION_LOST as err:
-            # tenacity exhausted with reraise=True.
+        except (*_CONNECTION_LOST, _TurnMessageMissing) as err:
+            # tenacity exhausted with reraise=True, or a reconnect that found no
+            # trace of this turn's message.
             await _cancel_render()
             return await _finalize_connection_lost(
                 state_cell=state_cell,
@@ -1327,6 +1385,22 @@ async def _pump(
                 rate_limit_until=rate_limit[0] if rate_limit else None,
                 retry_after_s=rate_limit[1] if rate_limit else None,
                 renders_failed=renders_failed_cell[0],
+            )
+        except TurnError as err:
+            # An IO's own verdict (Gemini's replay deadline): its kind names the
+            # end, rather than escaping the driver as an unexpected failure.
+            await _cancel_render()
+            state_cell[0] = dataclasses.replace(
+                state_cell[0], error=err, termination=termination_reason(err)
+            )
+            return await _finalize_success_or_error(
+                state_cell=state_cell,
+                lifecycle=lifecycle,
+                render_once=_render_once,
+                session_id=session_id,
+                events_folded=events_folded_cell[0],
+                renders_failed=renders_failed_cell[0],
+                tool_confirmation=tool_confirmation,
             )
         except (_anthropic.APIError, ProviderError) as err:
             await _cancel_render()
@@ -1625,6 +1699,7 @@ async def _consume_with_reconnect(
     anthropic: AsyncAnthropic,
     session_id: str,
     send_initial: Callable[[], Awaitable[None]],
+    message_landed: Callable[[list[Any]], bool],
     is_retry: bool,
     reconnect_reason: ReconnectReason,
     state_cell: list[TurnState],
@@ -1676,9 +1751,20 @@ async def _consume_with_reconnect(
                 "turn.reconnect.started", session_id=session_id, reconnect_reason=reconnect_reason
             )
             await lifecycle.on_reconnect(reconnect_reason)
-            replayed = await io.replay()
+            if getattr(io, "replay_may_send", False):
+                replayed = await io.replay()
+            else:
+                try:
+                    replayed = await _read_after_quiet(
+                        io.replay, name="replay", session_id=session_id, cancel=cancel
+                    )
+                except _InterruptInConsume:
+                    # Same as a Stop seen right after the replay, below.
+                    raise _InterruptedDuringRecovery(phase="replay") from None
             if cancel.is_set():
                 raise _InterruptedDuringRecovery(phase="replay")
+            if not message_landed(replayed):
+                raise _TurnMessageMissing()
             current_turn_events = _events_since_last_turn_boundary(
                 replayed, tool_confirmation=tool_confirmation
             )
@@ -1759,8 +1845,14 @@ async def _consume_with_reconnect(
                 # Only keep-alives for `idle_check_s`: the same status-checked path
                 # as a clean close. Still running keeps waiting on the same fetch.
                 try:
-                    status = await io.status()
-                except (*_CONNECTION_LOST, _anthropic.APIError, ProviderError) as error:
+                    async with asyncio.timeout(_STATUS_READ_TIMEOUT_S):
+                        status = await io.status()
+                except (
+                    *_CONNECTION_LOST,
+                    _anthropic.APIError,
+                    ProviderError,
+                    TimeoutError,
+                ) as error:
                     # A lost connection or a 429/5xx on the check is no verdict, so it
                     # never ends the turn: keep waiting, and the turn's deadline still
                     # bounds it. A scope violation still propagates.
@@ -2044,6 +2136,32 @@ async def _finalize_success_or_error(
                 final_state,
                 error=final_state.retrying_error,
                 termination=TerminationReason.RETRYING_UNSETTLED,
+            )
+            state_cell[0] = final_state
+    if (
+        final_state.error is None
+        and final_state.stop_reason is None
+        and final_state.termination is None
+        and normalized_reason is None
+    ):
+        # Nothing ended this turn: no stop reason, no outcome, no error. A quiet
+        # stream, an idle status and a replay without the turn's end look like
+        # this. With an answer on screen it stands, logged so it can be counted.
+        # With nothing to show it is not a finished reply: say the connection
+        # was lost, so the person asks what was done instead of reading an
+        # empty answer as complete.
+        log.warning(
+            "turn.no_terminal_evidence",
+            session_id=session_id,
+            events_folded=events_folded,
+            answered=bool(final_state.content),
+        )
+        if not final_state.content:
+            err = TurnError(
+                kind="connection_lost", message="the turn ended with no sign it finished"
+            )
+            final_state = dataclasses.replace(
+                final_state, error=err, termination=TerminationReason.CONNECTION_LOST
             )
             state_cell[0] = final_state
     if final_state.termination is None:
