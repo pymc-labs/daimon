@@ -4,11 +4,12 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from io import StringIO
+from pathlib import Path
 
 import pytest
 from daimon.adapters.cli.commands.routines import (
     read_seed_entries,
-    run_link_internal,
+    run_link_source,
     run_seed_first_run,
 )
 from daimon.core.errors import UserFacingError
@@ -23,10 +24,10 @@ from ..harness import build_cli_runtime
 @pytest.mark.parametrize(
     "entry, message",
     [
-        ({"internal_routine_id": str(uuid.uuid4())}, "last_completed_slot"),
+        ({"source_routine_id": str(uuid.uuid4())}, "last_completed_slot"),
         (
             {
-                "internal_routine_id": str(uuid.uuid4()),
+                "source_routine_id": str(uuid.uuid4()),
                 "last_completed_slot": "2026-10-27T10:00:00",
             },
             "offset",
@@ -38,7 +39,7 @@ def test_invalid_entries_report_id(tmp_path, entry, message):
     path.write_text(json.dumps([entry]))
     with pytest.raises(UserFacingError, match=message) as error:
         read_seed_entries(path)
-    assert entry["internal_routine_id"] in str(error.value)
+    assert entry["source_routine_id"] in str(error.value)
     assert "Nothing was changed" in str(error.value)
 
 
@@ -50,7 +51,7 @@ async def test_cli_preview_and_apply(db_session_factory):
             tenant_id=tenant.id,
             created_by_user_id=None,
             agent_id="ag",
-            internal_routine_id=uuid.uuid4(),
+            source_routine_id=uuid.uuid4(),
             agent_name="daimon",
             cron_expr="0 * * * *",
             timezone_="UTC",
@@ -60,9 +61,9 @@ async def test_cli_preview_and_apply(db_session_factory):
     entries = [
         RoutineSeedEntry.model_validate(
             dict(
-                internal_routine_id=row.internal_routine_id,
+                source_routine_id=row.source_routine_id,
                 last_completed_slot="2026-10-27T10:00:00Z",
-                internal_next_run="2026-10-27T11:00:00Z",
+                source_next_run="2026-10-27T11:00:00Z",
                 cron_expr="0 * * * *",
                 timezone="UTC",
             )
@@ -128,7 +129,7 @@ async def test_handback_cli_preview_apply_and_preserve(db_session_factory):
             session,
             tenant_id=tenant.id,
             created_by_user_id=None,
-            internal_routine_id=uuid.uuid4(),
+            source_routine_id=uuid.uuid4(),
             agent_id="ag",
             agent_name="daimon",
             cron_expr="0 * * * *",
@@ -145,7 +146,7 @@ async def test_handback_cli_preview_apply_and_preserve(db_session_factory):
             rt=build_cli_runtime(db_session_factory),
             console=Console(file=output, width=300),
             tenant_id=tenant.id,
-            internal_ids=[row.internal_routine_id],
+            source_ids=[row.source_routine_id],
             apply=apply,
             now=datetime(2026, 10, 27, 12, tzinfo=UTC),
         )
@@ -159,8 +160,8 @@ async def test_handback_cli_preview_apply_and_preserve(db_session_factory):
     assert "already captured; preserved" in rendered
 
 
-async def test_link_internal_cli_preview_and_apply(db_session_factory):
-    internal_id = uuid.uuid4()
+async def test_link_source_cli_preview_and_apply(db_session_factory):
+    source_id = uuid.uuid4()
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
         row = await create_routine(
@@ -176,41 +177,41 @@ async def test_link_internal_cli_preview_and_apply(db_session_factory):
         )
     output = StringIO()
     for apply in (False, True):
-        await run_link_internal(
+        await run_link_source(
             rt=build_cli_runtime(db_session_factory),
             console=Console(file=output, width=300),
             tenant_id=tenant.id,
             routine_id=row.id,
-            internal_id=internal_id,
+            source_id=source_id,
             apply=apply,
         )
         async with db_session_factory() as session:
             stored = await get_routine(session, row.id, tenant_id=tenant.id)
-            assert stored.internal_routine_id == (internal_id if apply else None)
-            assert stored.model_copy(update={"internal_routine_id": None}) == row
-    assert f"{row.id}: internal_routine_id={internal_id}" in output.getvalue()
+            assert stored.source_routine_id == (source_id if apply else None)
+            assert stored.model_copy(update={"source_routine_id": None}) == row
+    assert f"{row.id}: source_routine_id={source_id}" in output.getvalue()
     assert "Dry run: nothing written." in output.getvalue()
     assert "Applied atomically." in output.getvalue()
-    with pytest.raises(UserFacingError, match="already linked to same internal id"):
-        await run_link_internal(
+    with pytest.raises(UserFacingError, match="already linked to source routine"):
+        await run_link_source(
             rt=build_cli_runtime(db_session_factory),
             console=Console(file=output),
             tenant_id=tenant.id,
             routine_id=row.id,
-            internal_id=internal_id,
+            source_id=source_id,
             apply=True,
         )
 
 
 @pytest.mark.parametrize("apply", [False, True])
 @pytest.mark.parametrize("refuse", [False, True])
-def test_link_internal_command_options_and_one_line_refusal(monkeypatch, apply, refuse):
+def test_link_source_command_options_and_one_line_refusal(monkeypatch, apply, refuse):
     from contextlib import asynccontextmanager
 
     from daimon.adapters.cli.commands import routines
     from typer.testing import CliRunner
 
-    tenant_id, routine_id, internal_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    tenant_id, routine_id, source_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 
     @asynccontextmanager
     async def runtime(_settings):
@@ -219,22 +220,22 @@ def test_link_internal_command_options_and_one_line_refusal(monkeypatch, apply, 
     async def run_link(**kwargs):
         assert kwargs["tenant_id"] == tenant_id
         assert kwargs["routine_id"] == routine_id
-        assert kwargs["internal_id"] == internal_id
+        assert kwargs["source_id"] == source_id
         assert kwargs["apply"] is apply
         if refuse:
             raise UserFacingError("routine is enabled; pause it before linking.")
 
     monkeypatch.setattr(routines, "load_settings", lambda: None)
     monkeypatch.setattr(routines, "build_runtime", runtime)
-    monkeypatch.setattr(routines, "run_link_internal", run_link)
+    monkeypatch.setattr(routines, "run_link_source", run_link)
     args = [
-        "link-internal",
+        "link-source",
         "--tenant",
         str(tenant_id),
         "--routine",
         str(routine_id),
-        "--internal-id",
-        str(internal_id),
+        "--source-id",
+        str(source_id),
     ]
     if apply:
         args.append("--apply")
@@ -242,3 +243,59 @@ def test_link_internal_command_options_and_one_line_refusal(monkeypatch, apply, 
     assert result.exit_code == (1 if refuse else 0), result.output
     if refuse:
         assert result.output.strip() == "Error: routine is enabled; pause it before linking."
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        None,
+        {},
+        {"format_version": 1, "routines": []},
+        {"format_version": 2, "routines": []},
+        {"routines": []},
+    ],
+)
+def test_seed_requires_nonempty_bare_array(tmp_path: Path, payload: object) -> None:
+    path = tmp_path / "seed.json"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(UserFacingError, match="must be a nonempty array"):
+        read_seed_entries(path)
+
+
+@pytest.mark.parametrize("keep_source", [False, True])
+def test_seed_array_accepts_only_source_fields(tmp_path: Path, keep_source: bool) -> None:
+    values = {
+        "source_routine_id": str(uuid.uuid4()),
+        "last_completed_slot": "2026-10-27T10:00:00Z",
+        "source_next_run": "2026-10-27T11:00:00Z",
+        "cron_expr": "0 * * * *",
+        "timezone": "UTC",
+    }
+    path = tmp_path / "seed.json"
+    path.write_text(json.dumps([values]))
+    assert read_seed_entries(path) == [RoutineSeedEntry.model_validate(values)]
+    for field, legacy in (
+        ("routine_id", "internal_routine_id"),
+        ("next_run", "internal_next_run"),
+    ):
+        invalid = dict(values, **{legacy: values["source_" + field]})
+        if not keep_source:
+            invalid.pop("source_" + field)
+        path.write_text(json.dumps([invalid]))
+        with pytest.raises(UserFacingError, match=f"{legacy}: Extra inputs are not permitted"):
+            read_seed_entries(path)
+
+
+def test_seed_rejects_wrapped_source_entries(tmp_path: Path) -> None:
+    values = {
+        "source_routine_id": str(uuid.uuid4()),
+        "last_completed_slot": "2026-10-27T10:00:00Z",
+        "source_next_run": "2026-10-27T11:00:00Z",
+        "cron_expr": "0 * * * *",
+        "timezone": "UTC",
+    }
+    path = tmp_path / "seed.json"
+    path.write_text(json.dumps({"format_version": 2, "routines": [values]}))
+    with pytest.raises(UserFacingError, match="must be a nonempty array"):
+        read_seed_entries(path)

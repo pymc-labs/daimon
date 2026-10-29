@@ -30,7 +30,7 @@ async def setup(session, *, count=2):
             tenant_id=tenant.id,
             created_by_user_id=None,
             agent_id="ag",
-            internal_routine_id=uuid.uuid4(),
+            source_routine_id=uuid.uuid4(),
             agent_name="daimon",
             cron_expr="0 * * * *",
             timezone_="UTC",
@@ -42,9 +42,9 @@ async def setup(session, *, count=2):
     entries = [
         RoutineSeedEntry.model_validate(
             dict(
-                internal_routine_id=row.internal_routine_id,
+                source_routine_id=row.source_routine_id,
                 last_completed_slot="2026-10-27T10:00:00Z",
-                internal_next_run="2026-10-27T11:00:00Z",
+                source_next_run="2026-10-27T11:00:00Z",
                 cron_expr="0 * * * *",
                 timezone="UTC",
             )
@@ -91,17 +91,17 @@ async def test_batch_refusal_writes_nothing(db_session_factory, invalid):
     async with db_session_factory.begin() as session:
         tid, rows, entries = await setup(session)
         if invalid == "os-id":
-            entries[1] = entries[1].model_copy(update={"internal_routine_id": rows[1].id})
+            entries[1] = entries[1].model_copy(update={"source_routine_id": rows[1].id})
         elif invalid in ("unknown", "cross-tenant"):
             other_id = uuid.uuid4()
             if invalid == "cross-tenant":
                 _, other, _ = await setup(session, count=1)
-                other_id = other[0].internal_routine_id
-            entries[1] = entries[1].model_copy(update={"internal_routine_id": other_id})
+                other_id = other[0].source_routine_id
+            entries[1] = entries[1].model_copy(update={"source_routine_id": other_id})
         elif invalid == "duplicate":
             entries.append(entries[0])
         elif invalid == "clock":
-            entries[1] = entries[1].model_copy(update={"internal_next_run": NOW})
+            entries[1] = entries[1].model_copy(update={"source_next_run": NOW})
         elif invalid == "mismatch":
             entries[1] = entries[1].model_copy(update={"timezone": "America/New_York"})
         else:
@@ -173,7 +173,7 @@ async def test_export_filters_refuse_cross_tenant(db_session):
     other_tid, _, _ = await setup(db_session, count=1)
     with pytest.raises(StoreError, match="no Daimon routine has this id in the selected team"):
         await rollback_rows(
-            db_session, tenant_id=other_tid, internal_routine_ids=[rows[0].internal_routine_id]
+            db_session, tenant_id=other_tid, source_routine_ids=[rows[0].source_routine_id]
         )
 
 
@@ -226,13 +226,13 @@ async def test_several_matches_refuse_the_entire_batch(db_session):
     tid, rows, entries = await setup(db_session)
     # Defensive refusal even for a legacy/corrupted DB without the unique constraint.
     await db_session.execute(
-        text("ALTER TABLE routines DROP CONSTRAINT uq_routines_tenant_internal_id")
+        text("ALTER TABLE routines DROP CONSTRAINT uq_routines_tenant_source_id")
     )
     await db_session.execute(
         update(Routine)
         .where(Routine.id == rows[1].id)
         .values(
-            internal_routine_id=rows[0].internal_routine_id,
+            source_routine_id=rows[0].source_routine_id,
         )
     )
     with pytest.raises(StoreError, match="several routines match"):
@@ -245,7 +245,7 @@ async def test_export_refuses_empty_selection(db_session, selection):
     tenant = await make_tenant(db_session)
     ids = [uuid.uuid4()] if selection == "missing" else selection
     with pytest.raises(StoreError, match="at least one|No routines matched|no Daimon routine"):
-        await rollback_rows(db_session, tenant_id=tenant.id, internal_routine_ids=ids)
+        await rollback_rows(db_session, tenant_id=tenant.id, source_routine_ids=ids)
 
 
 @pytest.mark.parametrize("rival", ["seed", "resume"])
@@ -312,7 +312,7 @@ async def test_two_sessions_seeding_and_resuming_cannot_both_succeed(
     assert isinstance(results[1], StoreError)
     async with factory() as session:
         stored = await get_routine(session, rows[0].id, tenant_id=tid)
-        assert stored.enabled and stored.next_fire_at == entries[0].internal_next_run
+        assert stored.enabled and stored.next_fire_at == entries[0].source_next_run
         assert stored.seeded_after == entries[0].last_completed_slot
 
 
@@ -322,16 +322,16 @@ async def test_handback_preview_apply_and_idempotence(db_session_factory):
     async with db_session_factory.begin() as session:
         tid, rows, entries = await setup(session)
         await seed_routines(session, entries, tenant_id=tid, now=NOW, apply=True)
-    ids = [row.internal_routine_id for row in rows]
+    ids = [row.source_routine_id for row in rows]
     async with db_session_factory.begin() as session:
-        await pause_for_handback(session, tenant_id=tid, internal_routine_ids=ids, now=NOW)
+        await pause_for_handback(session, tenant_id=tid, source_routine_ids=ids, now=NOW)
         assert all(
             row.enabled and row.handback_paused_at is None
             for row in await rollback_rows(session, tenant_id=tid)
         )
     async with db_session_factory.begin() as session:
         await pause_for_handback(
-            session, tenant_id=tid, internal_routine_ids=ids, now=NOW, apply=True
+            session, tenant_id=tid, source_routine_ids=ids, now=NOW, apply=True
         )
     async with db_session_factory.begin() as session:
         captured = await rollback_rows(session, tenant_id=tid)
@@ -342,7 +342,7 @@ async def test_handback_preview_apply_and_idempotence(db_session_factory):
         await pause_for_handback(
             session,
             tenant_id=tid,
-            internal_routine_ids=ids,
+            source_routine_ids=ids,
             now=NOW + timedelta(hours=2),
             apply=True,
         )
@@ -356,7 +356,7 @@ async def test_handback_batch_refuses_without_partial_pause(db_session_factory, 
     async with db_session_factory.begin() as session:
         tid, rows, entries = await setup(session)
         await seed_routines(session, entries, tenant_id=tid, now=NOW, apply=True)
-        ids = [row.internal_routine_id for row in rows]
+        ids = [row.source_routine_id for row in rows]
         if invalid == "empty":
             ids = []
         elif invalid == "duplicate":
@@ -365,11 +365,11 @@ async def test_handback_batch_refuses_without_partial_pause(db_session_factory, 
             ids.append(uuid.uuid4())
         else:
             _, other, _ = await setup(session, count=1)
-            ids.append(other[0].internal_routine_id)
+            ids.append(other[0].source_routine_id)
     with pytest.raises(StoreError):
         async with db_session_factory.begin() as session:
             await pause_for_handback(
-                session, tenant_id=tid, internal_routine_ids=ids, now=NOW, apply=True
+                session, tenant_id=tid, source_routine_ids=ids, now=NOW, apply=True
             )
     async with db_session_factory() as session:
         stored = await rollback_rows(session, tenant_id=tid)
@@ -384,7 +384,7 @@ async def test_restart_clears_handback_record(db_session, restart):
     await pause_for_handback(
         db_session,
         tenant_id=tid,
-        internal_routine_ids=[rows[0].internal_routine_id],
+        source_routine_ids=[rows[0].source_routine_id],
         now=NOW,
         apply=True,
     )
@@ -410,7 +410,7 @@ async def test_seed_claim_handback_export_preserves_next_unrun_slot(db_session):
     completed = claim_now.replace(minute=0, second=0, microsecond=0) - timedelta(days=3)
     values = entries[0].model_dump(mode="json") | {
         "last_completed_slot": completed.isoformat(),
-        "internal_next_run": next_slot_at_or_after("0 * * * *", "UTC", completed).isoformat(),
+        "source_next_run": next_slot_at_or_after("0 * * * *", "UTC", completed).isoformat(),
     }
     await db_session.execute(
         update(Routine).where(Routine.id == rows[0].id).values(catch_up_policy="run-once")
@@ -428,7 +428,7 @@ async def test_seed_claim_handback_export_preserves_next_unrun_slot(db_session):
     await pause_for_handback(
         db_session,
         tenant_id=tid,
-        internal_routine_ids=[rows[0].internal_routine_id],
+        source_routine_ids=[rows[0].source_routine_id],
         now=claim_now,
         apply=True,
     )
@@ -457,11 +457,9 @@ async def test_user_enabled_edits_reset_handback_and_recapture_off(db_session):
 
     tid, rows, entries = await setup(db_session, count=1)
     rid = rows[0].id
-    ids = [rows[0].internal_routine_id]
+    ids = [rows[0].source_routine_id]
     await seed_routines(db_session, entries, tenant_id=tid, now=NOW, apply=True)
-    await pause_for_handback(
-        db_session, tenant_id=tid, internal_routine_ids=ids, now=NOW, apply=True
-    )
+    await pause_for_handback(db_session, tenant_id=tid, source_routine_ids=ids, now=NOW, apply=True)
     captured = await get_routine(db_session, rid, tenant_id=tid)
     assert captured.handback_enabled is True
     # MCP's update tool uses this store entry point rather than resume_routine.
@@ -475,7 +473,7 @@ async def test_user_enabled_edits_reset_handback_and_recapture_off(db_session):
     assert paused.handback_enabled is None and paused.handback_next_fire_at is None
     again = NOW + timedelta(minutes=1)
     await pause_for_handback(
-        db_session, tenant_id=tid, internal_routine_ids=ids, now=again, apply=True
+        db_session, tenant_id=tid, source_routine_ids=ids, now=again, apply=True
     )
     stored = await get_routine(db_session, rid, tenant_id=tid)
     assert stored.handback_paused_at == again
@@ -495,7 +493,7 @@ async def test_plain_pause_clears_an_existing_handback(db_session):
     await pause_for_handback(
         db_session,
         tenant_id=tid,
-        internal_routine_ids=[rows[0].internal_routine_id],
+        source_routine_ids=[rows[0].source_routine_id],
         now=NOW,
         apply=True,
     )

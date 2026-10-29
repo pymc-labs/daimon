@@ -9,7 +9,7 @@ from daimon.core.errors import StoreError
 from daimon.core.stores.routines import (
     create_routine,
     get_routine,
-    link_internal_routine,
+    link_source_routine,
     update_routine,
 )
 from daimon.testing.factories import make_tenant
@@ -18,14 +18,14 @@ from sqlalchemy import update
 NOW = datetime(2026, 10, 27, 12, tzinfo=UTC)
 
 
-async def setup(session, *, tenant_id=None, internal_id=None):
+async def setup(session, *, tenant_id=None, source_id=None):
     if tenant_id is None:
         tenant_id = (await make_tenant(session)).id
     return await create_routine(
         session,
         tenant_id=tenant_id,
         created_by_user_id="owner",
-        internal_routine_id=internal_id,
+        source_routine_id=source_id,
         agent_id="ag",
         agent_name="daimon",
         cron_expr="0 * * * *",
@@ -36,19 +36,19 @@ async def setup(session, *, tenant_id=None, internal_id=None):
     )
 
 
-async def test_preview_then_link_changes_only_internal_id(db_session):
+async def test_preview_then_link_changes_only_source_id(db_session):
     row = await setup(db_session)
-    internal_id = uuid.uuid4()
+    source_id = uuid.uuid4()
     for apply in (False, True):
-        await link_internal_routine(
+        await link_source_routine(
             db_session,
             tenant_id=row.tenant_id,
             routine_id=row.id,
-            internal_routine_id=internal_id,
+            source_routine_id=source_id,
             apply=apply,
         )
         stored = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
-        expected = row.model_copy(update={"internal_routine_id": internal_id}) if apply else row
+        expected = row.model_copy(update={"source_routine_id": source_id}) if apply else row
         assert stored == expected
 
 
@@ -76,11 +76,11 @@ async def test_refuses_execution_and_delivery_state(db_session, apply, field, va
     await db_session.execute(update(Routine).where(Routine.id == row.id).values({field: value}))
     before = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
     with pytest.raises(StoreError, match=reason):
-        await link_internal_routine(
+        await link_source_routine(
             db_session,
             tenant_id=row.tenant_id,
             routine_id=row.id,
-            internal_routine_id=uuid.uuid4(),
+            source_routine_id=uuid.uuid4(),
             apply=apply,
         )
     assert await get_routine(db_session, row.id, tenant_id=row.tenant_id) == before
@@ -89,32 +89,30 @@ async def test_refuses_execution_and_delivery_state(db_session, apply, field, va
 @pytest.mark.parametrize("invalid", ["missing", "cross-tenant", "same", "different", "duplicate"])
 @pytest.mark.parametrize("apply", [False, True])
 async def test_identity_refusals_write_nothing(db_session, invalid, apply):
-    internal_id = uuid.uuid4()
-    row = await setup(
-        db_session, internal_id=internal_id if invalid in ("same", "different") else None
-    )
+    source_id = uuid.uuid4()
+    row = await setup(db_session, source_id=source_id if invalid in ("same", "different") else None)
     tenant_id, routine_id = row.tenant_id, row.id
     if invalid == "missing":
         routine_id = uuid.uuid4()
     elif invalid == "cross-tenant":
         tenant_id = (await make_tenant(db_session)).id
     elif invalid == "different":
-        internal_id = uuid.uuid4()
+        source_id = uuid.uuid4()
     elif invalid == "duplicate":
-        other = await setup(db_session, tenant_id=tenant_id, internal_id=internal_id)
+        other = await setup(db_session, tenant_id=tenant_id, source_id=source_id)
     reason = {
         "missing": "does not exist in the selected team",
         "cross-tenant": "does not exist in the selected team",
-        "same": f"same internal id {internal_id}",
-        "different": f"different internal id {row.internal_routine_id}",
+        "same": f"already linked to source routine {source_id}",
+        "different": f"already linked to source routine {row.source_routine_id}",
         "duplicate": "already linked to routine",
     }[invalid]
     with pytest.raises(StoreError, match=reason) as error:
-        await link_internal_routine(
+        await link_source_routine(
             db_session,
             tenant_id=tenant_id,
             routine_id=routine_id,
-            internal_routine_id=internal_id,
+            source_routine_id=source_id,
             apply=apply,
         )
     assert await get_routine(db_session, row.id, tenant_id=row.tenant_id) == row
@@ -123,20 +121,20 @@ async def test_identity_refusals_write_nothing(db_session, invalid, apply):
         assert await get_routine(db_session, other.id, tenant_id=tenant_id) == other
 
 
-async def test_internal_identity_is_tenant_scoped(db_session):
-    internal_id = uuid.uuid4()
-    await setup(db_session, internal_id=internal_id)
+async def test_source_identity_is_tenant_scoped(db_session):
+    source_id = uuid.uuid4()
+    await setup(db_session, source_id=source_id)
     row = await setup(db_session)
-    await link_internal_routine(
+    await link_source_routine(
         db_session,
         tenant_id=row.tenant_id,
         routine_id=row.id,
-        internal_routine_id=internal_id,
+        source_routine_id=source_id,
         apply=True,
     )
     assert (
         await get_routine(db_session, row.id, tenant_id=row.tenant_id)
-    ).internal_routine_id == internal_id
+    ).source_routine_id == source_id
 
 
 async def test_unique_constraint_race_is_a_clear_refusal(
@@ -146,7 +144,7 @@ async def test_unique_constraint_race_is_a_clear_refusal(
     from sqlalchemy.sql.dml import Update
 
     factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
-    internal_id = uuid.uuid4()
+    source_id = uuid.uuid4()
     async with factory.begin() as session:
         row = await setup(session)
     async with factory.begin() as session:
@@ -156,16 +154,16 @@ async def test_unique_constraint_race_is_a_clear_refusal(
             if isinstance(statement, Update):
                 # Simulate an importer that does not participate in advisory locking.
                 async with factory.begin() as rival:
-                    await setup(rival, tenant_id=row.tenant_id, internal_id=internal_id)
+                    await setup(rival, tenant_id=row.tenant_id, source_id=source_id)
             return await execute(statement, *args, **kwargs)
 
         monkeypatch.setattr(session, "execute", competing_insert)
         with pytest.raises(StoreError, match="linked to another routine.*concurrently"):
-            await link_internal_routine(
+            await link_source_routine(
                 session,
                 tenant_id=row.tenant_id,
                 routine_id=row.id,
-                internal_routine_id=internal_id,
+                source_routine_id=source_id,
                 apply=True,
             )
         assert await get_routine(session, row.id, tenant_id=row.tenant_id) == row
@@ -185,11 +183,11 @@ async def test_refuses_missing_or_archived_team(db_session, archived):
             update(Tenant).where(Tenant.id == tenant_id).values(archived_at=NOW)
         )
     with pytest.raises(StoreError, match="Select an active team"):
-        await link_internal_routine(
+        await link_source_routine(
             db_session,
             tenant_id=tenant_id,
             routine_id=row.id,
-            internal_routine_id=uuid.uuid4(),
+            source_routine_id=uuid.uuid4(),
             apply=True,
         )
     assert await get_routine(db_session, row.id, tenant_id=row.tenant_id) == row
@@ -238,21 +236,21 @@ async def test_linked_routine_can_be_seeded(db_session, state):
             await db_session.execute(update(Routine).where(Routine.id == row.id).values(values))
             row = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
 
-    internal_id = uuid.uuid4()
-    await link_internal_routine(
+    source_id = uuid.uuid4()
+    await link_source_routine(
         db_session,
         tenant_id=row.tenant_id,
         routine_id=row.id,
-        internal_routine_id=internal_id,
+        source_routine_id=source_id,
         apply=True,
     )
     linked = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
-    assert linked == row.model_copy(update={"internal_routine_id": internal_id})
+    assert linked == row.model_copy(update={"source_routine_id": source_id})
     entry = RoutineSeedEntry.model_validate(
         dict(
-            internal_routine_id=internal_id,
+            source_routine_id=source_id,
             last_completed_slot=NOW.isoformat(),
-            internal_next_run=NOW.replace(hour=13).isoformat(),
+            source_next_run=NOW.replace(hour=13).isoformat(),
             cron_expr=row.cron_expr,
             timezone=row.timezone,
         )
@@ -260,5 +258,5 @@ async def test_linked_routine_can_be_seeded(db_session, state):
     await seed_routines(db_session, [entry], tenant_id=row.tenant_id, now=NOW, apply=True)
     stored = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
     assert stored.enabled
-    assert stored.next_fire_at == entry.internal_next_run
+    assert stored.next_fire_at == entry.source_next_run
     assert stored.seeded_after == NOW

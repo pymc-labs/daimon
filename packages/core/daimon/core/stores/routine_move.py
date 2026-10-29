@@ -27,7 +27,7 @@ async def seed_routines(
     also serialize ordinary edits/resume and concurrent seed attempts.
     """
     errors: list[str] = []
-    ids = [entry.internal_routine_id for entry in entries]
+    ids = [entry.source_routine_id for entry in entries]
     seen: set[UUID] = set()
     for rid in ids:
         if rid in seen:
@@ -40,43 +40,43 @@ async def seed_routines(
         raise StoreError("Select an active team. Nothing was changed.")
     statement = (
         select(Routine)
-        .where(Routine.tenant_id == tenant_id, Routine.internal_routine_id.in_(ids))
+        .where(Routine.tenant_id == tenant_id, Routine.source_routine_id.in_(ids))
         .order_by(Routine.id)
     )
     if apply:
         statement = statement.with_for_update()
     rows: dict[UUID, list[RoutineRow]] = {}
     for orm in (await session.scalars(statement.execution_options(populate_existing=True))).all():
-        assert orm.internal_routine_id is not None
-        rows.setdefault(orm.internal_routine_id, []).append(RoutineRow.model_validate(orm))
+        assert orm.source_routine_id is not None
+        rows.setdefault(orm.source_routine_id, []).append(RoutineRow.model_validate(orm))
     planned: list[tuple[RoutineRow, datetime]] = []
     for entry in entries:
-        matches = rows.get(entry.internal_routine_id, [])
+        matches = rows.get(entry.source_routine_id, [])
         if len(matches) != 1:
             reason = (
                 "no Daimon routine has this id in the selected team"
                 if not matches
                 else "several routines match"
             )
-            errors.append(f"{entry.internal_routine_id}: {reason}")
+            errors.append(f"{entry.source_routine_id}: {reason}")
             continue
         row = matches[0]
         try:
             planned.append((row, seed_first_slot(entry, row, now=now)))
         except ValueError as exc:
-            errors.append(f"{entry.internal_routine_id}: {exc}")
+            errors.append(f"{entry.source_routine_id}: {exc}")
     if errors:
         raise StoreError("\n".join(errors) + "\nNothing was changed.")
     if apply:
-        seeds = {entry.internal_routine_id: entry.last_completed_slot for entry in entries}
+        seeds = {entry.source_routine_id: entry.last_completed_slot for entry in entries}
         for row, slot in planned:
-            assert row.internal_routine_id is not None
+            assert row.source_routine_id is not None
             saved = await session.scalar(
                 update(Routine)
                 .where(
                     Routine.id == row.id,
                     Routine.tenant_id == tenant_id,
-                    Routine.internal_routine_id == row.internal_routine_id,
+                    Routine.source_routine_id == row.source_routine_id,
                     Routine.enabled.is_(False),
                     Routine.last_fired_at.is_(None),
                     Routine.last_fired_slot.is_(None),
@@ -85,7 +85,7 @@ async def seed_routines(
                 .values(
                     next_fire_at=slot,
                     enabled=True,
-                    seeded_after=seeds[row.internal_routine_id],
+                    seeded_after=seeds[row.source_routine_id],
                     handback_paused_at=None,
                     handback_enabled=None,
                     handback_next_fire_at=None,
@@ -97,30 +97,30 @@ async def seed_routines(
             )
             if saved is None:
                 raise StoreError(
-                    f"{row.internal_routine_id}: routine changed during seed. Nothing was changed."
+                    f"{row.source_routine_id}: routine changed during seed. Nothing was changed."
                 )
     return planned
 
 
 async def rollback_rows(
-    session: AsyncSession, *, tenant_id: UUID, internal_routine_ids: list[UUID] | None = None
+    session: AsyncSession, *, tenant_id: UUID, source_routine_ids: list[UUID] | None = None
 ) -> list[RoutineRow]:
     """One SELECT gives a consistent snapshot without locks or database writes."""
     statement = select(Routine).where(Routine.tenant_id == tenant_id).order_by(Routine.id)
-    if internal_routine_ids is not None:
-        if not internal_routine_ids:
+    if source_routine_ids is not None:
+        if not source_routine_ids:
             raise StoreError("Select at least one routine to export.")
-        if len(set(internal_routine_ids)) != len(internal_routine_ids):
+        if len(set(source_routine_ids)) != len(source_routine_ids):
             raise StoreError("Duplicate routine id in rollback selection.")
-        statement = statement.where(Routine.internal_routine_id.in_(internal_routine_ids))
+        statement = statement.where(Routine.source_routine_id.in_(source_routine_ids))
     rows = [
         RoutineRow.model_validate(row)
         for row in (
             await session.scalars(statement.execution_options(populate_existing=True))
         ).all()
     ]
-    if internal_routine_ids is not None:
-        missing = set(internal_routine_ids) - {row.internal_routine_id for row in rows}
+    if source_routine_ids is not None:
+        missing = set(source_routine_ids) - {row.source_routine_id for row in rows}
         if missing:
             raise StoreError(
                 "\n".join(
@@ -137,20 +137,18 @@ async def pause_for_handback(
     session: AsyncSession,
     *,
     tenant_id: UUID,
-    internal_routine_ids: list[UUID],
+    source_routine_ids: list[UUID],
     now: datetime,
     apply: bool = False,
 ) -> list[RoutineRow]:
     """Capture the pre-pause schedule once; caller owns the whole transaction."""
-    if not internal_routine_ids:
+    if not source_routine_ids:
         raise StoreError("Select at least one routine to pause.")
-    if len(set(internal_routine_ids)) != len(internal_routine_ids):
+    if len(set(source_routine_ids)) != len(source_routine_ids):
         raise StoreError("Duplicate routine id in handback selection.")
     statement = (
         select(Routine)
-        .where(
-            Routine.tenant_id == tenant_id, Routine.internal_routine_id.in_(internal_routine_ids)
-        )
+        .where(Routine.tenant_id == tenant_id, Routine.source_routine_id.in_(source_routine_ids))
         .order_by(Routine.id)
     )
     if apply:
@@ -161,8 +159,8 @@ async def pause_for_handback(
             await session.scalars(statement.execution_options(populate_existing=True))
         ).all()
     ]
-    for rid in internal_routine_ids:
-        matches = [row for row in rows if row.internal_routine_id == rid]
+    for rid in source_routine_ids:
+        matches = [row for row in rows if row.source_routine_id == rid]
         if len(matches) != 1:
             reason = (
                 "no Daimon routine has this id in the selected team"
@@ -175,7 +173,7 @@ async def pause_for_handback(
             if row.handback_paused_at is not None:
                 if row.enabled:
                     raise StoreError(
-                        f"{row.internal_routine_id}: handback record conflicts "
+                        f"{row.source_routine_id}: handback record conflicts "
                         "with a routine that is on."
                     )
                 continue
@@ -201,7 +199,7 @@ async def pause_for_handback(
             )
             if saved is None:
                 raise StoreError(
-                    f"{row.internal_routine_id}: routine changed during handback. "
+                    f"{row.source_routine_id}: routine changed during handback. "
                     "Nothing was changed."
                 )
     return rows

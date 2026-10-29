@@ -98,7 +98,7 @@ WATCH_MCP_HEAD = "0156_watch_mcp_sources"
 NOTICE_RECEIPTS_HEAD = "0157_watch_notice_receipts"
 
 
-HEAD = "0158_watch_mcp_claim"
+HEAD = "0161_routine_source_id"
 
 
 CHAIN = [
@@ -128,6 +128,7 @@ CHAIN = [
     COMPUTE_TASKS_HEAD,
     WATCH_MCP_HEAD,
     NOTICE_RECEIPTS_HEAD,
+    "0158_watch_mcp_claim",
     HEAD,
 ]
 
@@ -261,6 +262,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
                 "handback_enabled",
                 "handback_next_fire_at",
                 "seeded_after",
+                "source_routine_id",
                 "internal_routine_id",
             }
             and expected != HEAD
@@ -268,7 +270,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if (
             kind == "unique_constraint"
-            and name == "uq_routines_tenant_internal_id"
+            and name in {"uq_routines_tenant_source_id", "uq_routines_tenant_internal_id"}
             and expected != HEAD
         ):
             return False
@@ -488,9 +490,15 @@ async def test_deployed_upgrade_and_downgrade_paths(
             assert version == WATCH_MCP_HEAD
             command.upgrade(config, HEAD)
             _assert_head(sync)
+            command.downgrade(config, "0158_watch_mcp_claim")
+            assert (
+                sync.scalar(text("SELECT version_num FROM alembic_version"))
+                == "0158_watch_mcp_claim"
+            )
             # 0158 keeps watch history: no downgrade past it.
             with pytest.raises(NotImplementedError, match="Watch evidence"):
                 command.downgrade(config, NOTICE_RECEIPTS_HEAD)
+            command.upgrade(config, HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)
