@@ -1935,6 +1935,10 @@ async def _consume_with_reconnect(
                     silence.status = status
                 if status in {"running", "rescheduling"}:
                     continue
+                if next_task.done():
+                    # An event arrived during the check: fold it live first (its
+                    # callbacks fire); the next silence asks again.
+                    continue
                 log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
                 raise _EventlessCycle(reason="read_timeout")
             if cancel_task in done:
