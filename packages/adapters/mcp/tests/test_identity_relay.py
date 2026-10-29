@@ -46,7 +46,6 @@ SERVER = SignedIdentityServer(
     issuer="daimon-test",
     audience="https://tools.example.com",
 )
-ISOLATED_SERVER = SERVER.model_copy(update={"isolate_context": True})
 
 
 def _public_ca() -> tuple[str, bytes]:
@@ -124,8 +123,6 @@ async def _chat_session(
     *,
     turn: bool = True,
     foreign: bool = False,
-    message: bool = True,
-    isolated: bool = False,
 ) -> tuple[str, uuid.UUID]:
     """A person's chat session in `thread`, optionally running their turn there.
 
@@ -147,10 +144,9 @@ async def _chat_session(
                 configuration_target_ma_agent_id=None, configuration_target_name=None,
                 role=Role.USER, expires_at=now + dt.timedelta(hours=1), now=now,
                 sender_foreign=foreign, shared_channel=False,
-                platform_channel_id=thread,
-                platform_message_id=f"msg-{thread}" if message else None,
+                platform_channel_id=thread, platform_message_id=f"msg-{thread}",
             )  # fmt: skip
-    token = await _token(factory, person, RelayBinding("Agent A", mapping_id, isolated))
+    token = await _token(factory, person, RelayBinding("Agent A", mapping_id))
     return token, mapping_id
 
 
@@ -355,44 +351,3 @@ async def test_unreachable_server_is_a_bad_gateway_and_a_full_pool_a_retry(
     assert down.status_code == 502, "a server that cannot be reached is a 502"
     assert busy.status_code == 503, "every connection to the server is in use"
     assert busy.headers["retry-after"] == "5", "the caller is told when to retry"
-
-
-async def test_isolated_relay_requires_a_live_requester_message(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    person = await _person(db_session_factory)
-    valid, _ = await _chat_session(db_session_factory, person, "thread-valid", isolated=True)
-    legacy, _ = await _chat_session(db_session_factory, person, "thread-legacy")
-    idle, _ = await _chat_session(
-        db_session_factory, person, "thread-idle", turn=False, isolated=True
-    )
-    no_message, _ = await _chat_session(
-        db_session_factory, person, "thread-no-message", message=False, isolated=True
-    )
-    foreign, _ = await _chat_session(
-        db_session_factory, person, "thread-foreign", foreign=True, isolated=True
-    )
-    upstream = _Upstream()
-    async with _relay(
-        db_session_factory, upstream, generate_signing_key(), ISOLATED_SERVER
-    ) as client:
-        responses = [
-            await _call(client, token) for token in (valid, legacy, idle, no_message, foreign)
-        ]
-    assert [response.status_code for response in responses] == [200, 403, 403, 403, 403]
-    assert len(upstream.requests) == 1
-
-
-async def test_isolated_relay_refuses_an_older_live_session(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    person = await _person(db_session_factory)
-    old, _ = await _chat_session(db_session_factory, person, "thread-1", isolated=True)
-    await _chat_session(db_session_factory, person, "thread-1", turn=False, isolated=True)
-    upstream = _Upstream()
-    async with _relay(
-        db_session_factory, upstream, generate_signing_key(), ISOLATED_SERVER
-    ) as client:
-        response = await _call(client, old)
-    assert response.status_code == 403
-    assert upstream.requests == []

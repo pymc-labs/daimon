@@ -46,7 +46,6 @@ from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
-from daimon.core.mcp_identity import relay_route_name
 from daimon.core.memory_resource import memory_scope
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call
@@ -109,20 +108,6 @@ if TYPE_CHECKING:
     from daimon.core.stores.neutral_catalog import AgentRevision
 
 log = structlog.get_logger(__name__)
-
-
-def isolated_relay_names(deps: TurnDeps, admission: Admission) -> frozenset[str]:
-    """Opt in only agents attached to this deployment's isolated relay URLs."""
-    if deps.public_url is None:
-        return frozenset()
-    return frozenset(
-        server.name
-        for server in admission.agent.mcp_servers
-        if any(
-            relay_route_name(server.url, public_url=deps.public_url) == name
-            for name in deps.isolated_relay_names
-        )
-    )
 
 
 def _delivered_app_snapshot_state(
@@ -381,11 +366,6 @@ async def create_ma_session(
     if _admitted_profile(admission) != "anthropic.managed_agents":
         raise AdmissionDenied(reason="backend_unsupported")
     admission = await reauthorize(deps, admission)
-    isolated = isolated_relay_names(deps, admission)
-    if isolated and (
-        admission.shared_owner is not None or extra_resources or predecessor_session_id
-    ):
-        raise AdmissionDenied(reason="backend_unsupported")
     seal: set[str] = set(admission.origin_seal_ids)
     if predecessor_session_id is not None and admission.origin_channel_id is not None:
         async with deps.sessionmaker() as db:
@@ -439,11 +419,7 @@ async def create_ma_session(
 
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     github_mode = "app"
-    env_sha256 = (
-        None
-        if isolated
-        else await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
-    )
+    env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     excluded_repo_urls: tuple[str, ...] = ()
     delivered_app_access: AppSessionAccess | None = None
 
@@ -497,7 +473,6 @@ async def create_ma_session(
             channel_skills=skills,
             system_override=system_for_platform(admission.agent.system, platform),
             relay_session_key=mapping_id,
-            isolated_relay_names=isolated,
         )
 
     while True:
@@ -534,15 +509,8 @@ async def create_ma_session(
     # in the personal-memory lookup below would leave it live upstream for good.
     try:
         async with deps.sessionmaker() as session:
-            personal_memory_store_id = (
-                None
-                if isolated
-                else await get_personal_memory_store_id(
-                    session,
-                    tenant_id=tenant_id,
-                    agent_id=agent_uuid,
-                    account_id=admission.account_id,
-                )
+            personal_memory_store_id = await get_personal_memory_store_id(
+                session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=admission.account_id
             )
         has_repo = any(
             isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
@@ -578,7 +546,7 @@ async def create_ma_session(
                 () if personal_memory_store_id is None else (personal_memory_store_id,)
             ),
             mcp_hold=None if admission.shared_owner is not None else hold_key(admission.hold),
-            memory_scope=None if isolated else memory_scope(admission.hold),
+            memory_scope=memory_scope(admission.hold),
         ).model_copy(
             update={
                 "token_repo_urls": token_repo_urls,
@@ -697,7 +665,7 @@ async def create_fresh_session(
     passes none of them.
     """
     predecessor_session_id: str | None = None
-    if predecessor_id is not None and not isolated_relay_names(deps, admission):
+    if predecessor_id is not None:
         async with deps.sessionmaker() as session:
             predecessor = await get_thread_session_by_id(session, id=predecessor_id)
         # A lineage row that can't be found still means old work is carried:
@@ -1162,8 +1130,6 @@ async def bind_session_impl(
             raise
 
     if profile != "anthropic.managed_agents":
-        if isolated_relay_names(deps, admission):
-            raise AdmissionDenied(reason="backend_unsupported")
         if (deps.turn_path or load_turn_settings().path) != "mux":
             raise AdmissionDenied(reason="backend_unsupported")
         from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
@@ -1223,7 +1189,6 @@ async def bind_session_impl(
         # change since `admit()` applies to this turn, and a seal added in
         # between is stamped on the session (`reauthorize`).
         current = await reauthorize(deps, admission)
-        isolated = bool(isolated_relay_names(deps, current))
         # Imported here, not at module scope: `session_preparation` imports
         # this module for the types above, and importing it back at module
         # scope would make either module unimportable first. The import is
@@ -1239,20 +1204,15 @@ async def bind_session_impl(
 
         # Chat callers get the checkpoint-and-bundle transfer by default; a
         # caller that must never spend a checkpoint turn passes its own hook.
-        effective_transfer = (
-            None
-            if isolated
-            else transfer
-            or WorkspaceTransferRunner(
-                anthropic=deps.anthropic,
-                sessionmaker=deps.sessionmaker,
-                tenant_id=tenant_id,
-                account_id=current.account_id,
-                external_user_id=external_user_id,
-                markup=deps.markup,
-                channel_id=admission.budget_channel_id,
-                turn_path=deps.turn_path,
-            )
+        effective_transfer = transfer or WorkspaceTransferRunner(
+            anthropic=deps.anthropic,
+            sessionmaker=deps.sessionmaker,
+            tenant_id=tenant_id,
+            account_id=current.account_id,
+            external_user_id=external_user_id,
+            markup=deps.markup,
+            channel_id=admission.budget_channel_id,
+            turn_path=deps.turn_path,
         )
 
         # `SessionOps` is built here rather than at import time so that
@@ -1272,7 +1232,6 @@ async def bind_session_impl(
             thread_id=thread_id,
             session_account_id=session_account_id,
             reuse_existing=reuse_existing,
-            isolate_context=isolated,
             capabilities=capabilities,
             transfer=effective_transfer,
             deadline=effective_deadline,

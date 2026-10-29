@@ -157,19 +157,9 @@ def test_relay_urls_are_only_this_deployments_relay() -> None:
 
 def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:
     key = uuid.uuid4()
-    for binding in (
-        RelayBinding("Helper", key),
-        RelayBinding("Helper"),
-        RelayBinding("Helper", key, isolated=True),
-    ):
+    for binding in (RelayBinding("Helper", key), RelayBinding("Helper")):
         assert parse_relay_claim(binding.claim()) == binding, "a binding reads back"
-    for bad in (
-        "x",
-        {},
-        {"agent_name": "Helper", "extra": "1"},
-        {"agent_name": "Helper", "isolated": "true"},
-        {"agent_name": ""},
-    ):
+    for bad in ("x", {}, {"agent_name": "Helper", "extra": "1"}, {"agent_name": ""}):
         with pytest.raises(ValueError):
             parse_relay_claim(bad)
 

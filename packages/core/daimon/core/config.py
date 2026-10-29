@@ -2050,7 +2050,6 @@ class SignedIdentityServer(BaseModel):
     audience: str = Field(min_length=1)
     # Servers are deployment-wide: without a list any workspace's agents may use one.
     workspaces: frozenset[str] | None = None
-    isolate_context: bool = False
     ca_certificate: str | None = None
 
     @field_validator("url")
@@ -2096,20 +2095,15 @@ class McpIdentitySettings(BaseModel):
             "endpoint), issuer (the issuer id the server gave you), audience (the "
             "server's base URL) and optionally workspaces, the only workspaces whose agents "
             'may use it, each "<platform>:<workspace id>" (for example "discord:<guild id>"; '
-            "default: every workspace). Set isolate_context=true for sources whose results "
-            "must stay within one verified request. Each request gets a fresh session: no "
-            "carried transcript, files, memory or raw tool results, and these sessions cannot "
-            "be resumed or read through transcript tools; metadata remains listable. Thread, "
-            "channel or DM history the asker can already read is still passed as context. "
-            "Use a dedicated agent with only this relay plus Daimon's provisioned default "
-            "tools, attached at the route matching this server's name. "
+            "default: every workspace). "
             "Optional ca_certificate is a public PEM CA certificate for a private HTTPS server. "
             "Attach such a server to an agent at "
             "<app root>/mcp-identity/<name> instead of its own URL: Daimon forwards each "
             "request with a short-lived EdDSA token naming the agent, the workspace and, "
-            "for a person's turn, who asked, the channel and the message. The MCP service "
-            "requires DAIMON_MCP_IDENTITY__SIGNING_KEY; chat workers use the same server "
-            "policy without the signing key. Default: [] (off)."
+            "for a person's turn, who asked, the channel and the message. Daimon names the "
+            "asker only while that person's turn is live in the calling session's thread. "
+            "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY; chat workers use the "
+            "same server policy without the signing key. Default: [] (off)."
         ),
     )
 
