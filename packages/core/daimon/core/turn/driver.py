@@ -2358,6 +2358,8 @@ async def _finalize_upstream(
         provider_category=provider.category if provider else None,
         provider_native_code=provider.native_code if provider else None,
         provider_http_status=provider.native_error_code if provider else None,
+        # The redacted name of the request field the provider rejected (e.g. on a 400).
+        provider_param=provider.native_param if provider else None,
     )
     if rate_limit_until is not None:
         log.warning(
