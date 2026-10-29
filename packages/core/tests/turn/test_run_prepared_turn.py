@@ -408,6 +408,9 @@ async def test_every_log_line_of_a_turn_names_its_backend(
     for entry in turn_lines:
         assert entry["backend"] == "anthropic"
         assert entry["profile"] == "anthropic.managed_agents"
+    assert not {"backend", "profile", "model"} & set(structlog.contextvars.get_contextvars()), (
+        "the fields are unbound once the turn returns, so no other turn's lines inherit them"
+    )
 
 
 async def test_reattaching_to_a_session_debits_calls_no_worker_streamed(

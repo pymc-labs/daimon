@@ -542,6 +542,7 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
         activate=lambda: __import__("contextlib").nullcontext(),
         finish=lambda **_: None,
         thread_id=None,
+        model_by_session={},
     )
     prepared = SimpleNamespace(
         admission=SimpleNamespace(
@@ -608,6 +609,7 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
         activate=lambda: __import__("contextlib").nullcontext(),
         finish=lambda **_: None,
         thread_id=None,
+        model_by_session={},
     )
     prepared = SimpleNamespace(
         admission=SimpleNamespace(

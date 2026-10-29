@@ -947,18 +947,18 @@ async def run_prepared_turn(
     backend = revision.backend if revision is not None else "anthropic"
     profile = revision.profile if revision is not None else "anthropic.managed_agents"
     observation.backend = f"{backend}/{profile}"
+    # Every log line of the turn names the backend it ran on, so failures, lost
+    # connections and ceilings can be counted per backend. Bound until the end of
+    # the `finally`, so the credential finalizer's lines carry it too.
+    bound = structlog.contextvars.bind_contextvars(
+        backend=backend,
+        profile=profile,
+        model=revision.model
+        if revision is not None
+        else observation.model_by_session.get(prepared.ma_session_id),
+    )
     try:
-        # Every log line of the turn names the backend it ran on, so failures,
-        # lost connections and ceilings can be counted per backend.
-        with (
-            structlog.contextvars.bound_contextvars(
-                backend=backend,
-                profile=profile,
-                model=revision.model if revision is not None else None,
-            ),
-            observation.activate(),
-            deps.running_turns.track(),
-        ):
+        with observation.activate(), deps.running_turns.track():
             result = await run_prepared_turn_impl(
                 deps,
                 prepared,
@@ -1005,6 +1005,7 @@ async def run_prepared_turn(
                 await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
             except TimeoutError:
                 log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
+        structlog.contextvars.reset_contextvars(**bound)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
     if seeded is not None and not sent and result.state.error is not None:

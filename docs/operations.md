@@ -239,9 +239,9 @@ These events carry identifiers, counts and durations, never message text:
 
 `turn.user_failure` covers upstream errors, lost connections, the turn
 ceiling, failed recovery and queue-full shedding. Its `backend` names the
-backend and profile, such as `gemini/gemini.inline_reuse`, so alerts can
-split by backend. Every line logged during a turn also carries `backend`,
-`profile` and `model`. It is not logged for
+backend and profile, such as `gemini/gemini.inline_reuse`, or `unknown`
+before one is chosen, so alerts can split by backend. Lines logged while a
+chat or routine turn runs also carry `backend`, `profile` and `model`. It is not logged for
 completed turns, stops the user asked for, model refusals, admission refusals
 such as an empty balance, or missing setup. An uncaught exception is logged
 as `process.uncaught_exception` at critical.

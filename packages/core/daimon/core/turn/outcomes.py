@@ -96,7 +96,8 @@ class TurnObservation:
     """Admitted profile displayed only for explicitly configured neutral turns."""
     backend: str | None = field(default=None, kw_only=True)
     """The backend and profile the turn ran on (`gemini/gemini.inline_reuse`),
-    for logs only; unlike `backend_profile` it is set for every turn."""
+    for logs only; unlike `backend_profile` it is set for every turn that ran,
+    and logged as `unknown` where none was selected."""
     progress_plans: bool = field(default=False, kw_only=True)
     """Progress plans resolved on for this turn: its card draws the agent's plan."""
     alertable: bool = field(default=True, kw_only=True)
@@ -261,7 +262,7 @@ class TurnObservation:
                 reason=resolved.value,
                 error_class=type(terminal_error).__name__ if terminal_error else None,
                 origin=self.origin,
-                backend=self.backend,
+                backend=self.backend or "unknown",
                 release=current_release(),
                 turn_id=str(self.id),
                 tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
