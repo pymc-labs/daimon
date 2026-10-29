@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from copy import deepcopy
 
 import pytest
 from mux.contracts.events import RequiresActionPayload
@@ -55,13 +56,223 @@ async def test_recovery_connects_first_final_item_dedup_and_gap(
     assert after.data == history.data[1:] and after.next_cursor is None
 
 
+class LiveSource(AsyncIterator[Object]):
+    """An events stream the test feeds, ends cleanly, or breaks while recovery pages."""
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[Object | BaseException | None] = asyncio.Queue()
+        self.closed = False
+
+    def __aiter__(self) -> LiveSource:
+        return self
+
+    async def __anext__(self) -> Object:
+        value = await self.queue.get()
+        if value is None:
+            raise StopAsyncIteration
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class RacingTransport(FakeTransport):
+    """Serves items in pages, a fresh live stream per open, and hooks on reads."""
+
+    def __init__(self, base: FakeTransport) -> None:
+        super().__init__(responses=base.responses)
+        self.lives: list[LiveSource] = []
+        self.closing = 0  # this many streams end cleanly as soon as they open
+        self.item_pages: list[Object] = []
+        self.hooks: dict[tuple[str, str | None], list[Callable[[], None]]] = {}
+
+    @property
+    def live(self) -> LiveSource:
+        return self.lives[-1]
+
+    def hook(self, path: str, after: str | None, action: Callable[[], None]) -> None:
+        self.hooks.setdefault((path, after), []).append(action)
+
+    async def open_stream(self, path: str) -> AsyncIterator[Object]:
+        self.calls.append(("GET", path, None, None))
+        self.lives.append(LiveSource())
+        if len(self.lives) <= self.closing:
+            self.live.queue.put_nowait(None)
+        return self.live
+
+    async def request(
+        self,
+        method: Method,
+        path: str,
+        *,
+        body: Object | None = None,
+        query: Mapping[str, str | int] | None = None,
+        key: str | None = None,
+    ) -> Object:
+        after = None if query is None else query.get("after")
+        actions = self.hooks.get((path, None if after is None else str(after)))
+        if actions and (query is None or query.get("order") == "asc"):
+            actions.pop(0)()
+            # Let the buffering task drain what the hook put on the stream.
+            for _ in range(5):
+                await asyncio.sleep(0)
+        if path == "/agents/sessions/s/items" and self.item_pages:
+            self.calls.append((method, path, None, query))
+            index = 0 if after is None else int(str(after).removeprefix("i"))
+            return deepcopy(self.item_pages[index])
+        return await super().request(method, path, body=body, query=query, key=key)
+
+
+def racing_driver(transport: RacingTransport) -> OpenAIDriver:
+    return OpenAIDriver(
+        transport,
+        account_scope_id="project",
+        journal=MemoryRecoveryJournal(),
+        usage_revisions=MemoryUsageRevisions(),
+        authorization=lambda s, k, i: s == SCOPE,
+    )
+
+
+def reads(transport: FakeTransport, path: str) -> int:
+    """Snapshot page reads; session retrieval also lists turns, newest first."""
+    return sum(
+        call[1] == path
+        and call[3] is not None
+        and call[3].get("order") == "asc"
+        and "after" not in call[3]
+        for call in transport.calls
+    )
+
+
 @pytest.mark.asyncio
-async def test_recovery_eof_cannot_publish_success(
-    driver: OpenAIDriver, transport: FakeTransport
+async def test_recovery_clean_eof_retries_under_a_fresh_stream(transport: FakeTransport) -> None:
+    # F5: the events stream ending cleanly is not a disconnect.
+    racing = RacingTransport(transport)
+    racing.closing = 1
+    driver = racing_driver(racing)
+    projection = await driver.events.reconcile(SCOPE, REF)
+    assert projection.state == "idle" and projection.active_root_turn is None
+    assert len(racing.lives) == 2 and all(live.closed for live in racing.lives)
+    assert reads(racing, "/agents/sessions/s/turns") == 2
+    history = await driver.events.list(SCOPE, REF, page=PageRequest())
+    assert sum(e.type == "session.turn_ended" for e in history.data) == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_stream_that_keeps_closing_publishes_nothing(
+    transport: FakeTransport,
 ) -> None:
+    racing = RacingTransport(transport)
+    racing.closing = 3
+    driver = racing_driver(racing)
+    before = await driver.events.list(SCOPE, REF, page=PageRequest())
+    with pytest.raises(ProviderError, match="transient_network") as raised:
+        await driver.events.reconcile(SCOPE, REF)
+    assert raised.value.native_code == "snapshot_stream_closed"
+    assert len(racing.lives) == 3 and all(live.closed for live in racing.lives)
+    assert (await driver.events.list(SCOPE, REF, page=PageRequest())) == before
+
+
+@pytest.mark.asyncio
+async def test_recovery_stream_error_cannot_publish_success(transport: FakeTransport) -> None:
+    racing = RacingTransport(transport)
+    driver = racing_driver(racing)
+    before = await driver.events.list(SCOPE, REF, page=PageRequest())
+    racing.hook(
+        "/agents/sessions/s/turns",
+        None,
+        lambda: racing.live.queue.put_nowait(ProviderError("transient_network", retryable=True)),
+    )
     with pytest.raises(ProviderError, match="transient_network"):
         await driver.events.reconcile(SCOPE, REF)
-    assert transport.sources[0].closed
+    assert (await driver.events.list(SCOPE, REF, page=PageRequest())) == before
+    assert len(racing.lives) == 1 and racing.live.closed
+
+
+@pytest.mark.asyncio
+async def test_recovery_events_between_pages_are_neither_lost_nor_doubled(
+    transport: FakeTransport,
+) -> None:
+    racing = RacingTransport(transport)
+    driver = racing_driver(racing)
+    racing.responses["GET", "/agents/sessions/s"] = native_session("in_progress")
+    racing.responses["GET", "/agents/sessions/s/turns"] = page(turn("in_progress"))
+    racing.item_pages = [
+        page(message("first", id_="i1"), more=True) | {"last_id": "i1"},
+        page(message("second", id_="i2")),
+    ]
+
+    def land() -> None:
+        # The second message and the root's end land after page one, before page two.
+        racing.live.queue.put_nowait(
+            event("turn.item.done", "e-i2", item=message("second", id_="i2"), turn_id="root")
+        )
+        racing.live.queue.put_nowait(event("turn.completed", "e-end", turn=turn()))
+
+    racing.hook("/agents/sessions/s/items", "i1", land)
+    projection = await driver.events.reconcile(SCOPE, REF)
+    # The stream stayed open, so one snapshot pass was enough.
+    assert reads(racing, "/agents/sessions/s/turns") == 1
+    assert projection.state == "idle" and projection.active_root_turn is None
+    history = (await driver.events.list(SCOPE, REF, page=PageRequest())).data
+    messages = [e.item_id for e in history if e.type == "agent.message"]
+    assert len(messages) == 2 and set(messages) == {"i1", "i2"}
+    assert sum(e.type == "session.turn_ended" for e in history) == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_close_mid_snapshot_drops_that_attempt_and_its_buffer(
+    transport: FakeTransport,
+) -> None:
+    racing = RacingTransport(transport)
+    driver = racing_driver(racing)
+    racing.responses["GET", "/agents/sessions/s"] = native_session("in_progress")
+    racing.responses["GET", "/agents/sessions/s/turns"] = page(turn("in_progress"))
+    racing.item_pages = [page(message("partial", status="in_progress"))]
+
+    def stale_action_then_close() -> None:
+        # The first stream carries an action that is answered later, then ends
+        # cleanly mid-snapshot. Its buffer is older than any later read.
+        racing.live.queue.put_nowait(required_action_event())
+        racing.live.queue.put_nowait(None)
+
+    def new_root_starts() -> None:
+        # Under the second stream a new root starts after its turns page was read.
+        racing.live.queue.put_nowait(
+            event("turn.in_progress", "e-root2", turn=turn("in_progress", id_="root2"))
+        )
+
+    racing.hook("/agents/sessions/s/items", None, stale_action_then_close)
+    racing.hook("/agents/sessions/s/items", None, new_root_starts)
+    projection = await driver.events.reconcile(SCOPE, REF)
+    assert len(racing.lives) == 2 and all(live.closed for live in racing.lives)
+    assert reads(racing, "/agents/sessions/s/turns") == 2
+    assert projection.state == "running" and projection.active_root_turn == "root2"
+    assert projection.required_actions == ()
+    history = (await driver.events.list(SCOPE, REF, page=PageRequest())).data
+    assert not any(e.type == "session.requires_action" for e in history)
+
+
+@pytest.mark.asyncio
+async def test_repeat_recovery_adds_no_journal_rows(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    # M19: the gap and reconciled markers are keyed on the snapshot, not a fresh uuid.
+    transport.hold = True
+    await driver.events.reconcile(SCOPE, REF)
+    first = (await driver.events.list(SCOPE, REF, page=PageRequest())).data
+    await driver.events.reconcile(SCOPE, REF)
+    second = (await driver.events.list(SCOPE, REF, page=PageRequest())).data
+    assert [e.id for e in second] == [e.id for e in first]
+    assert sum(e.type == "session.history_gap" for e in second) == 1
+    transport.responses["GET", "/agents/sessions/s/items"] = page(
+        message(), message("more", id_="item-2")
+    )
+    await driver.events.reconcile(SCOPE, REF)
+    third = (await driver.events.list(SCOPE, REF, page=PageRequest())).data
+    assert sum(e.type == "session.history_gap" for e in third) == 2
 
 
 @pytest.mark.asyncio
@@ -185,7 +396,7 @@ async def test_usage_completeness_changes_receive_new_revision(
 
 
 @pytest.mark.asyncio
-async def test_overlapping_snapshot_pages_choose_final_content_and_disconnect_cannot_commit() -> (
+async def test_overlapping_snapshot_pages_choose_final_content_and_stream_error_cannot_commit() -> (
     None
 ):
 
@@ -206,6 +417,7 @@ async def test_overlapping_snapshot_pages_choose_final_content_and_disconnect_ca
                 self.request_keys.append(key)
                 if query and query.get("after") == "item":
                     if self.break_second:
+                        self.sources[-1].fail = ProviderError("transient_network", retryable=True)
                         self.sources[-1].wait.set()
                         import asyncio
 

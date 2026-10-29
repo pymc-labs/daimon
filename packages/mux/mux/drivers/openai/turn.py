@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Protocol
-from uuid import uuid4
 
 from mux.contracts.actions import InputEvent, UserMessage
 from mux.contracts.events import (
@@ -20,7 +20,7 @@ from mux.contracts.events import (
 )
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
-from mux.contracts.resources import ProjectionSnapshot
+from mux.contracts.resources import ProjectionSnapshot, Session
 from mux.drivers.openai._common import Context, objects, owned, text
 from mux.drivers.openai.actions import translate
 from mux.drivers.openai.normalize import SCHEMA_DATE, EventNormalizer
@@ -94,6 +94,16 @@ class _NormalizedStream(AsyncIterator[Event]):
             self._closed = True
             self._pending.clear()
             await close(self._source)
+
+
+_SNAPSHOT_ATTEMPTS = 3
+
+
+async def _buffer(source: AsyncIterator[Object], buffered: list[Object]) -> None:
+    async for raw in source:
+        if len(buffered) >= 10000:
+            raise ProviderError("upstream", retryable=True, native_code="recovery_buffer_full")
+        buffered.append(raw)
 
 
 def event_identity(event: Event) -> tuple[str, str]:
@@ -251,46 +261,49 @@ class OpenAIEvents:
                 raise ValueError("pagination cursor loop")
             seen.add(cursor)
 
+    async def _snapshot(
+        self, scope: Scope, session: ResourceRef
+    ) -> tuple[Session, list[Object], list[Object], list[Object]]:
+        """Read the saved snapshot while a live stream buffers what lands meanwhile.
+
+        Only a snapshot read entirely under an open stream is used. A clean end
+        of the stream is not a disconnect, but it leaves the rest of the reads
+        uncovered, so that attempt and its buffer are dropped and the snapshot
+        is read again under a fresh stream. A ProviderError from the stream or
+        a partial snapshot fails recovery.
+        """
+        for _ in range(_SNAPSHOT_ATTEMPTS):
+            source = await self._c.transport.open_stream(
+                f"/agents/sessions/{segment(session.id)}/events"
+            )
+            buffered: list[Object] = []
+            task = asyncio.create_task(_buffer(source, buffered))
+            try:
+                # Start consuming before the first snapshot read.
+                await asyncio.sleep(0)
+                current = await self._sessions.retrieve(scope, session)
+                turns = await self._pages(session, "turns")
+                items = await self._pages(session, "items")
+                await asyncio.sleep(0)
+                if not task.done():
+                    return current, turns, items, buffered
+                task.result()
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError, ProviderError):
+                    await task
+                await close(source)
+        raise ProviderError(
+            "transient_network", retryable=True, native_code="snapshot_stream_closed"
+        )
+
     @owned
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         self._c.check(scope, session, "session")
         previous = await self._journal.read(session) or ()
         normalizer = EventNormalizer(session.id, prior=previous)
-        source = await self._c.transport.open_stream(
-            f"/agents/sessions/{segment(session.id)}/events"
-        )
-        buffered: list[Object] = []
-        disconnected = False
-
-        async def buffer() -> None:
-            nonlocal disconnected
-            try:
-                async for raw in source:
-                    if len(buffered) >= 10000:
-                        raise ProviderError(
-                            "upstream", retryable=True, native_code="recovery_buffer_full"
-                        )
-                    buffered.append(raw)
-            except ProviderError:
-                disconnected = True
-                raise
-            disconnected = True
-
-        task = asyncio.create_task(buffer())
         try:
-            # Start consuming before the first snapshot read. Neither a partial
-            # snapshot nor a disconnect during pagination can publish success.
-            await asyncio.sleep(0)
-            current = await self._sessions.retrieve(scope, session)
-            turns = await self._pages(session, "turns")
-            items = await self._pages(session, "items")
-            await asyncio.sleep(0)
-            if task.done():
-                task.result()
-            if disconnected:
-                raise ProviderError(
-                    "transient_network", retryable=True, native_code="snapshot_stream_disconnected"
-                )
+            current, turns, items, buffered = await self._snapshot(scope, session)
             events: list[Event] = []
             for turn in turns:
                 event = normalizer.saved_turn(turn)
@@ -305,7 +318,17 @@ class OpenAIEvents:
                     if event.authority != "preview"
                 )
             gap = "missed_native_events"
-            snapshot_id = uuid4().hex
+            # Keyed on the history this snapshot publishes, so a repeat reconcile
+            # that saw nothing new adds no journal rows; new events earn a new marker.
+            snapshot_id = hashlib.sha256(
+                repr(
+                    [
+                        event_identity(event)
+                        for event in merge_history(previous, events)
+                        if event.type not in ("session.history_gap", "session.reconciled")
+                    ]
+                ).encode()
+            ).hexdigest()[:32]
             for id_, kind, payload, authority in (
                 (
                     "openai:gap:" + session.id + ":" + snapshot_id,
@@ -384,11 +407,6 @@ class OpenAIEvents:
             raise ProviderError(
                 "upstream", retryable=False, native_code="malformed_snapshot"
             ) from None
-        finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError, ProviderError):
-                await task
-            await close(source)
 
     @owned
     async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:

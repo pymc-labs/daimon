@@ -111,7 +111,12 @@ performs a single observation of the requested root turn with a bounded deadline
 
 Recovery opens and consumes a live stream before reading all saved turn/item pages.
 It deduplicates overlapping pages, preserves final items over late previews and
-merges buffered updates. A disconnect or pagination failure publishes nothing.
+merges buffered updates. A stream error or pagination failure publishes nothing.
+A clean end of the stream is not an error, but it leaves the rest of the snapshot
+uncovered: that attempt and its buffer are dropped and the snapshot is read again
+under a fresh stream, up to three times. The gap and
+reconciled markers are keyed on the published history, so a repeat recovery that
+saw nothing new writes no new journal rows.
 Buffered required actions and session/environment failure update the returned
 projection along with its journal; root completion clears stale required actions.
 An action for a known terminal root is suppressed, including an older action

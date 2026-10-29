@@ -104,6 +104,7 @@ class Source(AsyncIterator[Object]):
         self.hold = hold
         self.closed = False
         self.wait = asyncio.Event()
+        self.fail: Exception | None = None
 
     def __aiter__(self) -> Source:
         return self
@@ -114,6 +115,8 @@ class Source(AsyncIterator[Object]):
         except StopIteration:
             if self.hold:
                 await self.wait.wait()
+            if self.fail is not None:
+                raise self.fail from None
             raise StopAsyncIteration from None
 
     async def aclose(self) -> None:
