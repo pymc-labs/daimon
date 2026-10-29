@@ -887,11 +887,15 @@ async def test_admin_lists_every_watch_in_own_tenant_only(runtime_watch):
         elsewhere = await make_tenant(db)
         foreign = await _seed_watch(db, elsewhere.id, "123")
     source = AsyncMock(
-        return_value=SimpleNamespace(model_dump=lambda **_: {"rows": [{"content": "1"}]})
+        return_value=SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "1"}]}
+        )
     )
     with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
         assert await run_poll(runtime, watch.id, await lease(runtime, watch))
-        source.return_value = SimpleNamespace(model_dump=lambda **_: {"rows": [{"content": "2"}]})
+        source.return_value = SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "2"}]}
+        )
         assert await run_poll(runtime, watch.id, await lease(runtime, watch))
     async with runtime.session_factory.begin() as db:
         await watches.pause_watch(db, other.id)
