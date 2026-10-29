@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daimon routines seed-first-run --apply`. Dry-run reports whether creation
   would be paused or enabled.
 
+- Watch cap messages now say whether the watch hit its own daily limit or its owner's limit across all their watches, and the owner-wide one goes out at most once a day instead of once per watch. A watch held back by a cap no longer counts earlier source errors toward stopping it, so a day of capped polls followed by one error cannot stop a healthy watch.
+
 - Stop a polled watch that keeps failing: after at least five errors in a row over at least a day it pauses, cancels its queued wakes and sends its owner one private message; resuming it with the usual approval resets the count. Owners also get one private message per watch per rolling day when a daily cap holds back a firing; the watch keeps running and fires again when the day rolls.
 - Admins can list every watch in their workspace with `list_watches(scope="all")`, and operators with `daimon watches list --tenant TENANT_UUID`: owner, status and pause reason, source and destination, expiry, firings today, last firing and errors. Non-admins are refused; instructions, keys and source evidence are never shown.
 

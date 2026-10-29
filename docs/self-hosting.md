@@ -1763,9 +1763,11 @@ success or resume) stops: it is paused with reason `failed`, its queued wakes ar
 cancelled and the owner gets one private message. The owner resumes it with the
 usual attended approval, which resets the error count. When a per-watch or
 per-owner daily cap blocks a firing, the watch stays active, polls at its normal
-interval and fires again once older firings leave the rolling day; the owner gets
-one private message per watch per rolling day, kept across restarts. Event-rate and
-storage quotas stay silent. Revoked owner/source/destination
+interval and fires again once older firings leave the rolling day. A capped poll
+read its source, so it also clears the error count. The owner gets one private
+message per rolling day for each watch that hits its own cap, and one per rolling
+day in total when their cap across all watches is hit; the message says which,
+and the spacing is kept across restarts. Event-rate and storage quotas stay silent. Revoked owner/source/destination
 access pauses polling and cancels queued work. Expired watches stop automatically.
 
 `create_watch`, `list_watches`, `show_watch`, `pause_watch`, `resume_watch`,

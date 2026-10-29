@@ -7,7 +7,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from daimon.core.continuity.watch_imports import ImportedWatch
@@ -756,6 +756,10 @@ async def finish_poll(
     return None if result is None else uuid.UUID(str(result))
 
 
+# Which daily cap blocked a firing: this watch's own, or the owner's across all their watches.
+DailyCap = Literal["watch", "owner"]
+
+
 async def poll_failed(
     session: AsyncSession,
     watch_id: uuid.UUID,
@@ -764,7 +768,7 @@ async def poll_failed(
     revoked: bool,
     now: datetime,
     capped: bool = False,
-    daily_cap: bool = False,
+    daily_cap: DailyCap | None = None,
 ) -> None:
     """Back off on errors, stop a watch that kept failing, note a reached daily cap."""
     # Invalid capabilities never contend on the global firing lock.
@@ -780,20 +784,38 @@ async def poll_failed(
         return
     interval = int(row.source_state.get("interval", 60))
     if capped:
+        # A capped poll read its source, so it ends any run of errors.
+        row.consecutive_errors = 0
         row.backoff_until = None
         row.next_check_at = now + timedelta(seconds=interval)
-        noticed = row.source_state.get("daily_cap_at")
-        if daily_cap and (
-            noticed is None or datetime.fromisoformat(str(noticed)) <= now - timedelta(days=1)
+        state = {**row.source_state, "failing_since": None}
+        day_ago = now - timedelta(days=1)
+        if daily_cap == "watch":
+            noticed = [state.get("daily_cap_at")]
+        elif daily_cap == "owner":
+            # The owner cap spans all their watches, so one notice covers every watch.
+            noticed = list(
+                await session.scalars(
+                    select(Watch.source_state["owner_cap_at"].astext).where(
+                        Watch.tenant_id == row.tenant_id,
+                        Watch.owner_account_id == row.owner_account_id,
+                    )
+                )
+            )
+        else:
+            noticed = []
+        if daily_cap is not None and not any(
+            at is not None and datetime.fromisoformat(str(at)) > day_ago for at in noticed
         ):
             # One owner notice per rolling day; the watch keeps polling and fires again
             # once older firings leave the window.
-            row.source_state = {
-                **row.source_state,
-                "daily_cap_at": now.isoformat(),
+            state |= {
+                "daily_cap_at" if daily_cap == "watch" else "owner_cap_at": now.isoformat(),
+                "daily_cap_kind": daily_cap,
                 "notice_state": "daily_cap",
                 "notice_pending": True,
             }
+        row.source_state = state
     else:
         if row.consecutive_errors == 0 or row.source_state.get("failing_since") is None:
             row.source_state = {**row.source_state, "failing_since": now.isoformat()}
