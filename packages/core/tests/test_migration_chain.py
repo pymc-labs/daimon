@@ -89,7 +89,10 @@ COMPUTE_SESSIONS_HEAD = "0152_compute_sessions"
 REPO_MEMORY_HEAD = "0154_repo_memory_state"
 
 
-HEAD = "0155_compute_tasks"
+COMPUTE_TASKS_HEAD = "0155_compute_tasks"
+
+
+HEAD = "0156_watch_mcp_sources"
 
 
 CHAIN = [
@@ -116,6 +119,7 @@ CHAIN = [
     COMPUTE_SESSIONS_HEAD,
     "0153_repo_memory",
     REPO_MEMORY_HEAD,
+    COMPUTE_TASKS_HEAD,
     HEAD,
 ]
 
@@ -458,10 +462,15 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 command.downgrade(config, ROUTINES_HEAD)
             version = sync.scalar(text("SELECT version_num FROM alembic_version"))
             assert version == COMPUTE_SESSIONS_HEAD
-            command.upgrade(config, HEAD)
-            _assert_head(sync)
+            command.upgrade(config, COMPUTE_TASKS_HEAD)
             with pytest.raises(NotImplementedError, match="Retain compute task records"):
                 command.downgrade(config, REPO_MEMORY_HEAD)
+            version = sync.scalar(text("SELECT version_num FROM alembic_version"))
+            assert version == COMPUTE_TASKS_HEAD
+            command.upgrade(config, HEAD)
+            _assert_head(sync)
+            with pytest.raises(NotImplementedError, match="Watch evidence"):
+                command.downgrade(config, COMPUTE_TASKS_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)

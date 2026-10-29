@@ -13,6 +13,7 @@ they import this module by its bare name.
 
 from __future__ import annotations
 
+import json
 import types
 import typing
 from dataclasses import dataclass
@@ -134,7 +135,20 @@ def stringify_default(value: object) -> str:
         return ",".join(stringify_default(v) for v in items)
     if isinstance(value, HttpUrl):
         return str(value).rstrip("/")
+    models = _model_list(value)
+    if models:
+        # A JSON list setting is written as JSON, not as Python reprs.
+        return json.dumps([m.model_dump(mode="json") for m in models], separators=(",", ":"))
     return str(value)
+
+
+def _model_list(value: object) -> list[BaseModel]:
+    if not isinstance(value, list):
+        return []
+    items = typing.cast("list[object]", value)
+    if not all(isinstance(item, BaseModel) for item in items):
+        return []
+    return typing.cast("list[BaseModel]", items)
 
 
 def collect_leaves(model: type[BaseModel], prefix: str) -> list[SettingsLeaf]:

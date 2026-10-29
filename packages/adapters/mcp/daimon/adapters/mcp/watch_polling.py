@@ -8,7 +8,6 @@ clients are used only to retrieve current agent facts; no AI turn is started.
 from __future__ import annotations
 
 import asyncio
-import json
 import secrets
 import time
 import uuid
@@ -39,8 +38,24 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
 from daimon.core.config import load_watches_settings
-from daimon.core.continuity.poll_tools import require_distinct_source, validate_poll
-from daimon.core.continuity.watch_projection import Rule, bounded, evaluate, project
+from daimon.core.continuity.poll_tools import (
+    ToolUnlisted,
+    require_distinct_source,
+    require_listed,
+    validate_poll,
+)
+from daimon.core.continuity.watch_projection import (
+    BASELINE,
+    SOURCE,
+    Rule,
+    bounded,
+    compare,
+    kept,
+    project,
+)
+from daimon.core.continuity.watch_projection import (
+    payload as evidence_payload,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
@@ -53,7 +68,9 @@ from daimon.core.stores.watches import (
     DailyCap,
     PollBindingRevoked,
     finish_poll,
+    hold_to_floor,
     leased_poll,
+    pause_unlisted,
     poll_failed,
     release_poll_lease,
 )
@@ -128,6 +145,9 @@ async def authorize_poll(
     runtime: McpRuntime,
     watch: WatchRow,
 ) -> tuple[AuthIdentity, ChannelReadPolicy]:
+    if watch.source == "poll":
+        # The operator registry, read fresh each time: before and after every read.
+        require_listed(DAIMON_SERVER_NAME, str(watch.source_state.get("tool")))
     async with runtime.session_factory() as db:
         tenant = await get_tenant(db, watch.tenant_id)
         account = await get_account(db, watch.owner_account_id)
@@ -248,6 +268,7 @@ async def authorize_poll(
 async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool:
     if not load_watches_settings().enabled:
         return False
+    floor = 0
     try:
         async with asyncio.timeout(25):
             async with runtime.session_factory() as db:
@@ -258,16 +279,22 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     await release_poll_lease(db, watch_id, lease)
                 return False
             tool = str(watch.source_state["tool"])
+            # The operator's current floor, not the one in place at approval.
+            floor = require_listed(DAIMON_SERVER_NAME, tool).max_interval_floor_s
             arguments = TypeAdapter(dict[str, JsonValue]).validate_python(
                 watch.source_state["arguments"]
             )
             expression, rule = str(watch.rule["projection"]), str(watch.rule["kind"])
+            key = cast(str | None, watch.rule.get("key"))
+            evidence_fields = cast(list[str], watch.rule.get("evidence") or [])
             validate_poll(
                 tool,
                 arguments,
                 projection=expression,
                 rule=rule,
                 interval=int(str(watch.source_state["interval"])),
+                key=key,
+                evidence=evidence_fields,
             )
             auth, read = await authorize_poll(runtime, watch)
             if not load_watches_settings().enabled:
@@ -299,18 +326,26 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
             human_document: JsonValue = {
                 "rows": [row for row in raw["rows"] if row.get("role") == "user"]
             }
-            value = project(human_document, expression)
+            # The raw read is bounded (I7) and projected; only the projection is kept.
+            projected = project(human_document, expression, limits=SOURCE, allow_map=True)
+            value = kept(projected, rule=rule, key=key)
             previous = cast(JsonValue, watch.baseline.get("value"))
             # A legacy baseline may contain bot output or pagination metadata.
             # Re-establish it without firing; the version and value commit together.
             if isinstance(previous, dict) and previous.get("document") == "human_rows_v1":
-                evidence = evaluate(cast(Rule, rule), previous["projection"], value)
+                evidence = compare(
+                    previous["projection"],
+                    projected,
+                    rule=cast(Rule, rule),
+                    key=key,
+                    evidence=evidence_fields,
+                )
             else:
                 # Validate added/updated baseline shape before saving the first value.
-                evaluate(cast(Rule, rule), value, value)
+                compare(value, projected, rule=cast(Rule, rule), key=key)
                 evidence = None
             saved: JsonValue = {"document": "human_rows_v1", "projection": value}
-            bounded(saved)
+            bounded(saved, BASELINE)
             # Recheck membership/policy after network I/O before persisting evidence.
             await authorize_poll(runtime, watch)
             async with runtime.session_factory.begin() as db:
@@ -322,9 +357,17 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     watch,
                     lease,
                     value=saved,
-                    payload=None if evidence is None else json.dumps(evidence, ensure_ascii=True),
+                    payload=None
+                    if evidence is None
+                    else evidence_payload(evidence, items=key is not None or bool(evidence_fields)),
                 )
+                await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
             return True
+    except ToolUnlisted:
+        # The operator took the tool off the registry: pause and tell the owner.
+        async with runtime.session_factory.begin() as db:
+            await pause_unlisted(db, watch_id, lease)
+        return False
     except Exception as exc:
         # Never log remote content, arguments, lease capabilities or exception text.
         from fastmcp.exceptions import ToolError
@@ -352,6 +395,8 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 ),
                 now=datetime.now(UTC),
             )
+            if floor:
+                await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
         return False
 
 

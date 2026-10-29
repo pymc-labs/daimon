@@ -996,3 +996,249 @@ async def test_non_admin_cannot_list_every_watch(runtime_watch):
         pytest.raises(ToolError, match="Ask an admin"),
     ):
         await list_watches_impl(runtime, auth, scope="all")
+
+
+def _rows(*rows):
+    return SimpleNamespace(model_dump=lambda **_: {"rows": list(rows)})
+
+
+async def test_default_registry_keyed_added_reports_new_human_rows_once(runtime_watch):
+    import json
+
+    runtime, watch, _ = runtime_watch
+    async with runtime.session_factory.begin() as db:
+        await db.execute(
+            text("UPDATE watches SET rule=CAST(:rule AS jsonb) WHERE id=:id"),
+            {
+                "id": watch.id,
+                "rule": json.dumps(
+                    {
+                        "projection": ".",
+                        "kind": "added",
+                        "key": ".rows[].id",
+                        "evidence": [".content"],
+                    }
+                ),
+            },
+        )
+    old = {"role": "user", "id": "1", "content": "before"}
+    new = [{"role": "user", "id": str(n), "content": f"new {n}"} for n in (2, 3, 4)]
+    bot = {"role": "assistant", "id": "5", "content": "my own report"}
+    source = AsyncMock(return_value=_rows(old))
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.return_value = _rows(old, *new, bot)
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+    async with runtime.session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+        evidence = await watches.list_evidence(db, watch.id)
+    assert len(evidence) == 1
+    assert json.loads(evidence[0].payload) == {
+        "items": [{".content": f"new {n}"} for n in (2, 3, 4)],
+        "omitted": 0,
+    }
+    # Only key fingerprints are kept, never row content.
+    assert "new 2" not in json.dumps(current.baseline)
+    assert len(current.baseline["value"]["projection"]["keys"]) == 4
+
+
+async def test_registry_removal_during_read_pauses_and_tells_owner(runtime_watch, monkeypatch):
+    import json
+
+    from daimon.core.continuity.watch_notices import poll_watch_notices
+
+    runtime, watch, _ = runtime_watch
+
+    async def delisted_read(*args, **kwargs):
+        monkeypatch.setenv(
+            "DAIMON_WATCHES__POLLABLE_TOOLS",
+            json.dumps(
+                [
+                    {
+                        "server": "daimon-mcp",
+                        "tool": "read_channel",
+                        "credential": "none",
+                        "returns_chat": True,
+                    }
+                ]
+            ),
+        )
+        return _rows({"role": "user", "content": "untrusted result"})
+
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", delisted_read):
+        assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
+    async with runtime.session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+        assert current.status == "paused"
+        assert current.source_state["reason"] == "tool_unlisted"
+        assert current.baseline == {} and current.consecutive_errors == 0
+        assert await watches.list_evidence(db, watch.id) == []
+    deliver = AsyncMock(return_value=True)
+    await poll_watch_notices(runtime.session_factory, deliver=deliver)
+    await poll_watch_notices(runtime.session_factory, deliver=deliver)
+    deliver.assert_awaited_once()
+    _, _, message = deliver.await_args.args
+    assert watch.instructions in message and "can no longer check that tool" in message
+
+
+async def test_unlisted_tool_never_reads_and_cannot_be_resumed(attended_owner, monkeypatch):
+    runtime, watch, auth, origin = attended_owner
+    monkeypatch.setenv("DAIMON_WATCHES__POLLABLE_TOOLS", "[]")
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", AsyncMock()) as source:
+        assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.assert_not_called()
+    with pytest.raises(ToolError, match="list of tools"):
+        await manage_watch_impl(
+            runtime, auth, watch_id=str(watch.id), action="resume", origin_context_id=origin
+        )
+    async with runtime.session_factory() as db:
+        assert (await watches.get_watch(db, watch.id)).source_state["reason"] == "tool_unlisted"
+
+
+async def test_unlisted_tool_and_short_interval_refused_at_create(attended_owner, monkeypatch):
+    import json
+
+    from daimon.adapters.mcp.tools.watches import create_watch_impl
+
+    runtime, watch, auth, origin = attended_owner
+    monkeypatch.setenv(
+        "DAIMON_WATCHES__POLLABLE_TOOLS",
+        json.dumps(
+            [
+                {
+                    "server": "daimon-mcp",
+                    "tool": "read_channel",
+                    "credential": "none",
+                    "returns_chat": True,
+                    "max_interval_floor_s": 600,
+                }
+            ]
+        ),
+    )
+    with pytest.raises(ToolError, match="list of tools"):
+        await create_watch_impl(
+            runtime,
+            auth,
+            origin_context_id=origin,
+            instructions="report",
+            source="poll",
+            tool="read_thread",
+            arguments={"thread_id": "4343"},
+        )
+    with pytest.raises(ToolError, match="600 seconds"):
+        await create_watch_impl(
+            runtime,
+            auth,
+            origin_context_id=origin,
+            instructions="report",
+            source="poll",
+            tool="read_channel",
+            arguments={"channel_id": "4343"},
+            interval=300,
+        )
+    async with runtime.session_factory() as db:
+        assert [
+            row.id
+            for row in await watches.list_owned_watches(
+                db, tenant_id=auth.tenant_id, account_id=auth.account_id
+            )
+        ] == [watch.id]
+
+
+async def test_frozen_sql_enforces_the_kept_bounds_exactly(runtime_watch):
+    """0156: baseline <= 65536 and payload <= 16384 bytes, accepted at the limit."""
+    import json
+
+    from sqlalchemy.exc import DBAPIError
+
+    runtime, watch, _ = runtime_watch
+
+    async def accept(value_chars: int, payload: str | None):
+        token = await lease(runtime, watch)
+        try:
+            async with runtime.session_factory.begin() as db:
+                return await db.scalar(
+                    text(
+                        "SELECT accept_watch_poll_result(:id,:lease,CAST(:value AS jsonb),:payload)"
+                    ),
+                    {
+                        "id": watch.id,
+                        "lease": token,
+                        # jsonb renders a string as its characters plus two quotes.
+                        "value": json.dumps("x" * (value_chars - 2)),
+                        "payload": payload,
+                    },
+                )
+        except DBAPIError:
+            async with runtime.session_factory.begin() as db:
+                await watches.release_poll_lease(db, watch.id, token)
+            raise
+
+    with pytest.raises(DBAPIError, match="poll evidence bounds"):
+        await accept(65537, None)
+    assert await accept(65536, None) is None
+    with pytest.raises(DBAPIError, match="poll evidence bounds"):
+        await accept(10, "p" * 16385)
+    assert await accept(10, "p" * 16384) is not None
+
+
+async def test_raised_floor_slows_existing_watches_without_pausing(runtime_watch, monkeypatch):
+    import json
+
+    runtime, watch, _ = runtime_watch
+    monkeypatch.setenv(
+        "DAIMON_WATCHES__POLLABLE_TOOLS",
+        json.dumps(
+            [
+                {
+                    "server": "daimon-mcp",
+                    "tool": "read_thread",
+                    "credential": "none",
+                    "returns_chat": True,
+                    "max_interval_floor_s": 600,
+                }
+            ]
+        ),
+    )
+    source = AsyncMock(return_value=_rows({"role": "user", "content": "1"}))
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
+        before = datetime.now(UTC)
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.side_effect = RuntimeError("source down")
+        assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
+    async with runtime.session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+    # Approved at 60 s, now held to the operator's 600 s floor, and still running.
+    assert current.status == "active"
+    assert current.source_state["interval"] == 60
+    assert current.next_check_at >= before + timedelta(seconds=600)
+
+
+async def test_quote_heavy_full_firing_still_seeds_newest_events(runtime_watch):
+    import json
+
+    from daimon.core.continuity.watch_projection import payload as evidence_payload
+
+    runtime, watch, _ = runtime_watch
+    source = AsyncMock(return_value=_rows({"role": "user", "content": "1"}))
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.return_value = _rows({"role": "user", "content": "2"})
+        assert await run_poll(runtime, watch.id, await lease(runtime, watch))
+    # Twenty maximal payloads made of quotes escape again inside the seed.
+    text_payload = evidence_payload({"content": '"' * 40000}, items=False)
+    assert len(text_payload) <= 16384
+    events = [{"event_id": f"event-{n}", "text": text_payload} for n in range(20)]
+    assert len(json.dumps(events).encode()) > watches.SEED_BYTES
+    async with runtime.session_factory.begin() as db:
+        [evidence] = await watches.list_evidence(db, watch.id)
+        await db.execute(
+            text("UPDATE watch_firings SET events=CAST(:events AS jsonb) WHERE wake_key=:key"),
+            {"events": json.dumps(events), "key": evidence.wake_key},
+        )
+        wake = await get_continuation(db, idempotency_key=evidence.wake_key)
+        seed = await watches.watch_seed(db, wake, now=datetime.now(UTC))
+    assert seed is not None
+    assert "event-19" in seed and "event-0" not in seed
+    assert len(seed.encode()) < 2 * watches.SEED_BYTES
