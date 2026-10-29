@@ -102,10 +102,6 @@ BACKENDS: dict[str, Backend] = {
             ),
         },
         pending={
-            "clock_skew_reads_behind": (
-                "PR 2: a read stamped before the create is discarded by the time "
-                "watermark (gemini core.py:389), so the turn never sees its end"
-            ),
             "two_clean_eofs_in_a_row": (
                 "PR 4: a clean SSE EOF raises TurnConnectionLost (gemini.py _LazyStream); "
                 "the second one in a row loses the turn"

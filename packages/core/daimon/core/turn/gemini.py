@@ -85,6 +85,8 @@ log = structlog.get_logger(__name__)
 
 #: Most a host terminal failure waits to stop the native interaction.
 ABANDON_TIMEOUT_S = 10.0
+ROOT_SNAPSHOT_TIMEOUT_S = 1.0
+"""Bound on the local journal read that guards an uncertain send (F12)."""
 #: First backoff after a failed stream open/read; doubles per consecutive
 #: failure (jittered, capped at 32x). Any delivered event resets it.
 STREAM_RETRY_BASE_S = 1.0
@@ -270,6 +272,10 @@ class GeminiTurnIO:
             persistence.check_session(scope, session)
         self.root: str | None = None
         self._ready = False
+        # Roots that already existed when this IO's own send came back uncertain
+        # (None: that send was never uncertain). History cannot tell a stale root
+        # from this turn's, so none of them may become this turn's root (F12).
+        self._stale_roots: frozenset[str] | None = None
         self._streams: list[_LazyStream] = []
         self._tool_ids: dict[tuple[str | None, str], str] = {}
         self._actions: dict[str, str] = {}
@@ -322,6 +328,9 @@ class GeminiTurnIO:
                 self.scope, self.session, tuple(inputs), key=f"driver:{key}"
             )
 
+        # The roots this send can't be, taken before it can record its own. A tool
+        # result continues the turn's known root, so only a new turn is guarded.
+        before = await self._known_roots() if kind == "send" else None
         try:
             receipt = (
                 await deliver(str(uuid4()))
@@ -336,16 +345,70 @@ class GeminiTurnIO:
                 )
             )
         except UncertainSend as error:
+            # Only this attempt timing out leaves nothing recorded before the
+            # snapshot. A claim by an earlier or concurrent attempt of the same
+            # host operation may already have recorded this turn's root, so that
+            # keeps the designed reattach.
+            if kind == "send" and isinstance(error.__cause__, TimeoutError):
+                self._send_uncertain(before)
             raise TurnConnectionLost(
                 "Gemini delivery was already claimed; replay required"
             ) from error
         if receipt.status == "outcome_unknown":
+            if kind == "send":
+                self._send_uncertain(before)
             raise TurnConnectionLost("Gemini input acceptance is unknown; replay before recovery")
         if receipt.status not in {"queued", "processed"} or receipt.turn_id is None:
             raise ProviderError("upstream", retryable=False, native_code="gemini_send_rejected")
         self.root, self._ready = receipt.turn_id, True
         for stream in self._streams:
             stream.ready()
+
+    async def _known_roots(self) -> frozenset[str] | None:
+        """Every root in the local journal (None: not read within the bound)."""
+        try:
+            async with asyncio.timeout(ROOT_SNAPSHOT_TIMEOUT_S):
+                return frozenset(e.turn_id for e in await self._history() if e.turn_id)
+        except Exception:  # never delay or block a send for the guard
+            return None
+
+    def _send_uncertain(self, before: frozenset[str] | None) -> None:
+        """This turn's send may or may not have been accepted: no root that
+        existed before it, including one an earlier stream open picked, can be
+        this turn's. A root recorded since can (the designed reattach). Without
+        a snapshot the turn keeps main's reattach.
+        """
+        if before is None:
+            return
+        self._stale_roots = before
+        self.root = self._own_root(self.root)
+
+    def _own_root(self, candidate: str | None) -> str | None:
+        """`candidate` if it can be this turn's root, else None."""
+        if candidate is None or self._stale_roots is None:
+            return candidate
+        if candidate in self._stale_roots:
+            return None
+        return candidate
+
+    def _latest_own_root(self, records: Sequence[Event]) -> str | None:
+        """The newest root that can be this turn's: a late correction to an
+        earlier turn's usage never hides one accepted since."""
+        return next(
+            (e.turn_id for e in reversed(records) if e.turn_id and self._own_root(e.turn_id)),
+            None,
+        )
+
+    def _require_own_root(self) -> None:
+        if self._stale_roots is not None and self.root is None:
+            log.warning(
+                "turn.gemini_own_input_missing",
+                session=self.session.id,
+                stale_roots=len(self._stale_roots),
+            )
+            raise TurnConnectionLost(
+                "Gemini never showed this turn's input after an uncertain send"
+            )
 
     async def status(self) -> str:
         session = await self.backend.sessions.retrieve(self.scope, self.session)
@@ -360,7 +423,7 @@ class GeminiTurnIO:
         session = await self.backend.sessions.retrieve(self.scope, self.session)
         if session.binding.native_refs.get("interaction"):
             self._ready = True
-            self.root = session.active_root_turn or self.root
+            self.root = self._own_root(session.active_root_turn) or self.root
         stream = _LazyStream(self, read_timeout_s)
         self._streams.append(stream)
         if self._ready:
@@ -570,7 +633,8 @@ class GeminiTurnIO:
                 records = await self._history()
                 usages = await self.usage_snapshots()
                 if self.root is None:
-                    self.root = next((e.turn_id for e in reversed(records) if e.turn_id), None)
+                    self.root = self._latest_own_root(records)
+                self._require_own_root()
                 if self.persistence is not None and records:
                     final = records[-1]
                     await self.persistence.record_many(
@@ -663,7 +727,7 @@ class GeminiTurnIO:
     async def _local_usage(self) -> Sequence[UsageObservation]:
         if self.root is None:
             records = await self._history()
-            self.root = next((e.turn_id for e in reversed(records) if e.turn_id), None)
+            self.root = self._latest_own_root(records)
         observations = await self.usage_snapshots()
         latest: dict[str, UsageObservation] = {}
         for observation in observations.values():

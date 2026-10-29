@@ -241,6 +241,13 @@ provider requests. Agents and environment definitions are local inline
 configuration records. Turns respecify that configuration and reuse both
 `previous_interaction_id` and the returned environment ID. Expired or missing
 continuity raises `ContinuityLost` instead of provisioning a fresh workspace.
+Provider stamps order reads of one interaction, but never hold it unfinished:
+a read that finishes the current interaction is applied despite an older stamp
+or a missing meter (a lower count is still stale), a non-final read never undoes
+a final one, and every discarded read is logged (`gemini.read_discarded`). A
+send to a session still recorded as running reads the provider first, so a
+record whose finishing read was missed takes the next message instead of
+refusing it as a steer. A retried send key returns its saved receipt.
 The scripted transport and memory storage are offline test tools, not a
 production persistence implementation or a live certification.
 

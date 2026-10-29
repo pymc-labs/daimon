@@ -1078,6 +1078,508 @@ async def test_a_whole_second_read_after_a_sub_second_create_finishes_the_turn(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("behind", [timedelta(seconds=2), timedelta(milliseconds=300)])
+async def test_a_finishing_read_stamped_before_the_create_still_finishes_the_turn(
+    setup: Setup, behind: timedelta
+) -> None:
+    """A read served by a clock behind the one that stamped the create reply looks
+    older. An interaction never un-finishes, so its finishing read is newest anyway."""
+    ma, t, _, _, s, _ = setup
+    created = datetime.now(UTC).replace(microsecond=900000)
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage=None,
+            created=created.isoformat(),
+            updated=created.isoformat(),
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "running"
+
+    t.saved["i1"] = native(created=created.isoformat(), updated=(created - behind).isoformat())
+    current = await ma.sessions.retrieve(SCOPE, s.ref)
+    assert current.state == "idle" and current.active_root_turn is None
+    journal = await ma.events.list(SCOPE, s.ref, page=PageRequest())
+    assert any(e.type == "session.turn_ended" for e in journal.data)
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_read_stamped_before_the_last_one_is_still_discarded(
+    setup: Setup,
+) -> None:
+    ma, t, _, _, s, _ = setup
+    created = datetime.now(UTC).replace(microsecond=0)
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage={"total_output_tokens": 50, "total_thought_tokens": 0},
+            created=created.isoformat(),
+            updated=created.isoformat(),
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    before = await ma.usage.list(SCOPE, s.ref, page=PageRequest())
+
+    t.saved["i1"] = native(
+        status="in_progress",
+        steps=[],
+        usage={"total_output_tokens": 5, "total_thought_tokens": 0},
+        created=created.isoformat(),
+        updated=(created - timedelta(seconds=1)).isoformat(),
+    )
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "running"
+    assert await ma.usage.list(SCOPE, s.ref, page=PageRequest()) == before
+
+
+@pytest.mark.asyncio
+async def test_a_message_to_a_record_left_running_reads_the_provider_before_refusing(
+    setup: Setup,
+) -> None:
+    """Staging R4WRRK: the record said running after the reply had finished, so every
+    next message was refused as a steer. The send now reads the provider first."""
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[], usage=None))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    # The finishing read never landed: the record still says running.
+    async with storage.transaction() as records:
+        assert records.sessions[s.ref.id].session.state == "running"
+    t.saved["i1"] = native()
+    t.responses.append(native("i2"))
+
+    receipt = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="second")
+
+    assert receipt.turn_id is not None
+    assert len(t.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_message_while_the_provider_is_still_running_is_still_a_steer(
+    setup: Setup,
+) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[], usage=None))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native(status="in_progress", steps=[], usage=None)
+
+    with pytest.raises(UnsupportedCapability):
+        await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="second")
+    assert len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stamped", [True, False], ids=["equal_stamp", "no_stamp"])
+async def test_a_finishing_read_without_usage_is_never_discarded(
+    setup: Setup, stamped: bool
+) -> None:
+    """F7: an equal-stamp or unstamped finishing read went through `_regresses`, which
+    took its missing usage for a regression and dropped it silently. A finishing read
+    now still ends the turn; its usage stays as main records it."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0).isoformat()
+    t.responses.append(native(status="in_progress", steps=[], created=stamp, updated=stamp))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    measured = (await ma.usage.list(SCOPE, s.ref, page=PageRequest())).data[-1]
+
+    finished = native(created=stamp, updated=stamp)
+    del finished["usage"]
+    if not stamped:
+        del finished["created"], finished["updated"]
+    t.saved["i1"] = finished
+    current = await ma.sessions.retrieve(SCOPE, s.ref)
+
+    assert current.state == "idle" and current.active_root_turn is None
+    journal = await ma.events.list(SCOPE, s.ref, page=PageRequest())
+    assert any(e.type == "session.turn_ended" for e in journal.data)
+    # Usage stays exactly as main records it for a discarded read.
+    assert (await ma.usage.list(SCOPE, s.ref, page=PageRequest())).data[-1] == measured
+
+
+@pytest.mark.asyncio
+async def test_every_discarded_read_is_logged(
+    setup: Setup, caplog: pytest.LogCaptureFixture
+) -> None:
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0)
+    t.responses.append(
+        native(status="in_progress", steps=[], created=stamp.isoformat(), updated=stamp.isoformat())
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    lower: dict[str, JsonValue] = {
+        "total_input_tokens": 1,
+        "total_output_tokens": 1,
+        "total_thought_tokens": 0,
+    }
+    for updated in (stamp - timedelta(seconds=1), stamp):
+        t.saved["i1"] = native(
+            status="in_progress",
+            steps=[],
+            usage=lower,
+            created=stamp.isoformat(),
+            updated=updated.isoformat(),
+        )
+        with caplog.at_level("INFO", logger="mux.drivers.gemini.core"):
+            assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "running"
+    discards = [r.getMessage() for r in caplog.records if "gemini.read_discarded" in r.getMessage()]
+    assert len(discards) == 2
+    assert "reason=older_stamp" in discards[0] and "reason=regresses" in discards[1]
+    assert all("stamp=" in d and "watermark=" in d for d in discards)
+
+
+@pytest.mark.asyncio
+async def test_a_retried_accepted_send_returns_its_receipt_while_reads_fail(
+    setup: Setup,
+) -> None:
+    """F8: the retry of an accepted send found the record running (because of that
+    very send) and read the provider before its receipt lookup, so a failing read
+    failed an idempotent retry. The saved receipt now comes first."""
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[], usage=None))
+    receipt = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.reads["i1"] = [ProviderError("permission", retryable=False)]
+    reads = len(t.read_requests)
+
+    assert await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first") == receipt
+    assert len(t.read_requests) == reads and len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_terminal_read_of_a_replaced_interaction_never_ends_the_turn(
+    setup: Setup,
+) -> None:
+    """Terra PR 2 r2: once a tool result continued the turn in a new interaction, a
+    delayed cancelled read of the earlier one ended the shared root and hid the
+    continuation's own end. Only the current interaction bypasses the stamp gates."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0)
+    call = {"type": "function_call", "id": "call", "name": "weather", "arguments": {}}
+    t.responses.extend(
+        [
+            native(
+                status="requires_action",
+                steps=[call],
+                created=stamp.isoformat(),
+                updated=stamp.isoformat(),
+            ),
+            native("i2", status="in_progress", steps=[], usage=None),
+        ]
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    await ma.events.send(
+        SCOPE,
+        s.ref,
+        (UserToolResult(action_id="call", content=(TextPart(text="cold"),)),),
+        key="result",
+    )
+    t.saved["i1"] = native(
+        status="cancelled",
+        steps=[call],
+        created=stamp.isoformat(),
+        updated=(stamp - timedelta(seconds=1)).isoformat(),
+    )
+    await ma.events.reconcile(SCOPE, s.ref)
+    journal = await ma.events.list(SCOPE, s.ref, page=PageRequest())
+    assert not any(e.type == "session.turn_ended" for e in journal.data)
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "running"
+
+    t.saved["i2"] = native("i2")
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+    journal = await ma.events.list(SCOPE, s.ref, page=PageRequest())
+    ended = [e for e in journal.data if e.type == "session.turn_ended"]
+    assert len(ended) == 1 and ended[0].native.ordering_domain == "i2"
+
+
+@pytest.mark.asyncio
+async def test_a_finishing_read_after_a_downward_correction_ends_the_turn(setup: Setup) -> None:
+    """Terra PR 2 r4: a newer read may correct a count down (120 to 110); the
+    finishing read that follows at 110 must still end the turn."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0)
+
+    def meter(output: int) -> JsonValue:
+        return {"total_input_tokens": 10, "total_output_tokens": output, "total_thought_tokens": 0}
+
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage=meter(120),
+            created=stamp.isoformat(),
+            updated=stamp.isoformat(),
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    later = (stamp + timedelta(seconds=1)).isoformat()
+    t.saved["i1"] = native(
+        status="in_progress", steps=[], usage=meter(110), created=stamp.isoformat(), updated=later
+    )
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "running"
+    t.saved["i1"] = native(usage=meter(110), created=stamp.isoformat(), updated=later)
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_revision_never_hides_a_lower_stale_count(setup: Setup) -> None:
+    """Terra PR 2 r3: measured 100, then an unknown terminal revision, then a stale
+    same-stamp read of 1 produced a measured 1. Counts compare against every
+    revision measured for the interaction."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0).isoformat()
+    t.responses.append(native(status="in_progress", steps=[], created=stamp, updated=stamp))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    finished = native(created=stamp, updated=stamp)
+    del finished["usage"]
+    t.saved["i1"] = finished
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+    usage = await ma.usage.list(SCOPE, s.ref, page=PageRequest())
+    t.saved["i1"] = native(
+        usage={"total_input_tokens": 1, "total_output_tokens": 1, "total_thought_tokens": 0},
+        created=stamp,
+        updated=stamp,
+    )
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    assert await ma.usage.list(SCOPE, s.ref, page=PageRequest()) == usage
+
+
+@pytest.mark.asyncio
+async def test_a_measured_final_after_a_correction_and_an_unknown_one_applies(
+    setup: Setup,
+) -> None:
+    """Terra PR 2 r5: after 120 was corrected to 110, an unknown final, then a
+    measured final of 110 at the same stamp, stayed unknown: the floor was the
+    historical maximum. It is now the latest measured count."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0)
+    later = (stamp + timedelta(seconds=1)).isoformat()
+
+    def meter(output: int) -> JsonValue:
+        return {"total_input_tokens": 10, "total_output_tokens": output, "total_thought_tokens": 0}
+
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage=meter(120),
+            created=stamp.isoformat(),
+            updated=stamp.isoformat(),
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native(
+        status="in_progress", steps=[], usage=meter(110), created=stamp.isoformat(), updated=later
+    )
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    unknown = native(created=stamp.isoformat(), updated=later)
+    del unknown["usage"]
+    t.saved["i1"] = unknown
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+    t.saved["i1"] = native(usage=meter(110), created=stamp.isoformat(), updated=later)
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    final = (await ma.usage.list(SCOPE, s.ref, page=PageRequest())).data[-1]
+    assert final.completeness == "measured" and final.output_tokens == 110
+
+
+@pytest.mark.asyncio
+async def test_a_replaced_interaction_still_takes_a_usage_correction(setup: Setup) -> None:
+    """Terra PR 2 r5: a replaced interaction's newer terminal read was dropped whole,
+    losing a measured correction to its unknown usage. It now records the usage and
+    only its lifecycle events are suppressed."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0)
+    call = {"type": "function_call", "id": "call", "name": "weather", "arguments": {}}
+    t.responses.extend(
+        [
+            native(
+                status="requires_action",
+                steps=[call],
+                usage=None,
+                created=stamp.isoformat(),
+                updated=stamp.isoformat(),
+            ),
+            native("i2"),
+        ]
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    await ma.events.send(
+        SCOPE,
+        s.ref,
+        (UserToolResult(action_id="call", content=(TextPart(text="cold"),)),),
+        key="result",
+    )
+    t.saved["i1"] = native(
+        status="cancelled",
+        steps=[call],
+        created=stamp.isoformat(),
+        updated=(stamp + timedelta(seconds=3)).isoformat(),
+    )
+    await ma.events.reconcile(SCOPE, s.ref)
+    usage = {u.id: u for u in (await ma.usage.list(SCOPE, s.ref, page=PageRequest())).data}
+    assert usage["gemini:i1:usage"].completeness == "measured"
+    journal = await ma.events.list(SCOPE, s.ref, page=PageRequest())
+    ended = [e for e in journal.data if e.type == "session.turn_ended"]
+    assert len(ended) == 1 and ended[0].native.ordering_domain == "i2"
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_meterless_read_never_hides_a_measured_final(setup: Setup) -> None:
+    """Terra PR 2 r6: a delayed terminal read without a meter, stamped the same as
+    the measured terminal read, made the final revision unknown again."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0).isoformat()
+    t.responses.append(native(status="in_progress", steps=[], created=stamp, updated=stamp))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native(created=stamp, updated=stamp)
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+    usage = await ma.usage.list(SCOPE, s.ref, page=PageRequest())
+    meterless = native(created=stamp, updated=stamp)
+    del meterless["usage"]
+    t.saved["i1"] = meterless
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    assert await ma.usage.list(SCOPE, s.ref, page=PageRequest()) == usage
+
+
+@pytest.mark.asyncio
+async def test_a_same_stamp_correction_after_a_newer_unknown_revision_applies(
+    setup: Setup,
+) -> None:
+    """Terra PR 2 r7: measured 100, then a newer unknown revision, then a same-stamp
+    correction to 90. Main records 90; the floor comes only from readings at the
+    latest revision's own stamp."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0)
+    later = (stamp + timedelta(seconds=1)).isoformat()
+
+    def meter(output: int) -> JsonValue:
+        return {"total_input_tokens": 10, "total_output_tokens": output, "total_thought_tokens": 0}
+
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage=meter(100),
+            created=stamp.isoformat(),
+            updated=stamp.isoformat(),
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native(
+        status="in_progress", steps=[], usage=None, created=stamp.isoformat(), updated=later
+    )
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    t.saved["i1"] = native(
+        status="in_progress", steps=[], usage=meter(90), created=stamp.isoformat(), updated=later
+    )
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    latest = (await ma.usage.list(SCOPE, s.ref, page=PageRequest())).data[-1]
+    assert latest.output_tokens == 90
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_stale_count_never_replaces_a_stamped_measurement(
+    setup: Setup,
+) -> None:
+    """Terra PR 2 r8: stamped 100, then an unstamped meterless finishing read, then a
+    delayed unstamped 1. An unstamped reading orders nothing, so 100 stays the floor."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0).isoformat()
+
+    def unstamped(raw: Object) -> Object:
+        del raw["created"], raw["updated"]
+        return raw
+
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage={"total_input_tokens": 10, "total_output_tokens": 100, "total_thought_tokens": 0},
+            created=stamp,
+            updated=stamp,
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    finished = unstamped(native())
+    del finished["usage"]
+    t.saved["i1"] = finished
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+    t.saved["i1"] = unstamped(
+        native(
+            usage={"total_input_tokens": 10, "total_output_tokens": 1, "total_thought_tokens": 0}
+        )
+    )
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    latest = (await ma.usage.list(SCOPE, s.ref, page=PageRequest())).data[-1]
+    assert latest.output_tokens != 1
+
+
+@pytest.mark.asyncio
+async def test_an_unstamped_measurement_after_a_newer_unknown_one_applies(setup: Setup) -> None:
+    """Terra PR 2 r9: stamped 100, a newer unknown, an unstamped unknown finish, then
+    an unstamped 90. Main accepts 90; the floor stops at the newest stamped group."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0)
+
+    def meter(output: int) -> JsonValue:
+        return {"total_input_tokens": 10, "total_output_tokens": output, "total_thought_tokens": 0}
+
+    def unstamped(raw: Object) -> Object:
+        del raw["created"], raw["updated"]
+        return raw
+
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage=meter(100),
+            created=stamp.isoformat(),
+            updated=stamp.isoformat(),
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    later = (stamp + timedelta(seconds=1)).isoformat()
+    t.saved["i1"] = native(
+        status="in_progress", steps=[], usage=None, created=stamp.isoformat(), updated=later
+    )
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    finished = unstamped(native())
+    del finished["usage"]
+    t.saved["i1"] = finished
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+    t.saved["i1"] = unstamped(native(usage=meter(90)))
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    latest = (await ma.usage.list(SCOPE, s.ref, page=PageRequest())).data[-1]
+    assert latest.output_tokens == 90
+
+
+@pytest.mark.asyncio
+async def test_a_finishing_read_that_lowers_a_count_is_still_refused(setup: Setup) -> None:
+    """Terra PR 2 r9: a same-stamp finishing read whose meter dropped 100 to 1 became
+    final measured usage. A missing meter never holds a finish; a lower count is
+    stale, as on main."""
+    ma, t, _, _, s, _ = setup
+    stamp = datetime.now(UTC).replace(microsecond=0).isoformat()
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage={"total_input_tokens": 10, "total_output_tokens": 100, "total_thought_tokens": 0},
+            created=stamp,
+            updated=stamp,
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    usage = await ma.usage.list(SCOPE, s.ref, page=PageRequest())
+    t.saved["i1"] = native(
+        usage={"total_input_tokens": 10, "total_output_tokens": 1, "total_thought_tokens": 0},
+        created=stamp,
+        updated=stamp,
+    )
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    assert await ma.usage.list(SCOPE, s.ref, page=PageRequest()) == usage
+
+
+@pytest.mark.asyncio
 async def test_a_read_from_a_workspace_replaced_meanwhile_is_refused(setup: Setup) -> None:
     """#1557 review 4: the read is checked against the snapshot's workspace before the
     lock, and again against the current record when it is applied."""
@@ -1123,3 +1625,34 @@ async def test_a_stop_observation_holds_no_lock_while_it_reads_the_provider(
     assert wrote and stop.stopped and stop.outcome == "interrupted"
     t.get = real_get  # type: ignore[method-assign]  # retrieve still reads under the lock
     assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_count_after_a_coarser_meterless_finish_is_refused(setup: Setup) -> None:
+    """Terra PR 2 r10: a microsecond-stamped 100 and a whole-second meterless finish
+    in the same second are one stamp group, so a stale 1 stays refused."""
+    ma, t, _, _, s, _ = setup
+    fine = datetime.now(UTC).replace(microsecond=420000)
+    coarse = fine.replace(microsecond=0).isoformat()
+    t.responses.append(
+        native(
+            status="in_progress",
+            steps=[],
+            usage={"total_input_tokens": 10, "total_output_tokens": 100, "total_thought_tokens": 0},
+            created=fine.isoformat(),
+            updated=fine.isoformat(),
+        )
+    )
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    finished = native(created=coarse, updated=coarse)
+    del finished["usage"]
+    t.saved["i1"] = finished
+    assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+    t.saved["i1"] = native(
+        usage={"total_input_tokens": 10, "total_output_tokens": 1, "total_thought_tokens": 0},
+        created=coarse,
+        updated=coarse,
+    )
+    await ma.sessions.retrieve(SCOPE, s.ref)
+    latest = (await ma.usage.list(SCOPE, s.ref, page=PageRequest())).data[-1]
+    assert latest.output_tokens != 1
