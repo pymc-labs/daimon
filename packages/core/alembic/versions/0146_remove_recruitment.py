@@ -1,4 +1,4 @@
-"""Remove the internal-only staffing ledger from Daimon OS.
+"""Remove the staffing ledger.
 
 Upgrade permanently removes all ledger data. Downgrade restores the empty
 schema and its access restrictions, but cannot recover removed evidence.
