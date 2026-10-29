@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- On a phone, the agent's GitHub repo page fills the width with its Save changes and Back to Discord buttons, and the saved page is centred. Undo and Remove on a repo row now look the same.
 - A Gemini agent's reply no longer goes missing. Gemini stamps a new reply to the microsecond but every later read of it to the second, so Daimon took each later read for an older one and never saw the reply finish: the turn ended "Lost the connection" and the next message in that thread "Something went wrong". Threads stuck this way recover on their next message.
 - GitHub setup can save newly available repos even when Daimon has an older cached repo list. Error pages show the explanation once, and unexpected save failures ask for help instead of sending you through another sign-in.
 - A signed-identity MCP server on private HTTPS can set a public `ca_certificate` without changing TLS trust for other relays.
