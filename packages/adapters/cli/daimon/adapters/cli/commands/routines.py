@@ -59,6 +59,7 @@ from daimon.core.stores.routines import (
     PIN_UNAVAILABLE_REFUSAL,
     create_routine,
     get_routine,
+    link_internal_routine,
     list_routines_missing_agent_name,
     set_sandbox_tools,
     update_routine,
@@ -435,6 +436,60 @@ def read_seed_entries(path: Path) -> list[RoutineSeedEntry]:
     if errors:
         raise UserFacingError("\n".join(errors) + "\nNothing was changed.")
     return entries
+
+
+@routines_app.command("link-internal")
+def link_internal_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    routine: Annotated[uuid.UUID, typer.Option("--routine", help="Daimon routine UUID.")],
+    internal_id: Annotated[uuid.UUID, typer.Option("--internal-id", help="Internal routine UUID.")],
+    apply: Annotated[bool, typer.Option("--apply", help="Write the validated link.")] = False,
+) -> None:
+    """Operator only: link a paused, never-fired routine before seed-first-run."""
+    settings = load_settings()
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            await run_link_internal(
+                rt=rt,
+                console=Console(highlight=False),
+                tenant_id=tenant,
+                routine_id=routine,
+                internal_id=internal_id,
+                apply=apply,
+            )
+
+    try:
+        asyncio.run(run())
+    except UserFacingError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
+
+async def run_link_internal(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    tenant_id: uuid.UUID,
+    routine_id: uuid.UUID,
+    internal_id: uuid.UUID,
+    apply: bool,
+) -> None:
+    try:
+        async with rt.sessionmaker.begin() as session:
+            await link_internal_routine(
+                session,
+                tenant_id=tenant_id,
+                routine_id=routine_id,
+                internal_routine_id=internal_id,
+                apply=apply,
+            )
+    except StoreError as exc:
+        raise UserFacingError(str(exc)) from exc
+    console.print(
+        f"{routine_id}: internal_routine_id={internal_id} tenant={tenant_id}", markup=False
+    )
+    console.print("Applied atomically." if apply else "Dry run: nothing written.")
 
 
 @routines_app.command("seed-first-run")

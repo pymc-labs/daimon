@@ -321,13 +321,24 @@ Migration `0151_routine_claimed_slot` backfills only a first line exactly matchi
 `internal-routine-import-v1:<uuid>` in `trigger_message` (LF or CRLF); similarly named tags,
 suffixes and tags on later lines do not count. Duplicate imports within a team
 refuse the migration rather than choosing a match. Later prompt edits preserve
-this stored identity. `create_routine` accepts `internal_routine_id`, but no
-importer in this repository sets it yet. Routines imported later cannot be seeded
-until an importer supplies that dedicated identity; a prompt tag alone no longer
-links a new routine. Seed refuses both missing and ambiguous matches, and never
+this stored identity. `seed-first-run` needs this stored identity. For a later
+import or a routine recreated by its owner, link the paused Daimon routine to its internal original
+before seeding; a prompt tag alone no longer links a new routine:
+
+```bash
+daimon routines link-internal --tenant TENANT_UUID --routine OS_ROUTINE_UUID --internal-id INTERNAL_UUID
+daimon routines link-internal --tenant TENANT_UUID --routine OS_ROUTINE_UUID --internal-id INTERNAL_UUID --apply
+```
+
+The default is a dry run; `--apply` writes only `internal_routine_id`. Linking
+refuses routines outside the selected team, enabled routines, any execution or
+delivery state, an existing link (even to the same ID), or an internal ID already
+linked to another routine in that team. It preserves the schedule, prompt and
+owner. Pause a newly created routine before linking, and use a never-fired
+routine for the move. Seed refuses both missing and ambiguous matches, and never
 matches a Daimon routine UUID against the input.
 
-The command prints T, Daimon's cron/timezone, the first slot strictly after T (computed in the routine's
+The seed command prints T, Daimon's cron/timezone, the first slot strictly after T (computed in the routine's
 zone), the catch-up policy and freshness window, and one of: `wait`, `fire next tick`,
 or `roll forward unrun under skip: older than the freshness window`.
 It reads `DAIMON_SCHEDULER__MAX_AGE_S` (900 seconds by default); run it with the

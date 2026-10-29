@@ -44,6 +44,7 @@ from daimon.core.stores.domain import (
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy import and_, delete, false, func, or_, select, true, update
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -73,6 +74,98 @@ def _captured_routine(row: RoutineRow) -> ColumnElement[bool]:
         Routine.destination_kind.is_not_distinct_from(row.destination_kind),
         Routine.destination_id.is_not_distinct_from(row.destination_id),
     )
+
+
+async def link_internal_routine(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    routine_id: _uuid.UUID,
+    internal_routine_id: _uuid.UUID,
+    apply: bool = False,
+) -> RoutineRow:
+    """Link a paused, never-used routine; caller owns the transaction.
+
+    Serialize competing links for the same tenant/internal identity, then lock
+    the target against resume, edits and scheduler claims. The unique constraint
+    also protects against writers that do not take the advisory lock.
+    """
+    tenant = await session.scalar(
+        select(Tenant).where(Tenant.id == tenant_id, Tenant.archived_at.is_(None))
+    )
+    if tenant is None:
+        raise StoreError("Select an active team. Nothing was changed.")
+    if apply:
+        await session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(f"routine-link:{tenant_id}:{internal_routine_id}", 0)
+                )
+            )
+        )
+    statement = select(Routine).where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+    if apply:
+        statement = statement.with_for_update()
+    orm = await session.scalar(statement.execution_options(populate_existing=True))
+    if orm is None:
+        raise StoreError(f"{routine_id}: routine does not exist in the selected team.")
+    row = RoutineRow.model_validate(orm)
+    if row.internal_routine_id is not None:
+        match = "same" if row.internal_routine_id == internal_routine_id else "different"
+        raise StoreError(
+            f"{routine_id}: already linked to {match} internal id {row.internal_routine_id}; "
+            "no overwrite."
+        )
+    if row.enabled:
+        raise StoreError(f"{routine_id}: routine is enabled; pause it before linking.")
+    if any(
+        value is not None
+        for value in (
+            row.last_fired_at,
+            row.last_fired_slot,
+            row.last_finished_at,
+            row.last_finished_claim_at,
+            row.last_skipped_from,
+            row.last_skipped_until,
+            row.last_skip_reason,
+            row.last_error,
+            row.last_result_tail,
+            row.delivery_status,
+            row.delivery_lease_owner,
+            row.delivery_lease_expires_at,
+            row.delivery_note,
+            row.delivery_payload,
+            row.delivered_at,
+        )
+    ):
+        raise StoreError(f"{routine_id}: routine has execution or delivery state; cannot link.")
+    linked_id = await session.scalar(
+        select(Routine.id).where(
+            Routine.tenant_id == tenant_id,
+            Routine.internal_routine_id == internal_routine_id,
+        )
+    )
+    if linked_id is not None:
+        raise StoreError(
+            f"{internal_routine_id}: internal id is already linked to routine {linked_id} "
+            "in the selected team."
+        )
+    if apply:
+        try:
+            async with session.begin_nested():
+                await session.execute(
+                    update(Routine)
+                    .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+                    .values(internal_routine_id=internal_routine_id)
+                )
+        except IntegrityError as exc:
+            if "uq_routines_tenant_internal_id" not in str(exc.orig):
+                raise
+            raise StoreError(
+                f"{internal_routine_id}: internal id was linked to another routine "
+                "in the selected team concurrently. Nothing was changed."
+            ) from exc
+    return row
 
 
 async def create_routine(
