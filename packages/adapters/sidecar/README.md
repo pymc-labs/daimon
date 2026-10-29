@@ -10,6 +10,7 @@ review. Outside callback senders are unsupported.
 
 See [self-hosting](../../../docs/self-hosting.md#signed-page-event-watch-sidecar)
 for callback signing, headers, replay/retention rules, database roles and limits.
+Run `uv run daimon-sidecar` with the database role and settings described there.
 
 Polling uses a fixed private watch executor, never external URLs. Sidecar can claim
 four 60-second poll leases at a time; the private executor loads the registered
@@ -17,6 +18,8 @@ source and checks live owner permissions. Only the executor can submit poll resu
 Both producer gates remain default off. See
 [self-hosting](../../../docs/self-hosting.md#polling-and-owner-management) for owner
 tools and offline paused imports.
+
+Start the watch executor with `uvicorn daimon.adapters.mcp.watch_executor:create_watch_executor_app --factory --port 8767`.
 
 The poll-only ASGI app runs separately on `watch-executor:8767`, without published
 ports or proxy routes. The public MCP app has no executor route. Configure the

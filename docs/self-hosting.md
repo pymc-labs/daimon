@@ -1673,9 +1673,10 @@ watches map to `page_event`, which is not yet delivered: no host calls
 `sign_page_event`, and sidecar verification is not connected to per-watch keys.
 `create_watch(source="page_event")` refuses creation until a producer exists.
 
-Run the sidecar after migrations, from the same image as the other services,
-behind a TLS proxy. Only callback paths are public; database, `/healthz` and other
-paths remain private.
+Run `uv run daimon-sidecar` as a separate process with the database role and
+settings below. If exposing callbacks through a reverse proxy, route only
+`/callbacks/watches/{watch_id}` and keep `/healthz` and other paths off the public listener.
+Disable access logging and supply TLS at the proxy.
 
 Migration `0142_watches` follows `0141_lead_intake` and has no downgrade;
 retain compatible readers for rollback. `DAIMON_WATCHES__ENABLED` and the core-owned
@@ -1741,11 +1742,13 @@ Do not grant that port to `daimon_sidecar`. The separate `watch-executor` servic
 listens on private port 8767, with no published port or proxy route. It has no MCP
 tools; the public MCP app has no poll route. Supply a random 32–256 byte secret as
 `DAIMON_WATCHES__EXECUTOR_SECRET` on the executor and the same value as
-`DAIMON_SIDECAR__EXECUTOR_SECRET` on sidecar (Compose wires both from the former).
+`DAIMON_SIDECAR__EXECUTOR_SECRET` on sidecar.
 Unset secrets disable poll transport. Authentication and a cheap exact-lease lookup
 precede rate accounting, so invalid requests cannot consume the real-poll budget.
 Sidecar sends only the service secret and short-lived lease, never owner credentials.
 For MCP server watches the executor needs outbound HTTPS to the listed server URLs.
+
+Start the watch executor with `uvicorn daimon.adapters.mcp.watch_executor:create_watch_executor_app --factory --port 8767`.
 
 Sidecar checks due work every five seconds, at most four polls per tick. A poll
 lease lasts 60 seconds, independently of the durable wake's lease. Each watch executor

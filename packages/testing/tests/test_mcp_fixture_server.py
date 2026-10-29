@@ -7,7 +7,6 @@ from typing import Any
 
 import httpx
 import pytest
-from daimon.testing import preview_parity_mcp
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan
 from daimon.testing.mcp_fixture_server import build_fixture_server, create_app
 
@@ -112,26 +111,6 @@ def test_factory_refuses_unless_enabled_and_missing_or_weak_credentials(
             create_app()
     monkeypatch.setenv("DAIMON_MCP_FIXTURE_TOKEN", TOKEN)
     assert create_app()
-
-
-def test_old_entry_point_keeps_its_variables_and_refuses_other_lanes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    old = preview_parity_mcp.create_app
-    monkeypatch.setenv("DAIMON_PARITY_CALL_LOG", str(tmp_path / "calls.jsonl"))
-    monkeypatch.setenv("DAIMON_PARITY_LANE", "staging")
-    with pytest.raises(ValueError, match="only run in the preview lane"):
-        old()
-    monkeypatch.setenv("DAIMON_PARITY_LANE", "preview")
-    monkeypatch.delenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", raising=False)
-    with pytest.raises(KeyError):
-        old()
-    for token in ("", "short", TOKEN + "\n"):
-        monkeypatch.setenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", token)
-        with pytest.raises(ValueError, match="bearer"):
-            old()
-    monkeypatch.setenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", TOKEN)
-    assert old()
 
 
 async def test_counter_reads_submissions_and_mislabeled_write_counts(tmp_path: Path) -> None:

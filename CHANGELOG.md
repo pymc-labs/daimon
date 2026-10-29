@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `deploy/lanes` is now a generic self-host example.
+
 - Watch owner notices (expired, paused, stopped, cap reached) go out once even if the bot restarts mid-send: each attempt leaves a receipt, and a resumed send first looks for the earlier DM. Operators count them with `daimon watches notices --watch WATCH_UUID [--json]`; receipts hold ids, times and outcome, never the message text, and are kept 30 days, also after the watch is deleted.
 
 - Operators name the MCP server tools that return chat or archive text in `DAIMON_WATCHES__CHAT_TOOLS` (a JSON list, default none); listing them for polling on an MCP server is refused. Daimon's own `read_thread`, `read_channel` and `search_messages` are always refused there. Watch import notices and signing-key messages use plain words.
