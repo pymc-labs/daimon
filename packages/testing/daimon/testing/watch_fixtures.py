@@ -87,6 +87,11 @@ async def install_poll_ports(session: AsyncSession) -> None:
         str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0156_watch_mcp_sources.py")
     )
     await session.execute(text(cast(str, bounds["POLL_SQL"]).format(schema=quoted)))
+    # 0163 replaces it again: the live-session check applies to thread delivery only.
+    delivery = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0163_watch_delivery.py")
+    )
+    await session.execute(text(cast(str, delivery["POLL_SQL"]).format(schema=quoted)))
     await session.execute(
         text(f"REVOKE ALL ON FUNCTION {quoted}.project_watch_document(jsonb,text) FROM PUBLIC")
     )

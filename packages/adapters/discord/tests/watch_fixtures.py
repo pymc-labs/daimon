@@ -26,7 +26,9 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
-async def enrolled_page_watch(db_session_factory, monkeypatch, *, source="page_event"):
+async def enrolled_page_watch(
+    db_session_factory, monkeypatch, *, source="page_event", delivery="thread"
+):
     monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
     signing_key = "os-page-test-" + "ab" * 32
     db_session_factory = async_sessionmaker(
@@ -82,6 +84,7 @@ async def enrolled_page_watch(db_session_factory, monkeypatch, *, source="page_e
                 interval=60,
                 expires_at=now + timedelta(days=1),
                 now=now,
+                delivery=delivery,
             )
         else:
             watch = await watches.register_page_watch(

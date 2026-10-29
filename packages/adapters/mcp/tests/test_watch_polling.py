@@ -1242,3 +1242,67 @@ async def test_quote_heavy_full_firing_still_seeds_newest_events(runtime_watch):
     assert seed is not None
     assert "event-19" in seed and "event-0" not in seed
     assert len(seed.encode()) < 2 * watches.SEED_BYTES
+
+
+async def test_dm_watch_reports_to_its_owner_and_polls_without_a_thread_session(attended_owner):
+    from daimon.adapters.mcp.tools.watches import create_watch_impl
+    from daimon.core.stores.direct_messages import set_dm_enabled
+    from daimon.core.stores.thread_sessions import get_live_thread_session, mark_dead
+
+    runtime, watch, auth, origin = attended_owner
+    async with runtime.session_factory.begin() as db:
+        await set_dm_enabled(db, tenant_id=watch.tenant_id, enabled=True)
+    created = await create_watch_impl(
+        runtime,
+        auth,
+        origin_context_id=origin,
+        instructions="Report a change.",
+        source="poll",
+        tool="read_thread",
+        arguments={"thread_id": "4343"},
+        delivery="dm",
+    )
+    assert created.delivery == "dm"
+    async with runtime.session_factory.begin() as db:
+        row = await watches.get_watch(db, created.watch_id)
+        assert row is not None and row.session_id is None
+        assert row.owner_external_id == auth.platform_user_id
+        live = await get_live_thread_session(
+            db,
+            tenant_id=row.tenant_id,
+            platform="discord",
+            thread_id=row.thread_id,
+            account_id=row.owner_account_id,
+        )
+        assert live is not None
+        # Each DM fire starts its own session, so the thread's ending never revokes it.
+        await mark_dead(db, id=live.id)
+    async with runtime.session_factory.begin() as db:
+        leases = {item["watch_id"]: item["lease"] for item in await watches.claim_poll_watches(db)}
+    async with runtime.session_factory() as db:
+        leased = await watches.leased_poll(
+            db, created.watch_id, leases[str(created.watch_id)], now=datetime.now(UTC)
+        )
+    assert leased is not None and leased.delivery == "dm"
+
+
+async def test_dm_delivery_refused_when_daimon_cannot_dm_the_owner(attended_owner):
+    from daimon.adapters.mcp.tools.watches import create_watch_impl
+
+    runtime, watch, auth, origin = attended_owner
+    with pytest.raises(ToolError, match="cannot DM you"):
+        await create_watch_impl(
+            runtime,
+            auth,
+            origin_context_id=origin,
+            instructions="Report a change.",
+            source="poll",
+            tool="read_thread",
+            arguments={"thread_id": "4343"},
+            delivery="dm",
+        )
+    async with runtime.session_factory() as db:
+        owned = await watches.list_owned_watches(
+            db, tenant_id=watch.tenant_id, account_id=watch.owner_account_id
+        )
+    assert [item.id for item in owned] == [watch.id]

@@ -1774,7 +1774,8 @@ access pauses polling and cancels queued work. Expired watches stop automaticall
 another owner's watch). Creation, resume and signing-key rotation require an attended
 owner `origin_context_id` and a human confirmation card even with tool safety off;
 admins cannot resume or rotate for someone else. Creation never takes a
-caller-selected owner or destination. Only tools on the deployment's watch list,
+caller-selected owner or recipient: `delivery` picks only this thread, the owner's
+own DM or a new public thread per report. Only tools on the deployment's watch list,
 `DAIMON_WATCHES__POLLABLE_TOOLS`, are pollable; no arbitrary HTTP or external sender
 mode is supported. The list is a JSON array of entries with `server` (`daimon-mcp`
 for a native reader, otherwise an `https` MCP server URL compared in canonical form,

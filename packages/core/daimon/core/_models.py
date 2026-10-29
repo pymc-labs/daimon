@@ -2798,7 +2798,8 @@ class TaskContinuation(Base):
     __table_args__ = (
         CheckConstraint(
             "reason IN ('task_handoff', 'private_input_applied', 'timer', "
-            "'github_access_ready', 'worker_finished', 'watch_fired', 'job_finished')",
+            "'github_access_ready', 'worker_finished', 'watch_fired', 'job_finished', "
+            "'watch_report')",
             name="ck_task_continuations_reason",
         ),
         CheckConstraint(
@@ -4246,7 +4247,18 @@ class Watch(Base):
     """Owner-registered source and immutable conversation binding."""
 
     __tablename__ = "watches"
-    __table_args__ = (Index("watch_poll_due_idx", "source", "status", "next_check_at"),)
+    __table_args__ = (
+        Index("watch_poll_due_idx", "source", "status", "next_check_at"),
+        CheckConstraint("delivery IN ('thread', 'dm', 'new_thread')", name="ck_watches_delivery"),
+        # A thread watch is bound to one live session; the others never are.
+        CheckConstraint(
+            "(delivery = 'thread') = (session_id IS NOT NULL)", name="ck_watches_delivery_session"
+        ),
+        CheckConstraint(
+            "delivery = 'thread' OR source IN ('poll', 'mcp_poll')",
+            name="ck_watches_delivery_source",
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
@@ -4262,7 +4274,12 @@ class Watch(Base):
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL unless `delivery` is 'thread': the others run each fire on a fresh session.
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Where a fire reports: 'thread' (the bound thread), 'dm' (the owner's DM) or
+    # 'new_thread' (a new thread under the parent). `thread_id` and
+    # `parent_channel_id` always name the place the watch was made.
+    delivery: Mapped[str] = mapped_column(Text, nullable=False, server_default="thread")
     instructions: Mapped[str] = mapped_column(Text, nullable=False)
     producer: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     page_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -4333,6 +4350,10 @@ class WatchFiring(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # Written once: the thread a 'new_thread' fire made, so a retry reuses it.
+    delivery_thread_id: Mapped[str | None] = mapped_column(Text)
+    # Written once: the fresh session a 'dm' fire runs on.
+    delivery_session_id: Mapped[str | None] = mapped_column(Text)
 
 
 class WatchEvidence(Base):

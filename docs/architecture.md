@@ -2918,8 +2918,18 @@ Removals alone do not fire added/updated rules. Per-watch/owner caps, coalescing
 retention and the read-and-report turn path are shared with page events. Poll errors
 back off exponentially to one day; revoked access pauses the watch and cancels wakes.
 
+A polled watch reports where `delivery` says: its own thread, the owner's DM, or a
+new public thread per report. The last two queue a `watch_report` wake, which the
+thread wake path never lists; `0163_watch_delivery` adds it. The Discord report
+poller runs a DM report as a fresh DM turn under watch posture, like a DM routine.
+It rechecks DMs, the owner's DM permission and guild membership before each chunk.
+A new-thread report checks the owner's thread rights on the parent over REST, then
+records its one thread on the firing, so a retry reuses it. The watch's own
+thread stays its policy and budget place. Turned-off DMs or lost thread rights
+pause the watch.
+
 MCP enrollment requires an attended turn origin and binds its tenant, owner, agent,
-thread, parent and session. Owner/admin management cancels queued wakes on pause,
+thread and parent; a watch that reports in its thread also binds that thread's session. Owner/admin management cancels queued wakes on pause,
 rotation and deletion. `list_watches(scope="all")` lists every watch in the caller's tenant for a freshly rechecked admin only (`fresh_admin`), and `daimon watches list --tenant` gives operators the same read-only view; neither shows instructions, keys, baselines or evidence. Fresh signing keys go only to the owner's private DM, once;
 MCP results and stored rows contain no plaintext key. The offline CLI importer
 accepts no signing keys, imports everything paused, and requires explicit exact-binding confirmation before

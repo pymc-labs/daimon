@@ -140,6 +140,7 @@ from daimon.core.continuity.wakes import (
     skip_thread_wakes,
 )
 from daimon.core.continuity.watch_notices import poll_watch_notices
+from daimon.core.continuity.watch_reports import run_watch_report_poller
 from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -1281,6 +1282,14 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     platform="discord",
                     open_thread=self._open_wake_thread,
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
+            self._spawn(
+                run_watch_report_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    open_report=self._open_watch_report,
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
@@ -4173,6 +4182,105 @@ class DaimonBot(commands.Bot):
         )
         return True
 
+    async def _open_watch_report(self, row: TaskContinuationRow) -> None:
+        """The report poller's hook: dispatch one watch report in its own task."""
+        if self.draining:
+            return
+        from daimon.core.continuity.watch_reports import dispatch_watch_report
+
+        self._spawn(
+            dispatch_watch_report(
+                self.runtime.sessionmaker,
+                row,
+                run_report=self._run_watch_report,
+                dispatch_errors=(discord.HTTPException,),
+            )
+        )
+
+    async def _run_watch_report(self, row: TaskContinuationRow, seed: str) -> None:
+        """Run one started watch report into the owner's DM or a new thread."""
+        from daimon.adapters.discord.watch_delivery import (
+            deliver_dm_report,
+            open_report_thread,
+        )
+        from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_watch
+        from daimon.core.stores.watches import get_firing, get_watch, pause_watch
+        from daimon.core.turn.admission import DmSource
+
+        async with self.runtime.sessionmaker() as db:
+            firing = await get_firing(db, row.idempotency_key)
+            watch = None if firing is None else await get_watch(db, firing.watch_id)
+        if watch is None:
+            raise AdmissionDenied(reason="runs_elsewhere")
+        if watch.delivery == "dm":
+
+            async def run_turn(current: WatchRow) -> str:
+                try:
+                    reply = await run_dm_watch(
+                        self.runtime.turn_deps,
+                        row,
+                        owner_user_id=current.owner_external_id,
+                        prompt=seed,
+                        source=DmSource(
+                            channel_id=current.parent_channel_id, thread_id=current.thread_id
+                        ),
+                        budget_channel_id=current.parent_channel_id,
+                    )
+                except DirectMessageAccessRevoked as error:
+                    log.info("watch_report.dm_refused", reason=error.reason)
+                    if error.reason in ("dm_disabled", "source_sealed"):
+                        async with self.runtime.sessionmaker.begin() as db:
+                            await pause_watch(
+                                db,
+                                current.id,
+                                reason="Watch paused: it can no longer report in your DMs.",
+                            )
+                    raise AdmissionDenied(reason="invoker_not_allowed") from None
+                return reply.text
+
+            async def member_present(guild_id: int, user_id: int) -> bool:
+                try:
+                    guild = self.get_guild(guild_id) or await self.fetch_guild(guild_id)
+                    member = await guild.fetch_member(user_id)
+                except (discord.NotFound, discord.Forbidden):
+                    return False
+                return not member.bot
+
+            await deliver_dm_report(
+                self.runtime.sessionmaker,
+                row,
+                run_turn=run_turn,
+                open_dm=self.open_member_dm,
+                member_present=member_present,
+                dm_policy=lambda tenant_id: self.runtime.settings.direct_message_policies.get(
+                    tenant_id, DirectMessagePolicy()
+                ),
+            )
+            return
+        if watch.delivery != "new_thread":
+            raise AdmissionDenied(reason="runs_elsewhere")
+        thread = await open_report_thread(self.runtime.sessionmaker, row, client=self)
+        if thread.id in self._processing:
+            # Someone is already talking in it; the report waits for that turn.
+            raise SessionBusyError(
+                pending_reasons=("watch_report",),
+                retry_after=datetime.now(UTC) + timedelta(seconds=30),
+            )
+        self._processing.add(thread.id)
+        self._thread_stops.claim(thread.id)
+        self._track_processing_task(thread.id)
+        try:
+            # The normal continuation path, in the thread this firing made.
+            await self._run_continuation_turn(
+                row.model_copy(update={"thread_id": str(thread.id)}),
+                ContinuationDecision(action="dispatch", seed_user_message=seed),
+                thread=thread,
+                tenant_id=row.tenant_id,
+                guild_id=str(thread.guild.id),
+            )
+        finally:
+            await self._release_and_clear(thread.id, row.tenant_id, clear_reactions=False)
+
     def _release_thread(self, thread_id: int) -> None:
         self._processing_tasks.pop(thread_id, None)
         self._thread_stops.release(thread_id)
@@ -4307,7 +4415,7 @@ class DaimonBot(commands.Bot):
 
         # Watches and long-job completions require fresh REST-only owner access.
         # Other continuations retain their existing requester-role resolution.
-        if row.reason in ("watch_fired", "job_finished"):
+        if row.reason in ("watch_fired", "watch_report", "job_finished"):
             access = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
             member = access.member
             role = (
@@ -4335,7 +4443,9 @@ class DaimonBot(commands.Bot):
             thread_id=row.thread_id,
             role=role,
             role_ids=tuple(_role_ids),
-            verified_membership=True if row.reason in ("watch_fired", "job_finished") else None,
+            verified_membership=True
+            if row.reason in ("watch_fired", "watch_report", "job_finished")
+            else None,
             origin=row.reason,
             attended=continuation_attended(row),
             now=datetime.now(UTC),
@@ -4343,7 +4453,7 @@ class DaimonBot(commands.Bot):
             category_unresolved=category_unresolved,
         )
         if (
-            row.reason in ("watch_fired", "job_finished")
+            row.reason in ("watch_fired", "watch_report", "job_finished")
             and admission.account_id != row.requester_account_id
         ):
             raise AdmissionDenied(reason="invoker_not_allowed")
@@ -4431,7 +4541,7 @@ class DaimonBot(commands.Bot):
         async def watch_binding() -> None:
             from daimon.core.stores.watches import watch_seed
 
-            if row.reason == "watch_fired":
+            if row.reason in ("watch_fired", "watch_report"):
                 async with self.runtime.sessionmaker() as db:
                     seed = await watch_seed(db, row, now=datetime.now(UTC))
                 if seed is None:
@@ -4495,7 +4605,7 @@ class DaimonBot(commands.Bot):
                 ),
             )
 
-            if row.reason in ("watch_fired", "job_finished"):
+            if row.reason in ("watch_fired", "watch_report", "job_finished"):
                 lifecycle.set_output_authorization(OutputAuthorization(watch_binding))
             return lifecycle
 
@@ -4697,7 +4807,7 @@ class DaimonBot(commands.Bot):
                     thread, msg, turn_card_intent_id=turn_card_intent.id
                 ),
             )
-            if row.reason in ("watch_fired", "job_finished"):
+            if row.reason in ("watch_fired", "watch_report", "job_finished"):
                 new_lifecycle.set_output_authorization(OutputAuthorization(watch_binding))
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
@@ -4719,11 +4829,11 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     thread_id=row.thread_id,
                     external_user_id=row.requester_external_user_id,
-                    watch_row=row if row.reason == "watch_fired" else None,
+                    watch_row=row if row.reason in ("watch_fired", "watch_report") else None,
                     job_row=row if row.reason == "job_finished" else None,
                     origin="handoff" if handoff_notice is not None else "chat",
                     attended=False
-                    if row.reason in ("watch_fired", "job_finished")
+                    if row.reason in ("watch_fired", "watch_report", "job_finished")
                     else continuation_attended(row),
                     user_message=(
                         render_turn_origin(
@@ -4753,7 +4863,7 @@ class DaimonBot(commands.Bot):
                     active_turn_message_id=marked_message_id,
                     before_send=(
                         watch_binding
-                        if row.reason in ("watch_fired", "job_finished")
+                        if row.reason in ("watch_fired", "watch_report", "job_finished")
                         else completion_root
                         if completion_batch is not None
                         else None

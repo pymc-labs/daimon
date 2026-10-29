@@ -27,8 +27,10 @@ from daimon.core.config import load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import SignedPageEvent, verify_page_event
 from daimon.core.stores import watch_credentials
+from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.domain import (
     TaskContinuationRow,
+    WatchDelivery,
     WatchEvidenceRow,
     WatchFiringRow,
     WatchRow,
@@ -330,6 +332,36 @@ async def get_firing(session: AsyncSession, wake_key: uuid.UUID) -> WatchFiringR
     return None if row is None else WatchFiringRow.model_validate(row)
 
 
+async def record_delivery_thread(
+    session: AsyncSession, wake_key: uuid.UUID, thread_id: str
+) -> str | None:
+    """Record the thread a new-thread fire made, once; the recorded thread, which a retry
+    reuses. None when the firing is gone."""
+    await session.execute(
+        update(WatchFiring)
+        .where(WatchFiring.wake_key == wake_key, WatchFiring.delivery_thread_id.is_(None))
+        .values(delivery_thread_id=thread_id)
+    )
+    return await session.scalar(
+        select(WatchFiring.delivery_thread_id).where(WatchFiring.wake_key == wake_key)
+    )
+
+
+async def record_delivery_session(
+    session: AsyncSession, wake_key: uuid.UUID, session_id: str
+) -> bool:
+    """Record the fresh session a DM fire runs on, once; False when another is recorded."""
+    await session.execute(
+        update(WatchFiring)
+        .where(WatchFiring.wake_key == wake_key, WatchFiring.delivery_session_id.is_(None))
+        .values(delivery_session_id=session_id)
+    )
+    stored = await session.scalar(
+        select(WatchFiring.delivery_session_id).where(WatchFiring.wake_key == wake_key)
+    )
+    return stored == session_id
+
+
 async def watch_seed(
     session: AsyncSession, wake: TaskContinuationRow, *, now: datetime
 ) -> str | None:
@@ -345,13 +377,19 @@ async def watch_seed(
         or not await is_watch_enabled(session, watch)
     ):
         return None
+    # The thread path only ever runs `watch_fired`; the other deliveries only `watch_report`.
+    if wake.reason != ("watch_fired" if watch.delivery == "thread" else "watch_report"):
+        return None
+    # A new-thread fire runs in the thread it made; every other wake names the watch's own.
+    threads = {watch.thread_id}
+    if watch.delivery == "new_thread" and firing.delivery_thread_id is not None:
+        threads.add(firing.delivery_thread_id)
     if (
         watch.tenant_id,
         watch.owner_account_id,
         watch.owner_external_id,
         watch.platform,
         watch.parent_channel_id,
-        watch.thread_id,
         watch.agent_id,
     ) != (
         wake.tenant_id,
@@ -359,9 +397,8 @@ async def watch_seed(
         wake.requester_external_user_id,
         wake.platform,
         wake.parent_channel_id,
-        wake.thread_id,
         wake.target_ma_agent_id,
-    ):
+    ) or wake.thread_id not in threads:
         return None
     tenant = await get_tenant(session, watch.tenant_id)
     if tenant is None or tenant.archived_at is not None or tenant.provision_status != "ready":
@@ -404,22 +441,23 @@ async def watch_seed(
         except ToolUnlisted:
             return None
     account = await session.get(Account, watch.owner_account_id)
-    live = await get_live_thread_session(
-        session,
-        tenant_id=watch.tenant_id,
-        platform=watch.platform,
-        thread_id=watch.thread_id,
-        account_id=watch.owner_account_id,
-    )
-    if (
-        account is None
-        or account.tenant_id != watch.tenant_id
-        or live is None
-        or live.ma_session_id != watch.session_id
-        or live.ma_agent_id != watch.agent_id
-        or live.channel_id != watch.parent_channel_id
-    ):
+    if account is None or account.tenant_id != watch.tenant_id:
         return None
+    if watch.delivery == "thread":
+        live = await get_live_thread_session(
+            session,
+            tenant_id=watch.tenant_id,
+            platform=watch.platform,
+            thread_id=watch.thread_id,
+            account_id=watch.owner_account_id,
+        )
+        if (
+            live is None
+            or live.ma_session_id != watch.session_id
+            or live.ma_agent_id != watch.agent_id
+            or live.channel_id != watch.parent_channel_id
+        ):
+            return None
     if len(firing.events) > 20:
         return None
     # Quote-heavy payloads escape again here; keep the newest events within the
@@ -657,6 +695,23 @@ async def delete_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
     await session.execute(delete(Watch).where(Watch.id == watch_id))
 
 
+def require_delivery(binding: ContinuationRequest, delivery: WatchDelivery) -> None:
+    """A DM or a new thread per fire is for Discord watches made outside a DM."""
+    if delivery == "thread":
+        return
+    if binding.platform != "discord":
+        raise ValueError("Only Discord watches can report in a DM or a new thread")
+    if binding.thread_id.startswith(DM_SCOPE_PREFIX) or binding.parent_channel_id.startswith(
+        DM_SCOPE_PREFIX
+    ):
+        raise ValueError("A watch made in a DM reports in that DM")
+
+
+def _delivery_values(delivery: WatchDelivery) -> dict[str, object]:
+    # Set with the source in one UPDATE, so every row check holds when it ends.
+    return {} if delivery == "thread" else {"delivery": delivery, "session_id": None}
+
+
 async def register_poll_watch(
     session: AsyncSession,
     binding: ContinuationRequest,
@@ -671,6 +726,7 @@ async def register_poll_watch(
     now: datetime,
     key: str | None = None,
     evidence: list[str] | None = None,
+    delivery: WatchDelivery = "thread",
 ) -> WatchRow:
     from daimon.core.continuity.poll_tools import (
         require_distinct_source,
@@ -696,6 +752,7 @@ async def register_poll_watch(
         evidence=evidence or (),
     )
     require_distinct_source(args, binding.thread_id)
+    require_delivery(binding, delivery)
     watch = await register_page_watch(
         session,
         binding,
@@ -709,6 +766,7 @@ async def register_poll_watch(
         .where(Watch.id == watch.id)
         .values(
             source="poll",
+            **_delivery_values(delivery),
             source_state={"tool": tool, "arguments": args, "interval": interval},
             rule={
                 "projection": projection,
@@ -742,6 +800,7 @@ async def register_mcp_poll_watch(
     now: datetime,
     key: str | None = None,
     evidence: list[str] | None = None,
+    delivery: WatchDelivery = "thread",
 ) -> WatchRow:
     """A watch on a read tool of an attached MCP server, keyed by its canonical URL.
 
@@ -762,6 +821,7 @@ async def register_mcp_poll_watch(
     validate_mcp_poll(
         args, projection=projection, rule=rule, interval=interval, key=key, evidence=evidence or ()
     )
+    require_delivery(binding, delivery)
     watch = await register_page_watch(
         session,
         binding,
@@ -775,6 +835,7 @@ async def register_mcp_poll_watch(
         .where(Watch.id == watch.id)
         .values(
             source="mcp_poll",
+            **_delivery_values(delivery),
             source_state={
                 "server_url": listed.server,
                 "server_name_at_enrollment": server_name,
@@ -834,13 +895,6 @@ async def leased_poll(
         platform=watch.platform,
         external_id=watch.owner_external_id,
     )
-    live = await get_live_thread_session(
-        session,
-        tenant_id=watch.tenant_id,
-        platform=watch.platform,
-        thread_id=watch.thread_id,
-        account_id=watch.owner_account_id,
-    )
     if (
         account is None
         or account.tenant_id != watch.tenant_id
@@ -849,11 +903,23 @@ async def leased_poll(
         or tenant.provision_status != "ready"
         or principal is None
         or principal.account_id != watch.owner_account_id
-        or live is None
-        or (live.ma_session_id, live.ma_agent_id, live.channel_id)
-        != (watch.session_id, watch.agent_id, watch.parent_channel_id)
     ):
         raise PollBindingRevoked("Watch binding revoked")
+    if watch.delivery == "thread":
+        # Only a thread watch is bound to a session; the others start a fresh one per fire.
+        live = await get_live_thread_session(
+            session,
+            tenant_id=watch.tenant_id,
+            platform=watch.platform,
+            thread_id=watch.thread_id,
+            account_id=watch.owner_account_id,
+        )
+        if live is None or (live.ma_session_id, live.ma_agent_id, live.channel_id) != (
+            watch.session_id,
+            watch.agent_id,
+            watch.parent_channel_id,
+        ):
+            raise PollBindingRevoked("Watch binding revoked")
     return watch
 
 

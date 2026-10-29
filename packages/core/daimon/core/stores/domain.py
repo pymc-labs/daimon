@@ -63,7 +63,10 @@ ContinuationReason = Literal[
     "worker_finished",
     "watch_fired",
     "job_finished",
+    "watch_report",
 ]
+#: Where a watch reports each fire.
+WatchDelivery = Literal["thread", "dm", "new_thread"]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 UserSkillSource = Literal["repo", "upload"]
 
@@ -1356,7 +1359,8 @@ class WatchRow(BaseModel):
     thread_id: str
     agent_id: str
     agent_name: str
-    session_id: str
+    session_id: str | None
+    delivery: WatchDelivery = "thread"
     instructions: str
     producer: str
     page_id: uuid.UUID
@@ -1397,3 +1401,5 @@ class WatchFiringRow(BaseModel):
     events: list[dict[str, str]]
     omitted: int
     created_at: datetime
+    delivery_thread_id: str | None = None
+    delivery_session_id: str | None = None

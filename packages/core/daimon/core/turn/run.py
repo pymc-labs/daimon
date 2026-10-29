@@ -1153,7 +1153,9 @@ async def run_prepared_turn_impl(
         or job_row.target_ma_agent_id != prepared.admission.agent.id
     ):
         raise AdmissionDenied(reason="invoker_not_allowed")
-    if watch_row is not None and (watch_row.reason != "watch_fired" or attended is not False):
+    if watch_row is not None and (
+        watch_row.reason not in ("watch_fired", "watch_report") or attended is not False
+    ):
         raise ValueError("Watch turns must be explicitly unattended")
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
     unattended = not (attended if attended is not None else origin != "routine")

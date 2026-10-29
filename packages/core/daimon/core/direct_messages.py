@@ -50,7 +50,7 @@ from daimon.core.stores.direct_messages import (
     quarantine_conversation,
     start_conversation,
 )
-from daimon.core.stores.domain import ChatPlatform, Role, TenantRow
+from daimon.core.stores.domain import ChatPlatform, Role, TaskContinuationRow, TenantRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,
@@ -569,12 +569,14 @@ async def _run_admitted_dm_turn(
     on_sealed: Callable[[], Awaitable[None]],
     destination: AbstractAsyncContextManager[None] | None = None,
     origin: TurnContext = "chat",
+    watch_row: TaskContinuationRow | None = None,
 ) -> tuple[str, str]:
     """Run one admitted, bound private turn and return its final text and session.
 
-    Shared by live DM replies and DM routines. `on_sealed` runs when the DM's
-    source was sealed during the turn (it may raise its own refusal). Nothing
-    is rendered while the turn runs; the caller delivers the answer.
+    Shared by live DM replies, DM routines and DM watch reports (`watch_row`,
+    which runs under watch posture). `on_sealed` runs when the DM's source was
+    sealed during the turn (it may raise its own refusal). Nothing is rendered
+    while the turn runs; the caller delivers the answer.
     """
     async with (
         destination if destination is not None else nullcontext(),
@@ -616,6 +618,8 @@ async def _run_admitted_dm_turn(
                 recovery_lifecycle=lambda _: _CollectReply(),
                 origin=origin,
                 deadline=deadline,
+                attended=False if watch_row is not None else None,
+                watch_row=watch_row,
             )
         except DmSourceSealedError:
             # Decided again during a dead-session recovery.
@@ -865,6 +869,59 @@ async def run_dm_routine(
     rechecked for a seal whenever the session is built; `budget_channel_id` only
     bills. Nothing is posted here: the caller queues the final output.
     """
+    return await _run_dm_fire(
+        deps,
+        tenant_id=tenant_id,
+        owner_user_id=owner_user_id,
+        agent_name=agent_name,
+        prompt=prompt,
+        source=source,
+        budget_channel_id=budget_channel_id,
+    )
+
+
+async def run_dm_watch(
+    deps: TurnDeps,
+    row: TaskContinuationRow,
+    *,
+    owner_user_id: str,
+    prompt: str,
+    source: DmSource,
+    budget_channel_id: str,
+) -> DmRoutineReply:
+    """Run a DM watch's fire as a fresh private DM turn of its owner, under watch posture.
+
+    The same cold-DM admission, `dm_enabled` and Managed-Agents-only rules as a DM
+    routine, serialised per owner the same way. The turn reads and reports only
+    (`watch_turn.watch_posture`), never routine posture. The fresh session is
+    recorded on the firing before anything is sent, and each send checks it.
+    `source` is the place the watch was made; nothing is posted here.
+    """
+    if row.reason != "watch_report" or row.requester_external_user_id != owner_user_id:
+        raise DirectMessageAccessRevoked("invoker_not_allowed", message="Watch owner changed.")
+    return await _run_dm_fire(
+        deps,
+        tenant_id=row.tenant_id,
+        owner_user_id=owner_user_id,
+        agent_name=row.target_name,
+        prompt=prompt,
+        source=source,
+        budget_channel_id=budget_channel_id,
+        watch_row=row,
+    )
+
+
+async def _run_dm_fire(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    owner_user_id: str,
+    agent_name: str,
+    prompt: str,
+    source: DmSource | None,
+    budget_channel_id: str | None,
+    watch_row: TaskContinuationRow | None = None,
+) -> DmRoutineReply:
     async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False):
         now = datetime.now(UTC)
         async with deps.sessionmaker() as session:
@@ -884,7 +941,7 @@ async def run_dm_routine(
                 requester_org=RequesterOrg.HOST,
                 platform="discord",
                 external_user_id=owner_user_id,
-                origin="routine",
+                origin="routine" if watch_row is None else watch_row.reason,
                 attended=False,
                 channel_id=scope_id,
                 now=now,
@@ -945,6 +1002,21 @@ async def run_dm_routine(
         grant = prepared.admission.grant
         if prepared.backend is not None or grant is None:
             raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+        if watch_row is not None:
+            from daimon.core.stores.watches import record_delivery_session
+
+            if prepared.admission.agent.id != watch_row.target_ma_agent_id:
+                raise DirectMessageAccessRevoked(
+                    "invoker_not_allowed", message="The watch's agent changed."
+                )
+            async with deps.sessionmaker.begin() as session:
+                recorded = await record_delivery_session(
+                    session, watch_row.idempotency_key, prepared.ma_session_id
+                )
+            if not recorded:
+                raise DirectMessageAccessRevoked(
+                    "invoker_not_allowed", message="This report already ran."
+                )
 
         async def sealed() -> None:
             raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
@@ -963,6 +1035,7 @@ async def run_dm_routine(
                 deadline=deadline,
                 on_sealed=sealed,
                 origin="routine",
+                watch_row=watch_row,
             )
         except asyncio.CancelledError:
             if deps.running_turns.is_drain_cancel():
