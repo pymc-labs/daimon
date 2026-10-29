@@ -672,7 +672,7 @@ async def test_daily_cap_keeps_normal_poll_interval_and_clears_errors(runtime_wa
             await db.execute(
                 text(
                     "UPDATE watches SET max_turns_per_day=1, consecutive_errors=3,"
-                    " source_state=source_state || jsonb_build_object('failing_since', :since)"
+                    " source_state=source_state || jsonb_build_object('failing_since', CAST(:since AS text))"
                     " WHERE id=:id"
                 ),
                 {"id": watch.id, "since": datetime.now(UTC).isoformat()},

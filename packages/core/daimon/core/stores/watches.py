@@ -811,7 +811,10 @@ async def poll_failed(
             # once older firings leave the window.
             state |= {
                 "daily_cap_at" if daily_cap == "watch" else "owner_cap_at": now.isoformat(),
-                "daily_cap_kind": daily_cap,
+                # An undelivered owner notice is the wider one, so it keeps its wording.
+                "daily_cap_kind": "owner"
+                if state.get("notice_pending") and state.get("daily_cap_kind") == "owner"
+                else daily_cap,
                 "notice_state": "daily_cap",
                 "notice_pending": True,
             }

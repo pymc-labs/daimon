@@ -593,6 +593,10 @@ async def test_capped_polls_end_a_run_of_errors(db_session_factory, poll_watch):
         db_session_factory, watch, errors_before=3, failing_for=timedelta(0), now=start
     )
     assert current.consecutive_errors == 4
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            text("UPDATE watches SET backoff_until=NULL WHERE id=:id"), {"id": watch.id}
+        )
     # The source recovers, but a day of capped polls re-detects the same held-back change.
     for hours in range(1, 25):
         lease = await claim(db_session_factory, watch.id)
