@@ -462,10 +462,15 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 command.downgrade(config, ROUTINES_HEAD)
             version = sync.scalar(text("SELECT version_num FROM alembic_version"))
             assert version == COMPUTE_SESSIONS_HEAD
-            command.upgrade(config, HEAD)
-            _assert_head(sync)
+            command.upgrade(config, COMPUTE_TASKS_HEAD)
             with pytest.raises(NotImplementedError, match="Retain compute task records"):
                 command.downgrade(config, REPO_MEMORY_HEAD)
+            version = sync.scalar(text("SELECT version_num FROM alembic_version"))
+            assert version == COMPUTE_TASKS_HEAD
+            command.upgrade(config, HEAD)
+            _assert_head(sync)
+            with pytest.raises(NotImplementedError, match="Watch evidence"):
+                command.downgrade(config, COMPUTE_TASKS_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)
