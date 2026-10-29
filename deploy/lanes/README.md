@@ -301,7 +301,7 @@ sidecar and executor. Both producer gates default off.
 Migration `0156_watch_mcp_sources` follows `0155_compute_tasks` and raises the poll
 baseline and payload bounds. `DAIMON_WATCHES__POLLABLE_TOOLS` lists the tools a
 watch may poll; leave it unset to keep `read_thread` and `read_channel`.
-Migration `0157_watch_mcp_claim` follows it and lets the sidecar lease watches on
+Migration `0158_watch_mcp_claim` follows `0157_watch_notice_receipts` and lets the sidecar lease watches on
 MCP server tools too.
 
 See [self-hosting](../../docs/self-hosting.md#polling-and-owner-management) for the

@@ -95,7 +95,10 @@ COMPUTE_TASKS_HEAD = "0155_compute_tasks"
 WATCH_MCP_HEAD = "0156_watch_mcp_sources"
 
 
-HEAD = "0157_watch_notice_receipts"
+NOTICE_RECEIPTS_HEAD = "0157_watch_notice_receipts"
+
+
+HEAD = "0158_watch_mcp_claim"
 
 
 CHAIN = [
@@ -124,6 +127,7 @@ CHAIN = [
     REPO_MEMORY_HEAD,
     COMPUTE_TASKS_HEAD,
     WATCH_MCP_HEAD,
+    NOTICE_RECEIPTS_HEAD,
     HEAD,
 ]
 
@@ -473,8 +477,7 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 command.downgrade(config, REPO_MEMORY_HEAD)
             version = sync.scalar(text("SELECT version_num FROM alembic_version"))
             assert version == COMPUTE_TASKS_HEAD
-            command.upgrade(config, HEAD)
-            _assert_head(sync)
+            command.upgrade(config, NOTICE_RECEIPTS_HEAD)
             command.downgrade(config, WATCH_MCP_HEAD)
             version = sync.scalar(text("SELECT version_num FROM alembic_version"))
             assert version == WATCH_MCP_HEAD
@@ -484,6 +487,10 @@ async def test_deployed_upgrade_and_downgrade_paths(
             version = sync.scalar(text("SELECT version_num FROM alembic_version"))
             assert version == WATCH_MCP_HEAD
             command.upgrade(config, HEAD)
+            _assert_head(sync)
+            # 0158 keeps watch history: no downgrade past it.
+            with pytest.raises(NotImplementedError, match="Watch evidence"):
+                command.downgrade(config, NOTICE_RECEIPTS_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)

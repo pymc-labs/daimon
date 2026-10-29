@@ -11,8 +11,8 @@ downgrade: unsupported
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0157_watch_mcp_claim"
-down_revision: str | None = "0156_watch_mcp_sources"
+revision = "0158_watch_mcp_claim"
+down_revision: str | None = "0157_watch_notice_receipts"
 branch_labels = None
 depends_on = None
 

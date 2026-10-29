@@ -2890,7 +2890,12 @@ as `tool_unlisted` and its owner gets the lifecycle DM. Poll arguments must expl
 name a source different from the reporting thread, preventing self-report wake loops.
 The agent must currently have that read enabled with `always_allow` in its own
 canonical OS MCP toolset; missing, disabled or approval-required reads stop the watch. Arguments exclude URLs and limit
-reads to 20 messages.
+reads to 20 messages. The safe jq-style projection subset supports identity, object
+fields, numeric indexes and one `[]` map step for polls. The raw read is bounded
+(256 KiB, depth 32, 20,000 nodes) and only the projection is kept: a baseline of at
+most 64 KiB (keyed `added` keeps key fingerprints only) and a payload of at most
+16 KiB and 20 items. `0156_watch_mcp_sources` enforces the kept bounds again in
+SQL; page events keep the 4 KiB limits.
 
 An `mcp_poll` source stores the canonical URL, never the server name, and each poll
 needs that URL still attached, enabled, visible to the owner and not denied. The
@@ -2898,12 +2903,8 @@ executor sends only that URL's agent-wide credential, to one pinned public addre
 without redirects or proxies, reading at most 256 KiB. The live `tools/list` entry
 must match the digest approved at create and keep `readOnlyHint`; the hint can only
 refuse, since the registry is what allows a poll. Each URL gets two polls at once
-and 30 a minute, and `0157_watch_mcp_claim` lets the sidecar lease these watches. The safe jq-style projection subset supports identity, object
-fields, numeric indexes and one `[]` map step for polls. The raw read is bounded
-(256 KiB, depth 32, 20,000 nodes) and only the projection is kept: a baseline of at
-most 64 KiB (keyed `added` keeps key fingerprints only) and a payload of at most
-16 KiB and 20 items. `0156_watch_mcp_sources` enforces the kept bounds again in
-SQL; page events keep the 4 KiB limits.
+and 30 a minute, and `0158_watch_mcp_claim` lets the sidecar lease these watches.
+
 The first poll saves a baseline without firing. Later `change`, `added` and `updated`
 comparisons save their baseline with evidence and the existing `watch_fired` wake in
 one transaction. False/empty change results re-arm without firing; zero is meaningful.
