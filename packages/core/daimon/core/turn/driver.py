@@ -147,6 +147,32 @@ _PENDING_CONFIRMATION_RECONNECTS = 2
 T = TypeVar("T")
 
 
+async def _read_after_quiet[R](
+    read: Callable[[], Awaitable[R]], *, name: str, session_id: str
+) -> R:
+    """One status or replay read after a quiet stream, retried on a transient failure.
+
+    The read only fetches; nothing is folded until it returns, so a retry
+    cannot apply anything twice. Any other error (a scope violation, a 4xx),
+    and the last attempt's failure, propagate unchanged.
+    """
+    for delay in _QUIET_READ_RETRY_DELAYS_S:
+        try:
+            return await read()
+        except Exception as error:
+            if not _transient_read_error(error):
+                raise
+            log.warning(
+                "turn.quiet_read_retry",
+                read=name,
+                session_id=session_id,
+                error_type=type(error).__name__,
+                delay_s=delay,
+            )
+            await asyncio.sleep(delay)
+    return await read()
+
+
 def _answers_in_turn(tool_confirmation: ToolConfirmation) -> bool:
     """Whether this posture answers a `requires_action` idle and keeps going."""
     return isinstance(tool_confirmation, AutoApprove | PolicyApproval)
@@ -397,8 +423,29 @@ async def _send_decision_batch(
 # handled as an eventless-cycle signal (see `_EventlessCycle` below), not a
 # connection error — the driver asks MA for the session's status before
 # deciding anything, so it does not consume the bounded 2-attempt retry
-# budget reserved for genuine connection loss.
-_CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError, TurnConnectionLost)
+# budget reserved for genuine connection loss. `httpx.ReadError` is the same
+# loss as a protocol error: the socket broke mid-body, so it reconnects too.
+_CONNECTION_LOST = (
+    _anthropic.APIConnectionError,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    TurnConnectionLost,
+)
+
+# The status and replay reads after a quiet stream. A dropped connection, a
+# 429 or a 5xx on one of them says nothing about the turn, so it is retried
+# after these pauses before it may end the turn.
+_QUIET_READ_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 2.0)
+
+
+def _transient_read_error(error: BaseException) -> bool:
+    """A failure of the read itself, not a verdict on the turn: worth one more try."""
+    if isinstance(error, (*_CONNECTION_LOST, httpx.NetworkError)):
+        return True
+    if isinstance(error, _anthropic.APIStatusError):
+        return error.status_code == 429 or error.status_code >= 500
+    return isinstance(error, ProviderError) and error.retryable
+
 
 # Guarded single-render: no-op if `diff(prev, state)` is empty; else calls
 # `lifecycle.on_render(state)` and advances the render anchor. Finalizers
@@ -1078,7 +1125,9 @@ async def _pump(
                             )
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
-                    status = await io.status()
+                    status = await _read_after_quiet(
+                        io.status, name="status", session_id=session_id
+                    )
                     if status in {"running", "rescheduling"}:
                         log.info(
                             "turn.eventless_cycle",
@@ -1101,7 +1150,9 @@ async def _pump(
                         reason=cycle.reason,
                         status=status,
                     )
-                    replayed = await io.replay()
+                    replayed = await _read_after_quiet(
+                        io.replay, name="replay", session_id=session_id
+                    )
                     current_turn_events = _events_since_last_turn_boundary(
                         replayed, tool_confirmation=tool_confirmation
                     )

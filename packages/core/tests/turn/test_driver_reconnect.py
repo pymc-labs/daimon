@@ -26,6 +26,7 @@ from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import (
     DelayThenYield,
     FakeAnthropic,
+    RaiseReadError,
     RecordingLifecycle,
     YieldEvent,
     run_turn_on_leg,
@@ -499,3 +500,156 @@ async def test_connection_error_regression_still_exhausts_at_two_attempts() -> N
     assert fa.beta.sessions.retrieve_calls == [], (
         "connection-error budget must never consult the status check"
     )
+
+
+# --- The reads after a quiet stream are retried before a turn is lost -----
+
+
+def _dropped() -> anthropic.APIConnectionError:
+    request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
+    return anthropic.APIConnectionError(request=request)
+
+
+@pytest.fixture
+def no_quiet_read_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daimon.core.turn import driver
+
+    monkeypatch.setattr(driver, "_QUIET_READ_RETRY_DELAYS_S", (0.0, 0.0))
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_dropped_status_read_after_a_clean_close_is_retried_not_lost() -> None:
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello")
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(pre)], [YieldEvent(done)]]
+    fa.beta.sessions.events.replay_events = [pre]
+    fa.beta.sessions.retrieve_statuses = [_dropped(), "running"]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert fa.beta.sessions.retrieve_calls == ["sess_1", "sess_1"]
+    assert final.stop_reason is not None
+    assert final.stop_reason.type == "end_turn"
+    assert len(lc.terminal_success) == 1
+    assert not lc.terminal_failures
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_dropped_replay_after_a_quiet_idle_stream_is_retried_not_lost() -> None:
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello")
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(pre)]]
+    fa.beta.sessions.events.replay_events = [pre, done]
+    fa.beta.sessions.events.list_raises = [_dropped()]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.content == [TextBlock(kind="text", text="hello")]
+    assert final.stop_reason is not None
+    assert final.stop_reason.type == "end_turn"
+    assert len(lc.terminal_success) == 1
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_status_reads_that_keep_dropping_still_end_the_turn_as_lost() -> None:
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    fa.beta.sessions.retrieve_statuses = [_dropped(), _dropped(), _dropped()]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert fa.beta.sessions.retrieve_calls == ["sess_1"] * 3
+    assert final.termination == TerminationReason.CONNECTION_LOST
+    assert len(lc.terminal_failures) == 1
+
+
+async def test_a_read_error_mid_stream_reconnects() -> None:
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello ")
+    mid = make_agent_message(event_id="sevt_2", text="world")
+    done = make_status_idle(event_id="sevt_3", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [
+        [YieldEvent(pre), RaiseReadError()],
+        [YieldEvent(mid), YieldEvent(done)],
+    ]
+    fa.beta.sessions.events.replay_events = [pre, mid]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert lc.reconnects == ["connection_dropped"]
+    assert final.content == [TextBlock(kind="text", text="hello world")]
+    assert len(lc.terminal_success) == 1
+    assert not lc.terminal_failures
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_503_on_the_status_read_after_a_clean_close_is_retried() -> None:
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello")
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(pre)], [YieldEvent(done)]]
+    fa.beta.sessions.events.replay_events = [pre]
+    request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
+    unavailable = anthropic.APIStatusError(
+        "unavailable", response=httpx.Response(503, request=request), body=None
+    )
+    fa.beta.sessions.retrieve_statuses = [unavailable, "running"]
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert final.stop_reason is not None
+    assert final.stop_reason.type == "end_turn"
+    assert len(lc.terminal_success) == 1
