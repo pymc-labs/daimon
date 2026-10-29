@@ -19,6 +19,7 @@ from daimon.testing.turn_fakes import (
     FakeAnthropic,
     RecordingLifecycle,
     YieldEvent,
+    run_turn_on_leg,
 )
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle, make_tool_use
@@ -42,7 +43,7 @@ async def _run_until_stopped(fake: FakeAnthropic, *, after_s: float) -> TurnStat
     stopper = asyncio.create_task(stop_later())
     try:
         async with asyncio.timeout(10):
-            return await driver.run_turn(
+            return await run_turn_on_leg(
                 anthropic=cast(AsyncAnthropic, fake),
                 session_id="sess_1",
                 user_message="hi",
