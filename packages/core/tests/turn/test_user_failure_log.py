@@ -38,6 +38,7 @@ _FIELDS = {
     "reason",
     "error_class",
     "origin",
+    "backend",
     "release",
     "turn_id",
     "tenant_id",
@@ -104,6 +105,7 @@ def observation(sessionmaker: async_sessionmaker[AsyncSession]) -> TurnObservati
         channel_id="C-private",
         thread_id="T-private",
         session_id="sesn_private",
+        backend="gemini/gemini.inline_reuse",
     )
 
 
@@ -131,6 +133,7 @@ async def test_a_failed_turn_logs_one_content_free_line(
         "reason": "upstream",
         "error_class": "ValueError",
         "origin": "chat",
+        "backend": "gemini/gemini.inline_reuse",
         "release": current_release(),
         "turn_id": str(observation.id),
         "tenant_id": str(observation.tenant_id),

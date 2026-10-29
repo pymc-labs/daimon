@@ -231,7 +231,10 @@ async def test_a_summary_goes_back_only_when_its_turn_never_sent(
     monkeypatch.setattr(run_module, "_restore_handoff_summary", restore)
     monkeypatch.setattr(run_module, "run_prepared_turn_impl", failing_turn)
     observation = SimpleNamespace(
-        activate=contextlib.nullcontext, finish=lambda **_k: None, session_id=None
+        activate=contextlib.nullcontext,
+        finish=lambda **_k: None,
+        session_id=None,
+        model_by_session={},
     )
     prepared = SimpleNamespace(
         admission=SimpleNamespace(
@@ -239,6 +242,7 @@ async def test_a_summary_goes_back_only_when_its_turn_never_sent(
             account_id=HANDER,
             agent=SimpleNamespace(id=COPY),
             backend_footer_profile=None,
+            backend_revision=None,
         ),
         ma_session_id="sess",
         _finalize=None,

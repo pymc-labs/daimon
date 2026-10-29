@@ -104,7 +104,7 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import SUPPORTED
 from mux.errors import ScopeViolation, UnsupportedCapability
-from mux.profiles import get_profile
+from mux.profiles import MANAGED_AGENTS, get_profile
 from mux.profiles.selfhosted import LOOP as SELFHOSTED_LOOP
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -943,6 +943,20 @@ async def run_prepared_turn(
         else None
     )
     marking = SEND_ATTEMPTED.set(sent)
+    revision = prepared.admission.backend_revision
+    backend = revision.backend if revision is not None else MANAGED_AGENTS.provider
+    profile = revision.profile if revision is not None else MANAGED_AGENTS.profile_id
+    observation.backend = f"{backend}/{profile}"
+    # Every log line of the turn names the backend it ran on, so failures, lost
+    # connections and ceilings can be counted per backend. Bound until the end of
+    # the `finally`, so the credential finalizer's lines carry it too.
+    bound = structlog.contextvars.bind_contextvars(
+        backend=backend,
+        profile=profile,
+        model=revision.model
+        if revision is not None
+        else observation.model_by_session.get(prepared.ma_session_id),
+    )
     try:
         with observation.activate(), deps.running_turns.track():
             result = await run_prepared_turn_impl(
@@ -979,18 +993,23 @@ async def run_prepared_turn(
             )
         raise
     finally:
-        SEND_ATTEMPTED.reset(marking)
-        finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
-        if finalize is not None:
-            # Credential revocation must survive a second cancel of this task:
-            # the shielded call keeps running even if this wait is cancelled.
-            pending = asyncio.ensure_future(finalize())
-            _PENDING_FINALIZERS.add(pending)
-            pending.add_done_callback(_finalizer_done)
-            try:
-                await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
-            except TimeoutError:
-                log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
+        try:
+            SEND_ATTEMPTED.reset(marking)
+            finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
+            if finalize is not None:
+                # Credential revocation must survive a second cancel of this task:
+                # the shielded call keeps running even if this wait is cancelled.
+                pending = asyncio.ensure_future(finalize())
+                _PENDING_FINALIZERS.add(pending)
+                pending.add_done_callback(_finalizer_done)
+                try:
+                    await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
+                except TimeoutError:
+                    log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
+        finally:
+            # Even when a second cancel or the finalizer itself raises: a caller
+            # that carries on in this task must not inherit this turn's fields.
+            structlog.contextvars.reset_contextvars(**bound)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
     if seeded is not None and not sent and result.state.error is not None:
@@ -1428,6 +1447,9 @@ async def run_prepared_turn_impl(
 
             active_record_cell[0] = new_record
             active_admission_cell[0] = recovery.admission or prepared.admission
+            # The replacement's lines name its own model; `run_prepared_turn`'s
+            # reset still restores the caller's values afterwards.
+            structlog.contextvars.bind_contextvars(model=recovery.model_id)
 
             log.info(
                 "turn.session_recovered",

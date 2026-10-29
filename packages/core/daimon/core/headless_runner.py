@@ -506,6 +506,7 @@ async def run_turn_impl(
         if (observation := current_outcome.get()) is not None:
             observation.session_id = session.id
             observation.model_by_session[session.id] = model_choice_id(session.agent.model)
+            observation.backend = f"{MANAGED_AGENTS.provider}/{MANAGED_AGENTS.profile_id}"
 
         usage_record: Callable[..., Awaitable[object]] | None = None
         if usage_record_factory is not None:
@@ -572,7 +573,16 @@ async def run_turn_impl(
         # Driver's own run_turn builds and sends the `user.message` event itself
         # from `user_message=trigger_message` — the drain (steps 3-6 of the old
         # bespoke loop) is fully delegated below.
-        with persistence.activate() if persistence is not None else contextlib.nullcontext():
+        # A routine turn runs on Managed Agents; its driver lines name it, as a
+        # chat turn's do (`run_prepared_turn`).
+        with (
+            structlog.contextvars.bound_contextvars(
+                backend=MANAGED_AGENTS.provider,
+                profile=MANAGED_AGENTS.profile_id,
+                model=model_choice_id(session.agent.model),
+            ),
+            persistence.activate() if persistence is not None else contextlib.nullcontext(),
+        ):
             state: TurnState = await drive_turn(
                 anthropic=anthropic,
                 path=selected_path,
