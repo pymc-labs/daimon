@@ -832,8 +832,9 @@ async def test_a_raw_transport_error_that_outlasts_the_retries_ends_the_turn_as_
 
 
 @pytest.mark.usefixtures("no_quiet_read_pause")
-async def test_stop_during_a_retried_read_that_succeeds_interrupts_the_turn(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("retried_read_fails", [False, True])
+async def test_stop_during_a_retried_read_interrupts_the_turn(
+    monkeypatch: pytest.MonkeyPatch, retried_read_fails: bool
 ) -> None:
     from daimon.core.turn import driver
 
@@ -858,6 +859,8 @@ async def test_stop_during_a_retried_read_that_succeeds_interrupts_the_turn(
             if len(checks) == 1:
                 raise ProviderError("overloaded", retryable=True)
             cancel.set()  # Stop lands while the retried read is in flight
+            if retried_read_fails:
+                raise ProviderError("overloaded", retryable=True)
             return "running"
 
         async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:

@@ -156,8 +156,9 @@ async def _read_after_quiet[R](
     most journals by source key (an IO whose replay can send opts out with
     `replay_may_send`). Any other error (a scope violation, a 4xx) propagates
     unchanged; a transport error that outlasts the retries is a lost connection.
-    Stop pressed once a read has failed is the live turn's interrupt: the
-    provider is told to stop, as it is mid-stream.
+    Stop pressed once a read has failed is the live turn's interrupt, whatever
+    the retried read then returns or raises: the provider is told to stop, as it
+    is mid-stream.
     """
     for attempt, delay in enumerate((*_QUIET_READ_RETRY_DELAYS_S, None)):
         if attempt and cancel.is_set():
@@ -165,6 +166,8 @@ async def _read_after_quiet[R](
         try:
             value = await read()
         except Exception as error:
+            if attempt and cancel.is_set():
+                raise _InterruptInConsume() from error
             if delay is None or not _transient_read_error(error):
                 if isinstance(error, httpx.TransportError) and delay is None:
                     raise TurnConnectionLost(f"{name} read kept failing") from error
