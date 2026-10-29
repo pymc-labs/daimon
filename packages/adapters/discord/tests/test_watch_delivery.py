@@ -212,6 +212,14 @@ async def test_paused_watch_sends_no_further_chunks(dm_store):
     assert dm.send.await_count == 1
 
 
+async def test_dms_closed_on_discord_pause_the_watch(dm_store):
+    ports, dm = _ports()
+    dm.send.side_effect = discord.Forbidden(MagicMock(status=403, reason="closed"), "closed")
+    with pytest.raises(AdmissionDenied):
+        await deliver_dm_report(_Sessions(), _row(dm_store.watch), **ports)
+    assert dm_store.paused == ["Watch paused: Discord does not let Daimon DM you."]
+
+
 async def test_thread_delivery_never_reaches_the_dm_path(dm_store):
     dm_store.watch = _watch("thread", session_id="sess_watch")
     ports, _dm = _ports()

@@ -7,8 +7,9 @@ DM recipient: nothing on the row or the card can name anyone else.
 A DM report runs as a fresh private DM turn of the owner under watch posture
 (`direct_messages.run_dm_watch`). Before the turn and before each chunk the
 tenant's DMs must be on, the owner allowed to receive them, still a human member
-of the guild (read over REST), and the watch still due to report. Turned-off DMs
-or a sealed source pause the watch; anything else stops this report only.
+of the guild (read over REST), and the watch still due to report. Turned-off DMs,
+DMs Discord refuses, or a sealed source pause the watch; anything else stops this
+report only.
 
 A new-thread report checks the owner's rights on the parent channel over REST
 (`require_watch_parent_access`), makes one public thread and records it on the
@@ -121,13 +122,19 @@ async def deliver_dm_report(
     await still_open()
     text = await run_turn(watch)
     guild = await still_open()
-    dm = await open_dm(guild, int(owner))
     sent = 0
-    for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
-        if sent:
-            await still_open()
-        await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
-        sent += 1
+    try:
+        dm = await open_dm(guild, int(owner))
+        for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
+            if sent:
+                await still_open()
+            await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
+            sent += 1
+    except discord.Forbidden:
+        # The owner closed their DMs to Daimon: every later report would fail the same way.
+        raise await _pause(
+            sessionmaker, watch, "Watch paused: Discord does not let Daimon DM you."
+        ) from None
     return sent
 
 
