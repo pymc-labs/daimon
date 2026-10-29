@@ -57,10 +57,11 @@ connects repos to the workspace, minted on that workspace admin's behalf. An
 admin then grants a repository to an agent:
 
 ```bash
-daimon github grants add --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read
+daimon github grants add --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id>
 ```
 
-Use `grants list` and `grants remove` with the same options. When the
+Add `--working` to make it the agent's working repo. `grants list` takes
+`--tenant` and `--agent`; `grants remove` also takes `--repo`. When the
 repository set is unchanged, running sessions rotate tokens in place. A changed
 set closes the sessions, so the next turn mounts the new checkouts.
 

@@ -105,7 +105,10 @@ silent, check `docker compose logs discord`.
 ### Run on OpenAI
 
 No Anthropic account needed — leave `DAIMON_ANTHROPIC__API_KEY` unset and
-provision an OpenAI agent instead, after step 3 above:
+provision an OpenAI agent instead, after step 3 above. First add
+`DAIMON_CHANNEL_OPENAI_KEY=<key>` and
+`DAIMON_TURN__PROVIDER_RUNTIME_FILE=/app/runtime/openai.json` to `.env`.
+Find your tenant UUID with `daimon tenants list`.
 
 ```bash
 docker compose run --rm init "daimon openai init --tenant-id <your-tenant-uuid> --project <openai-project-id> --model <openai-model-id>"
@@ -113,7 +116,8 @@ docker compose run --rm init "daimon agents backend set <agent-name-or-id> opena
 ```
 
 The first command creates an OpenAI agent, a hosted environment and seeds
-the default skill set; the second routes that agent's channels to it. See
+the default skill set; the second routes that agent's channels to it. Then
+run `docker compose up -d` so the services read the new values. See
 [Run on OpenAI](docs/providers.md#run-on-openai) for the OpenAI
 key setup, per-channel routing, verifying the install, and what's different
 on OpenAI (no multi-agent delegation, no cross-turn memory, and a few other

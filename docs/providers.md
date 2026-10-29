@@ -62,7 +62,18 @@ container defaults with no Daimon model settings.
 
    The runtime file records only this name, never the key.
 
-2. Provision the agent, environment and default skills:
+2. Point the runtime at the file in `.env`:
+
+   ```bash
+   DAIMON_TURN__PROVIDER_RUNTIME_FILE=/app/runtime/openai.json
+   ```
+
+   The services already share `./runtime` as `/app/runtime`. `daimon openai
+   init` reads the same variable, or takes `--manifest`.
+
+3. Invite the Discord bot first: Daimon creates your server's tenant when
+   the bot joins. `daimon tenants list` then shows its UUID. Provision the
+   agent, environment and default skills:
 
    ```bash
    docker compose run --rm init "daimon openai init --tenant-id <tenant-uuid> --project <openai-project-id> --model <openai-model-id>"
@@ -71,18 +82,8 @@ container defaults with no Daimon model settings.
    It creates one OpenAI agent and one hosted environment, uploads every skill
    under `defaults/skills/` and writes a runtime file row. Repeating it prints
    the existing IDs. Pass `--skip-default-skills` for a bare agent and
-   `--api-key-env` for a different variable name. Find your tenant UUID with
-   `daimon tenants list` once another channel has sent a first message, or
-   choose any UUID on a fresh OpenAI-only install.
-
-3. Point the runtime at the file in `.env`:
-
-   ```bash
-   DAIMON_TURN__PROVIDER_RUNTIME_FILE=/app/runtime/openai.json
-   ```
-
-   The services already share `./runtime` as `/app/runtime`. `daimon openai
-   init` reads the same variable, or takes `--manifest`.
+   `--api-key-env` for a different variable name. Then run
+   `docker compose up -d` so the services read the new values.
 
 4. Route channels as shown above, then verify:
 

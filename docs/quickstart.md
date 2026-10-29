@@ -109,8 +109,12 @@ docker compose run --rm init "daimon openai init --tenant-id <tenant-uuid> --pro
 docker compose run --rm init "daimon agents backend set <agent-name-or-id> openai"
 ```
 
-Add your OpenAI key to `.env` first. [Model providers](providers.md) covers
-the key setup, routing and verification, and what OpenAI does not support.
+Find your tenant UUID with `daimon tenants list`. Before the first command,
+add `DAIMON_CHANNEL_OPENAI_KEY=<key>` and
+`DAIMON_TURN__PROVIDER_RUNTIME_FILE=/app/runtime/openai.json` to `.env`. After
+both, run `docker compose up -d` so the services read the new values.
+[Model providers](providers.md) covers routing, verification and what OpenAI
+does not support.
 
 ## Next steps
 
