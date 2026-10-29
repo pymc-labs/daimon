@@ -2820,7 +2820,8 @@ which may contain signed upload URLs.
 
 ### Signed page-event watch entry point
 
-Only polled Discord `read_thread` and `read_channel` watches work end to end.
+Polled watches work end to end, on Discord `read_thread` and `read_channel` or on a
+listed read tool of an attached MCP server.
 See [supported sources and page-event limitations](self-hosting.md#signed-page-event-watch-sidecar).
 The callback infrastructure verifies HMAC, binding, freshness and replay before
 acknowledging a transaction that stores evidence and enqueues a `watch_fired` wake.
@@ -2866,7 +2867,8 @@ result. Sidecar cannot read watch rows or submit poll results. The OS executor l
 the immutable registration and rechecks current membership, agent rules, seals,
 exact destination visibility and source permissions before every read, and again
 before saving its result. It uses existing Discord `read_thread` and `read_channel`
-implementations as the human owner. No AI turn is spent polling. Both producer
+implementations as the human owner, or `core.mcp_tool_call` for an MCP server
+source. No AI turn is spent polling. Both producer
 gates apply before a source is read; stopped/expired leases cannot commit.
 
 Polls exclude bot/assistant rows before selecting the latest human-message window
@@ -2894,6 +2896,16 @@ fields, numeric indexes and one `[]` map step for polls. The raw read is bounded
 most 64 KiB (keyed `added` keeps key fingerprints only) and a payload of at most
 16 KiB and 20 items. `0156_watch_mcp_sources` enforces the kept bounds again in
 SQL; page events keep the 4 KiB limits.
+
+An `mcp_poll` source stores the canonical URL, never the server name, and each poll
+needs that URL still attached, enabled, visible to the owner and not denied. The
+executor sends only that URL's agent-wide credential, to one pinned public address,
+without redirects or proxies, reading at most 256 KiB and no compressed reply. The live `tools/list` entry
+must match the digest approved at create and keep `readOnlyHint`; the hint can only
+refuse, since the registry is what allows a poll. Each URL gets two polls at once
+and 30 a minute, and a busy URL's watches step back in the
+queue. `0158_watch_mcp_claim` lets the sidecar lease these watches.
+
 The first poll saves a baseline without firing. Later `change`, `added` and `updated`
 comparisons save their baseline with evidence and the existing `watch_fired` wake in
 one transaction. False/empty change results re-arm without firing; zero is meaningful.

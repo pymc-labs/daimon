@@ -35,6 +35,30 @@ from .test_watch_polling import attended_owner, lease, runtime_watch  # noqa: F4
 SECRET = "s" * 40
 
 
+async def enrolling_pid(runtime, independent):
+    """The enrolling connection's pid, proven to show up in `pg_locks` when it holds the key."""
+    async with runtime.session_factory.begin() as db:
+        pid = await db.scalar(text("SELECT pg_backend_pid()"))
+        await db.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
+        async with independent() as other:
+            assert await enrolling_holds_watch_lock(other, pid)
+    return pid
+
+
+async def enrolling_holds_watch_lock(other, pid) -> bool:
+    """The global watch lock key is database-wide, so a parallel test worker may hold it;
+    ask only whether the enrolling connection does."""
+    return bool(
+        await other.scalar(
+            text(
+                "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' "
+                "AND classid=0 AND objid=813749201 AND objsubid=1 AND pid=:pid)"
+            ),
+            {"pid": pid},
+        )
+    )
+
+
 @pytest.mark.parametrize("identifier", ["0", "04242", "+4242", " 4242", "١٢٣", "1" * 21])
 def test_i1_source_has_exactly_one_boundary_spelling(identifier):
     with pytest.raises(ValueError, match="canonical"):
@@ -409,12 +433,13 @@ async def test_enrollment_access_checks_precede_global_lock_and_recheck_state(
                 text("UPDATE watches SET source='page_event' WHERE id=:id"), {"id": watch.id}
             )
     independent = async_sessionmaker(runtime.session_factory.kw["bind"].engine)
+    enrolling = await enrolling_pid(runtime, independent)
     observed = []
 
     async def check_access(*args):
         async with independent.begin() as other:
-            free = await other.scalar(text("SELECT pg_try_advisory_xact_lock(813749201)"))
-            observed.append(free)
+            held = await enrolling_holds_watch_lock(other, enrolling)
+            observed.append(not held)
         # A stop/control action while network I/O was outstanding invalidates
         # this approval, even when the final status is still paused.
         async with runtime.session_factory.begin() as db:
@@ -805,13 +830,13 @@ async def test_i2_proof_lookup_does_not_hold_global_watch_lock(attended_owner, m
             )
     await manage_watch_impl(runtime, auth, watch_id=str(watch.id), action="pause")
     independent = async_sessionmaker(runtime.session_factory.kw["bind"].engine)
+    enrolling = await enrolling_pid(runtime, independent)
     observed = {}
 
     async def proof(*a, **k):
         async with independent() as other:
-            observed["free"] = await other.scalar(text("SELECT pg_try_advisory_lock(813749201)"))
-            if observed["free"]:
-                await other.execute(text("SELECT pg_advisory_unlock(813749201)"))
+            held = await enrolling_holds_watch_lock(other, enrolling)
+            observed["free"] = not held
         return None
 
     monkeypatch.setattr(_session_gate, "session_card_gap", proof)

@@ -56,7 +56,7 @@ class ToolUnlisted(ValueError):
 
 def require_listed(server: str, tool: str) -> PollableTool:
     """The registry entry for (server, tool); servers compare by name or canonical URL only."""
-    from daimon.core.mcp_server_url import same_mcp_url
+    from daimon.core.mcp_server_url import same_ascii_mcp_url
 
     for entry in load_watches_settings().pollable_tools:
         if entry.tool != tool:
@@ -64,9 +64,105 @@ def require_listed(server: str, tool: str) -> PollableTool:
         if server == DAIMON_SERVER_NAME or entry.server == DAIMON_SERVER_NAME:
             if entry.server == server:
                 return entry
-        elif same_mcp_url(entry.server, server):
+        elif same_ascii_mcp_url(entry.server, server):
             return entry
     raise ToolUnlisted("This tool is not on the list of tools a watch can check here")
+
+
+def watch_server(watch_source: str, source_state: Mapping[str, object]) -> str:
+    """The registry server a stored watch polls: `daimon-mcp`, or its canonical URL."""
+    return DAIMON_SERVER_NAME if watch_source == "poll" else str(source_state.get("server_url"))
+
+
+class SourceChanged(ValueError):
+    """The server's listing for the tool no longer matches what the owner approved."""
+
+
+#: The fields of one `tools/list` entry the owner's approval covers.
+CATALOGUE_FIELDS = ("name", "inputSchema", "outputSchema", "annotations")
+
+
+def catalogue_digest(entry: Mapping[str, JsonValue]) -> str:
+    """sha256 of the tool's listed name, schemas and annotations, in canonical JSON."""
+    import hashlib
+    import json
+
+    pinned = {field: entry.get(field) for field in CATALOGUE_FIELDS}
+    return hashlib.sha256(
+        json.dumps(pinned, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
+
+
+def require_read_only_listing(entry: Mapping[str, JsonValue]) -> None:
+    """I4.3: the server itself must say the tool only reads. This can refuse, never allow."""
+    annotations = entry.get("annotations")
+    if (
+        not isinstance(annotations, dict)
+        or annotations.get("readOnlyHint") is not True
+        or annotations.get("destructiveHint") is True
+    ):
+        raise SourceChanged("That tool's server does not say it only reads")
+
+
+def require_schema_arguments(
+    entry: Mapping[str, JsonValue], arguments: Mapping[str, JsonValue]
+) -> None:
+    """The arguments fit the listed `inputSchema`: known names, required present, plain types.
+
+    A deliberately small check: names and top-level JSON types only. Values are
+    bounded separately, and the server still validates them itself.
+    """
+    schema = entry.get("inputSchema")
+    if not isinstance(schema, dict) or schema.get("type", "object") != "object":
+        raise SourceChanged("That tool's arguments cannot be checked")
+    properties = schema.get("properties") or {}
+    required = schema.get("required") or []
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        raise SourceChanged("That tool's arguments cannot be checked")
+    if any(name not in arguments for name in required):
+        raise ValueError("Poll arguments are missing a value the tool needs")
+    if schema.get("additionalProperties") is not True and set(arguments) - set(properties):
+        raise ValueError("Poll arguments name a value the tool does not take")
+    kinds: dict[str, tuple[type, ...]] = {
+        "string": (str,),
+        "integer": (int,),
+        "number": (int, float),
+        "boolean": (bool,),
+        "array": (list,),
+        "object": (dict,),
+        "null": (type(None),),
+    }
+    for name, value in arguments.items():
+        spec = properties.get(name)
+        declared = spec.get("type") if isinstance(spec, dict) else None
+        names = [declared] if isinstance(declared, str) else declared
+        if not isinstance(names, list):
+            continue
+        allowed = tuple(
+            kind for item in names if isinstance(item, str) for kind in kinds.get(item, ())
+        )
+        is_bool = isinstance(value, bool)
+        if allowed and (not isinstance(value, allowed) or (is_bool and bool not in allowed)):
+            raise ValueError(f"Poll argument {name} has the wrong type")
+
+
+def validate_mcp_poll(
+    arguments: dict[str, JsonValue],
+    *,
+    projection: str,
+    rule: str,
+    interval: int,
+    key: str | None = None,
+    evidence: Sequence[str] = (),
+) -> None:
+    """The stored shape of an MCP server poll; the server's own schema is checked live."""
+    bounded(arguments)
+    projection_path(projection, allow_map=True)
+    if rule not in {"change", "added", "updated"}:
+        raise ValueError("Unsupported poll arguments or rule")
+    validate_rule(rule, key=key, evidence=evidence)
+    if not 60 <= interval <= 86400:
+        raise ValueError("Poll interval must be 60 to 86400 seconds")
 
 
 def validate_poll(

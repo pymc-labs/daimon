@@ -1666,9 +1666,9 @@ uncertain or partially sent claim to pending, because delivery is at most once.
 
 ### Signed page-event watch sidecar
 
-Only Discord `read_thread` and `read_channel` polling works end to end.
-Notion, Linear, HubSpot and URL watches are polls of unreviewed tools: creation
-is refused, and imports remain paused as `source_unmapped`. Webhook/callback
+Polling works end to end for Discord `read_thread` and `read_channel` and for
+listed read tools on MCP servers an agent attaches. Imported Notion, Linear,
+HubSpot and URL watches remain paused as `source_unmapped`. Webhook/callback
 watches map to `page_event`, which is not yet delivered: no host calls
 `sign_page_event`, and sidecar verification is not connected to per-watch keys.
 `create_watch(source="page_event")` refuses creation until a producer exists.
@@ -1747,6 +1747,7 @@ tools; the public MCP app has no poll route. Supply a random 32–256 byte secre
 Unset secrets disable poll transport. Authentication and a cheap exact-lease lookup
 precede rate accounting, so invalid requests cannot consume the real-poll budget.
 Sidecar sends only the service secret and short-lived lease, never owner credentials.
+For MCP server watches the executor needs outbound HTTPS to the listed server URLs.
 
 Sidecar checks due work every five seconds, at most four polls per tick. A poll
 lease lasts 60 seconds, independently of the durable wake's lease. Each OS executor
@@ -1782,10 +1783,13 @@ for a native reader, otherwise an `https` MCP server URL compared in canonical f
 never a server name), `tool`, `credential`, `returns_chat` (required) and optional
 `max_interval_floor_s` and `label`. Native entries must be the reviewed `read_thread`
 or `read_channel` with credential `none`; an MCP server entry with `returns_chat:
-true` is refused at startup. MCP server entries are validated but not polled yet.
+true` is refused at startup, as are known chat and archive tools such as
+`connected_archives_search`. An MCP entry with credential `agent` polls with the
+agent's stored credential for that exact URL; `owner` entries are not polled yet.
 The default lists `read_thread` and `read_channel` with a 60-second floor, which is
 today's behaviour. A server's read-only annotation never makes a tool pollable; only
-this list does. The list is read fresh at create, at resume, and before and after
+this list does. A server can say a tool only reads and still write, so list only
+tools you trust. The list is read fresh at create, at resume, and before and after
 each read: an unlisted tool is refused at create and resume, and a watch whose tool
 is removed pauses at its next poll with reason `tool_unlisted` and its owner gets
 one private message. An empty value means the default; `[]` allows no polls. Poll
@@ -1801,8 +1805,13 @@ legacy baselines are re-established without firing. Source IDs require canonical
 ASCII decimal spelling (1–20 digits). Enrollment verifies the attended owner's
 exact-tool card proof server-side via `session_card_gap`; unsupported backends and
 ungated/unreadable sessions refuse, including with tool safety off.
-Poll arguments must name a source distinct from the reporting thread. The agent
-must have the read enabled without approval on its canonical OS MCP toolset.
+`read_thread` and `read_channel` arguments must name a source distinct from the
+reporting thread. The agent must have the read enabled without approval on its
+canonical OS MCP toolset. An MCP server poll needs the server still attached at
+the same URL, under any name, with the tool enabled and not denied. The tool's
+always-ask or always-allow setting does not stop a poll; an agent rule that asks
+or denies does. Its listing
+is read on every poll; a changed listing pauses the watch as `source_changed`.
 Gate, expiry and lease races release the matching poll lease without marking owner
 access revoked. Actual owner or binding revocation pauses and cancels queued wakes.
 

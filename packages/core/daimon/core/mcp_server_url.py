@@ -38,6 +38,33 @@ def same_mcp_url(left: str, right: str) -> bool:
     return canonical_mcp_url(left) == canonical_mcp_url(right)
 
 
+def ascii_mcp_url(url: str) -> str:
+    """`canonical_mcp_url` with an internationalised host in its punycode form.
+
+    Two spellings of one host compare equal. A host that will not encode is
+    kept as it is, so it matches nothing but itself.
+    """
+    canonical = canonical_mcp_url(url)
+    try:
+        parts = urlsplit(canonical)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return canonical
+    if not host or host.isascii() or parts.username or parts.password:
+        return canonical
+    try:
+        encoded = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return canonical
+    netloc = encoded if port is None else f"{encoded}:{port}"
+    return urlunsplit(parts._replace(netloc=netloc))
+
+
+def same_ascii_mcp_url(left: str, right: str) -> bool:
+    return ascii_mcp_url(left) == ascii_mcp_url(right)
+
+
 def session_mcp_url(public_url: str, session_id: str) -> str:
     """A distinct credential slot for one server-minted provider session grant."""
     parts = urlsplit(public_url)

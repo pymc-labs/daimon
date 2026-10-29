@@ -2267,18 +2267,26 @@
     }),
     'create_watch': dict({
       'description': '''
-        Watch a reviewed Discord read tool from this conversation.
+        Watch a listed read tool from this conversation: a Discord reader or an MCP server's.
         <blank line>
         Binds the current human owner, tenant, agent and exact Discord thread.
         Requires an attended turn origin and verified owner card approval.
         Backends without tool confirmation refuse enrollment.
         Polls run without an AI turn; firings
         use unattended read-and-report turns and current access/spend checks.
-        Poll arguments must explicitly name a source different from the reporting thread.
         Only tools on this deployment's watch list (set by whoever runs Daimon) can be
-        checked; by default that is read_thread and read_channel, and never URLs or
-        outside tools. An unlisted tool is refused, and a watch whose tool is taken off
-        the list pauses and its owner is told.
+        checked; by default that is read_thread and read_channel on daimon-mcp. An
+        unlisted tool is refused, and a watch whose tool is taken off the list pauses
+        and its owner is told. For read_thread and read_channel the arguments must name
+        a source different from the reporting thread.
+        `server` is "daimon-mcp" (the default) or, for a tool on another MCP server this
+        agent attaches, that server's https URL; pass the URL so the approval card shows
+        its host. A server name on this agent is also accepted and resolved to its URL,
+        which is what is stored. Such a tool must be listed for that URL, enabled on
+        this agent, and its server must say it only reads (readOnlyHint true, not
+        destructive); that hint can only refuse, never allow. Its listing is read when
+        the watch is made and on every poll, and a change pauses the watch. Servers
+        that need each person's own sign-in or key are refused for now.
         Projection supports `.`, `.field.nested`, `.rows[0].field` and one `[]` step
         such as `.rows[].content`; other jq expressions are refused. Polls start with a
         saved baseline and compare change, added array elements, or updated object keys,
@@ -2355,6 +2363,10 @@
               'added',
               'updated',
             ]),
+            'type': 'string',
+          }),
+          'server': dict({
+            'default': 'daimon-mcp',
             'type': 'string',
           }),
           'source': dict({

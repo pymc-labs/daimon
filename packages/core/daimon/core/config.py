@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from daimon.core.mcp_server_url import canonical_mcp_url
+from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.scope_cascade import CascadeMode
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
@@ -2116,6 +2116,26 @@ class FleetSettings(BaseModel):
     )
 
 
+#: Tools known to return chat or archive text, Daimon's own replies included.
+#: Only native readers drop Daimon's rows, so these are refused on an MCP
+#: server whatever `returns_chat` says (I5): a report must never fire its watch.
+CHAT_TOOLS: frozenset[str] = frozenset(
+    {
+        "connected_archives_list_channels",
+        "connected_archives_search",
+        "discord_archive_query",
+        "discord_get_message",
+        "discord_read_channel_since",
+        "discord_read_messages",
+        "discord_search_messages",
+        "fetch_attachment",
+        "read_channel",
+        "read_thread",
+        "search_messages",
+    }
+)
+
+
 class PollableTool(BaseModel):
     """One operator-listed tool a watch may poll. The list is the only thing that allows a poll."""
 
@@ -2147,9 +2167,16 @@ class PollableTool(BaseModel):
     def _canonical_server(cls, value: str) -> str:
         if value == DAIMON_SERVER_NAME:
             return value
-        url = canonical_mcp_url(value)
+        # Punycode, so two spellings of one host are one entry.
+        url = ascii_mcp_url(value)
         parts = urlsplit(url)
-        if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+        if (
+            parts.scheme != "https"
+            or not parts.hostname
+            or not parts.hostname.isascii()
+            or parts.username
+            or parts.password
+        ):
             raise ValueError('server must be "daimon-mcp" or an https URL without credentials')
         return url
 
@@ -2164,7 +2191,7 @@ class PollableTool(BaseModel):
                     f"daimon-mcp/{self.tool} is not a reviewed native poll tool "
                     "with credential none"
                 )
-        elif self.returns_chat:
+        elif self.returns_chat or self.tool in CHAT_TOOLS:
             raise ValueError(f"{self.tool} returns chat; MCP server tools that do cannot be polled")
         return self
 
@@ -2202,7 +2229,7 @@ class WatchesSettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Enable reviewed Discord READ-tool polling and watch dispatch. "
+            "Enable polling of the listed read tools and watch dispatch. "
             "Page-event watches are not yet delivered. "
             "Keep disabled "
             "until the execution-bound unattended origin grants, non-gateable cleanup "
@@ -2221,9 +2248,11 @@ class WatchesSettings(BaseModel):
             "MCP servers), returns_chat (required: true only for native readers, which "
             "drop Daimon's own messages), max_interval_floor_s (shortest interval, at "
             "least 60, default 300) and label (shown on the approval card). Native "
-            "entries must be read_thread or read_channel. MCP server entries are checked "
-            "here but are not polled yet. A server's read-only annotation never allows a "
-            "poll; only this list does. A watch below a raised floor polls at the "
+            "entries must be read_thread or read_channel. Known chat and archive tools "
+            "are refused on MCP servers. MCP entries with credential owner are not "
+            "polled yet. A server's read-only annotation never allows a poll; only this "
+            "list does, and a server can still write when it says it only reads. A "
+            "watch below a raised floor polls at the "
             "floor. Default (also used when the value is empty): read_thread and "
             "read_channel on daimon-mcp, credential none, returns_chat true, floor 60. "
             "Set [] to allow no polls."

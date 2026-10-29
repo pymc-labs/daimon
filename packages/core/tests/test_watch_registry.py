@@ -95,3 +95,31 @@ def test_duplicates_and_bad_json_are_refused():
     default = WatchesSettings().pollable_tools
     assert WatchesSettings(pollable_tools="").pollable_tools == default  # pyright: ignore[reportArgumentType]
     assert WatchesSettings(pollable_tools="[]").pollable_tools == []  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    "tool", ["connected_archives_search", "discord_read_messages", "fetch_attachment"]
+)
+def test_known_chat_tools_are_refused_on_mcp_servers_even_marked_not_chat(tool):
+    # R5: an operator mistake (returns_chat false on an archive reader) is refused at load.
+    with pytest.raises(ValidationError, match="returns chat"):
+        PollableTool.model_validate(
+            {
+                "server": "https://bridge.example/mcp",
+                "tool": tool,
+                "credential": "agent",
+                "returns_chat": False,
+            }
+        )
+
+
+def test_internationalised_hosts_are_one_entry_and_match_either_spelling(monkeypatch):
+    entry = {"tool": "x", "credential": "agent", "returns_chat": False}
+    unicode_host = {**entry, "server": "https://Bücher.example/mcp"}
+    punycode_host = {**entry, "server": "https://xn--bcher-kva.example/mcp/"}
+    assert PollableTool.model_validate(unicode_host).server == "https://xn--bcher-kva.example/mcp"
+    with pytest.raises(ValidationError, match="more than once"):
+        WatchesSettings(pollable_tools=json.dumps([unicode_host, punycode_host]))  # pyright: ignore[reportArgumentType]
+    monkeypatch.setenv("DAIMON_WATCHES__POLLABLE_TOOLS", json.dumps([unicode_host]))
+    assert require_listed("https://xn--bcher-kva.example/mcp", "x")
+    assert require_listed("https://bücher.example/mcp/", "x")

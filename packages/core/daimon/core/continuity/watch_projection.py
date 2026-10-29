@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Final, Literal
 
 from pydantic import JsonValue
@@ -72,6 +74,7 @@ def bounded(value: JsonValue, limits: Limits = DEFAULT) -> JsonValue:
     """
     pending = [(value, 0)]
     nodes = 0
+    widening = 0
     while pending:
         item, depth = pending.pop()
         nodes += 1
@@ -95,9 +98,23 @@ def bounded(value: JsonValue, limits: Limits = DEFAULT) -> JsonValue:
             raise ValueError("Watch document must be JSON")
         elif type(item) is int and item.bit_length() > 128:
             raise ValueError("Watch integer exceeds limit")
-    if len(_text(value)) > limits.bytes:
+        elif type(item) is float:
+            widening += _jsonb_widening(item)
+    if len(_text(value)) + widening > limits.bytes:
         raise ValueError("Watch document exceeds byte limit")
     return value
+
+
+def _jsonb_widening(number: float) -> int:
+    """How many more bytes Postgres jsonb prints for `number` than `json.dumps` does.
+
+    jsonb writes numbers out in full, so `1e+300` comes back as 301 digits.
+    Non-finite numbers are refused when the text is measured.
+    """
+    if not math.isfinite(number):
+        return 0
+    short = json.dumps(number)
+    return max(0, len(format(Decimal(short), "f")) - len(short))
 
 
 def _text(value: JsonValue) -> str:

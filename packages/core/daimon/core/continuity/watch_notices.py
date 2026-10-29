@@ -97,6 +97,11 @@ def notice_text(watch: WatchRow, kind: str) -> str:
             f"{label} paused: watches here can no longer check that tool.\n"
             "Ask whoever runs this Daimon to add it back, then ask me to resume it."
         )
+    if kind == "source_changed":
+        return (
+            f"{label} paused: the tool it checks changed on its server.\n"
+            "Make a new watch if you still want it."
+        )
     if kind == "access_revoked":
         return f"{label} paused: owner access was revoked."
     if kind == "failed":

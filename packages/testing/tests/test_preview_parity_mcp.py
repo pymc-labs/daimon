@@ -44,8 +44,14 @@ async def test_catalogue_execution_and_persistent_readback(tmp_path: Path) -> No
             return response.json()
 
         assert (await c.post("/mcp", json=INIT_BODY)).status_code == 200
-        tools = {t["name"]: t for t in (await rpc("tools/list"))["result"]["tools"]}
-        assert set(tools) == {"lead_fixture_read", "lead_fixture_submit"}
+        listed = {t["name"]: t for t in (await rpc("tools/list"))["result"]["tools"]}
+        assert set(listed) == {
+            "lead_fixture_read",
+            "lead_fixture_submit",
+            "fixture_counter_read",
+            "fixture_mislabeled_write",
+        }
+        tools = {name: listed[name] for name in ("lead_fixture_read", "lead_fixture_submit")}
         assert tools["lead_fixture_read"]["annotations"]["readOnlyHint"] is True
         assert tools["lead_fixture_submit"]["annotations"]["readOnlyHint"] is False
         assert tools["lead_fixture_submit"]["annotations"]["destructiveHint"] is False
@@ -98,3 +104,47 @@ def test_factory_refuses_other_lanes_and_missing_or_weak_credentials(
             create_app()
     monkeypatch.setenv("DAIMON_PREVIEW_PARITY_MCP_TOKEN", TOKEN)
     assert create_app()
+
+
+async def test_counter_reads_submissions_and_mislabeled_write_counts(tmp_path: Path) -> None:
+    path = tmp_path / "calls.jsonl"
+    app = build_parity_host(token=TOKEN, journal_path=path)
+    headers = {**INIT_HEADERS, "Authorization": f"Bearer {TOKEN}"}
+    async with (
+        asgi_lifespan(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://qa", headers=headers
+        ) as c,
+    ):
+
+        async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            response = await c.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+            )
+            assert response.status_code == 200, response.text
+            return response.json()["result"]
+
+        assert (await c.post("/mcp", json=INIT_BODY)).status_code == 200
+        listed = (
+            await c.post("/mcp", json={"jsonrpc": "2.0", "id": 9, "method": "tools/list"})
+        ).json()["result"]["tools"]
+        hints = {tool["name"]: tool["annotations"] for tool in listed}
+        # The mislabeled write claims to only read, exactly like the honest counter.
+        assert hints["fixture_mislabeled_write"]["readOnlyHint"] is True
+        assert hints["fixture_counter_read"]["readOnlyHint"] is True
+        assert (await call("fixture_counter_read", {}))["structuredContent"] == {"markers": []}
+        await call("lead_fixture_submit", {"marker": "m-1"})
+        # A read never changes what the next read returns: no self-trigger.
+        for _ in range(2):
+            result = await call("fixture_counter_read", {})
+            assert result["structuredContent"] == {"markers": ["m-1"]}
+        await call("fixture_mislabeled_write", {"marker": "m-2"})
+        evidence = (await c.get("/calls")).json()
+        assert evidence["write_count"] == 2
+        assert (await call("fixture_counter_read", {}))["structuredContent"] == {"markers": ["m-1"]}

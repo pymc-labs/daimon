@@ -9,12 +9,15 @@ tool_confirmation, an ungated session or an unreadable proof refuses enrollment.
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
+from urllib.parse import urlsplit
 
 import discord
+from daimon.adapters.mcp import watch_polling as polling
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
@@ -25,13 +28,28 @@ from daimon.adapters.mcp.tools.discord._client import (
     rest_client,
 )
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.adapters.mcp.watch_polling import authorize_poll
+from daimon.adapters.mcp.watch_polling import (
+    PollAccessRevoked,
+    attached_server,
+    authorize_poll,
+    listed_read_tool,
+    operator_denied,
+    poll_credential,
+)
 from daimon.core import channel_backend
+from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.continuity.poll_tools import catalogue_digest, require_listed, validate_mcp_poll
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
+from daimon.core.mcp_tool_call import McpCallError
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.stores import mux_state, watches
 from daimon.core.stores.domain import ChatPlatform, TurnOriginRow, WatchRow
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import BackendConfig, resolve_default
@@ -39,7 +57,7 @@ from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.contracts.profile import SUPPORTED
 from mux.profiles import get_profile
 from mux.state.lease import Slot
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue, TypeAdapter
 
 
 class WatchSummary(BaseModel):
@@ -52,10 +70,12 @@ class WatchSummary(BaseModel):
     agent_id: str
     expires_at: datetime
     key_id: str | None = None
+    source_host: str | None = None
 
 
 def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
     reason = row.source_state.get("reason")
+    server_url = row.source_state.get("server_url") if row.source == "mcp_poll" else None
     return WatchSummary(
         watch_id=row.id,
         source=row.source,
@@ -66,6 +86,7 @@ def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
         agent_id=row.agent_id,
         expires_at=row.expires_at,
         key_id=key_id,
+        source_host=urlsplit(str(server_url)).hostname if server_url else None,
     )
 
 
@@ -255,6 +276,7 @@ async def create_watch_impl(
     origin_context_id: str,
     instructions: str,
     source: Literal["page_event", "poll"],
+    server: str = DAIMON_SERVER_NAME,
     tool: str = "read_thread",
     arguments: dict[str, object] | None = None,
     projection: str = ".",
@@ -286,6 +308,23 @@ async def create_watch_impl(
         reason="watch_fired",
         idempotency_key=uuid.uuid4(),
     )
+    if server != DAIMON_SERVER_NAME:
+        return await create_mcp_watch(
+            runtime,
+            auth,
+            binding,
+            server=server,
+            instructions=instructions,
+            tool=tool,
+            arguments=arguments or {},
+            projection=projection,
+            rule=rule,
+            interval=interval,
+            expires_at=now + timedelta(days=lifetime_days),
+            now=now,
+            key=key,
+            evidence=evidence,
+        )
     try:
         async with runtime.session_factory.begin() as db:
             watch = await watches.register_poll_watch(
@@ -305,6 +344,118 @@ async def create_watch_impl(
             # Current owner/agent/seal policy, independently of the origin grant.
             await authorize_poll(runtime, watch)
         return summary(watch)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+async def create_mcp_watch(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    binding: ContinuationRequest,
+    *,
+    server: str,
+    instructions: str,
+    tool: str,
+    arguments: dict[str, object],
+    projection: str,
+    rule: str,
+    interval: int,
+    expires_at: datetime,
+    now: datetime,
+    key: str | None,
+    evidence: list[str] | None,
+) -> WatchSummary:
+    """A watch on a listed read tool of a server this agent attaches (I3, I4, I9).
+
+    `server` is the server's URL or its name on this agent; the canonical URL is
+    what gets stored and checked, never the name. The tool's live listing is read
+    with the poll's own credential before anything is saved.
+    """
+    try:
+        agent = await retrieve_agent(
+            runtime.client,
+            binding.target_ma_agent_id,
+            scope=resource_scope(tenant_id=str(auth.tenant_id)),
+        )
+        if server.lower().startswith("https://"):
+            attached = [item for item in agent.mcp_servers if same_ascii_mcp_url(item.url, server)]
+        else:
+            attached = [item for item in agent.mcp_servers if item.name == server]
+        if len(attached) != 1 or attached[0].name == DAIMON_SERVER_NAME:
+            raise ValueError("This agent has no such server. Ask me to list its servers.")
+        server_url = ascii_mcp_url(attached[0].url)
+        listed = require_listed(server_url, tool)
+        if listed.credential not in ("agent", "none"):
+            raise ValueError("This tool needs your own key, which watches cannot use yet")
+        args = TypeAdapter(dict[str, JsonValue]).validate_python(arguments)
+        validate_mcp_poll(
+            args,
+            projection=projection,
+            rule=rule,
+            interval=interval,
+            key=key,
+            evidence=evidence or (),
+        )
+        server_name = attached_server(agent, server_url, tool)
+        hidden = await resolve_hidden_mcp_server_names(
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(
+                tenant_id=auth.tenant_id, ma_agent_id=binding.target_ma_agent_id
+            ),
+            account_id=auth.account_id,
+            server_urls={str(item.name): str(item.url) for item in agent.mcp_servers},
+        )
+        if server_name in hidden:
+            raise ValueError(
+                "That server needs each person's own sign-in, which watches cannot use yet"
+            )
+        if operator_denied(runtime.settings.tool_safety, server_name=server_name, tool=tool):
+            raise ValueError("Whoever runs this Daimon has blocked that tool")
+        token = await poll_credential(
+            runtime,
+            tenant_id=auth.tenant_id,
+            agent_id=binding.target_ma_agent_id,
+            server_url=server_url,
+            credential=listed.credential,
+        )
+        try:
+            # The same overall bound a poll has, so a slow server cannot hold the turn.
+            async with (
+                asyncio.timeout(25),
+                polling.open_source(server_url, token) as source,
+            ):
+                entry = await listed_read_tool(
+                    runtime, source, server_name=server_name, tool=tool, arguments=args
+                )
+                digest = catalogue_digest(entry)
+        except (McpCallError, TimeoutError, RecursionError):
+            raise ValueError("Could not read that server's tool list. Try again later.") from None
+        async with runtime.session_factory.begin() as db:
+            watch = await watches.register_mcp_poll_watch(
+                db,
+                binding,
+                instructions=instructions,
+                server_url=server_url,
+                server_name=server_name,
+                tool=tool,
+                arguments=dict(args),
+                projection=projection,
+                rule=rule,
+                interval=interval,
+                catalogue_digest=digest,
+                expires_at=expires_at,
+                now=now,
+                key=key,
+                evidence=evidence,
+            )
+            # Current owner/agent/seal policy, independently of the origin grant.
+            await authorize_poll(runtime, watch)
+        return summary(watch)
+    except PollAccessRevoked:
+        raise ToolError(
+            "This agent cannot use that tool for a watch. Ask an admin or an owner."
+        ) from None
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -432,6 +583,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str,
         instructions: str,
         source: Literal["poll"],
+        server: str = DAIMON_SERVER_NAME,
         tool: str = "read_thread",
         arguments: dict[str, object] | None = None,
         projection: str = ".",
@@ -441,18 +593,26 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         key: str | None = None,
         evidence: list[str] | None = None,
     ) -> WatchSummary:
-        """Watch a reviewed Discord read tool from this conversation.
+        """Watch a listed read tool from this conversation: a Discord reader or an MCP server's.
 
         Binds the current human owner, tenant, agent and exact Discord thread.
         Requires an attended turn origin and verified owner card approval.
         Backends without tool confirmation refuse enrollment.
         Polls run without an AI turn; firings
         use unattended read-and-report turns and current access/spend checks.
-        Poll arguments must explicitly name a source different from the reporting thread.
         Only tools on this deployment's watch list (set by whoever runs Daimon) can be
-        checked; by default that is read_thread and read_channel, and never URLs or
-        outside tools. An unlisted tool is refused, and a watch whose tool is taken off
-        the list pauses and its owner is told.
+        checked; by default that is read_thread and read_channel on daimon-mcp. An
+        unlisted tool is refused, and a watch whose tool is taken off the list pauses
+        and its owner is told. For read_thread and read_channel the arguments must name
+        a source different from the reporting thread.
+        `server` is "daimon-mcp" (the default) or, for a tool on another MCP server this
+        agent attaches, that server's https URL; pass the URL so the approval card shows
+        its host. A server name on this agent is also accepted and resolved to its URL,
+        which is what is stored. Such a tool must be listed for that URL, enabled on
+        this agent, and its server must say it only reads (readOnlyHint true, not
+        destructive); that hint can only refuse, never allow. Its listing is read when
+        the watch is made and on every poll, and a change pauses the watch. Servers
+        that need each person's own sign-in or key are refused for now.
         Projection supports `.`, `.field.nested`, `.rows[0].field` and one `[]` step
         such as `.rows[].content`; other jq expressions are refused. Polls start with a
         saved baseline and compare change, added array elements, or updated object keys,
@@ -470,6 +630,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id=origin_context_id,
             instructions=instructions,
             source=source,
+            server=server,
             tool=tool,
             arguments=arguments,
             projection=projection,
