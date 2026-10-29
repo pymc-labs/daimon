@@ -31,6 +31,16 @@ async def poll_watch_notices(
                 message = f"{label}: {reason}"
             elif reason == "access_revoked":
                 message = f"{label} paused: owner access was revoked."
+            elif watch.status == "paused" and reason == "failed":
+                message = (
+                    f"{label} stopped: it could not check its source for a day.\n"
+                    "Fix the source, then ask me to resume it."
+                )
+            elif watch.source_state.get("notice_state") == "daily_cap":
+                message = (
+                    f"{label} reached its daily limit, so it is waiting before it reports again.\n"
+                    "Nothing to do: it carries on by itself within a day."
+                )
             else:
                 message = f"{label} reached its firing limit: fired {watch.fire_count} times."
             delivered = await deliver(watch, workspace_id, message)

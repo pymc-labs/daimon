@@ -692,6 +692,39 @@ async def test_daily_cap_keeps_normal_poll_interval_and_error_count(runtime_watc
         assert len(await watches.list_evidence(db, watch.id)) == 1
 
 
+async def test_daily_cap_tells_the_owner_once(runtime_watch):
+    from daimon.core.continuity.watch_notices import poll_watch_notices
+
+    runtime, watch, _ = runtime_watch
+    source = AsyncMock()
+
+    async def poll(content):
+        source.return_value = SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": content}]}
+        )
+        return await run_poll(runtime, watch.id, await lease(runtime, watch))
+
+    deliver = AsyncMock(return_value=True)
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
+        assert await poll("first")
+        assert await poll("second")
+        async with runtime.session_factory.begin() as db:
+            await db.execute(
+                text("UPDATE watches SET max_turns_per_day=1 WHERE id=:id"), {"id": watch.id}
+            )
+            await db.execute(text("UPDATE task_continuations SET status='delivered'"))
+        assert not await poll("third")
+        await poll_watch_notices(runtime.session_factory, deliver=deliver)
+        assert not await poll("fourth")
+        await poll_watch_notices(runtime.session_factory, deliver=deliver)
+    deliver.assert_awaited_once()
+    _, _, message = deliver.await_args.args
+    assert watch.instructions in message and "daily limit" in message
+    async with runtime.session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+        assert current.status == "active" and current.consecutive_errors == 0
+
+
 @pytest.mark.parametrize(
     "transition",
     [

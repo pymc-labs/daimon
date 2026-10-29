@@ -312,13 +312,15 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
         # Never log remote content, arguments, lease capabilities or exception text.
         from fastmcp.exceptions import ToolError
 
+        capped = isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "54000"
         async with runtime.session_factory.begin() as db:
             await poll_failed(
                 db,
                 watch_id,
                 lease,
-                capped=isinstance(exc, DBAPIError)
-                and getattr(exc.orig, "sqlstate", None) == "54000",
+                capped=capped,
+                # The firing SQL names its own limits; rate and quota limits stay silent.
+                daily_cap=capped and "daily cap" in str(getattr(exc, "orig", "")),
                 revoked=isinstance(
                     exc,
                     (
