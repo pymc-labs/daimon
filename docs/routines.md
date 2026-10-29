@@ -286,14 +286,18 @@ claimed run; catch-up applies to slots still pending in `next_fire_at`.
 
 ### Moving routines into Daimon and rolling back
 
-Use the operator CLI with database credentials. Before moving from the internal
-bot to Daimon, pause the internal bot's scheduler and drain its runs; take each
-routine's last **completed scheduled slot** T from the internal bot. Recreate
+Use the operator CLI with database credentials. Before moving from a source
+system to Daimon, pause the source system's scheduler and drain its runs; take each
+routine's last **attempted scheduled slot** T from the source system. Recreate
 owner-DM routines ahead of the switch with `daimon routines create --paused`
 and the required creation options above. Then use
-`daimon routines link-internal --apply` to set each routine's internal ID before
+`daimon routines link-source --apply` to set each routine's source ID before
 `daimon routines seed-first-run --apply` enables it. Keep the matching Daimon
 routines paused and never fired until seeding.
+
+Export each source routine’s UUID, cron expression, timezone, last attempted
+scheduled slot T and next scheduled run into the seed document below. Capture
+these values with the source scheduler stopped and its executions drained.
 
 The seed command is a dry run unless `--apply` is given:
 
@@ -302,50 +306,54 @@ daimon routines seed-first-run --file seed.json --tenant TENANT_UUID
 daimon routines seed-first-run --file seed.json --tenant TENANT_UUID --apply
 ```
 
-`seed.json` is a nonempty array:
+`seed.json` is a version-2 object containing a nonempty `routines` array:
 
 ```json
-[
-  {
-    "internal_routine_id": "00000000-0000-0000-0000-000000000001",
-    "last_completed_slot": "2026-10-26T09:00:00+00:00",
-    "internal_next_run": "2026-10-27T09:00:00+00:00",
-    "cron_expr": "0 9 * * *",
-    "timezone": "UTC"
-  }
-]
+{
+  "format_version": 2,
+  "routines": [
+    {
+      "source_routine_id": "00000000-0000-0000-0000-000000000001",
+      "last_completed_slot": "2026-10-26T09:00:00+00:00",
+      "source_next_run": "2026-10-27T09:00:00+00:00",
+      "cron_expr": "0 9 * * *",
+      "timezone": "UTC"
+    }
+  ]
+}
 ```
 
-All five fields are required. T and `internal_next_run` must be ISO timestamps
+Only format version 2 is accepted; version 1, unversioned arrays and legacy field
+names are rejected without aliases. All five routine fields are required. T and
+`source_next_run` must be ISO timestamps
 with explicit offsets; T cannot be in the future. Cron and timezone must match
-the Daimon row, and Daimon's computed first slot must equal `internal_next_run`
+the Daimon row, and Daimon's computed first slot must equal `source_next_run`
 exactly as an instant. A mismatch refuses the entire file, including differences
 between cron implementations around DST or special syntax. Capture with the
 source loop stopped and no execution running; omit source-disabled routines so
 they remain paused. T means the last attempted slot, including failed, timed-out
 or cancelled runs; slots coalesced during a run are not owed.
 
-Identity uses the dedicated `internal_routine_id` UUID, unique within each team.
-Migration `0151_routine_claimed_slot` backfills only a first line exactly matching
-`internal-routine-import-v1:<uuid>` in `trigger_message` (LF or CRLF); similarly named tags,
-suffixes and tags on later lines do not count. Duplicate imports within a team
-refuse the migration rather than choosing a match. Later prompt edits preserve
-this stored identity. `seed-first-run` needs this stored identity.
-`daimon routines create --paused` leaves `internal_routine_id` unset. For a later
+Identity uses the dedicated `source_routine_id` UUID, unique within each team.
+Migration `0161_routine_source_id` preserves existing imported identities while
+renaming their column and unique constraint. Later prompt edits preserve this
+stored identity. `seed-first-run` needs this stored identity. Import metadata
+uses the tag `routine-import-v2:<uuid>`; a prompt tag alone does not link a routine.
+`daimon routines create --paused` leaves `source_routine_id` unset. For a later
 import or a routine recreated by its owner, first create it with `--paused`, then
-use `daimon routines link-internal --apply` to set the internal ID, and finally
+use `daimon routines link-source --apply` to set the source ID, and finally
 run `daimon routines seed-first-run --apply`. A prompt tag alone no longer links
 a new routine:
 
 ```bash
-daimon routines link-internal --tenant TENANT_UUID --routine DAIMON_ROUTINE_UUID --internal-id INTERNAL_UUID
-daimon routines link-internal --tenant TENANT_UUID --routine DAIMON_ROUTINE_UUID --internal-id INTERNAL_UUID --apply
+daimon routines link-source --tenant TENANT_UUID --routine DAIMON_ROUTINE_UUID --source-id SOURCE_UUID
+daimon routines link-source --tenant TENANT_UUID --routine DAIMON_ROUTINE_UUID --source-id SOURCE_UUID --apply
 ```
 
-The default is a dry run; `--apply` writes only `internal_routine_id`. Linking
+The default is a dry run; `--apply` writes only `source_routine_id`. Linking
 refuses routines outside the selected active team, enabled routines, evidence of
 an execution or delivery (including retained results, errors, payloads or leases),
-an existing link (even to the same ID), or an internal ID already linked to
+an existing link (even to the same ID), or a source ID already linked to
 another routine in that team. Linking and seeding share the same never-fired
 check: an edit-only `skipped` delivery status and its note, and skip-window
 bookkeeping, do not count as a fire. It preserves the schedule, prompt and
@@ -371,7 +379,7 @@ for the initial move so it starts strictly after T.
 
 For rollback, use the dedicated handback pause while the Daimon scheduler is
 stopped, then drain executions and delivery before exporting. Use the moved
-internal ids in both commands:
+source ids in both commands:
 
 ```sh
 daimon routines pause-for-handback --tenant TENANT_UUID --ids-file moved-ids.json
@@ -379,7 +387,7 @@ daimon routines pause-for-handback --tenant TENANT_UUID --ids-file moved-ids.jso
 daimon routines export-rollback --tenant TENANT_UUID --ids-file moved-ids.json --output rollback.json
 ```
 
-`moved-ids.json` is a nonempty JSON array of internal UUID strings. The pause
+`moved-ids.json` is a nonempty JSON array of source UUID strings. The pause
 command previews each routine's enabled value and next run by default. Apply
 locks and validates the entire selection, then pauses it in one transaction,
 recording `handback_paused_at`, its pre-pause enabled value and its pre-pause
@@ -392,7 +400,7 @@ sets `expected_next_run` to N. Its `resume_after` is the cron slot immediately
 before N in the routine's timezone. Daimon verifies that its next-slot function
 applied to that watermark returns N exactly; an invalid or ambiguous DST
 calculation prevents finality. This consumes slots already coalesced or skipped,
-including slots after a run-once routine's actual claimed slot. The internal bot
+including slots after a run-once routine's actual claimed slot. The source system
 must compute its next slot strictly after `resume_after`, check it equals
 `expected_next_run`, and restore `enabled` from the export. A handback that
 recorded an on routine without N cannot produce a final export.
@@ -404,16 +412,16 @@ fails or delivery is skipped: it may have had effects. An imported routine with
 no watermark prevents finality. Historical claims without recorded slots cannot
 be reconstructed from wall time and also prevent finality.
 
-Pass the moved internal ids with `--ids-file` for handback. An unfiltered export
+Pass the moved source ids with `--ids-file` for handback. An unfiltered export
 includes every routine in the team, including native Daimon routines; any enabled
 routine in that selection prevents finality. Export also accepts repeated
-`--id INTERNAL_ROUTINE_UUID` filters. Empty id files and selections matching no
+`--id SOURCE_ROUTINE_UUID` filters. Empty id files and selections matching no
 routines are refused. Without `--output`, JSON goes to stdout. Export never
 writes to the database.
 
-The version-1 document has `format_version`, `exported_at`, `final`,
+The version-2 document has `format_version`, `exported_at`, `final`,
 `not_final_reasons`, and a `routines` array. Each entry contains
-`internal_routine_id` (null for routines not imported), Daimon's `routine_id`,
+`source_routine_id` (null for routines not imported), Daimon's `routine_id`,
 `agent_name`, `cron_expr`, `timezone`, `enabled`, `last_fired_slot`, `last_fired_at`,
 `in_flight`, `delivery_status`, `delivered_at`, `resume_after`, and
 `expected_next_run`. All exported timestamps are UTC. Use only `final=true` for

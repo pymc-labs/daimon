@@ -59,7 +59,7 @@ from daimon.core.stores.routines import (
     PIN_UNAVAILABLE_REFUSAL,
     create_routine,
     get_routine,
-    link_internal_routine,
+    link_source_routine,
     list_routines_missing_agent_name,
     set_sandbox_tools,
     update_routine,
@@ -423,13 +423,25 @@ def read_seed_entries(path: Path) -> list[RoutineSeedEntry]:
         payload = cast(JsonValue, json.loads(path.read_text()))
     except (OSError, ValueError) as exc:
         raise UserFacingError(f"Cannot read seed JSON: {exc}") from exc
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("format_version")) is not int
+        or payload.get("format_version") != 2
+    ):
+        raise UserFacingError(
+            "Seed JSON requires format_version 2 with a routines array; "
+            "older formats are not accepted."
+        )
+    if set(payload) != {"format_version", "routines"}:
+        raise UserFacingError("Seed JSON must contain only format_version and routines.")
+    payload = payload["routines"]
     if not isinstance(payload, list) or not payload:
-        raise UserFacingError("Seed JSON must be a nonempty array of routine entries.")
+        raise UserFacingError("Seed JSON routines must be a nonempty array of routine entries.")
     entries: list[RoutineSeedEntry] = []
     errors: list[str] = []
     for index, item in enumerate(payload):
         label = (
-            item.get("internal_routine_id", f"entry {index + 1}")
+            item.get("source_routine_id", f"entry {index + 1}")
             if isinstance(item, dict)
             else f"entry {index + 1}"
         )
@@ -447,24 +459,29 @@ def read_seed_entries(path: Path) -> list[RoutineSeedEntry]:
     return entries
 
 
-@routines_app.command("link-internal")
-def link_internal_command(
+@routines_app.command("link-source")
+def link_source_command(
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
     routine: Annotated[uuid.UUID, typer.Option("--routine", help="Daimon routine UUID.")],
-    internal_id: Annotated[uuid.UUID, typer.Option("--internal-id", help="Internal routine UUID.")],
+    source_id: Annotated[
+        uuid.UUID, typer.Option("--source-id", help="Routine UUID in the source system.")
+    ],
     apply: Annotated[bool, typer.Option("--apply", help="Write the validated link.")] = False,
 ) -> None:
-    """Operator only: link a paused, never-fired routine before seed-first-run."""
+    """Operator only: link a paused, never-fired routine to its source system.
+
+    Use before seed-first-run.
+    """
     settings = load_settings()
 
     async def run() -> None:
         async with build_runtime(settings) as rt:
-            await run_link_internal(
+            await run_link_source(
                 rt=rt,
                 console=Console(highlight=False),
                 tenant_id=tenant,
                 routine_id=routine,
-                internal_id=internal_id,
+                source_id=source_id,
                 apply=apply,
             )
 
@@ -475,35 +492,35 @@ def link_internal_command(
         raise typer.Exit(code=1) from None
 
 
-async def run_link_internal(
+async def run_link_source(
     *,
     rt: CliRuntime,
     console: Console,
     tenant_id: uuid.UUID,
     routine_id: uuid.UUID,
-    internal_id: uuid.UUID,
+    source_id: uuid.UUID,
     apply: bool,
 ) -> None:
     try:
         async with rt.sessionmaker.begin() as session:
-            await link_internal_routine(
+            await link_source_routine(
                 session,
                 tenant_id=tenant_id,
                 routine_id=routine_id,
-                internal_routine_id=internal_id,
+                source_routine_id=source_id,
                 apply=apply,
             )
     except StoreError as exc:
         raise UserFacingError(str(exc)) from exc
-    console.print(
-        f"{routine_id}: internal_routine_id={internal_id} tenant={tenant_id}", markup=False
-    )
+    console.print(f"{routine_id}: source_routine_id={source_id} tenant={tenant_id}", markup=False)
     console.print("Applied atomically." if apply else "Dry run: nothing written.")
 
 
 @routines_app.command("seed-first-run")
 def seed_first_run_command(
-    file: Annotated[Path, typer.Option("--file", help="JSON array of routine handover entries.")],
+    file: Annotated[
+        Path, typer.Option("--file", help="Format v2 JSON with source system routine entries.")
+    ],
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
     apply: Annotated[
         bool, typer.Option("--apply", help="Apply the entire validated batch.")
@@ -551,12 +568,12 @@ async def run_seed_first_run(
             )
     except StoreError as exc:
         raise UserFacingError(str(exc)) from exc
-    seeds = {entry.internal_routine_id: entry.last_completed_slot for entry in entries}
+    seeds = {entry.source_routine_id: entry.last_completed_slot for entry in entries}
     for row, slot in planned:
-        assert row.internal_routine_id is not None
+        assert row.source_routine_id is not None
         action = seed_scheduler_action(row, slot, now=now, max_age=max_age)
         console.print(
-            f"{row.internal_routine_id}: T={seeds[row.internal_routine_id].isoformat()} "
+            f"{row.source_routine_id}: T={seeds[row.source_routine_id].isoformat()} "
             f"cron={row.cron_expr} "
             f"tz={row.timezone} first_slot={slot.isoformat()} policy={row.catch_up_policy} "
             f"freshness_seconds={max_age.total_seconds():g}: {action}",
@@ -568,11 +585,11 @@ async def run_seed_first_run(
 @routines_app.command("export-rollback")
 def export_rollback_command(
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
-    internal_ids: Annotated[
-        list[uuid.UUID] | None, typer.Option("--id", help="Internal routine id; may be repeated.")
+    source_ids: Annotated[
+        list[uuid.UUID] | None, typer.Option("--id", help="Source routine id; may be repeated.")
     ] = None,
     ids_file: Annotated[
-        Path | None, typer.Option("--ids-file", help="JSON array of internal routine ids.")
+        Path | None, typer.Option("--ids-file", help="JSON array of source routine ids.")
     ] = None,
     output: Annotated[Path | None, typer.Option("--output")] = None,
 ) -> None:
@@ -582,9 +599,9 @@ def export_rollback_command(
     drain executions and deliveries before relying on final=true.
     """
     if ids_file is not None:
-        if internal_ids:
+        if source_ids:
             raise UserFacingError("Use either --id or --ids-file.")
-        internal_ids = read_internal_ids(ids_file)
+        source_ids = read_source_ids(ids_file)
     settings = load_settings()
 
     async def run() -> str:
@@ -593,7 +610,7 @@ def export_rollback_command(
                 async with rt.sessionmaker.begin() as session:
                     await session.execute(text("SET TRANSACTION READ ONLY"))
                     rows = await rollback_rows(
-                        session, tenant_id=tenant, internal_routine_ids=internal_ids
+                        session, tenant_id=tenant, source_routine_ids=source_ids
                     )
             except StoreError as exc:
                 raise UserFacingError(str(exc)) from exc
@@ -606,7 +623,7 @@ def export_rollback_command(
         typer.echo(rendered, nl=False)
 
 
-def read_internal_ids(path: Path) -> list[uuid.UUID]:
+def read_source_ids(path: Path) -> list[uuid.UUID]:
     try:
         payload = cast(JsonValue, json.loads(path.read_text()))
         if (
@@ -626,15 +643,13 @@ def read_internal_ids(path: Path) -> list[uuid.UUID]:
 @routines_app.command("pause-for-handback")
 def pause_for_handback_command(
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
-    ids_file: Annotated[
-        Path, typer.Option("--ids-file", help="JSON array of internal routine ids.")
-    ],
+    ids_file: Annotated[Path, typer.Option("--ids-file", help="JSON array of source routine ids.")],
     apply: Annotated[
         bool, typer.Option("--apply", help="Pause and capture the whole selection.")
     ] = False,
 ) -> None:
-    """Operator only: capture the next run and pause routines for return to the internal bot."""
-    ids = read_internal_ids(ids_file)
+    """Operator only: capture the next run and pause routines for return to the source system."""
+    ids = read_source_ids(ids_file)
     settings = load_settings()
 
     async def run() -> None:
@@ -643,7 +658,7 @@ def pause_for_handback_command(
                 rt=rt,
                 console=Console(highlight=False),
                 tenant_id=tenant,
-                internal_ids=ids,
+                source_ids=ids,
                 apply=apply,
             )
 
@@ -655,7 +670,7 @@ async def run_pause_for_handback(
     rt: CliRuntime,
     console: Console,
     tenant_id: uuid.UUID,
-    internal_ids: list[uuid.UUID],
+    source_ids: list[uuid.UUID],
     apply: bool,
     now: datetime | None = None,
 ) -> None:
@@ -664,7 +679,7 @@ async def run_pause_for_handback(
             rows = await pause_for_handback(
                 session,
                 tenant_id=tenant_id,
-                internal_routine_ids=internal_ids,
+                source_routine_ids=source_ids,
                 now=now or datetime.now(UTC),
                 apply=apply,
             )
@@ -675,7 +690,7 @@ async def run_pause_for_handback(
         enabled = row.handback_enabled if recorded else row.enabled
         next_run = row.handback_next_fire_at if recorded else row.next_fire_at
         console.print(
-            f"{row.internal_routine_id}: enabled={str(enabled).lower()} "
+            f"{row.source_routine_id}: enabled={str(enabled).lower()} "
             f"expected_next_run={next_run.isoformat() if next_run else 'null'} "
             f"({'already captured; preserved' if recorded else 'pause and capture'})",
             markup=False,

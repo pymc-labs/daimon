@@ -13,11 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Operators choose which tools a watch may poll with `DAIMON_WATCHES__POLLABLE_TOOLS`; the default keeps `read_thread` and `read_channel`. An unlisted tool is refused at create and resume, a watch whose tool is taken off the list pauses and its owner gets one private message, and a raised per-tool floor slows existing watches without pausing them; an empty value keeps the default. Polled watches also handle bigger results: a `[]` step in projections, `added` by a `key` that keeps only fingerprints, chosen `evidence` fields per new item, a 256 KiB raw read, a 64 KiB baseline and 16 KiB reports of at most 20 items with the rest counted (migration `0156_watch_mcp_sources`). A watch turn whose gathered reports exceed 512 KiB now keeps the newest and counts the rest as omitted instead of being dropped.
 
-- Add `daimon routines link-internal` to link a paused, never-fired routine to its internal original before `seed-first-run`, with a dry run by default and refusal of existing or conflicting links. Linking and seeding share never-fired validation, allowing paused DM routines with edit-only skipped delivery markers.
+- Add `daimon routines link-source` to link a paused, never-fired routine to its source routine before `seed-first-run`, with a dry run by default and refusal of existing or conflicting links. Linking and seeding share never-fired validation, allowing paused DM routines with edit-only skipped delivery markers.
 
 - Add `daimon routines create --paused` to create disabled routines with no next
-  fire time. For cutover, create with `--paused`, then use
-  `daimon routines link-internal --apply` to set the internal ID before
+  fire time. For import, create with `--paused`, then use
+  `daimon routines link-source --apply` to set the source ID before
   `daimon routines seed-first-run --apply`. Dry-run reports whether creation
   would be paused or enabled.
 
@@ -77,8 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requiring each person to link GitHub. Restricted conversations cannot save or delete.
 
 - Add slot-safe routine handover with claimed-slot and completion evidence,
-  stable internal ids, atomic `seed-first-run` and `pause-for-handback` operator
-  commands, and read-only `export-rollback`. Handback preserves the enabled state
+  stable source ids, atomic `seed-first-run` and `pause-for-handback` operator
+  commands, and read-only `export-rollback` using import format version 2.
+  Migration `0161_routine_source_id` preserves existing links under source names.
+  Handback preserves the enabled state
   and next unrun slot across coalescing and checks schedule, completion and
   delivery consistency before declaring a final export. Repeated resume replies
   plainly without replacing a seeded first run.

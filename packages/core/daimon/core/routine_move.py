@@ -28,13 +28,13 @@ class RoutineFreshnessSettings(BaseSettings):
 class RoutineSeedEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    internal_routine_id: UUID
+    source_routine_id: UUID
     last_completed_slot: datetime
-    internal_next_run: datetime
+    source_next_run: datetime
     cron_expr: str
     timezone: str
 
-    @field_validator("last_completed_slot", "internal_next_run", mode="before")
+    @field_validator("last_completed_slot", "source_next_run", mode="before")
     @classmethod
     def require_iso_offset(cls, value: object) -> datetime:
         if not isinstance(value, str):
@@ -78,8 +78,8 @@ def routine_never_fired(row: RoutineRow) -> bool:
 
 def seed_first_slot(entry: RoutineSeedEntry, row: RoutineRow, *, now: datetime) -> datetime:
     """Validate the handover against Daimon state and use its cron semantics."""
-    if row.internal_routine_id != entry.internal_routine_id:
-        raise ValueError("internal_routine_id differs from the Daimon routine")
+    if row.source_routine_id != entry.source_routine_id:
+        raise ValueError("source_routine_id differs from the Daimon routine")
     if entry.last_completed_slot > now:
         raise ValueError("last_completed_slot is in the future")
     if entry.cron_expr != row.cron_expr:
@@ -91,10 +91,10 @@ def seed_first_slot(entry: RoutineSeedEntry, row: RoutineRow, *, now: datetime) 
     if not routine_never_fired(row):
         raise ValueError("routine has already fired on Daimon or has a delivery record")
     slot = next_slot_at_or_after(row.cron_expr, row.timezone, entry.last_completed_slot)
-    if slot != entry.internal_next_run:
+    if slot != entry.source_next_run:
         raise ValueError(
-            f"first Daimon slot {slot.isoformat()} differs from internal_next_run "
-            f"{entry.internal_next_run.isoformat()}"
+            f"first Daimon slot {slot.isoformat()} differs from source_next_run "
+            f"{entry.source_next_run.isoformat()}"
         )
     return slot
 
@@ -124,7 +124,7 @@ def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) 
         return value.astimezone(UTC).isoformat() if value is not None else None
 
     for row in rows:
-        label = str(row.internal_routine_id or row.id)
+        label = str(row.source_routine_id or row.id)
         # Each claim clears completion evidence; do not compare wall clocks,
         # which can move backwards between a claim and its completion.
         in_flight = (
@@ -168,12 +168,12 @@ def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) 
                 reasons.append(f"{label}: resume_after is before the last fired slot")
             if resume_after > exported_at:
                 reasons.append(f"{label}: resume_after is in the future")
-        if row.internal_routine_id is not None and resume_after is None:
-            reasons.append(f"{row.internal_routine_id}: no fired slot or seeded T recorded")
+        if row.source_routine_id is not None and resume_after is None:
+            reasons.append(f"{row.source_routine_id}: no fired slot or seeded T recorded")
         entries.append(
             {
-                "internal_routine_id": (
-                    str(row.internal_routine_id) if row.internal_routine_id is not None else None
+                "source_routine_id": (
+                    str(row.source_routine_id) if row.source_routine_id is not None else None
                 ),
                 "routine_id": str(row.id),
                 "agent_name": row.agent_name,
@@ -190,7 +190,7 @@ def routine_rollback_document(rows: list[RoutineRow], *, exported_at: datetime) 
             }
         )
     return {
-        "format_version": 1,
+        "format_version": 2,
         "exported_at": exported_at.astimezone(UTC).isoformat(),
         "final": not reasons,
         "not_final_reasons": reasons,

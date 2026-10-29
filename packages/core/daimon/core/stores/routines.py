@@ -77,17 +77,17 @@ def _captured_routine(row: RoutineRow) -> ColumnElement[bool]:
     )
 
 
-async def link_internal_routine(
+async def link_source_routine(
     session: AsyncSession,
     *,
     tenant_id: _uuid.UUID,
     routine_id: _uuid.UUID,
-    internal_routine_id: _uuid.UUID,
+    source_routine_id: _uuid.UUID,
     apply: bool = False,
 ) -> RoutineRow:
     """Link a paused, never-fired routine; caller owns the transaction.
 
-    Serialize competing links for the same tenant/internal identity, then lock
+    Serialize competing links for the same tenant/source identity, then lock
     the target against resume, edits and scheduler claims. The unique constraint
     also protects against writers that do not take the advisory lock.
     """
@@ -100,7 +100,7 @@ async def link_internal_routine(
         await session.execute(
             select(
                 func.pg_advisory_xact_lock(
-                    func.hashtextextended(f"routine-link:{tenant_id}:{internal_routine_id}", 0)
+                    func.hashtextextended(f"routine-link:{tenant_id}:{source_routine_id}", 0)
                 )
             )
         )
@@ -111,11 +111,9 @@ async def link_internal_routine(
     if orm is None:
         raise StoreError(f"{routine_id}: routine does not exist in the selected team.")
     row = RoutineRow.model_validate(orm)
-    if row.internal_routine_id is not None:
-        match = "same" if row.internal_routine_id == internal_routine_id else "different"
+    if row.source_routine_id is not None:
         raise StoreError(
-            f"{routine_id}: already linked to {match} internal id {row.internal_routine_id}; "
-            "no overwrite."
+            f"{routine_id}: already linked to source routine {row.source_routine_id}; no overwrite."
         )
     if row.enabled:
         raise StoreError(f"{routine_id}: routine is enabled; pause it before linking.")
@@ -124,12 +122,12 @@ async def link_internal_routine(
     linked_id = await session.scalar(
         select(Routine.id).where(
             Routine.tenant_id == tenant_id,
-            Routine.internal_routine_id == internal_routine_id,
+            Routine.source_routine_id == source_routine_id,
         )
     )
     if linked_id is not None:
         raise StoreError(
-            f"{internal_routine_id}: internal id is already linked to routine {linked_id} "
+            f"{source_routine_id}: source id is already linked to routine {linked_id} "
             "in the selected team."
         )
     if apply:
@@ -138,13 +136,13 @@ async def link_internal_routine(
                 await session.execute(
                     update(Routine)
                     .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-                    .values(internal_routine_id=internal_routine_id)
+                    .values(source_routine_id=source_routine_id)
                 )
         except IntegrityError as exc:
-            if "uq_routines_tenant_internal_id" not in str(exc.orig):
+            if "uq_routines_tenant_source_id" not in str(exc.orig):
                 raise
             raise StoreError(
-                f"{internal_routine_id}: internal id was linked to another routine "
+                f"{source_routine_id}: source id was linked to another routine "
                 "in the selected team concurrently. Nothing was changed."
             ) from exc
     return row
@@ -160,7 +158,7 @@ async def create_routine(
     cron_expr: str,
     timezone_: str,
     trigger_message: str,
-    internal_routine_id: _uuid.UUID | None = None,
+    source_routine_id: _uuid.UUID | None = None,
     enabled: bool = True,
     catch_up_policy: CatchUpPolicy = "skip",
     next_fire_at: datetime | None = None,
@@ -192,7 +190,7 @@ async def create_routine(
         await validate_dm_source(session, tenant_id, source_channel_id, source_thread_id)
     orm = Routine(
         tenant_id=tenant_id,
-        internal_routine_id=internal_routine_id,
+        source_routine_id=source_routine_id,
         created_by_user_id=created_by_user_id,
         agent_id=agent_id,
         agent_name=agent_name,

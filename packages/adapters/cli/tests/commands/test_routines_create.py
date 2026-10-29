@@ -18,7 +18,7 @@ from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.routine_move import seed_routines
 from daimon.core.stores.routines import (
     get_routine,
-    link_internal_routine,
+    link_source_routine,
     list_routines_for_tenant,
     resume_routine,
 )
@@ -310,22 +310,22 @@ async def test_paused_creation_can_be_linked_and_seeded_for_cutover(db_session_f
         [created] = await list_routines_for_tenant(session, tenant_id=tenant.id)
     assert created.enabled is False
     assert created.next_fire_at is None
-    assert created.internal_routine_id is None
+    assert created.source_routine_id is None
 
-    internal_id = uuid4()
+    source_id = uuid4()
     async with db_session_factory.begin() as session:
-        await link_internal_routine(
+        await link_source_routine(
             session,
             tenant_id=tenant.id,
             routine_id=created.id,
-            internal_routine_id=internal_id,
+            source_routine_id=source_id,
             apply=True,
         )
     entry = RoutineSeedEntry.model_validate(
         {
-            "internal_routine_id": internal_id,
+            "source_routine_id": source_id,
             "last_completed_slot": "2026-10-27T09:00:00Z",
-            "internal_next_run": "2026-10-28T09:00:00Z",
+            "source_next_run": "2026-10-28T09:00:00Z",
             "cron_expr": "0 9 * * *",
             "timezone": "UTC",
         }
@@ -343,7 +343,7 @@ async def test_paused_creation_can_be_linked_and_seeded_for_cutover(db_session_f
     async with db_session_factory() as session:
         seeded = await get_routine(session, created.id, tenant_id=tenant.id)
     assert seeded is not None
-    assert seeded.internal_routine_id == internal_id
+    assert seeded.source_routine_id == source_id
     assert seeded.enabled is True
     assert seeded.next_fire_at == datetime(2026, 10, 28, 9, tzinfo=UTC)
     assert seeded.seeded_after == datetime(2026, 10, 27, 9, tzinfo=UTC)
