@@ -272,7 +272,7 @@ def test_create_command_forwards_paused_flag(monkeypatch, paused):
     assert create.call_args.kwargs["paused"] is paused
 
 
-async def test_paused_creation_can_be_linked_and_seeded_for_cutover(db_session_factory):
+async def test_paused_creation_can_be_linked_and_seeded_for_import(db_session_factory):
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id="424242")
         await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)

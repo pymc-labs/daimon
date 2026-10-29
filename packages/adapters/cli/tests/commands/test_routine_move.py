@@ -275,8 +275,10 @@ def test_seed_array_accepts_only_source_fields(tmp_path: Path, keep_source: bool
     path = tmp_path / "seed.json"
     path.write_text(json.dumps([values]))
     assert read_seed_entries(path) == [RoutineSeedEntry.model_validate(values)]
-    for field in ("routine_id", "next_run"):
-        legacy = "internal_" + field
+    for field, legacy in (
+        ("routine_id", "internal_routine_id"),
+        ("next_run", "internal_next_run"),
+    ):
         invalid = dict(values, **{legacy: values["source_" + field]})
         if not keep_source:
             invalid.pop("source_" + field)

@@ -295,7 +295,7 @@ and the required creation options above. Then use
 `daimon routines seed-first-run --apply` enables it. Keep the matching Daimon
 routines paused and never fired until seeding.
 
-Export each source routine’s UUID, cron expression, timezone, last attempted
+Export each source routine's UUID, cron expression, timezone, last attempted
 scheduled slot T and next scheduled run into the seed document below. Capture
 these values with the source scheduler stopped and its executions drained.
 

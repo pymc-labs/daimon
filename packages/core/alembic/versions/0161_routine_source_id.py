@@ -10,8 +10,8 @@ down_revision = "0158_watch_mcp_claim"
 branch_labels = None
 depends_on = None
 
-LEGACY_COLUMN = "internal" + "_routine_id"
-LEGACY_CONSTRAINT = "uq_routines_tenant_" + "internal_id"
+LEGACY_COLUMN = "internal_routine_id"
+LEGACY_CONSTRAINT = "uq_routines_tenant_internal_id"
 SOURCE_CONSTRAINT = "uq_routines_tenant_source_id"
 
 

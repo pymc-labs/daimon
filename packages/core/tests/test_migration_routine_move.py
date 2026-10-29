@@ -130,6 +130,6 @@ async def test_duplicate_legacy_tags_refuse_migration(db_session):
             timezone_="UTC",
             trigger_message=f"internal-routine-import-v1:{source_id}",
         )
-    with pytest.raises(IntegrityError, match="uq_routines_tenant_" + "internal_id"):
+    with pytest.raises(IntegrityError, match="uq_routines_tenant_internal_id"):
         async with db_session.begin_nested():
             await upgrade_from_previous(db_session)

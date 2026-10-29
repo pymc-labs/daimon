@@ -263,14 +263,14 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
                 "handback_next_fire_at",
                 "seeded_after",
                 "source_routine_id",
-                "internal" + "_routine_id",
+                "internal_routine_id",
             }
             and expected != HEAD
         ):
             return False
         if (
             kind == "unique_constraint"
-            and name in {"uq_routines_tenant_source_id", "uq_routines_tenant_" + "internal_id"}
+            and name in {"uq_routines_tenant_source_id", "uq_routines_tenant_internal_id"}
             and expected != HEAD
         ):
             return False
