@@ -264,8 +264,9 @@ daimon audit prune <tenant-uuid>
 export. Repeat per tenant for a person in several workspaces. It uses local
 database access and is not an MCP tool.
 
-Retention is 90 days (`security_audit_retention_days`; `0` keeps rows
-indefinitely). Schedule `daimon audit prune` for each tenant, for example
+Retention is 90 days
+([`DAIMON_SECURITY_AUDIT_RETENTION_DAYS`](configuration.md#daimon_security_audit_retention_days);
+`0` keeps rows indefinitely). Schedule `daimon audit prune` for each tenant, for example
 daily, and include it and your backup expiry in your retention policy. Privacy
 erasure clears a person's identifiers from audit rows, and deleting a tenant
 removes its rows. Database triggers block ordinary updates and deletes. They
@@ -302,8 +303,9 @@ On each request the token must be unrevoked and unexpired, and its account must
 still be a server admin. The stored admin role updates on that account's next
 platform turn, so a demoted admin's token keeps working until then or until it
 expires. `revoke-token` stops it on its next request. An operator token cannot
-open a billing checkout. It is rate limited to `operator_calls_per_minute`
-calls. Tool details are in [mcp-tools](mcp-tools.md).
+open a billing checkout. It is rate limited by
+[`DAIMON_MCP__OPERATOR_CALLS_PER_MINUTE`](configuration.md#daimon_mcp__operator_calls_per_minute).
+Tool details are in [mcp-tools](mcp-tools.md).
 
 `daimon channels list <platform> <workspace-id> [--json]` prints the same
 channel summary as `get_tenant_summary`, plus each channel's readers and

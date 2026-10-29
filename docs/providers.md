@@ -23,7 +23,8 @@ refuses the turn. Daimon never runs it on Anthropic in its place.
 ## Route channels to a backend
 
 With nothing configured, every channel runs on Anthropic using the agent's own
-model. Any other backend needs an explicit model. Route in one of two ways:
+model. Selecting another backend uses its default model unless you pass
+`--model`. Route in one of two ways:
 
 ```bash
 docker compose run --rm init "daimon agents backend set <agent-name-or-id> openai"
@@ -150,7 +151,8 @@ runtimes so ambient headers cannot replace the channel's key or project.
 
 ## Run on Gemini
 
-Gemini has no provisioning command. Install the extra, `daimon-mux[gemini]`.
+Gemini has no provisioning command. It needs the `daimon-mux[gemini]` extra,
+which the published image does not include, so build an image that adds it.
 With `DAIMON_CHANNEL_GEMINI_KEY` set, Gemini runs with no runtime file row.
 Add a row to the runtime file, which can hold both providers, only to override
 project, spend holds or storage:

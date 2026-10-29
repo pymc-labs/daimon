@@ -123,6 +123,11 @@ Daimon's own tools take rules under the key `daimon-mcp/<tool>`. An agent-wide
 tools added later. Wildcards work only there, and only as an agent-wide
 `deny`. Operator tokens and agent keys are not affected.
 
+The rule must name the agent's own Daimon endpoint. If the server cannot read
+the rules, it refuses the call. The tool part of the key allows letters,
+digits, `_`, `.` and `-`, up to 128 characters. Other names are refused on
+save, and stored ones are ignored and logged.
+
 A rule on a publish tool makes it ask in every channel and refuse in routines,
 even where the rule does not name the channel.
 

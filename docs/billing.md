@@ -55,7 +55,7 @@ priced as five-minute writes.
 `DAIMON_BILLING__MARKUP` multiplies the cost before it is debited
 ([configuration.md](configuration.md#daimon_billing__markup)). It applies to
 the ledger and to a finished turn's summary line. Usage panels and
-`get_turn_cost` show cost before markup.
+`get_turn_cost` show provider cost, before markup.
 
 > **Warning:** An Anthropic model with no pricing row runs free: the debit is
 > zero and Daimon logs `billing.unpriced_model`. OpenAI, Gemini and
@@ -98,8 +98,7 @@ balance gate again once it holds a slot.
 MCP `start_turn` sessions are worse. Their spend reaches the ledger only when
 a read sees the turn end or the sweep settles it, and MCP turns have no
 concurrency cap. The overdraft is then bounded by what a tenant runs before
-those reads, not by the cap. The model in `formal/metering/BalanceGate.tla`
-holds for chat turns and has a counterexample for headless ones.
+those reads, not by the cap.
 
 ### Exempt usage
 

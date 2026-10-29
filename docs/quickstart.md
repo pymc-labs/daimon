@@ -32,10 +32,10 @@ Open `.env`, then uncomment and fill in:
 | `POSTGRES_PASSWORD` | A strong, URL-safe value. Avoid `@ : / % #`. |
 | [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys) | A Fernet key. Without it, agent keys cannot be saved. |
 
-Generate the Fernet key with any Python that has `cryptography` installed:
+Generate the Fernet key with OpenSSL:
 
 ```bash
-uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+openssl rand -base64 32 | tr '+/' '-_'
 ```
 
 Back the key up separately from the database. Set `DAIMON_MCP__JWT_SECRET`,
