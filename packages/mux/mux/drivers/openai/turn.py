@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Protocol
-from uuid import uuid4
 
 from mux.contracts.actions import InputEvent, UserMessage
 from mux.contracts.events import (
@@ -20,7 +20,7 @@ from mux.contracts.events import (
 )
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
-from mux.contracts.resources import ProjectionSnapshot
+from mux.contracts.resources import ProjectionSnapshot, Session
 from mux.drivers.openai._common import Context, objects, owned, text
 from mux.drivers.openai.actions import translate
 from mux.drivers.openai.normalize import SCHEMA_DATE, EventNormalizer
@@ -251,6 +251,12 @@ class OpenAIEvents:
                 raise ValueError("pagination cursor loop")
             seen.add(cursor)
 
+    async def _snapshot(
+        self, scope: Scope, session: ResourceRef
+    ) -> tuple[Session, list[Object], list[Object]]:
+        current = await self._sessions.retrieve(scope, session)
+        return current, await self._pages(session, "turns"), await self._pages(session, "items")
+
     @owned
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         self._c.check(scope, session, "session")
@@ -260,37 +266,33 @@ class OpenAIEvents:
             f"/agents/sessions/{segment(session.id)}/events"
         )
         buffered: list[Object] = []
-        disconnected = False
+        ended = False
 
         async def buffer() -> None:
-            nonlocal disconnected
-            try:
-                async for raw in source:
-                    if len(buffered) >= 10000:
-                        raise ProviderError(
-                            "upstream", retryable=True, native_code="recovery_buffer_full"
-                        )
-                    buffered.append(raw)
-            except ProviderError:
-                disconnected = True
-                raise
-            disconnected = True
+            nonlocal ended
+            async for raw in source:
+                if len(buffered) >= 10000:
+                    raise ProviderError(
+                        "upstream", retryable=True, native_code="recovery_buffer_full"
+                    )
+                buffered.append(raw)
+            ended = True
 
         task = asyncio.create_task(buffer())
         try:
-            # Start consuming before the first snapshot read. Neither a partial
-            # snapshot nor a disconnect during pagination can publish success.
+            # Start consuming before the first snapshot read. A ProviderError from
+            # the stream or a partial snapshot can never publish success.
             await asyncio.sleep(0)
-            current = await self._sessions.retrieve(scope, session)
-            turns = await self._pages(session, "turns")
-            items = await self._pages(session, "items")
+            current, turns, items = await self._snapshot(scope, session)
             await asyncio.sleep(0)
             if task.done():
                 task.result()
-            if disconnected:
-                raise ProviderError(
-                    "transient_network", retryable=True, native_code="snapshot_stream_disconnected"
-                )
+            if ended:
+                # A clean end is not a disconnect. The buffer covers everything up
+                # to the close; read the whole snapshot again after the close, so a
+                # change that landed after the close on a page read before it is
+                # not lost. Overlap with the buffer is merged by identity.
+                current, turns, items = await self._snapshot(scope, session)
             events: list[Event] = []
             for turn in turns:
                 event = normalizer.saved_turn(turn)
@@ -305,7 +307,17 @@ class OpenAIEvents:
                     if event.authority != "preview"
                 )
             gap = "missed_native_events"
-            snapshot_id = uuid4().hex
+            # Keyed on the history this snapshot publishes, so a repeat reconcile
+            # that saw nothing new adds no journal rows; new events earn a new marker.
+            snapshot_id = hashlib.sha256(
+                repr(
+                    [
+                        event_identity(event)
+                        for event in merge_history(previous, events)
+                        if event.type not in ("session.history_gap", "session.reconciled")
+                    ]
+                ).encode()
+            ).hexdigest()[:32]
             for id_, kind, payload, authority in (
                 (
                     "openai:gap:" + session.id + ":" + snapshot_id,
