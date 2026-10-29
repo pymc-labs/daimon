@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import daimon.adapters.cli.commands.routines as routines_cli
 import pytest
@@ -12,8 +13,15 @@ from daimon.adapters.cli.commands.routines import run_create_dm_routine
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import UserFacingError
 from daimon.core.membership import CachedMembershipResolver, Membership
+from daimon.core.routine_move import RoutineSeedEntry
 from daimon.core.stores.direct_messages import set_dm_enabled
-from daimon.core.stores.routines import list_routines_for_tenant, resume_routine
+from daimon.core.stores.routine_move import seed_routines
+from daimon.core.stores.routines import (
+    get_routine,
+    link_internal_routine,
+    list_routines_for_tenant,
+    resume_routine,
+)
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
@@ -262,3 +270,80 @@ def test_create_command_forwards_paused_flag(monkeypatch, paused):
     create.assert_awaited_once()
     assert create.call_args.kwargs["rt"] is runtime
     assert create.call_args.kwargs["paused"] is paused
+
+
+async def test_paused_creation_can_be_linked_and_seeded_for_cutover(db_session_factory):
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id="424242")
+        await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
+    agent = ma_agent(
+        id="ag",
+        name="daimon",
+        metadata={MA_METADATA_KEY_NAME: "daimon", MA_METADATA_KEY_TENANT: str(tenant.id)},
+    )
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/agents", lambda _req, _m: list_response([agent.model_dump(mode="json")])
+    )
+    rt = build_cli_runtime(
+        db_session_factory, router=router, settings=SimpleNamespace(direct_message_policies={})
+    )
+
+    async def member(*args):
+        return Membership(is_member=True)
+
+    await run_create_dm_routine(
+        rt=rt,
+        console=Console(file=StringIO()),
+        tenant_id=tenant.id,
+        owner="123",
+        agent_name="daimon",
+        schedule="0 9 * * *",
+        timezone="UTC",
+        trigger="summarize",
+        source_channel=None,
+        dry_run=False,
+        paused=True,
+        resolver=CachedMembershipResolver(member),
+    )
+    async with db_session_factory() as session:
+        [created] = await list_routines_for_tenant(session, tenant_id=tenant.id)
+    assert created.enabled is False
+    assert created.next_fire_at is None
+    assert created.internal_routine_id is None
+
+    internal_id = uuid4()
+    async with db_session_factory.begin() as session:
+        await link_internal_routine(
+            session,
+            tenant_id=tenant.id,
+            routine_id=created.id,
+            internal_routine_id=internal_id,
+            apply=True,
+        )
+    entry = RoutineSeedEntry.model_validate(
+        {
+            "internal_routine_id": internal_id,
+            "last_completed_slot": "2026-10-27T09:00:00Z",
+            "internal_next_run": "2026-10-28T09:00:00Z",
+            "cron_expr": "0 9 * * *",
+            "timezone": "UTC",
+        }
+    )
+    async with db_session_factory.begin() as session:
+        planned = await seed_routines(
+            session,
+            [entry],
+            tenant_id=tenant.id,
+            now=datetime(2026, 10, 28, 8, tzinfo=UTC),
+            apply=True,
+        )
+    assert len(planned) == 1
+    assert planned[0][0].id == created.id
+    async with db_session_factory() as session:
+        seeded = await get_routine(session, created.id, tenant_id=tenant.id)
+    assert seeded is not None
+    assert seeded.internal_routine_id == internal_id
+    assert seeded.enabled is True
+    assert seeded.next_fire_at == datetime(2026, 10, 28, 9, tzinfo=UTC)
+    assert seeded.seeded_after == datetime(2026, 10, 27, 9, tzinfo=UTC)
