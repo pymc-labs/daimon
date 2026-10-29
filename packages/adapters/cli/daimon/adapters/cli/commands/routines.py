@@ -423,20 +423,8 @@ def read_seed_entries(path: Path) -> list[RoutineSeedEntry]:
         payload = cast(JsonValue, json.loads(path.read_text()))
     except (OSError, ValueError) as exc:
         raise UserFacingError(f"Cannot read seed JSON: {exc}") from exc
-    if (
-        not isinstance(payload, dict)
-        or type(payload.get("format_version")) is not int
-        or payload.get("format_version") != 2
-    ):
-        raise UserFacingError(
-            "Seed JSON requires format_version 2 with a routines array; "
-            "older formats are not accepted."
-        )
-    if set(payload) != {"format_version", "routines"}:
-        raise UserFacingError("Seed JSON must contain only format_version and routines.")
-    payload = payload["routines"]
     if not isinstance(payload, list) or not payload:
-        raise UserFacingError("Seed JSON routines must be a nonempty array of routine entries.")
+        raise UserFacingError("Seed JSON must be a nonempty array of routine entries.")
     entries: list[RoutineSeedEntry] = []
     errors: list[str] = []
     for index, item in enumerate(payload):
@@ -519,7 +507,7 @@ async def run_link_source(
 @routines_app.command("seed-first-run")
 def seed_first_run_command(
     file: Annotated[
-        Path, typer.Option("--file", help="Format v2 JSON with source system routine entries.")
+        Path, typer.Option("--file", help="JSON array of source system routine entries.")
     ],
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
     apply: Annotated[

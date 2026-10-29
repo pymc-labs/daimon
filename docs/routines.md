@@ -306,26 +306,22 @@ daimon routines seed-first-run --file seed.json --tenant TENANT_UUID
 daimon routines seed-first-run --file seed.json --tenant TENANT_UUID --apply
 ```
 
-`seed.json` is a version-2 object containing a nonempty `routines` array:
+`seed.json` is a nonempty JSON array, with no wrapper or version field:
 
 ```json
-{
-  "format_version": 2,
-  "routines": [
-    {
-      "source_routine_id": "00000000-0000-0000-0000-000000000001",
-      "last_completed_slot": "2026-10-26T09:00:00+00:00",
-      "source_next_run": "2026-10-27T09:00:00+00:00",
-      "cron_expr": "0 9 * * *",
-      "timezone": "UTC"
-    }
-  ]
-}
+[
+  {
+    "source_routine_id": "00000000-0000-0000-0000-000000000001",
+    "last_completed_slot": "2026-10-26T09:00:00+00:00",
+    "source_next_run": "2026-10-27T09:00:00+00:00",
+    "cron_expr": "0 9 * * *",
+    "timezone": "UTC"
+  }
+]
 ```
 
-Only format version 2 is accepted; version 1, unversioned arrays and legacy field
-names are rejected without aliases. All five routine fields are required. T and
-`source_next_run` must be ISO timestamps
+Wrapped objects and legacy field names are rejected without aliases. All five
+routine fields are required. T and `source_next_run` must be ISO timestamps
 with explicit offsets; T cannot be in the future. Cron and timezone must match
 the Daimon row, and Daimon's computed first slot must equal `source_next_run`
 exactly as an instant. A mismatch refuses the entire file, including differences
@@ -337,13 +333,12 @@ or cancelled runs; slots coalesced during a run are not owed.
 Identity uses the dedicated `source_routine_id` UUID, unique within each team.
 Migration `0161_routine_source_id` preserves existing imported identities while
 renaming their column and unique constraint. Later prompt edits preserve this
-stored identity. `seed-first-run` needs this stored identity. Import metadata
-uses the tag `routine-import-v2:<uuid>`; a prompt tag alone does not link a routine.
+stored identity. `seed-first-run` needs this stored identity. Linking uses only
+the explicit source ID; prompt text does not establish a link.
 `daimon routines create --paused` leaves `source_routine_id` unset. For a later
 import or a routine recreated by its owner, first create it with `--paused`, then
 use `daimon routines link-source --apply` to set the source ID, and finally
-run `daimon routines seed-first-run --apply`. A prompt tag alone no longer links
-a new routine:
+run `daimon routines seed-first-run --apply`:
 
 ```bash
 daimon routines link-source --tenant TENANT_UUID --routine DAIMON_ROUTINE_UUID --source-id SOURCE_UUID
@@ -419,7 +414,8 @@ routine in that selection prevents finality. Export also accepts repeated
 routines are refused. Without `--output`, JSON goes to stdout. Export never
 writes to the database.
 
-The version-2 document has `format_version`, `exported_at`, `final`,
+The rollback document uses `format_version: 2`; version 1 and legacy keys are
+not supported. It has `format_version`, `exported_at`, `final`,
 `not_final_reasons`, and a `routines` array. Each entry contains
 `source_routine_id` (null for routines not imported), Daimon's `routine_id`,
 `agent_name`, `cron_expr`, `timezone`, `enabled`, `last_fired_slot`, `last_fired_at`,

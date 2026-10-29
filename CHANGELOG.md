@@ -78,7 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add slot-safe routine handover with claimed-slot and completion evidence,
   stable source ids, atomic `seed-first-run` and `pause-for-handback` operator
-  commands, and read-only `export-rollback` using import format version 2.
+  commands, and read-only `export-rollback` using rollback format version 2.
+  Seed files remain bare JSON arrays with source identity and next-run keys;
+  wrapped objects and legacy keys are rejected without aliases.
   Migration `0161_routine_source_id` preserves existing links under source names.
   Handback preserves the enabled state
   and next unrun slot across coalescing and checks schedule, completion and

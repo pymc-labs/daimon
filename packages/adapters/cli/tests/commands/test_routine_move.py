@@ -36,7 +36,7 @@ from ..harness import build_cli_runtime
 )
 def test_invalid_entries_report_id(tmp_path, entry, message):
     path = tmp_path / "seed.json"
-    path.write_text(json.dumps({"format_version": 2, "routines": [entry]}))
+    path.write_text(json.dumps([entry]))
     with pytest.raises(UserFacingError, match=message) as error:
         read_seed_entries(path)
     assert entry["source_routine_id"] in str(error.value)
@@ -249,20 +249,43 @@ def test_link_source_command_options_and_one_line_refusal(monkeypatch, apply, re
     "payload",
     [
         [],
+        None,
+        {},
         {"format_version": 1, "routines": []},
-        {"format_version": "2", "routines": []},
-        {"format_version": True, "routines": []},
+        {"format_version": 2, "routines": []},
         {"routines": []},
     ],
 )
-def test_seed_requires_version_two(tmp_path: Path, payload: object) -> None:
+def test_seed_requires_nonempty_bare_array(tmp_path: Path, payload: object) -> None:
     path = tmp_path / "seed.json"
     path.write_text(json.dumps(payload))
-    with pytest.raises(UserFacingError, match="requires format_version 2"):
+    with pytest.raises(UserFacingError, match="must be a nonempty array"):
         read_seed_entries(path)
 
 
-def test_seed_version_two_accepts_only_source_fields(tmp_path: Path) -> None:
+@pytest.mark.parametrize("keep_source", [False, True])
+def test_seed_array_accepts_only_source_fields(tmp_path: Path, keep_source: bool) -> None:
+    values = {
+        "source_routine_id": str(uuid.uuid4()),
+        "last_completed_slot": "2026-10-27T10:00:00Z",
+        "source_next_run": "2026-10-27T11:00:00Z",
+        "cron_expr": "0 * * * *",
+        "timezone": "UTC",
+    }
+    path = tmp_path / "seed.json"
+    path.write_text(json.dumps([values]))
+    assert read_seed_entries(path) == [RoutineSeedEntry.model_validate(values)]
+    for field in ("routine_id", "next_run"):
+        legacy = "internal_" + field
+        invalid = dict(values, **{legacy: values["source_" + field]})
+        if not keep_source:
+            invalid.pop("source_" + field)
+        path.write_text(json.dumps([invalid]))
+        with pytest.raises(UserFacingError, match=f"{legacy}: Extra inputs are not permitted"):
+            read_seed_entries(path)
+
+
+def test_seed_rejects_wrapped_source_entries(tmp_path: Path) -> None:
     values = {
         "source_routine_id": str(uuid.uuid4()),
         "last_completed_slot": "2026-10-27T10:00:00Z",
@@ -272,18 +295,5 @@ def test_seed_version_two_accepts_only_source_fields(tmp_path: Path) -> None:
     }
     path = tmp_path / "seed.json"
     path.write_text(json.dumps({"format_version": 2, "routines": [values]}))
-    assert read_seed_entries(path) == [RoutineSeedEntry.model_validate(values)]
-    for field in ("routine_id", "next_run"):
-        legacy = "internal_" + field
-        invalid = dict(values, **{legacy: values["source_" + field]})
-        path.write_text(json.dumps({"format_version": 2, "routines": [invalid]}))
-        with pytest.raises(UserFacingError, match=f"{legacy}: Extra inputs are not permitted"):
-            read_seed_entries(path)
-
-
-@pytest.mark.parametrize("routines", [[], {}, None])
-def test_seed_requires_nonempty_routines(tmp_path: Path, routines: object) -> None:
-    path = tmp_path / "seed.json"
-    path.write_text(json.dumps({"format_version": 2, "routines": routines}))
-    with pytest.raises(UserFacingError, match="nonempty array"):
+    with pytest.raises(UserFacingError, match="must be a nonempty array"):
         read_seed_entries(path)
