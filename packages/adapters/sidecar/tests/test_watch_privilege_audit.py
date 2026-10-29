@@ -192,7 +192,21 @@ async def test_real_restricted_login_cannot_enumerate_credentials_edit_policy_or
             assert rows[1] == "daimon_watch_ingress_owner"
             assert not any(entry.startswith("=") for entry in rows[2])
 
+        async with db_session_factory() as db:
+            # Owner watch keys: no privilege of any kind for the sidecar or the ingress owner.
+            for role in (name, "daimon_sidecar", "daimon_watch_ingress_owner"):
+                assert not await db.scalar(
+                    text(
+                        "SELECT has_table_privilege(:role, 'watch_credentials', "
+                        "'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') "
+                        "OR has_any_column_privilege(:role, 'watch_credentials', "
+                        "'SELECT,INSERT,UPDATE,REFERENCES')"
+                    ),
+                    {"role": role},
+                ), role
         for sql in (
+            "SELECT * FROM watch_credentials",
+            "DELETE FROM watch_credentials",
             "SELECT * FROM agent_mcp_credentials",
             "SELECT * FROM tenant_access_policies",
             "UPDATE tenant_access_policies SET tenant_id=gen_random_uuid()",
@@ -218,6 +232,10 @@ async def test_real_restricted_login_cannot_enumerate_credentials_edit_policy_or
             (
                 f'GRANT SELECT(digest) ON "{schema}".watch_capabilities TO {name}',
                 f'REVOKE SELECT(digest) ON "{schema}".watch_capabilities FROM {name}',
+            ),
+            (
+                f'GRANT SELECT(token_encrypted) ON "{schema}".watch_credentials TO {name}',
+                f'REVOKE SELECT(token_encrypted) ON "{schema}".watch_credentials FROM {name}',
             ),
         ):
             async with db_engine.begin() as db:

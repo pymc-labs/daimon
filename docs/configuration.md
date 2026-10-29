@@ -1665,11 +1665,13 @@ readers; "agent" or "owner" for MCP servers), returns_chat (required: true only 
 native readers, which drop Daimon's own messages), max_interval_floor_s (shortest
 interval, at least 60, default 300) and label (shown on the approval card). Native
 entries must be read_thread or read_channel. Daimon's chat readers and chat_tools are
-refused on MCP servers. MCP entries with credential owner are not polled yet. A server's
-read-only annotation never allows a poll; only this list does, and a server can still
-write when it says it only reads. A watch below a raised floor polls at the floor.
-Default (also used when the value is empty): read_thread and read_channel on daimon-mcp,
-credential none, returns_chat true, floor 60. Set [] to allow no polls.
+refused on MCP servers. Credential owner polls with each watch owner's own read-only
+key, which they send once through a private form: for example a read-scoped API key the
+person creates on that server. A server's read-only annotation never allows a poll; only
+this list does, and a server can still write when it says it only reads. A watch below a
+raised floor polls at the floor. Default (also used when the value is empty):
+read_thread and read_channel on daimon-mcp, credential none, returns_chat true, floor
+60. Set [] to allow no polls.
 
 ### `DAIMON_WATCHES__CHAT_TOOLS`
 

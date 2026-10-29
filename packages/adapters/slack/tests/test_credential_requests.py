@@ -390,3 +390,27 @@ async def test_mcp_oauth_click_refuses_when_the_deployment_has_no_crypto_keys(
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=token)
     assert spent is not None and spent.used_at is None, "the request survives for a later click"
+
+
+@pytest.mark.asyncio
+async def test_watch_key_click_never_opens_a_form_on_slack(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """Watches run in Discord only; a watch key row on Slack fails closed."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    token = await _seed_request(
+        db_session,
+        tenant_id=tenant_id,
+        kind="watch_credential",
+        target="tools.example.com",
+        mcp_server_url="https://tools.example.com/mcp",
+    )
+    await db_session.commit()
+    runtime = _build_runtime(fernet_key, db_session_factory)
+
+    await handle_credential_request_click(runtime, _click_payload(token))
+
+    assert ("POST", _VIEWS_OPEN_URL) not in fake_slack_web_client.mock.requests
+    assert _ephemeral_texts(fake_slack_web_client) == [NO_LONGER_VALID_MESSAGE]

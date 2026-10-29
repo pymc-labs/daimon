@@ -2054,7 +2054,8 @@ class CredentialRequest(Base):
     __tablename__ = "credential_requests"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('env', 'env_file', 'mcp', 'mcp_oauth', 'repo', 'skill_repo')",
+            "kind IN ('env', 'env_file', 'mcp', 'mcp_oauth', 'repo', 'skill_repo', "
+            "'watch_credential')",
             name="ck_credential_requests_kind",
         ),
         UniqueConstraint("idempotency_key", name="uq_credential_requests_idempotency_key"),
@@ -4407,6 +4408,40 @@ class WatchNoticeReceipt(Base):
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     channel_id: Mapped[str | None] = mapped_column(Text)
     message_id: Mapped[str | None] = mapped_column(Text)
+
+
+class WatchCredential(Base):
+    """An owner's own read key for one MCP server, used only by that owner's watches.
+
+    Encrypted with the same MultiFernet as `agent_mcp_credentials`. Written
+    only by the requester-only private form; the poll executor decrypts the
+    one row for the leased watch's owner and URL. No sidecar or ingress grants.
+    """
+
+    __tablename__ = "watch_credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "owner_account_id", "server_url", name="uq_watch_credentials_owner_url"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    server_url: Mapped[str] = mapped_column(Text, nullable=False)
+    token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    rotated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LeadIntakeConfig(Base):

@@ -26,6 +26,7 @@ from daimon.core._models import (
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import SignedPageEvent, verify_page_event
+from daimon.core.stores import watch_credentials
 from daimon.core.stores.domain import (
     TaskContinuationRow,
     WatchEvidenceRow,
@@ -153,6 +154,7 @@ async def delete_for_account(session: AsyncSession, *, account_id: uuid.UUID) ->
     await session.execute(
         delete(WatchNoticeReceipt).where(WatchNoticeReceipt.owner_account_id == account_id)
     )
+    await watch_credentials.delete_for_account(session, account_id=account_id)
     return len(ids)
 
 
@@ -751,8 +753,8 @@ async def register_mcp_poll_watch(
 
     # The operator registry is the only thing that allows a poll.
     listed = require_listed(server_url, tool)
-    if listed.server == "daimon-mcp" or listed.credential not in ("agent", "none"):
-        raise ValueError("This tool needs your own key, which watches cannot use yet")
+    if listed.server == "daimon-mcp":
+        raise ValueError("Native readers are not MCP server polls")
     floor = listed.max_interval_floor_s
     if interval < floor:
         raise ValueError(f"This tool can be checked no more often than every {floor} seconds")
@@ -880,10 +882,10 @@ async def pause_unlisted(
     watch_id: uuid.UUID,
     lease: str,
     *,
-    reason: Literal["tool_unlisted", "source_changed"] = "tool_unlisted",
+    reason: Literal["tool_unlisted", "source_changed", "credential_missing"] = "tool_unlisted",
 ) -> None:
-    """The operator delisted the tool, or its server changed what the owner approved:
-    pause and tell the owner, never retry."""
+    """The operator delisted the tool, its server changed what the owner approved, or the
+    owner's own key for it is gone: pause and tell the owner, never retry."""
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None or row.lease_owner != lease:
@@ -1154,7 +1156,14 @@ async def claim_import_notice(
         (Watch.status == "paused")
         & or_(
             reason.in_(
-                ("access_revoked", "cap_reached", "failed", "tool_unlisted", "source_changed")
+                (
+                    "access_revoked",
+                    "cap_reached",
+                    "failed",
+                    "tool_unlisted",
+                    "source_changed",
+                    "credential_missing",
+                )
             ),
             reason.startswith("Watch paused:"),
         ),
@@ -1276,6 +1285,8 @@ def notice_kind(status: str, state: dict[str, object]) -> str:
         return "tool_unlisted"
     if reason == "source_changed":
         return "source_changed"
+    if reason == "credential_missing":
+        return "credential_missing"
     if reason == "access_revoked":
         return "access_revoked"
     if status == "paused" and reason == "failed":

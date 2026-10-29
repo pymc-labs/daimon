@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -176,3 +177,49 @@ async def test_counter_reads_submissions_and_mislabeled_write_counts(tmp_path: P
         evidence = (await c.get("/calls")).json()
         assert evidence["write_count"] == 2
         assert (await call("fixture_counter_read", {}))["structuredContent"] == {"markers": ["m-1"]}
+
+
+OWNER = "owner-bearer-" + "y" * 32
+
+
+async def test_an_owner_bearer_is_journaled_as_its_own_principal(tmp_path: Path) -> None:
+    path = tmp_path / "calls.jsonl"
+    app = build_fixture_server(token=TOKEN, journal_path=path, owner_tokens={"test-owner": OWNER})
+
+    async def counter_read(bearer: str) -> int:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://fixture",
+            headers={**INIT_HEADERS, "Authorization": f"Bearer {bearer}"},
+        ) as c:
+            initialized = await c.post("/mcp", json=INIT_BODY)
+            if initialized.status_code != 200:
+                return initialized.status_code
+            response = await c.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "fixture_counter_read", "arguments": {}},
+                },
+            )
+            return response.status_code
+
+    async with asgi_lifespan(app):
+        assert await counter_read(OWNER) == 200
+        assert await counter_read(TOKEN) == 200
+        assert await counter_read("not-a-known-bearer-" + "z" * 32) == 401
+    executed = [
+        event["caller"]
+        for event in map(json.loads, path.read_text().splitlines())
+        if event["phase"] == "executed"
+    ]
+    assert executed == ["test-owner", "mcp-fixture"]
+
+
+def test_an_owner_bearer_must_differ_from_the_agent_bearer(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="differ"):
+        build_fixture_server(
+            token=TOKEN, journal_path=tmp_path / "calls.jsonl", owner_tokens={"test-owner": TOKEN}
+        )

@@ -76,6 +76,7 @@ from daimon.adapters.discord.credential_modals import (
     McpCredentialModal,
     RepoBindModal,
     SkillRepoModal,
+    WatchCredentialModal,
 )
 from daimon.adapters.discord.credential_oauth import start_mcp_oauth_from_click
 from daimon.adapters.discord.credential_origin import is_credential_interaction_valid
@@ -305,6 +306,11 @@ class CredentialRequestButton(
                 # submit re-checks before anything is spent.
                 await interaction.response.send_modal(
                     SkillRepoModal(runtime=bot.runtime, request_row=request_row)
+                )
+            elif request_row.kind == "watch_credential":
+                # The requester's own read key for their watches; changes no agent.
+                await interaction.response.send_modal(
+                    WatchCredentialModal(runtime=bot.runtime, request_row=request_row)
                 )
             else:
                 await interaction.response.send_modal(

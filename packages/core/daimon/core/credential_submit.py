@@ -29,6 +29,7 @@ from daimon.core.env_file import (
     env_import_collisions,
     env_related_held,
 )
+from daimon.core.github_credentials import encrypt_token
 from daimon.core.mcp_attach import McpConnectDecision
 from daimon.core.mcp_oauth import begin_mcp_oauth_flow
 from daimon.core.mcp_token_connect import connect_mcp_server_with_token
@@ -45,6 +46,7 @@ from daimon.core.stores.domain import (
     McpOAuthFlowRow,
     RepoAccessProof,
 )
+from daimon.core.stores.watch_credentials import save_watch_credential
 from daimon.core.turn_keys import list_turn_key_names
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -274,6 +276,42 @@ async def settle_credential_submit(
             # occupy the retry's idempotency key without resuming its work.
             return False
         return await record(session, row, platform=platform, carries_work=carries_work)
+
+
+async def apply_watch_credential_submit(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    row: CredentialRequestRow,
+    fernet: MultiFernet,
+    value: str,
+    now: datetime,
+) -> CredentialRequestRow | None:
+    """Spend the form and store the requester's own watch key in one transaction.
+
+    The key is keyed by the row's tenant, its requester's account and its
+    exact server URL, never by anything the submitter typed. It changes no
+    agent, so no agent pin applies. None when the form is no longer usable.
+    """
+    if row.kind != "watch_credential" or row.mcp_server_url is None:
+        raise ValueError("Not a watch key form")
+    async with session_factory() as session, session.begin():
+        consumed = await credential_requests.consume_credential_request(
+            session, token=row.token, now=now
+        )
+        if consumed is None:
+            return None
+        await save_watch_credential(
+            session,
+            tenant_id=consumed.tenant_id,
+            owner_account_id=consumed.account_id,
+            server_url=str(consumed.mcp_server_url),
+            token_encrypted=encrypt_token(fernet, value),
+            now=now,
+        )
+        await credential_requests.set_credential_request_outcome(
+            session, token=consumed.token, outcome="applied"
+        )
+        return consumed
 
 
 async def begin_oauth_submit(

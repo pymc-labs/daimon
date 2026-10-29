@@ -51,7 +51,9 @@ TOKEN_BYTES: Final[int] = 16
 CUSTOM_ID_TEMPLATE: Final[str] = r"ztc:(?P<token>[A-Za-z0-9_-]{16,64})"
 CUSTOM_ID_PATTERN: Final[re.Pattern[str]] = re.compile(CUSTOM_ID_TEMPLATE)
 
-CredentialRequestKind = Literal["env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo"]
+CredentialRequestKind = Literal[
+    "env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo", "watch_credential"
+]
 
 # How a request actually ended, recorded on the row once it is spent.
 # "applied" — the write landed. "stale_replacement" — the compare-and-set
@@ -113,6 +115,7 @@ _KIND_LABEL_PREFIX: Final[dict[CredentialRequestKind, str]] = {
     "mcp_oauth": "Connect your account: ",
     "repo": "Set working repo: ",
     "skill_repo": "Import skills from: ",
+    "watch_credential": "Your watch key for: ",
 }
 
 

@@ -102,6 +102,11 @@ def notice_text(watch: WatchRow, kind: str) -> str:
             f"{label} paused: the tool it checks changed on its server.\n"
             "Make a new watch if you still want it."
         )
+    if kind == "credential_missing":
+        return (
+            f"{label} paused: your read-only key for its server is gone.\n"
+            "Ask me for a watch key form, then ask me to resume it."
+        )
     if kind == "access_revoked":
         return f"{label} paused: owner access was revoked."
     if kind == "failed":
