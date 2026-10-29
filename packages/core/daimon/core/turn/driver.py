@@ -148,13 +148,15 @@ T = TypeVar("T")
 
 
 async def _read_after_quiet[R](
-    read: Callable[[], Awaitable[R]], *, name: str, session_id: str
+    read: Callable[[], Awaitable[R]], *, name: str, session_id: str, cancel: asyncio.Event
 ) -> R:
     """One status or replay read after a quiet stream, retried on a transient failure.
 
-    The read only fetches; nothing is folded until it returns, so a retry
-    cannot apply anything twice. Any other error (a scope violation, a 4xx),
-    and the last attempt's failure, propagate unchanged.
+    Only for reads that are safe to repeat: a status read, or a replay that at
+    most journals by source key (an IO whose replay can send opts out with
+    `replay_may_send`). Any other error (a scope violation, a 4xx) and the last
+    attempt's failure propagate unchanged. Stop pressed while a failed read
+    waits for its retry ends the turn as interrupted, not lost.
     """
     for delay in _QUIET_READ_RETRY_DELAYS_S:
         try:
@@ -162,6 +164,8 @@ async def _read_after_quiet[R](
         except Exception as error:
             if not _transient_read_error(error):
                 raise
+            if cancel.is_set():
+                raise _InterruptedDuringRecovery(phase="replay") from error
             log.warning(
                 "turn.quiet_read_retry",
                 read=name,
@@ -169,7 +173,10 @@ async def _read_after_quiet[R](
                 error_type=type(error).__name__,
                 delay_s=delay,
             )
-            await asyncio.sleep(delay)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(cancel.wait(), timeout=delay)
+            if cancel.is_set():
+                raise _InterruptedDuringRecovery(phase="replay") from error
     return await read()
 
 
@@ -440,7 +447,7 @@ _QUIET_READ_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 2.0)
 
 def _transient_read_error(error: BaseException) -> bool:
     """A failure of the read itself, not a verdict on the turn: worth one more try."""
-    if isinstance(error, (*_CONNECTION_LOST, httpx.NetworkError)):
+    if isinstance(error, (*_CONNECTION_LOST, httpx.TransportError)):
         return True
     if isinstance(error, _anthropic.APIStatusError):
         return error.status_code == 429 or error.status_code >= 500
@@ -1126,7 +1133,7 @@ async def _pump(
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
                     status = await _read_after_quiet(
-                        io.status, name="status", session_id=session_id
+                        io.status, name="status", session_id=session_id, cancel=cancel
                     )
                     if status in {"running", "rescheduling"}:
                         log.info(
@@ -1150,8 +1157,12 @@ async def _pump(
                         reason=cycle.reason,
                         status=status,
                     )
-                    replayed = await _read_after_quiet(
-                        io.replay, name="replay", session_id=session_id
+                    replayed = (
+                        await io.replay()
+                        if getattr(io, "replay_may_send", False)
+                        else await _read_after_quiet(
+                            io.replay, name="replay", session_id=session_id, cancel=cancel
+                        )
                     )
                     current_turn_events = _events_since_last_turn_boundary(
                         replayed, tool_confirmation=tool_confirmation

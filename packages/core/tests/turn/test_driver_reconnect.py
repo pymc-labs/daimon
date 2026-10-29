@@ -9,6 +9,7 @@ grouping / the untouched connection-error budget).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import cast
 
@@ -17,9 +18,12 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions import (
+    BetaManagedAgentsEventParams,
+    BetaManagedAgentsSessionEvent,
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
+from daimon.core.turn.io import LegacyTurnIO, TurnStream
 from daimon.core.turn.posture import AutoApprove, BillingExempt, RequireApproval
 from daimon.core.turn.state import TextBlock
 from daimon.core.turn.termination import TerminationReason
@@ -31,6 +35,8 @@ from daimon.testing.turn_fakes import (
     YieldEvent,
     run_turn_on_leg,
 )
+from mux.contracts.receipts import StopObservation
+from mux.errors import ProviderError
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle, make_status_terminated
 
@@ -653,3 +659,141 @@ async def test_a_503_on_the_status_read_after_a_clean_close_is_retried() -> None
     assert final.stop_reason is not None
     assert final.stop_reason.type == "end_turn"
     assert len(lc.terminal_success) == 1
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+async def test_a_4xx_on_the_status_read_is_not_retried() -> None:
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    request = httpx.Request("GET", "https://api.anthropic.com/v1/beta/sessions/sess_1")
+    fa.beta.sessions.retrieve_raises = anthropic.APIStatusError(
+        "not found", response=httpx.Response(404, request=request), body=None
+    )
+
+    lc = RecordingLifecycle()
+    final = await run_turn_on_leg(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="hi",
+        lifecycle=lc,
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        now=_now,
+        billing=_EXEMPT,
+    )
+
+    assert fa.beta.sessions.retrieve_calls == ["sess_1"]
+    assert final.error is not None
+    assert len(lc.terminal_failures) == 1
+
+
+class _MuxShapedIO:
+    """The legacy IO behind the errors a mux backend raises: a normalized, retryable
+    `ProviderError` on the first status read and on every replay."""
+
+    def __init__(self, fake: FakeAnthropic, *, replay_may_send: bool) -> None:
+        self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+        self.replay_may_send = replay_may_send
+        self.checks = 0
+        self.replays = 0
+
+    async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
+        return await self.source.open_stream(read_timeout_s=read_timeout_s)
+
+    async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
+        await self.source.send(events)
+
+    async def status(self) -> str:
+        self.checks += 1
+        if self.checks == 1:
+            raise ProviderError("overloaded", retryable=True)
+        return await self.source.status()
+
+    async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:
+        self.replays += 1
+        if self.replays == 1:
+            raise ProviderError("overloaded", retryable=True)
+        return await self.source.replay(timeout_s=timeout_s)
+
+    async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
+        return await self.source.interrupt(timeout_s=timeout_s)
+
+    async def archive(self) -> None:
+        await self.source.archive()
+
+
+@pytest.mark.usefixtures("no_quiet_read_pause")
+@pytest.mark.parametrize("replay_may_send", [False, True])
+async def test_a_mux_backends_retryable_failure_is_retried_unless_its_replay_sends(
+    monkeypatch: pytest.MonkeyPatch, replay_may_send: bool
+) -> None:
+    from daimon.core.turn import driver
+
+    fa = FakeAnthropic()
+    pre = make_agent_message(event_id="sevt_1", text="hello")
+    done = make_status_idle(event_id="sevt_2", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[YieldEvent(pre)]]
+    fa.beta.sessions.events.replay_events = [pre, done]
+    fa.beta.sessions.retrieve_statuses = ["idle"]
+    io = _MuxShapedIO(fa, replay_may_send=replay_may_send)
+
+    def factory(*args: object, **kwargs: object) -> _MuxShapedIO:
+        return io
+
+    monkeypatch.setattr(driver, "turn_io", factory)
+    lc = RecordingLifecycle()
+    async with asyncio.timeout(10):
+        final = await driver.run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+        )
+
+    assert io.checks == 2, "the status read is always retried"
+    if replay_may_send:
+        assert io.replays == 1, "a replay that can send is never repeated"
+        assert len(lc.terminal_failures) == 1
+    else:
+        assert io.replays == 2
+        assert final.stop_reason is not None and final.stop_reason.type == "end_turn"
+        assert len(lc.terminal_success) == 1
+
+
+async def test_stop_while_a_failed_status_read_waits_ends_the_turn_as_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.turn import driver
+
+    monkeypatch.setattr(driver, "_QUIET_READ_RETRY_DELAYS_S", (5.0, 5.0))
+    fa = FakeAnthropic()
+    fa.beta.sessions.events.stream_scripts = [[]]
+    fa.beta.sessions.retrieve_statuses = [_dropped(), _dropped(), _dropped()]
+    cancel = asyncio.Event()
+
+    async def press_stop() -> None:
+        while not fa.beta.sessions.retrieve_calls:
+            await asyncio.sleep(0.001)
+        cancel.set()
+
+    lc = RecordingLifecycle()
+    async with asyncio.timeout(3):  # far less than one retry pause
+        _, final = await asyncio.gather(
+            press_stop(),
+            run_turn_on_leg(
+                anthropic=_cast(fa),
+                session_id="sess_1",
+                user_message="hi",
+                lifecycle=lc,
+                cancel=cancel,
+                render_interval_s=0.001,
+                now=_now,
+                billing=_EXEMPT,
+            ),
+        )
+
+    assert fa.beta.sessions.retrieve_calls == ["sess_1"], "no read after Stop"
+    assert final.termination == TerminationReason.INTERRUPTED
