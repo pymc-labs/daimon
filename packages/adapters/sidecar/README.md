@@ -10,6 +10,7 @@ review. Outside callback senders are unsupported.
 
 See [self-hosting](../../../docs/self-hosting.md#signed-page-event-watch-sidecar)
 for callback signing, headers, replay/retention rules, database roles and limits.
+Run `uv run daimon-sidecar` with the database role and settings described there.
 
 Polling uses a fixed private watch executor, never external URLs. Sidecar can claim
 four 60-second poll leases at a time; the private executor loads the registered
