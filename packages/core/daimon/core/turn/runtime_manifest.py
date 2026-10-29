@@ -1370,6 +1370,136 @@ def _consented_before(
     return any(_consented(candidate, consent) for candidate in candidates)
 
 
+#: Daimon MCP tools a provider-turn listing named for a while and then did not:
+#: #1515 pinned the fleet tools into it (a1d991fb) and #1536 took them out again
+#: (cbfc6032). Listed or not, they stay reachable through `call_tool`, so a consent
+#: captured on either side still describes what the turn can reach.
+_ONCE_PINNED_TOOLS: Final[frozenset[str]] = frozenset(
+    {"fleet_spawn", "fleet_collect", "fleet_status", "fleet_agents"}
+)
+_DAIMON_TOOL_DROP: Final[str] = f"mcp_tool:{DAIMON_SERVER_NAME}:"
+
+
+def _daimon_allowed(target: AgentSpec) -> list[str] | None:
+    """The target's Daimon MCP allowlist, or None when it carries none."""
+    for server in target.mcp_servers or ():
+        allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
+        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
+            return [str(name) for name in cast("list[JsonValue]", allowed)]
+    return None
+
+
+def _with_catalogue(
+    target: AgentSpec,
+    source_system: str | None,
+    allowed: frozenset[str],
+    consent: _BackendDropConsent,
+) -> AgentSpec | None:
+    """`target` as a consent captured against another Daimon MCP listing names it.
+
+    Today's target lists today's catalogue: the auto tools allowed, the gated ones
+    named losses. A consent captured when the listing differed (a tool pinned in
+    or out, a tool added) digested that listing. Only the Daimon MCP part is
+    rebuilt: the allowlist the consent's listing gave, and the consent's own
+    `mcp_tool:` losses; everything else must still match exactly.
+    """
+    from mux.contracts.resources import MCPConnection
+
+    servers: list[MCPConnection] = []
+    found = False
+    for server in target.mcp_servers or ():
+        if server.name == DAIMON_SERVER_NAME and _daimon_allowed(target) is not None:
+            found = True
+            server = server.model_copy(
+                update={"tool_policy": {**server.tool_policy, "allowed_tools": sorted(allowed)}}
+            )
+        servers.append(server)
+    if not found:
+        return None
+    drops = tuple(
+        sorted(
+            {d for d in target.declared_drops if not d.startswith(_DAIMON_TOOL_DROP)}
+            | {d for d in consent.declared_drops if d.startswith(_DAIMON_TOOL_DROP)}
+        )
+    )
+    base = _without_losses_line(target, source_system)
+    return target.model_copy(
+        update={
+            "mcp_servers": tuple(servers),
+            "declared_drops": drops,
+            "system": compose_source_instructions(
+                base, "Unavailable capabilities: " + ", ".join(drops) + "."
+            )
+            if drops
+            else base,
+        }
+    )
+
+
+def _consented_across_catalogue(
+    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
+) -> bool:
+    """A consent captured when Daimon MCP's provider-turn listing differed.
+
+    The listing is search_tools, call_tool, the gated tools and anything pinned,
+    so pinning a tool in or out, or adding one, changed every template's
+    catalogue, and with it every consent's digest (#1515, #1536). The turn still
+    runs today's target, which allows only today's auto tools and names today's
+    gated ones losses. Accepted only when:
+    - the consent's digest matches today's target with the consent's own Daimon
+      MCP allowlist and losses put back (a consent from before a pin change: with
+      or without the once-pinned tools);
+    - every tool it allowed is still offered: listed and auto today, or a
+      once-pinned tool still reachable through today's `call_tool` (a live listing
+      missing a consented tool still asks again);
+    - nothing it named a loss is allowed today (no gated tool newly auto).
+    """
+    today = _daimon_allowed(target)
+    if today is None:
+        return False
+    allowed_today = frozenset(today)
+    dropped = {
+        d.removeprefix(_DAIMON_TOOL_DROP)
+        for d in consent.declared_drops
+        if d.startswith(_DAIMON_TOOL_DROP)
+    }
+    if dropped & allowed_today:
+        return False
+    # A once-pinned tool is reachable through call_tool, listed or not.
+    reachable: frozenset[str] = (
+        allowed_today | _ONCE_PINNED_TOOLS if "call_tool" in allowed_today else allowed_today
+    )
+    for allowed in (
+        allowed_today,  # only the gated losses differ (a gated tool added or removed)
+        allowed_today | _ONCE_PINNED_TOOLS,
+        allowed_today - _ONCE_PINNED_TOOLS,
+    ):
+        if not allowed <= reachable:
+            continue
+        candidate = _with_catalogue(target, source_system, allowed, consent)
+        if candidate is not None and _consented(candidate, consent):
+            return True
+    return False
+
+
+def _without_losses_line(target: AgentSpec, source_system: str | None) -> str | None:
+    """The target's instructions before its "Unavailable capabilities" line: the
+    source's own plus any paragraph a representation adds.
+
+    An agent with no instructions of its own has the losses line alone, with no
+    paragraph before it: that is the source's (absent) instructions.
+    """
+    line = "Unavailable capabilities: "
+    system = target.system
+    if system is None:
+        return system
+    if "\n\n" + line in system:
+        return system[: system.rindex("\n\n" + line)]
+    if system.startswith(line):
+        return source_system
+    return system
+
+
 def source_preservation_pin(source: BackendAgent) -> str:
     """Pin complete owner-captured intent independently of the current caller address."""
     updates: dict[str, object] = {"resource_scope": None}
@@ -1505,7 +1635,11 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         target = preview_source_drops(
             source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
         )
-        if not _consented(target, consent) and not _consented_before(target, spec.system, consent):
+        if (
+            not _consented(target, consent)
+            and not _consented_before(target, spec.system, consent)
+            and not _consented_across_catalogue(target, spec.system, consent)
+        ):
             raise AgentBackendRefused("re_confirm")
     retain_native = (
         (setting is not None)

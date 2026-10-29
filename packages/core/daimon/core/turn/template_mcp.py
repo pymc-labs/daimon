@@ -6,7 +6,7 @@ credential in memory: the requesting person's account with the agent's
 chat-execution authority (no admin elevation; roles are re-read live by the
 server), surface `provider_turn` (the server refuses it gated and publishing tools),
 living at most min(turn deadline + 60 s, 900 s). It is checked against the
-consented catalogue before use, and `finalize` revokes it and reads that back.
+consented tools before use, and `finalize` revokes it and reads that back.
 """
 
 from __future__ import annotations
@@ -31,7 +31,12 @@ def template_mcp_kept(target: AgentSpec | None) -> bool:
 
 
 def consented_catalogue(source: BackendAgent, target: AgentSpec | None) -> frozenset[str]:
-    """The Daimon MCP catalogue the switch consented to: allowed plus named-unavailable."""
+    """The Daimon MCP tools the switch consented to allow (its target's allowlist).
+
+    Named-unavailable (gated) tools are not part of it: the provider executes only
+    the allowlist, and the server refuses gated tools to a provider-turn credential
+    whatever its listing says.
+    """
     from daimon.core.turn.runtime_manifest import represented_source
 
     represented = represented_source(source, target)
@@ -44,15 +49,7 @@ def consented_catalogue(source: BackendAgent, target: AgentSpec | None) -> froze
     allowed = connection.tool_policy.get("allowed_tools")
     if not isinstance(allowed, list):
         raise AdmissionDenied(reason="backend_unsupported")
-    prefix = f"mcp_tool:{connection.name}:"
-    return frozenset(
-        [str(name) for name in cast("list[JsonValue]", allowed)]
-        + [
-            item.removeprefix(prefix)
-            for item in represented.unavailable_mcp_tools
-            if item.startswith(prefix)
-        ]
-    )
+    return frozenset(str(name) for name in cast("list[JsonValue]", allowed))
 
 
 class TemplateMCPCredential:
@@ -123,8 +120,11 @@ class TemplateMCPCredential:
                 max_ttl_s=ttl_s,
                 chat_execution=True,
             )
-            if await list_mcp_tools(destination, token) != self.catalogue:
-                raise ValueError("target MCP catalogue differs from captured source")
+            # Every consented tool must still be listed. The listing may carry more
+            # (a tool added, a gated tool, a rollout's other revision): the provider
+            # runs only the consented allowlist, and the server keeps gating the rest.
+            if not self.catalogue <= await list_mcp_tools(destination, token):
+                raise ValueError("target MCP catalogue no longer lists a consented tool")
         except (OSError, ValueError):
             await self.finalize()
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
