@@ -9,8 +9,9 @@ A poll runs with nobody watching and may carry a credential, so every request:
   the certificate for the URL's host);
 - never follows a redirect (a 3xx is a failure), never reads proxy settings
   from the environment and never sends a cookie back;
-- stops reading a response past `MAX_RESPONSE_BYTES`, while it streams, and
-  gives each request `REQUEST_TIMEOUT_S`;
+- refuses a compressed response before reading it, stops reading past
+  `MAX_RESPONSE_BYTES` while it streams, and gives each request
+  `REQUEST_TIMEOUT_S`;
 - parses JSON strictly: no NaN or Infinity, no duplicate keys.
 
 A failure raises `McpCallError` carrying only a fixed class name. Nothing here
@@ -61,12 +62,20 @@ class McpCallError(Exception):
         self.kind: CallFailure = kind
 
 
+_NAT64 = ipaddress.IPv6Network("64:ff9b::/96")
+_IPV4_COMPATIBLE = ipaddress.IPv6Network("::/96")
+
+
 def _public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     if isinstance(address, ipaddress.IPv6Address):
+        if address in _IPV4_COMPATIBLE:
+            return False  # Deprecated IPv4-compatible form, and `::` itself.
         # An IPv6 form that carries an IPv4 address is judged by that address.
         embedded = address.ipv4_mapped or address.sixtofour
         if embedded is None and address.teredo is not None:
             embedded = address.teredo[1]
+        if embedded is None and address in _NAT64:
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
         if embedded is not None and not _public(embedded):
             return False
     return address.is_global and not address.is_multicast
@@ -143,7 +152,7 @@ class McpToolSession:
         self._headers = {
             "Host": host_header,
             "Accept": "application/json, text/event-stream",
-            # The cap counts decoded bytes either way; this just asks for none.
+            # An encoded reply is refused unread; see `_post`.
             "Accept-Encoding": "identity",
             "Content-Type": "application/json",
             "MCP-Protocol-Version": PROTOCOL_VERSION,
@@ -169,6 +178,10 @@ class McpToolSession:
         try:
             if 300 <= response.status_code < 400:
                 raise McpCallError("redirect")
+            # httpx decodes gzip, deflate, br and zstd whatever Accept-Encoding asked for,
+            # in memory and before the cap sees a byte: refuse any encoding unread.
+            if response.headers.get("content-encoding", "").strip().lower() not in ("", "identity"):
+                raise McpCallError("protocol")
             chunks: list[bytes] = []
             size = 0
             try:

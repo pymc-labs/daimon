@@ -863,6 +863,18 @@ async def release_poll_lease(session: AsyncSession, watch_id: uuid.UUID, lease: 
     )
 
 
+async def defer_busy_poll(
+    session: AsyncSession, watch_id: uuid.UUID, lease: str, *, until: datetime
+) -> None:
+    """Its server's budget is spent: release the lease and give up its place in the claim
+    queue, so watches on other servers are claimed first. Not an error."""
+    await session.execute(
+        update(Watch)
+        .where(Watch.id == watch_id, Watch.lease_owner == lease)
+        .values(lease_owner=None, lease_expires_at=None, next_check_at=until)
+    )
+
+
 async def pause_unlisted(
     session: AsyncSession,
     watch_id: uuid.UUID,

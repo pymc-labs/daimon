@@ -257,6 +257,9 @@ async def test_unsafe_urls_are_refused_before_any_connection(url: str):
         ["::ffff:127.0.0.1"],
         ["2002:7f00:1::1"],
         ["fd00::1"],
+        # NAT64 and the deprecated IPv4-compatible form are judged by the IPv4 inside.
+        ["64:ff9b::a9fe:a9fe"],
+        ["::a9fe:a9fe"],
         # DNS rebinding: one public and one private answer is refused as a whole.
         ["93.184.216.34", "127.0.0.1"],
         [],
@@ -314,3 +317,72 @@ async def test_catalogue_pages_are_bounded():
     ) as source:
         with pytest.raises(McpCallError, match="too_large"):
             await source.list_tools()
+
+
+async def test_a_gzip_bomb_is_refused_unread_with_little_memory():
+    """200 MiB of zeros in about 200 KB of gzip: refused before httpx decodes a byte."""
+    import tracemalloc
+    import zlib
+
+    packer = zlib.compressobj(9, zlib.DEFLATED, 31)
+    block = bytes(1024 * 1024)
+    bomb = b"".join(packer.compress(block) for _ in range(200)) + packer.flush()
+    del block
+    assert len(bomb) < 512 * 1024
+    pulled = 0
+
+    class Bomb(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            nonlocal pulled
+            for start in range(0, len(bomb), 65536):
+                pulled += 1
+                yield bomb[start : start + 65536]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=Bomb(),
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+        )
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(McpCallError) as failure:
+            async with mcp_tool_session(
+                URL, None, resolve=pinned, transport=httpx.MockTransport(handler)
+            ):
+                pass
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert failure.value.kind == "protocol"
+    assert peak < 1024 * 1024
+    assert pulled == 0
+
+
+@pytest.mark.parametrize("encoding", ["deflate", "br", "zstd", "identity, gzip", " GZIP "])
+async def test_any_content_encoding_is_refused(encoding: str):
+    def handler(request: httpx.Request) -> httpx.Response:
+        # A stream, as on the network: nothing is decoded before the client looks.
+        return httpx.Response(
+            200, stream=httpx.ByteStream(b"{}"), headers={"content-encoding": encoding}
+        )
+
+    with pytest.raises(McpCallError) as failure:
+        async with mcp_tool_session(
+            URL, None, resolve=pinned, transport=httpx.MockTransport(handler)
+        ):
+            pass
+    assert failure.value.kind == "protocol"
+
+
+async def test_identity_encoding_is_read():
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = rpc_reply(request, {"tools": []})
+        response.headers["content-encoding"] = "identity"
+        return response
+
+    async with mcp_tool_session(
+        URL, None, resolve=pinned, transport=httpx.MockTransport(handler)
+    ) as source:
+        assert await source.list_tools() == ()

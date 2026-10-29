@@ -1808,7 +1808,9 @@ ungated/unreadable sessions refuse, including with tool safety off.
 `read_thread` and `read_channel` arguments must name a source distinct from the
 reporting thread. The agent must have the read enabled without approval on its
 canonical OS MCP toolset. An MCP server poll needs the server still attached at
-the same URL, under any name, with the tool enabled and not denied. Its listing
+the same URL, under any name, with the tool enabled and not denied. The tool's
+always-ask or always-allow setting does not stop a poll; an agent rule that asks
+or denies does. Its listing
 is read on every poll; a changed listing pauses the watch as `source_changed`.
 Gate, expiry and lease races release the matching poll lease without marking owner
 access revoked. Actual owner or binding revocation pauses and cancels queued wakes.

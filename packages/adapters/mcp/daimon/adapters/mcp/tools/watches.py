@@ -9,6 +9,7 @@ tool_confirmation, an ungated session or an unreadable proof refuses enrollment.
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -419,11 +420,16 @@ async def create_mcp_watch(
             credential=listed.credential,
         )
         try:
-            async with polling.open_source(server_url, token) as source:
+            # The same overall bound a poll has, so a slow server cannot hold the turn.
+            async with (
+                asyncio.timeout(25),
+                polling.open_source(server_url, token) as source,
+            ):
                 entry = await listed_read_tool(
                     runtime, source, server_name=server_name, tool=tool, arguments=args
                 )
-        except McpCallError:
+                digest = catalogue_digest(entry)
+        except (McpCallError, TimeoutError, RecursionError):
             raise ValueError("Could not read that server's tool list. Try again later.") from None
         async with runtime.session_factory.begin() as db:
             watch = await watches.register_mcp_poll_watch(
@@ -437,7 +443,7 @@ async def create_mcp_watch(
                 projection=projection,
                 rule=rule,
                 interval=interval,
-                catalogue_digest=catalogue_digest(entry),
+                catalogue_digest=digest,
                 expires_at=expires_at,
                 now=now,
                 key=key,

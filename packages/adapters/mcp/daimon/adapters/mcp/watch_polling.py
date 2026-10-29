@@ -8,13 +8,14 @@ clients are used only to retrieve current agent facts; no AI turn is started.
 from __future__ import annotations
 
 import asyncio
+import random
 import secrets
 import time
 import uuid
 from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import discord
@@ -81,6 +82,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import (
     DailyCap,
     PollBindingRevoked,
+    defer_busy_poll,
     finish_poll,
     hold_to_floor,
     leased_poll,
@@ -141,6 +143,9 @@ class UrlBudget:
 
 
 SOURCE_BUDGET = UrlBudget()
+
+#: How far a watch whose server is busy steps back in the claim queue (plus jitter).
+BUSY_DEFER_S = 60
 
 #: Opens the bounded MCP session for one poll; tests swap in a fake server.
 open_source = mcp_tool_session
@@ -609,9 +614,11 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
             return True
     except SourceBusy:
-        # This server's own budget is spent; another claim retries it.
+        # This server's own budget is spent. Step back in the claim queue, or due
+        # watches on one busy server would fill every claim and starve the rest (R10).
+        until = datetime.now(UTC) + timedelta(seconds=BUSY_DEFER_S + random.uniform(0, 30))
         async with runtime.session_factory.begin() as db:
-            await release_poll_lease(db, watch_id, lease)
+            await defer_busy_poll(db, watch_id, lease, until=until)
         return False
     except ToolUnlisted:
         # The operator took the tool off the registry: pause and tell the owner.

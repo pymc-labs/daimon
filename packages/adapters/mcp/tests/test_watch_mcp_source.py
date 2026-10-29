@@ -12,7 +12,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -583,3 +583,96 @@ def test_operator_denied_and_write_pins_refuse_but_hints_cannot_allow():
     assert operator_denied(ToolSafetyPolicy(denied=("s",)), server_name="s", tool="t")
     assert operator_denied(ToolSafetyPolicy(denied=("s/t",)), server_name="s", tool="t")
     assert operator_denied(ToolSafetyPolicy(effects={"s/t": "write"}), server_name="s", tool="t")
+
+
+SLOW = "https://slow.example/mcp"
+
+
+class SaturatedServer(UrlBudget):
+    """Server A is always at its per-URL budget; every other server is free."""
+
+    def take(self, url: str):  # type: ignore[override]
+        if url == SLOW:
+            raise SourceBusy
+        return super().take(url)
+
+
+async def test_a_saturated_server_cannot_starve_watches_on_another(bridge, monkeypatch):
+    """R10: 20 due watches on a busy server A and one on B; B is polled within a few ticks."""
+    from daimon.core.continuity.continuation import ContinuationRequest
+
+    fx = bridge
+    monkeypatch.setenv(
+        "DAIMON_WATCHES__POLLABLE_TOOLS",
+        json.dumps(
+            [
+                *NATIVE,
+                entry("fixture_counter_read"),
+                entry("fixture_counter_read", server=SLOW, credential="none"),
+            ]
+        ),
+    )
+    fx.agent.return_value = agent_with(("parity-bridge", BRIDGE), ("slow", SLOW))
+    monkeypatch.setattr(watch_polling, "SOURCE_BUDGET", SaturatedServer())
+    native = fx.native
+    now = datetime.now(UTC)
+    async with fx.runtime.session_factory.begin() as db:
+        # The native watch is not part of this queue.
+        await watches.pause_watch(db, native.id)
+        slow = []
+        for _ in range(20):
+            row = await watches.register_mcp_poll_watch(
+                db,
+                ContinuationRequest(
+                    tenant_id=native.tenant_id,
+                    platform="discord",
+                    parent_channel_id=native.parent_channel_id,
+                    thread_id=native.thread_id,
+                    requester_account_id=native.owner_account_id,
+                    requester_external_user_id=native.owner_external_id,
+                    target_ma_agent_id=native.agent_id,
+                    target_name=native.agent_name,
+                    requested_work=None,
+                    reason="watch_fired",
+                    idempotency_key=uuid.uuid4(),
+                ),
+                instructions="Report.",
+                server_url=SLOW,
+                server_name="slow",
+                tool="fixture_counter_read",
+                arguments={},
+                projection=".markers",
+                rule="added",
+                interval=60,
+                catalogue_digest="0" * 64,
+                expires_at=now + timedelta(days=1),
+                now=now,
+            )
+            slow.append(row.id)
+        # Every A watch is due before B.
+        await db.execute(
+            text("UPDATE watches SET next_check_at=now()-interval '1 hour' WHERE source='mcp_poll'")
+        )
+    created = await create(fx)
+    fast = created.watch_id
+    polled_b = None
+    for tick in range(1, 8):
+        async with fx.runtime.session_factory.begin() as db:
+            claimed = await watches.claim_poll_watches(db)
+        assert len(claimed) <= 4
+        for item in claimed:
+            await run_poll(fx.runtime, uuid.UUID(item["watch_id"]), item["lease"])
+            if item["watch_id"] == str(fast):
+                polled_b = tick
+        if polled_b:
+            break
+    # 20 busy A rows step back four at a time: B is reached by the sixth tick.
+    assert polled_b is not None and polled_b <= 6
+    current = await get(fx, fast)
+    assert current.status == "active" and current.baseline
+    async with fx.runtime.session_factory() as db:
+        for watch_id in slow:
+            row = await watches.get_watch(db, watch_id)
+            # Busy is not an error and never pauses; it only waits its turn.
+            assert row.status == "active" and row.consecutive_errors == 0
+            assert row.lease_owner is None

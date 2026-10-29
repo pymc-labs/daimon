@@ -2900,10 +2900,11 @@ SQL; page events keep the 4 KiB limits.
 An `mcp_poll` source stores the canonical URL, never the server name, and each poll
 needs that URL still attached, enabled, visible to the owner and not denied. The
 executor sends only that URL's agent-wide credential, to one pinned public address,
-without redirects or proxies, reading at most 256 KiB. The live `tools/list` entry
+without redirects or proxies, reading at most 256 KiB and no compressed reply. The live `tools/list` entry
 must match the digest approved at create and keep `readOnlyHint`; the hint can only
 refuse, since the registry is what allows a poll. Each URL gets two polls at once
-and 30 a minute, and `0158_watch_mcp_claim` lets the sidecar lease these watches.
+and 30 a minute, and a busy URL's watches step back in the
+queue. `0158_watch_mcp_claim` lets the sidecar lease these watches.
 
 The first poll saves a baseline without firing. Later `change`, `added` and `updated`
 comparisons save their baseline with evidence and the existing `watch_fired` wake in
