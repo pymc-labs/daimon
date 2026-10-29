@@ -956,7 +956,7 @@ def backend_switch_callbacks(
             )
         if handed is not None and handed.kind == "setup":
             return None
-        if handed is not None and handed.kind == "handoff":
+        if handed is not None and handed.kind in ("handoff", "owner"):
             return handed.responder_name
         return turn_agent
 
