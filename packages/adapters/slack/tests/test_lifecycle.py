@@ -988,27 +988,51 @@ async def test_terminal_success_bounds_notification_text_on_long_answers(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("partial_text", ["", "Partial analysis before cancellation."])
-async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answer(
-    fake_slack_web_client: Any, partial_text: str
+async def test_interrupted_tool_turn_without_text_shows_cancelled(
+    fake_slack_web_client: Any,
 ) -> None:
     lc, _, _, deregistered = _make_lifecycle(fake_slack_web_client, notify_on_completion=True)
     await lc.post_initial()
     content = [
         ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
     ]
-    if partial_text:
-        content.append(TextBlock(kind="text", text=partial_text))
 
     await lc.on_terminal_success(
         TurnState(content=content, termination=TerminationReason.INTERRUPTED)
     )
 
-    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert "Stopped." in rendered
-    if partial_text:
-        assert partial_text in rendered
-    assert "cancel_turn" not in _action_ids(_last_update_blocks(fake_slack_web_client))
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert "❌ *Stopped.*\nSend a message to start again." in _block_text(blocks)
+    assert "cancel_turn" not in _action_ids(blocks)
+    assert _post_count(fake_slack_web_client) == 1, "cancellation must not send a completion ping"
+    assert lc.final_ts == lc.status_ts
+    assert lc.status_ts in deregistered
+
+
+async def test_interrupted_turn_keeps_partial_answer_and_marks_stopped_as_an_error_card(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, _, _, deregistered = _make_lifecycle(fake_slack_web_client, notify_on_completion=True)
+    await lc.post_initial()
+    partial_text = "Partial analysis before cancellation."
+    content = [
+        ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}),
+        TextBlock(kind="text", text=partial_text),
+    ]
+
+    await lc.on_terminal_success(
+        TurnState(content=content, termination=TerminationReason.INTERRUPTED)
+    )
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    answer = blocks[0]
+    assert answer["type"] == "markdown" and answer["text"] == partial_text, (
+        "the agent's text is untouched, with no system line added"
+    )
+    assert blocks[1]["type"] == "divider", "a rule sets the error apart from the answer"
+    assert blocks[2]["text"]["text"] == "❌ *Stopped.*"
+    assert blocks[3]["text"]["text"] == "Send a message to start again."
+    assert "cancel_turn" not in _action_ids(blocks)
     assert _post_count(fake_slack_web_client) == 1, "cancellation must not send a completion ping"
     assert lc.final_ts == lc.status_ts
     assert lc.status_ts in deregistered
@@ -1090,8 +1114,8 @@ async def test_terminal_success_empty_content_shows_turn_cancelled(
     assert lc.final_ts is not None, "final_ts must be set even for cancelled turns"
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert "Stopped.\nSend a message to start again." in _block_text(blocks), (
-        "an empty turn shows the stop and next step"
+    assert "❌ *Stopped.*\nSend a message to start again." in _block_text(blocks), (
+        "an empty turn shows the stop and next step as an error card"
     )
     assert not _has_actions_block(blocks), "cancelled turn must not keep the cancel button"
 
@@ -1137,7 +1161,7 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     assert notice is not None
     section, context = blocks[1], blocks[-1]
     assert section["type"] == "section"
-    assert blocks[0]["text"]["text"] == notice.title
+    assert blocks[0]["text"]["text"] == f"❌ *{notice.title}*"
     assert section["text"]["text"].startswith(notice.next_step)
     assert "*Next:*" not in section["text"]["text"]
     assert "`fit_model`" in blocks[2]["elements"][0]["text"], "work in flight is named"
@@ -1203,7 +1227,7 @@ async def test_a_notice_that_fails_to_build_still_draws_the_error_card(
     await lc.on_terminal_failure(TurnState(), RuntimeError("upstream timeout"))
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert blocks[0]["text"]["text"] == "Something went wrong."
+    assert blocks[0]["text"]["text"] == "❌ *Something went wrong.*"
     assert not any("upstream timeout" in str(block) for block in blocks)
 
 

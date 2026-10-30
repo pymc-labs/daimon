@@ -26,7 +26,11 @@ Terminal collapse (DONE/ERROR):
   section  — outcome and retry step when needed
   context  — Details: time, cost, tokens, balance
 
-No color field anywhere — blocks only, no attachments.
+A turn card is blocks only: chat.update keeps a message's old attachments when
+it sends none, so a coloured bar cannot be swapped in and out as the card
+changes. An error there is marked by a leading cross instead. A notice posted on
+its own, which nothing edits afterwards, is a red-barred attachment
+(``notice_attachments``).
 Preview text entity-escaped via escape_mrkdwn (& first, then < >).
 Terminal metrics stay visible in Details.
 """
@@ -75,6 +79,9 @@ NOTICE_MAX_CHARS = 2900
 
 _EMOJI_CROSS = "❌"  # ❌
 
+# Discord's error red, so the bar matches on every platform.
+ERROR_COLOR = "#ED4245"
+
 _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 
 # Copy is byte-identical to the Discord adapter's orphan-retirement embed: the
@@ -87,6 +94,39 @@ INTERRUPTED_NOTICE: str = (
 # ---------------------------------------------------------------------------
 # Pure functions
 # ---------------------------------------------------------------------------
+
+
+def error_title_block(title: str) -> dict[str, Any]:
+    """The bold, cross-led first line of an error card; ``title`` is plain text."""
+    return {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": f"{_EMOJI_CROSS} *{escape_mrkdwn(title)}*"},
+    }
+
+
+def error_blocks(title: str, next_step: str) -> list[dict[str, Any]]:
+    """An error card for a turn that stopped without a summary: title, then what to do."""
+    return [
+        error_title_block(title),
+        {"type": "section", "text": {"type": "mrkdwn", "text": escape_mrkdwn(next_step)}},
+    ]
+
+
+def notice_attachments(text: str) -> list[dict[str, Any]]:
+    """A red-barred attachment carrying one system notice, so it never reads as the agent's words.
+
+    For a message posted on its own and never edited: the top-level ``text`` is
+    left out (Slack would print it above the bar), and the attachment's
+    ``fallback`` stands in for it in notifications.
+    """
+    body = escape_mrkdwn(text)[:NOTICE_MAX_CHARS]
+    return [
+        {
+            "color": ERROR_COLOR,
+            "fallback": text,
+            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": body}}],
+        }
+    ]
 
 
 def to_fallback_text(state: State, *, now: float | None) -> str:
@@ -180,15 +220,10 @@ def to_blocks(
         )
         blocks: list[dict[str, Any]] = []
         if state.phase is TurnPhase.ERROR:
-            blocks.append(
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": escape_mrkdwn(state.notice_title or "Something went wrong."),
-                    },
-                }
-            )
+            if answer_visible:
+                # Under an answer: a rule sets Daimon's error apart from the agent's words.
+                blocks.append({"type": "divider"})
+            blocks.append(error_title_block(state.notice_title or "Something went wrong."))
             if state.notice:
                 parts = state.notice.split("\n\n")
                 blocks.append(

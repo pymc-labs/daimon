@@ -54,7 +54,9 @@ from daimon.adapters.slack.blockkit import (
     NOTICE_MAX_CHARS,
     EmbedEvent,
     TurnPhase,
+    error_blocks,
     format_termination_notice,
+    notice_attachments,
     to_blocks,
     to_fallback_text,
     update,
@@ -104,6 +106,8 @@ __all__ = ["SlackTurnLifecycle"]
 log = structlog.get_logger()
 
 _DEBOUNCE_S = 5.0
+_STOPPED_TITLE = "Stopped."
+_STOPPED_NEXT_STEP = "Send a message to start again."
 _SEALED_RESPONSE_MIN_CHARS = 500  # Same substantive-answer threshold as Discord.
 
 # Everything a chat.postMessage/chat.update can raise. slack_sdk wraps ok:false
@@ -313,13 +317,18 @@ class SlackTurnLifecycle:
     def _set_header_customized(self, customized: bool) -> None:
         self._state = dataclasses.replace(self._state, header_customized=customized)
 
-    async def post_notice(self, text: str, *, blocks: list[dict[str, Any]] | None = None) -> str:
-        """Post a turn notice with the same header and ownership as its answer."""
-        kwargs: dict[str, Any] = {
-            "channel": self._channel,
-            "thread_ts": self._thread_ts,
-            "text": text,
-        }
+    async def post_notice(
+        self, text: str, *, blocks: list[dict[str, Any]] | None = None, error: bool = False
+    ) -> str:
+        """Post a turn notice with the same header and ownership as its answer.
+
+        ``error`` posts it as a red-barred system notice instead of plain text.
+        """
+        kwargs: dict[str, Any] = {"channel": self._channel, "thread_ts": self._thread_ts}
+        if error:
+            kwargs["attachments"] = notice_attachments(text)
+        else:
+            kwargs["text"] = text
         if blocks is not None:
             kwargs["blocks"] = blocks
         resp = await post_as_agent(self._client, self._identity, **kwargs)
@@ -574,14 +583,8 @@ class SlackTurnLifecycle:
         """
         self._terminal = True
         await self._post_or_update(
-            [
-                {"type": "section", "text": {"type": "mrkdwn", "text": "Stopped."}},
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": "Send a message to start again."},
-                },
-            ],
-            "Stopped. Send a message to start again.",
+            error_blocks(_STOPPED_TITLE, _STOPPED_NEXT_STEP),
+            f"{_STOPPED_TITLE} {_STOPPED_NEXT_STEP}",
         )
 
     async def end_unstarted(self, *, stopped: bool, text: str = QUEUE_TIMED_OUT_TEXT) -> None:
@@ -640,7 +643,15 @@ class SlackTurnLifecycle:
         # terminal collapse (cost/usage Details, no cancel button) — matches the
         # Discord parity reference. Without this the status would render as still
         # running and the Details metrics would never appear.
-        self._state = update(self._state, EmbedEvent(kind="done", label=""))
+        cancelled = state.termination == TerminationReason.INTERRUPTED
+        if cancelled:
+            # The agent's partial text stays as it was; the card says it stopped.
+            self._state = update(self._state, EmbedEvent(kind="error", label=_STOPPED_TITLE))
+            self._state = dataclasses.replace(
+                self._state, notice=_STOPPED_NEXT_STEP, notice_title=_STOPPED_TITLE
+            )
+        else:
+            self._state = update(self._state, EmbedEvent(kind="done", label=""))
         self._apply_usage(state)
         await self._apply_balance()
         # Flipped after the status message is successfully replaced with final
@@ -661,14 +672,11 @@ class SlackTurnLifecycle:
             if final_response:
                 answer_parts.append(final_response)
             final_text = "\n\n".join(answer_parts)
-            cancelled = state.termination == TerminationReason.INTERRUPTED
             notify_on_completion = self._notify_on_completion and not cancelled
-            if cancelled:
-                if not final_text:
-                    await self._flush_cancelled()
-                    self.final_ts = self._status_ts
-                    return
-                final_text = f"{final_text}\n\nStopped.\nSend a message to start again."
+            if cancelled and not final_text:
+                await self._flush_cancelled()
+                self.final_ts = self._status_ts
+                return
             if not final_text:
                 # No final answer. A tool-only turn keeps the collapsed done
                 # footer; a truly empty turn (cancellation) shows "Turn

@@ -15,9 +15,11 @@ from typing import Any, Literal
 
 import pytest
 from daimon.adapters.slack.blockkit import (
+    ERROR_COLOR,
     EmbedEvent,
     State,
     TurnPhase,
+    notice_attachments,
     to_blocks,
     to_fallback_text,
     to_interrupted_blocks,
@@ -318,8 +320,24 @@ class TestToBlocks:
         assert context_blocks, "ERROR state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
         assert summary_text == "Atlas\u2003\u20035s"
-        assert blocks[0]["text"]["text"] == "Something went wrong."
+        assert blocks[0]["text"]["text"] == "❌ *Something went wrong.*", "cross-led bold title"
         assert "rate limited" not in str(blocks)
+
+    def test_error_under_an_answer_is_set_off_by_a_rule(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.ERROR),
+            notice="Send a message to start again.",
+            notice_title="Stopped.",
+        )
+        blocks = to_blocks(state, now=5.0, answer_visible=True)
+        assert [block["type"] for block in blocks[:3]] == ["divider", "section", "section"]
+        assert blocks[1]["text"]["text"] == "❌ *Stopped.*"
+
+    def test_notice_attachment_is_a_red_bar_with_no_top_level_text(self) -> None:
+        (attachment,) = notice_attachments("It's 11 MB & too big.")
+        assert attachment["color"] == ERROR_COLOR
+        assert attachment["fallback"] == "It's 11 MB & too big."
+        assert attachment["blocks"][0]["text"]["text"] == "It's 11 MB &amp; too big."
 
     def test_error_uses_notice_next_step_once(self) -> None:
         state = replace(

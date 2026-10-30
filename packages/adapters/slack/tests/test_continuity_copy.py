@@ -722,8 +722,10 @@ async def test_pending_posts_must_finish_copy_after_the_answer(
         if url == URL("https://slack.com/api/chat.postMessage")
         for req in reqs
     ]
-    texts = [p.kwargs["json"]["text"] for p in posts]
-    assert render_current_work_must_finish("uat-agent", handoff=False) in texts
+    notices = [attachment for p in posts for attachment in p.kwargs["json"].get("attachments", [])]
+    assert [(a["color"], a["blocks"][0]["text"]["text"]) for a in notices] == [
+        ("#ED4245", render_current_work_must_finish("uat-agent", handoff=False))
+    ], "the must-finish line is a red-barred notice after the answer, not plain text"
 
 
 async def test_session_busy_renders_must_finish_copy_and_does_not_run_turn(
