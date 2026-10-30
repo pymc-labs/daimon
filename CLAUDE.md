@@ -23,6 +23,15 @@ notices, tool results the model relays) is dumb simple:
 - Everyday words, the same on every platform: no internal terms, no " · " separators.
 - A refusal names who can help ("Ask an admin or an owner").
 
+Errors and notices are never hardcoded text in or beside the agent's reply:
+
+- A failure while a turn runs goes to the agent (`daimon.core.turn.agent_notices`,
+  the turn controls), which decides whether and how to tell the person.
+- A failure that stops or prevents a turn, or happens with no turn running, is
+  the platform's error card (Discord embed, Slack blocks, Teams card), never plain text.
+
+`tests/parity/test_agent_notices.py` records the first rule.
+
 `tests/parity/test_plain_words.py` and `tests/parity/test_plain_words_parity.py`
 enforce the words and the separators; Daimon's own prompt carries the setup part
 (`defaults/agents/daimon.yaml`).
