@@ -434,10 +434,14 @@ class DiscordDriver:
         for call in thread.send.call_args_list:
             if call.args and isinstance(call.args[0], str):
                 posted.append(call.args[0])
+            if embed := call.kwargs.get("embed"):
+                posted.append(embed.description)
         for call in message_ref.edit.call_args_list:
             content = call.kwargs.get("content")
             if isinstance(content, str):
                 posted.append(content)
+            if embed := call.kwargs.get("embed"):
+                posted.append(embed.description)
         return posted
 
     def expected_blocked_text(self, kind: Literal["balance", "cap"]) -> str:

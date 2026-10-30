@@ -189,8 +189,12 @@ def _extract_posted_texts(mock: AioResponsesMock) -> list[str]:
             req_kwargs = cast(dict[str, Any], req.kwargs)  # pyright: ignore[reportUnknownMemberType]
             body = cast(dict[str, Any], req_kwargs.get("json") or {})
             text = cast(Any, body.get("text"))
-            if isinstance(text, str):
+            if isinstance(text, str) and text:
                 posted.append(text)
+            for attachment in cast(list[dict[str, Any]], body.get("attachments") or []):
+                fallback = attachment.get("fallback")
+                if isinstance(fallback, str):
+                    posted.append(fallback)
     return posted
 
 
