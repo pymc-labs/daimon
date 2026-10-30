@@ -94,7 +94,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             agents = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
             matches = [row for row in agents if row.name.casefold() == name.casefold()]
             if len(matches) != 1:
-                await reply("Choose one current agent.", error=False)
+                await reply("Choose one current agent.")
                 return
             target_name = matches[0].name
             target_ma_id = str(matches[0].id)

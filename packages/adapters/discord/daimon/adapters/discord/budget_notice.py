@@ -42,7 +42,7 @@ def discord_budget_notifier(
             try:
                 dm = await open_dm(int(notice.workspace_id), int(user_id))
                 await dm.send(
-                    embed=build_notice_embed(text, neutral=True),
+                    embed=build_notice_embed(text),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 delivered += 1

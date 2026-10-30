@@ -32,9 +32,10 @@ GITHUB_KEY_RESTART_NOTICE = (
     "Earlier messages are still in the chat; unsaved work from before is gone."
 )
 
+# Files carry over only when the new agent may read them, so this never promises them.
 HANDED_OVER_NOTICE = (
-    "Someone here handed this conversation over to you. Its messages and working files "
-    "came across; you answer with your own keys, connections and memory."
+    "Someone here handed this conversation over to you. "
+    "You answer with your own keys, connections and memory."
 )
 
 LOST_WORKSPACE_NOTICE = (

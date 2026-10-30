@@ -163,12 +163,22 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
 
     assert "Nothing was changed" in json.dumps(answer), "only the clicker is told why"
     assert responder is None, "no binding was written"
+    async with db_session_factory.begin() as session:
+        notices = await take_agent_notices(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            thread_id=THREAD_ID,
+            agent_id="ag_research",
+            since=datetime.now(UTC) - timedelta(hours=1),
+        )
+    assert notices == [], "a refused click tells the agent nothing"
 
 
 async def test_a_click_in_a_1_1_chat_hands_over_the_chat(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    _, responder = await _hand_over(
+    answer, responder = await _hand_over(
         db_session_factory,
         teams_api_fake,
         click=make_card_action(VERB, "hand_over", agent="ag_research"),
@@ -177,6 +187,7 @@ async def test_a_click_in_a_1_1_chat_hands_over_the_chat(
     )
 
     assert responder == "ag_research", "the chat itself is the conversation handed over"
+    assert "answers in this conversation" in json.dumps(answer), "a card with no offer: a pop-up"
 
 
 async def test_a_channel_click_without_its_notice_writes_nothing(

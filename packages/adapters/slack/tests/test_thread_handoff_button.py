@@ -153,3 +153,13 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
             default=_DEFAULT,
         )
     assert routed.thread_binding_id is None
+    async with db_session_factory.begin() as session:
+        notices = await take_agent_notices(
+            session,
+            tenant_id=tenant.id,
+            platform="slack",
+            thread_id=_THREAD_TS,
+            agent_id="ag_research",
+            since=datetime.now(UTC) - timedelta(hours=1),
+        )
+    assert notices == [], "a refused click tells the agent nothing"

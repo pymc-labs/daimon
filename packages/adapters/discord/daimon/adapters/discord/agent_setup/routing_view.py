@@ -515,8 +515,11 @@ class RoutingView(PanelViewBase):
             )
             return
         await self.swap_to(interaction, routing)
+        # A saved pick, or one awaiting confirmation, names the channel; a refusal does not.
+        channel = self.state.channel_name
+        named = f"<#{self.state.channel_id}>" in note or bool(channel and f"#{channel}" in note)
         await interaction.followup.send(
-            embed=build_notice_embed(note, neutral=True),
+            embed=build_notice_embed(note, neutral=named),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )

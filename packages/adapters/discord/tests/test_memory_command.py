@@ -207,7 +207,8 @@ async def _say(runtime, *, user_id: int, path: str | None) -> str:
     await cog.memory.callback(cog, interaction, path=path)
     sent = interaction.followup.send.call_args
     assert sent.kwargs.get("ephemeral") is True
-    return sent.args[0]
+    # Memory itself is plain text; Daimon's own words come as a card.
+    return sent.args[0] if sent.args else sent.kwargs["embed"].description
 
 
 async def test_memory_mine_shows_only_the_invokers_own_personal_memory(

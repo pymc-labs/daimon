@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from daimon.core.stores.agent_notices import record_agent_notices, take_agent_notices
 from daimon.testing.factories import make_tenant
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -47,3 +48,20 @@ async def test_another_agents_notices_wait_for_it(db_session: AsyncSession) -> N
     assert await take_agent_notices(db_session, **where, agent_id="a2", since=since) == []
     taken = await take_agent_notices(db_session, **where, agent_id="a1", since=since)
     assert taken == ["first's"], "the first agent still gets its own"
+
+
+async def test_a_text_queued_again_counts_from_then(db_session: AsyncSession) -> None:
+    """A repeat hand-over is news again, even when an older copy went stale unread."""
+    tenant = await make_tenant(db_session)
+    where = {"tenant_id": tenant.id, "platform": "slack", "thread_id": "t1", "agent_id": "a1"}
+    await record_agent_notices(db_session, **where, texts=["handed over"])
+    await db_session.execute(
+        text(
+            "UPDATE agent_notices SET created_at = now() - interval '2 days' WHERE tenant_id = :t"
+        ),
+        {"t": tenant.id},
+    )
+    await record_agent_notices(db_session, **where, texts=["handed over"])
+
+    since = datetime.now(UTC) - timedelta(days=1)
+    assert await take_agent_notices(db_session, **where, since=since) == ["handed over"]

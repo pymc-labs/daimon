@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from daimon.core._models import AgentNotice
-from sqlalchemy import delete, or_
+from sqlalchemy import delete, func, or_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +21,7 @@ async def record_agent_notices(
     agent_id: str,
     texts: Sequence[str],
 ) -> None:
-    """Queue notices for the agent's next turn here; a text already waiting is kept once."""
+    """Queue notices for the agent's next turn here; a text already waiting is kept once, as new."""
     if not texts:
         return
     rows = [
@@ -34,7 +34,13 @@ async def record_agent_notices(
         }
         for text in dict.fromkeys(texts)
     ]
-    await session.execute(insert(AgentNotice).values(rows).on_conflict_do_nothing())
+    await session.execute(
+        insert(AgentNotice)
+        .values(rows)
+        .on_conflict_do_update(
+            constraint="uq_agent_notices_thread_agent_text", set_={"created_at": func.now()}
+        )
+    )
 
 
 async def take_agent_notices(

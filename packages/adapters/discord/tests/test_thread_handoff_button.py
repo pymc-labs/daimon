@@ -150,6 +150,16 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
             thread_id=str(_THREAD),
         )
     assert binding is None
+    async with db_session_factory.begin() as session:
+        notices = await take_agent_notices(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=str(_THREAD),
+            agent_id="ag_research",
+            since=datetime.now(UTC) - timedelta(hours=1),
+        )
+    assert notices == [], "a refused click tells the agent nothing"
 
 
 async def test_a_click_removes_a_webhook_cards_button(

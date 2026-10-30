@@ -214,11 +214,18 @@ class MemoryCog(commands.Cog):
                     scope=resource_scope(tenant_id=str(agent.tenant_id)),
                     held=agent.hold is not None,
                 )
-                await interaction.followup.send(
-                    _personal_text(reply),
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                # Memory itself is plain text; Daimon's own words are a card.
+                text = _personal_text(reply)
+                if reply.content is not None or reply.paths:
+                    await interaction.followup.send(
+                        text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+                    )
+                else:
+                    await interaction.followup.send(
+                        embed=build_notice_embed(text, neutral=not reply.error),
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
                 return
             resolved = await _resolve_store(runtime, interaction)
             if resolved is None:
