@@ -24,6 +24,8 @@ from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conftest import shown_text
+
 
 async def test_a_pinned_target_is_refused_before_the_form_is_consumed(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
@@ -79,7 +81,7 @@ async def test_a_pinned_target_is_refused_before_the_form_is_consumed(
     )
 
     assert row is None
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == PIN_WRITE_REFUSAL
+    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == PIN_WRITE_REFUSAL
     async with db_session_factory() as session:
         live = await peek_credential_request(session, token="tok-pin")
     assert live is not None and live.used_at is None, "nothing was consumed or written"

@@ -118,6 +118,7 @@ async def start_mcp_oauth_from_click(
             user_id=user_id,
             text=_UNCONFIGURED_OAUTH,
             thread_ts=thread_ts,
+            error=True,
         )
         return
     try:
@@ -131,13 +132,19 @@ async def start_mcp_oauth_from_click(
             user_id=user_id,
             text="I couldn't verify this agent. Nothing was saved; please try again.",
             thread_ts=thread_ts,
+            error=True,
         )
         return
     async with runtime.sessionmaker() as session:
         pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
     if pin_refusal is not None:
         await post_ephemeral(
-            client, channel_id=channel_id, user_id=user_id, text=pin_refusal, thread_ts=thread_ts
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=pin_refusal,
+            thread_ts=thread_ts,
+            error=True,
         )
         return
     now = datetime.now(UTC)
@@ -152,6 +159,7 @@ async def start_mcp_oauth_from_click(
             user_id=user_id,
             text=refused.refusal,
             thread_ts=thread_ts,
+            error=True,
         )
         return
     if consumed is None or flow is None:
@@ -161,6 +169,7 @@ async def start_mcp_oauth_from_click(
             user_id=user_id,
             text=NO_LONGER_VALID_MESSAGE,
             thread_ts=thread_ts,
+            error=True,
         )
         return
     # Same as Discord: the spent row's card stops offering a live button.
@@ -249,7 +258,11 @@ async def handle_credential_request_click(runtime: SlackRuntime, payload: dict[s
         refusal = ALREADY_USED_MESSAGE
     if refusal is not None or row is None:
         await post_ephemeral(
-            client, channel_id=channel_id, user_id=user_id, text=refusal or NO_LONGER_VALID_MESSAGE
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=refusal or NO_LONGER_VALID_MESSAGE,
+            error=True,
         )
         if is_expired and row is not None:
             # Opportunistic, and the only sweep there is: nothing walks

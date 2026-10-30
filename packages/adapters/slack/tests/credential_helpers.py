@@ -40,6 +40,7 @@ from mux.testing.drivers.anthropic.ma import (
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conftest import shown_text
 from .harness import build_slack_runtime
 
 _TEAM_ID = "T_CRED"
@@ -187,7 +188,7 @@ def _build_runtime(
 
 def _ephemeral_texts(fake_slack_web_client: Any) -> list[str]:
     posts = fake_slack_web_client.mock.requests.get(("POST", _EPHEMERAL_URL), [])
-    return [str((p.kwargs.get("json") or {}).get("text") or "") for p in posts]
+    return [shown_text(p.kwargs.get("json") or {}) for p in posts]
 
 
 def _agents_handler(live_agent: Any) -> Callable[[httpx.Request], httpx.Response]:

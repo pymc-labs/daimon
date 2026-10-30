@@ -82,7 +82,9 @@ async def test_an_unknown_action_shows_the_usage_lines(monkeypatch: pytest.Monke
         MagicMock(), {"team_id": "T1", "user_id": "U1", "channel_id": "C020", "text": "help"}
     )
 
-    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == (
+    sent = client.chat_postEphemeral.await_args.kwargs
+    assert "text" not in sent and sent["attachments"]
+    assert shown_text(sent) == (
         "That option isn't recognized.\n\n"
         "Run `/dm-me` in a channel to continue privately. "
         "Admins: `/dm-me enable` or `/dm-me disable`."

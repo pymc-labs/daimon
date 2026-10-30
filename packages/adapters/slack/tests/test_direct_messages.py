@@ -46,7 +46,9 @@ async def test_dm_policy_replies_use_workspace_words(
         runtime,
         {"team_id": _TEAM, "user_id": "U1", "channel_id": _CHANNEL, "text": action},
     )
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == expected
+    sent = client.chat_postEphemeral.await_args.kwargs
+    assert shown_text(sent) == expected
+    assert ("attachments" in sent) is (role is Role.USER)
     assert save.await_count == (1 if role is Role.ADMIN else 0)
 
 

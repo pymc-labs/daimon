@@ -65,6 +65,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conftest import shown_text
 from .harness import build_slack_runtime
 
 # ---------------------------------------------------------------------------
@@ -436,7 +437,8 @@ async def test_a_voter_who_could_not_ask_here_records_nothing_and_is_told(
     assert "callback_id" not in update["view"], "the open form is replaced, not left to submit"
     assert update["view"]["blocks"][0]["text"]["text"] == "You can't leave feedback on this answer."
     (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
-    assert ephemeral["text"] == "You can't leave feedback on this answer.", (
+    assert "attachments" in ephemeral
+    assert shown_text(ephemeral) == "You can't leave feedback on this answer.", (
         "the up-vote is told too"
     )
 
@@ -572,7 +574,7 @@ async def test_a_refused_submitter_records_nothing(
 
     assert await _rows(db_session_factory) == []
     (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
-    assert ephemeral["text"] == "You can't leave feedback on this answer."
+    assert shown_text(ephemeral) == "You can't leave feedback on this answer."
 
 
 async def test_a_form_opened_before_this_change_writes_nothing_and_says_start_again(
@@ -595,7 +597,7 @@ async def test_a_form_opened_before_this_change_writes_nothing_and_says_start_ag
     assert row["vote"] == "down", "the click-time vote stands"
     assert row["feedback_text"] is None
     (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
-    assert "expired" in ephemeral["text"]
+    assert "expired" in shown_text(ephemeral)
 
 
 async def test_a_views_open_timeout_still_records_the_vote_and_offers_the_button(
@@ -701,7 +703,7 @@ async def test_an_external_member_cannot_vote_on_another_answer_or_one_that_does
     assert _calls(fake_slack_web_client, _VIEWS_OPEN_URL) == [], "no form opens"
     (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
     assert ephemeral["user"] == _EXTERNAL_USER
-    assert "can't leave feedback" in ephemeral["text"]
+    assert "can't leave feedback" in shown_text(ephemeral)
 
 
 async def test_an_internal_member_still_votes_on_any_answer(

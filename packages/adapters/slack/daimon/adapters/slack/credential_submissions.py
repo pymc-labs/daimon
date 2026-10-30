@@ -23,7 +23,7 @@ import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Final
+from typing import Any, Final
 
 import anthropic
 import httpx
@@ -41,6 +41,7 @@ from daimon.adapters.slack.agent_setup.write import (
     load_agent_inline_pat,
     store_inline_pat,
 )
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.credential_forms import refusal_text
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
@@ -150,9 +151,15 @@ async def post_ephemeral(
     user_id: str,
     text: str,
     thread_ts: str | None = None,
+    error: bool = False,
 ) -> None:
+    """A message only ``user_id`` sees; ``error`` posts a refusal as the red notice card."""
+    fields: dict[str, Any] = notice_fields(text) if error else {"text": text}
     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
-        channel=channel_id, user=user_id, text=text, thread_ts=thread_ts
+        channel=channel_id,
+        user=user_id,
+        thread_ts=thread_ts,
+        **fields,
     )
 
 
@@ -351,7 +358,11 @@ async def _validate_submission(
         or row.kind != kind
     ):
         await post_ephemeral(
-            client, channel_id=channel_id, user_id=user_id, text=NO_LONGER_VALID_MESSAGE
+            client,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=NO_LONGER_VALID_MESSAGE,
+            error=True,
         )
         return None
     if row.used_at is not None or row.expires_at <= datetime.now(UTC):
@@ -361,6 +372,7 @@ async def _validate_submission(
             thread_ts=row.origin_thread_id,
             user_id=user_id,
             text=NO_LONGER_VALID_MESSAGE,
+            error=True,
         )
         return None
     agent = await find_agent_by_derived_uuid(
@@ -375,6 +387,7 @@ async def _validate_submission(
             thread_ts=row.origin_thread_id,
             user_id=user_id,
             text=AGENT_GONE_MESSAGE,
+            error=True,
         )
         return None
     async with runtime.sessionmaker() as session:
@@ -386,6 +399,7 @@ async def _validate_submission(
             thread_ts=row.origin_thread_id,
             user_id=user_id,
             text=pin_refusal,
+            error=True,
         )
         return None
     return row, agent
@@ -456,6 +470,7 @@ async def run_env_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=_env_name_refusal(request.target, name_problem),
+            error=True,
         )
         return
 
@@ -478,13 +493,19 @@ async def run_env_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=refused.refusal,
+            error=True,
         )
         return
     except AgentEnvEncryptionRequiredError as err:
         # Rolled back with the consume: nothing stored, the request stays live.
         log.error("credential_request.env_write_refused_no_crypto_keys")
         await post_ephemeral(
-            client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=str(err),
+            error=True,
         )
         return
     except Exception as exc:
@@ -499,6 +520,7 @@ async def run_env_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text="Something went wrong — please try again.",
+            error=True,
         )
         return
 
@@ -509,6 +531,7 @@ async def run_env_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=NO_LONGER_VALID_MESSAGE,
+            error=True,
         )
         return
 
@@ -532,6 +555,7 @@ async def run_env_credential_submission(
             text=refusal_text(
                 consumed, state="refused", refusal="replacement_admin_required", replaces=shadowed
             ),
+            error=True,
         )
         return
     if state == "superseded":
@@ -542,6 +566,7 @@ async def run_env_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=refusal_text(consumed, state="superseded"),
+            error=True,
         )
         return
 
@@ -678,6 +703,7 @@ async def run_env_file_credential_submission(
                 f"I could not read that upload, so nothing was saved for {agent_name}. "
                 "Attach the file again."
             ),
+            error=True,
         )
         return
 
@@ -698,6 +724,7 @@ async def run_env_file_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=render_env_import_rejected(err.rejection, err.problems, target_name=agent_name),
+            error=True,
         )
         return
 
@@ -713,13 +740,19 @@ async def run_env_file_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=refused.refusal,
+            error=True,
         )
         return
     except AgentEnvEncryptionRequiredError as err:
         # Rolled back with the consume: nothing stored, the request stays live.
         log.error("credential_request.env_file_refused_no_crypto_keys")
         await post_ephemeral(
-            client, thread_ts=thread_ts, channel_id=channel_id, user_id=user_id, text=str(err)
+            client,
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            user_id=user_id,
+            text=str(err),
+            error=True,
         )
         return
     except Exception as exc:
@@ -739,6 +772,7 @@ async def run_env_file_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text="Something went wrong — please try again.",
+            error=True,
         )
         return
     if consumed is None:
@@ -748,6 +782,7 @@ async def run_env_file_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=NO_LONGER_VALID_MESSAGE,
+            error=True,
         )
         return
 
@@ -774,6 +809,7 @@ async def run_env_file_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text="\n".join((f"No keys were saved for {agent_name}.", *lines)),
+            error=True,
         )
         return
 
@@ -866,6 +902,7 @@ async def _refuse_mcp_replacement(
             f"{row.target_name or 'The agent'} already has this connection. Nothing was saved."
             "\n\nOnly a workspace admin can replace it."
         ),
+        error=True,
     )
 
 
@@ -919,6 +956,7 @@ async def run_mcp_credential_submission(
                 "Daimon isn't fully set up yet. Ask the operator to finish "
                 "setup, then try again. Nothing was saved."
             ),
+            error=True,
         )
         return
 
@@ -937,6 +975,7 @@ async def run_mcp_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=refused.refusal,
+            error=True,
         )
         return
     if consumed is None:
@@ -946,6 +985,7 @@ async def run_mcp_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=NO_LONGER_VALID_MESSAGE,
+            error=True,
         )
         return
 
@@ -986,6 +1026,7 @@ async def run_mcp_credential_submission(
                 channel_id=channel_id,
                 user_id=user_id,
                 text="This request is missing its server URL — please ask again.",
+                error=True,
             )
             return
 
@@ -1007,6 +1048,7 @@ async def run_mcp_credential_submission(
                 channel_id=channel_id,
                 user_id=user_id,
                 text=rejected_token_message(rejection),
+                error=True,
             )
             return
         try:
@@ -1054,6 +1096,7 @@ async def run_mcp_credential_submission(
                     f"`{mcp_server_url}` could not be attached to "
                     "the agent. Nothing was saved. Try again using the same form."
                 ),
+                error=True,
             )
             return
         except McpTokenWriteFailedError as err:
@@ -1090,6 +1133,7 @@ async def run_mcp_credential_submission(
                     f"`{mcp_server_url}` is attached, but storing its token did not finish. "
                     "Try again using the same form."
                 ),
+                error=True,
             )
             return
 
@@ -1308,6 +1352,7 @@ async def _report_skill_repo_failure(
                 "Skill setup failed before token storage could be confirmed. "
                 "Try again using the same form."
             ),
+            error=True,
         )
         return
     await settle_credential_submit(
@@ -1339,6 +1384,7 @@ async def _report_skill_repo_failure(
         channel_id=channel_id,
         user_id=user_id,
         text="Token stored, but skill setup did not finish. Try again using the same form.",
+        error=True,
     )
 
 
@@ -1413,6 +1459,7 @@ async def run_skill_repo_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=refused.refusal,
+            error=True,
         )
         return
     if consumed is None:
@@ -1422,6 +1469,7 @@ async def run_skill_repo_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=NO_LONGER_VALID_MESSAGE,
+            error=True,
         )
         return
 
@@ -1466,6 +1514,7 @@ async def run_skill_repo_credential_submission(
                         f"That token cannot read `{owner_repo}`. Nothing was "
                         "stored. Try again using the same form."
                     ),
+                    error=True,
                 )
                 return
             ma_secret_ref, proof = await _resolve_repo_binding_credential(
@@ -1664,6 +1713,7 @@ async def run_repo_bind_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=refused.refusal,
+            error=True,
         )
         return
     if consumed is None:
@@ -1673,6 +1723,7 @@ async def run_repo_bind_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=NO_LONGER_VALID_MESSAGE,
+            error=True,
         )
         return
 
@@ -1724,6 +1775,7 @@ async def run_repo_bind_credential_submission(
                 channel_id=channel_id,
                 user_id=user_id,
                 text=("Repository access could not be saved. Try again using the same form."),
+                error=True,
             )
             return
         except Exception as err:
@@ -1738,6 +1790,7 @@ async def run_repo_bind_credential_submission(
                 channel_id=channel_id,
                 user_id=user_id,
                 text=("Linking the working repo failed. Try again using the same form."),
+                error=True,
             )
             return
 

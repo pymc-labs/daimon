@@ -166,9 +166,10 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             client, user_id=user_id, team_id=team_id, require_im_scopes=action != "disable"
         )
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        reply = refusal = None
         if action in {"enable", "disable"}:
             if role is not Role.ADMIN:
-                reply = "Only a workspace admin can turn Daimon DMs on or off here."
+                refusal = "Only a workspace admin can turn Daimon DMs on or off here."
             else:
                 async with runtime.sessionmaker.begin() as session:
                     await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
@@ -246,12 +247,15 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             )
             reply = "Ready in your DMs."
         else:
-            reply = (
+            refusal = (
                 "That option isn't recognized.\n\n"
                 "Run `/dm-me` in a channel to continue privately. "
                 "Admins: `/dm-me enable` or `/dm-me disable`."
             )
-        await client.chat_postEphemeral(channel=channel_id, user=user_id, text=reply)  # pyright: ignore[reportUnknownMemberType]
+        fields: dict[str, Any] = notice_fields(refusal) if refusal else {"text": reply}
+        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+            channel=channel_id, user=user_id, **fields
+        )
     except _ERRORS as exc:
         log.warning("slack.dm.command_failed", error_type=type(exc).__name__)
         if client is not None:
