@@ -287,7 +287,8 @@ class RunOutcome:
     `transfer_kind` then says how much of the old session could be rescued --
     `transcript` when its event log was still readable, `history` when it was
     not -- and `user_prefix` / `system_blocks` are what the replacement was
-    actually told, not what the overtaken bind had decided.
+    actually told, not what the overtaken bind had decided. `loss_told`: the
+    replacement was sent that framing (or an earlier turn's, when adopted).
     """
 
     state: TurnState
@@ -295,6 +296,7 @@ class RunOutcome:
     mapping_id: uuid.UUID | None
     recovered: bool
     continuity: ContinuityOutcome = ContinuityOutcome()
+    loss_told: bool = False
 
     @property
     def termination(self) -> TerminationReason:
@@ -1124,9 +1126,9 @@ async def run_prepared_turn(
     if origin in _CHAT_RENDERED_ORIGINS:
         # No backend takes input mid-turn, so the agent hears on the thread's
         # next turn of servers MA dropped from an answered reply, and of a lost
-        # workspace whose successor may never have been sent its framing.
+        # workspace whose successor was never sent its framing.
         failed = result.state.error is not None
-        lost = failed and result.continuity.state == "replaced_after_loss"
+        lost = failed and result.continuity.state == "replaced_after_loss" and not result.loss_told
         await _queue_agent_notices(
             deps,
             [
@@ -1612,6 +1614,8 @@ async def run_prepared_turn_impl(
                         + await briefing(recovery.admission or prepared.admission, fresh_cancel),
                         reseed,
                     )
+                    mark = SEND_ATTEMPTED.get()
+                    sends_before = len(mark) if mark is not None else 0
                     recovered_state = await run_turn(
                         **_turn_port_kwargs(
                             deps,
@@ -1655,6 +1659,7 @@ async def run_prepared_turn_impl(
             mapping_id=new_mapping_id,
             recovered=True,
             continuity=continuity_cell[0],
+            loss_told=recovery.adopted or (mark is not None and len(mark) > sends_before),
         )
 
     async def _run_within_ceiling() -> RunOutcome:

@@ -2474,6 +2474,7 @@ async def test_recovery_reports_a_replacement_after_loss_and_keeps_the_framing_p
     assert outcome.continuity.state == "replaced_after_loss", (
         "the session was lost, so the copy must not claim a planned replacement"
     )
+    assert outcome.loss_told, "the replacement was sent its loss framing"
     assert outcome.continuity.transfer_kind == "history", (
         "a deleted session's log is gone too (P9.e), so nothing but the thread crossed"
     )

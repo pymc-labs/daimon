@@ -82,13 +82,16 @@ async def test_the_next_turn_takes_queued_notices_in_front_of_its_message(
     assert again_reseed is reseed, "and the reseed is untouched"
 
 
-def _outcome(state: TurnState, continuity: ContinuityOutcome | None = None) -> Any:
+def _outcome(
+    state: TurnState, continuity: ContinuityOutcome | None = None, *, loss_told: bool = False
+) -> Any:
     return run_module.RunOutcome(
         state=state,
         ma_session_id="sess",
         mapping_id=None,
         recovered=False,
         continuity=continuity or ContinuityOutcome(),
+        loss_told=loss_told,
     )
 
 
@@ -185,3 +188,13 @@ async def test_a_failed_turn_after_a_lost_workspace_queues_the_loss_not_the_serv
     lost = ContinuityOutcome(state="replaced_after_loss", transfer_kind="history")
     queued = await _run(monkeypatch, _outcome(failed, lost), sent=True)
     assert queued == [[LOST_WORKSPACE_NOTICE]], "only the loss; the card covered the failure"
+
+
+async def test_a_failed_turn_whose_replacement_heard_of_the_loss_queues_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement was sent its loss framing; telling it again would repeat it."""
+    failed = TurnState(error=TurnError(kind="upstream", message="boom"))
+    lost = ContinuityOutcome(state="replaced_after_loss", transfer_kind="history")
+    queued = await _run(monkeypatch, _outcome(failed, lost, loss_told=True), sent=True)
+    assert queued == [[]], "no loss notice the agent already had"
