@@ -12,8 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaced workspace, a GitHub key restart and skipped images reach the agent as a short note
   in front of a message, and the agent decides whether and how to tell the person.
   A failure that stops a turn, or happens with no turn running, shows as an error card: a red
-  embed on Discord, a red block on Slack, a red container on Teams. "Stopped." moves from the
-  reply text to the card. Migration 0147 adds the per-thread queue of notices.
+  embed on Discord, a red bar on Slack, a red container on Teams. That covers stops, failed
+  and queued turns, setup and capacity refusals, and command errors. "Stopped." moves from the
+  reply text to the card. Information that is not a failure, such as a settings change that
+  waits for the next message, is a neutral card. Migration 0147 adds the queue of notices.
 - A long reply no longer ends "Lost the connection" because its connection dropped twice. A reconnect that brings new parts of the reply now resets the count, so only two drops in a row with nothing new between them end it.
 - A turn whose AI service sends nothing for 5, 10, 15 or 30 minutes logs `turn.would_stall` once per step, per backend, saying whether a tool call was open, to measure how long healthy replies go quiet. It changes nothing about how a turn ends.
 - Turn log lines name the backend, profile and model they ran on, and `turn.user_failure` carries `backend`, so failures and lost connections can be counted and alerted on per backend.
