@@ -724,8 +724,8 @@ async def test_pending_posts_must_finish_copy_after_the_answer(
     ]
     notices = [attachment for p in posts for attachment in p.kwargs["json"].get("attachments", [])]
     assert [(a["color"], a["blocks"][0]["text"]["text"]) for a in notices] == [
-        ("#ED4245", render_current_work_must_finish("uat-agent", handoff=False))
-    ], "the must-finish line is a red-barred notice after the answer, not plain text"
+        ("#5865F2", render_current_work_must_finish("uat-agent", handoff=False))
+    ], "the must-finish line is a neutral-barred notice after the answer, not a red error"
 
 
 async def test_session_busy_renders_must_finish_copy_and_does_not_run_turn(

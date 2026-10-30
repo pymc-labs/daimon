@@ -3118,7 +3118,7 @@ class SlackApp:
             if prepared.continuity.pending:
                 await final_lifecycle.post_notice(
                     render_current_work_must_finish(admission.agent.name, handoff=False),
-                    error=True,
+                    neutral=True,
                 )
 
             # This turn's own marker is cleared BEFORE anything is dispatched.

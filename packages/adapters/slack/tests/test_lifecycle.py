@@ -1231,6 +1231,21 @@ async def test_a_notice_that_fails_to_build_still_draws_the_error_card(
     assert not any("upstream timeout" in str(block) for block in blocks)
 
 
+async def test_end_unstarted_draws_the_error_card_for_a_queue_ending(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+
+    await lc.end_unstarted(stopped=False, text="Something went wrong. Mention me to try again.")
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert blocks[0]["text"]["text"] == "❌ *Something went wrong. Mention me to try again.*", (
+        "a queue ending is the error card, not a plain section"
+    )
+    assert not _has_actions_block(blocks), "the dead Stop button goes"
+
+
 async def test_the_card_reuses_the_rid_bound_for_the_turn(fake_slack_web_client: Any) -> None:
     lc, *_ = _make_lifecycle(fake_slack_web_client)
     await lc.post_initial()
@@ -1431,8 +1446,9 @@ async def test_terminal_success_flush_failure_repairs_status_message(
     )
     blocks = _last_update_blocks(fake_slack_web_client)
     assert "I couldn't send the full answer." in _block_text(blocks), (
-        "the repair must render a plain failure notice, not the live surface"
+        "the repair must render a failure notice, not the live surface"
     )
+    assert blocks[0]["text"]["text"].startswith("❌"), "the repair is the error card"
     assert not _has_actions_block(blocks), "the repair must not keep the dead cancel button"
     assert lc.final_ts is None, (
         "final_ts must stay unset — the watermark must not advance past an answer "
@@ -1559,8 +1575,9 @@ async def test_terminal_failure_flush_failure_repairs_status_message(
     )
     blocks = _last_update_blocks(fake_slack_web_client)
     assert "Something went wrong." in _block_text(blocks), (
-        "the repair must render a plain failure notice, not the live surface"
+        "the repair must render a failure notice, not the live surface"
     )
+    assert blocks[0]["text"]["text"].startswith("❌"), "the repair is the error card"
     assert not _has_actions_block(blocks), "the repair must not keep the dead cancel button"
     assert deregistered == ["1000000000.000001"], "deregister must still run in finally"
 

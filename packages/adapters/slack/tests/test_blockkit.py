@@ -16,9 +16,11 @@ from typing import Any, Literal
 import pytest
 from daimon.adapters.slack.blockkit import (
     ERROR_COLOR,
+    NEUTRAL_COLOR,
     EmbedEvent,
     State,
     TurnPhase,
+    error_blocks_from_text,
     notice_attachments,
     to_blocks,
     to_fallback_text,
@@ -338,6 +340,19 @@ class TestToBlocks:
         assert attachment["color"] == ERROR_COLOR
         assert attachment["fallback"] == "It's 11 MB & too big."
         assert attachment["blocks"][0]["text"]["text"] == "It's 11 MB &amp; too big."
+
+    def test_neutral_notice_attachment_is_not_red(self) -> None:
+        (attachment,) = notice_attachments("Still working.", neutral=True)
+        assert attachment["color"] == NEUTRAL_COLOR, "information gets the neutral bar"
+        assert attachment["color"] != ERROR_COLOR
+
+    def test_error_blocks_from_text_split_title_and_next_step(self) -> None:
+        blocks = error_blocks_from_text("Something went wrong.\n\nMention me to try again.")
+        assert [b["text"]["text"] for b in blocks] == [
+            "❌ *Something went wrong.*",
+            "Mention me to try again.",
+        ]
+        assert len(error_blocks_from_text("Too many chats.")) == 1, "one line is only a title"
 
     def test_error_uses_notice_next_step_once(self) -> None:
         state = replace(

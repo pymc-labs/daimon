@@ -81,6 +81,8 @@ _EMOJI_CROSS = "❌"  # ❌
 
 # Discord's error red, so the bar matches on every platform.
 ERROR_COLOR = "#ED4245"
+# Discord's blurple: the bar of a notice that is information, not a failure.
+NEUTRAL_COLOR = "#5865F2"
 
 _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 
@@ -112,8 +114,17 @@ def error_blocks(title: str, next_step: str) -> list[dict[str, Any]]:
     ]
 
 
-def notice_attachments(text: str) -> list[dict[str, Any]]:
-    """A red-barred attachment carrying one system notice, so it never reads as the agent's words.
+def error_blocks_from_text(text: str) -> list[dict[str, Any]]:
+    """An error card for a notice written as a title line, then the next step."""
+    title, _, next_step = text.strip().partition("\n")
+    if not next_step.strip():
+        return [error_title_block(title)]
+    return error_blocks(title, next_step.strip())
+
+
+def notice_attachments(text: str, *, neutral: bool = False) -> list[dict[str, Any]]:
+    """A red-barred (``neutral``: blurple) attachment carrying one system notice,
+    so it never reads as the agent's words.
 
     For a message posted on its own and never edited: the top-level ``text`` is
     left out (Slack would print it above the bar), and the attachment's
@@ -122,7 +133,7 @@ def notice_attachments(text: str) -> list[dict[str, Any]]:
     body = escape_mrkdwn(text)[:NOTICE_MAX_CHARS]
     return [
         {
-            "color": ERROR_COLOR,
+            "color": NEUTRAL_COLOR if neutral else ERROR_COLOR,
             "fallback": text,
             "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": body}}],
         }

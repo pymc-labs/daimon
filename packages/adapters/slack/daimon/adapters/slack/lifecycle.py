@@ -55,6 +55,7 @@ from daimon.adapters.slack.blockkit import (
     EmbedEvent,
     TurnPhase,
     error_blocks,
+    error_blocks_from_text,
     format_termination_notice,
     notice_attachments,
     to_blocks,
@@ -318,15 +319,21 @@ class SlackTurnLifecycle:
         self._state = dataclasses.replace(self._state, header_customized=customized)
 
     async def post_notice(
-        self, text: str, *, blocks: list[dict[str, Any]] | None = None, error: bool = False
+        self,
+        text: str,
+        *,
+        blocks: list[dict[str, Any]] | None = None,
+        error: bool = False,
+        neutral: bool = False,
     ) -> str:
         """Post a turn notice with the same header and ownership as its answer.
 
-        ``error`` posts it as a red-barred system notice instead of plain text.
+        ``error`` posts it as a red-barred system notice instead of plain text;
+        ``neutral`` as a blurple-barred one, for information that is not a failure.
         """
         kwargs: dict[str, Any] = {"channel": self._channel, "thread_ts": self._thread_ts}
-        if error:
-            kwargs["attachments"] = notice_attachments(text)
+        if error or neutral:
+            kwargs["attachments"] = notice_attachments(text, neutral=neutral)
         else:
             kwargs["text"] = text
         if blocks is not None:
@@ -595,15 +602,13 @@ class SlackTurnLifecycle:
             await self._flush_cancelled()
             return
         self._terminal = True
-        await self._post_or_update(
-            [{"type": "section", "text": {"type": "mrkdwn", "text": text}}], text
-        )
+        await self._post_or_update(error_blocks_from_text(text), text.replace("\n", " "))
 
     async def _repair_terminal_flush(self, text: str) -> None:
         """Best-effort collapse of the status message after a failed terminal flush.
 
         Replaces whatever the last debounced flush wrote — headline, tool
-        lines, cancel actions — with a plain failure notice. The cancel Event
+        lines, cancel actions — with the error card. The cancel Event
         is deregistered on every terminal path, so a status message left on the
         live surface shows a running turn with a dead cancel button forever.
         The repair can fail for the same reason as the flush (revoked token,
@@ -614,13 +619,7 @@ class SlackTurnLifecycle:
             return
         with contextlib.suppress(*_SLACK_SEND_ERRORS):
             # The status_ts guard above pins _post_or_update to its update branch.
-            await self._post_or_update(
-                [
-                    {"type": "section", "text": {"type": "mrkdwn", "text": line}}
-                    for line in text.splitlines()
-                ],
-                text.replace("\n", " "),
-            )
+            await self._post_or_update(error_blocks_from_text(text), text.replace("\n", " "))
 
     async def on_terminal_success(self, state: TurnState) -> None:
         """Replace status message with final answer; post overflow chunks; widen final_ts.
