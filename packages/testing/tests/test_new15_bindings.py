@@ -691,7 +691,9 @@ async def capture_run(
                             order=i,
                             observed_s=e.message.observed_s,
                             message_id=e.message.message_id,
-                            text=e.message.content,
+                            text="\n".join(
+                                t for t in (e.message.content, *e.message.embed_texts) if t
+                            ),
                         )
                         for i, e in enumerate(surface.gateway.events)
                     ),
