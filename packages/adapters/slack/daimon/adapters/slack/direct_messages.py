@@ -254,7 +254,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 "Admins: `/dm-me enable` or `/dm-me disable`."
             )
         fields: dict[str, Any] = (
-            notice_fields(refusal) if refusal else notice_fields(reply, neutral=True)
+            notice_fields(refusal) if refusal else notice_fields(reply or "", neutral=True)
         )
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id, user=user_id, **fields
