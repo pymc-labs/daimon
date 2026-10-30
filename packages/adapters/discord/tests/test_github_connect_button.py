@@ -96,9 +96,9 @@ async def test_another_member_is_told_who_to_ask_and_gets_no_link(
     bind.assert_not_awaited()
     audit.assert_not_awaited()
     interaction.guild.fetch_member.assert_not_awaited()
-    assert interaction.followup.send.await_args.args == ("Ask <@456> or an owner of ResearchBot.",)
     kwargs = interaction.followup.send.await_args.kwargs
-    assert kwargs["ephemeral"] is True and "view" not in kwargs and "embed" not in kwargs
+    assert kwargs["embed"].description == "Ask <@456> or an owner of ResearchBot."
+    assert kwargs["ephemeral"] is True and "view" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -154,8 +154,8 @@ async def test_an_owner_clicking_after_the_requester_lost_the_agent_is_refused(
     await button._reveal(interaction)  # pyright: ignore[reportPrivateUsage]
     bind.assert_not_awaited()
     audit.assert_not_awaited()
-    assert interaction.followup.send.await_args.args == (
-        "Ask whoever manages ResearchBot to add repos.",
+    assert interaction.followup.send.await_args.kwargs["embed"].description == (
+        "Ask whoever manages ResearchBot to add repos."
     )
 
 

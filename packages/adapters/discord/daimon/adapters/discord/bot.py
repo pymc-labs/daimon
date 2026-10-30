@@ -2773,7 +2773,11 @@ class DaimonBot(commands.Bot):
             )
         dm_sent = False
         try:
-            await message.author.send(protected_channel_notice(protection, channel_id=channel_id))
+            await message.author.send(
+                embed=build_notice_embed(
+                    protected_channel_notice(protection, channel_id=channel_id)
+                )
+            )
             dm_sent = True
         except Exception as exc:  # DMs closed, or the author is a bot
             log.info(
@@ -3069,17 +3073,23 @@ class DaimonBot(commands.Bot):
             claimed_message = True
 
             if needs_provisioning:
-                await message.channel.send(_setting_up_message(bot_display_name))
+                await message.channel.send(
+                    embed=build_notice_embed(_setting_up_message(bot_display_name))
+                )
                 return
             if tr.provision_status == "failed":
                 # Self-heal: re-seed if idle (in-flight guard). NEVER show "failed" to the user.
                 self._spawn(
                     self._seed_tenant_defaults(tenant_id=tr.id, guild=guild, was_ready=False)
                 )
-                await message.channel.send(_setting_up_message(bot_display_name))
+                await message.channel.send(
+                    embed=build_notice_embed(_setting_up_message(bot_display_name))
+                )
                 return
             if tr.provision_status == "pending":
-                await message.channel.send(_setting_up_message(bot_display_name))
+                await message.channel.send(
+                    embed=build_notice_embed(_setting_up_message(bot_display_name))
+                )
                 return
             # Only 'ready' proceeds.
 
@@ -3283,12 +3293,16 @@ class DaimonBot(commands.Bot):
             "already_stopping": ALREADY_STOPPING,
             "not_allowed": STOP_NOT_ALLOWED,
         }[outcome]
-        await self._reply_quietly(message, reply)
+        await self._reply_quietly(message, reply, neutral=outcome != "not_allowed")
         return True
 
-    async def _reply_quietly(self, message: discord.Message, text: str) -> None:
+    async def _reply_quietly(
+        self, message: discord.Message, text: str, *, neutral: bool = False
+    ) -> None:
         try:
-            await message.reply(text, mention_author=False)
+            await message.reply(
+                embed=build_notice_embed(text, neutral=neutral), mention_author=False
+            )
         except discord.HTTPException as exc:
             log.warning("turn.stop_typed_reply_failed", message_id=str(message.id), error=str(exc))
 
@@ -3715,7 +3729,7 @@ class DaimonBot(commands.Bot):
             if not isinstance(channel, discord.abc.Messageable):
                 return True
             await channel.send(
-                "Stopped waiting for GitHub access. Ask again any time.",
+                embed=build_notice_embed("Stopped waiting for GitHub access. Ask again any time."),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return True
@@ -3748,7 +3762,7 @@ class DaimonBot(commands.Bot):
                     client.post(
                         f"https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}",
                         json={
-                            "content": notice.text,
+                            "embeds": [build_notice_embed(notice.text, neutral=True).to_dict()],
                             "flags": 64,
                             "allowed_mentions": {"parse": []},
                         },

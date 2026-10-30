@@ -102,9 +102,12 @@ class DirectMessageCog(commands.Cog):
                 async with runtime.sessionmaker.begin() as session:
                     await set_dm_enabled(session, tenant_id=tenant_id, enabled=action == "enable")
                 await interaction.followup.send(
-                    "Daimon DMs are on for this server."
-                    if action == "enable"
-                    else "Daimon DMs are off for this server.",
+                    embed=build_notice_embed(
+                        "Daimon DMs are on for this server."
+                        if action == "enable"
+                        else "Daimon DMs are off for this server.",
+                        neutral=True,
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -158,11 +161,16 @@ class DirectMessageCog(commands.Cog):
                 context=context,
             )
             await dm_channel.send(
-                f"Continuing from {source_url}.\n\nSend your next message here. "
-                "To start a new private conversation, run /dm-me in a channel.",
+                embed=build_notice_embed(
+                    f"Continuing from {source_url}.\n\nSend your next message here. "
+                    "To start a new private conversation, run /dm-me in a channel.",
+                    neutral=True,
+                ),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            await interaction.followup.send("Ready in your DMs.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed("Ready in your DMs.", neutral=True), ephemeral=True
+            )
         except (
             DaimonError,
             MAResolverMissError,

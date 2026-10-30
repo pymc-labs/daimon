@@ -308,7 +308,7 @@ class RosterView(PanelViewBase):
 
         if interaction.guild_id != self.state.guild_id or not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
             await interaction.response.send_message(
-                "Only a server admin can connect GitHub.", ephemeral=True
+                embed=build_notice_embed("Only a server admin can connect GitHub."), ephemeral=True
             )
             return
         await interaction.response.defer()
@@ -338,7 +338,9 @@ class RosterView(PanelViewBase):
         from daimon.adapters.discord.agent_setup.details_view import DetailsView
 
         if self._is_superseded():
-            await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(STALE_PANEL_MESSAGE), ephemeral=True
+            )
             return
         self.state.details_request_seq += 1
         request_seq = self.state.details_request_seq

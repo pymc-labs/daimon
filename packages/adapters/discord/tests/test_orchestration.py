@@ -1699,7 +1699,7 @@ class TestProtectedChannelNotice:
             message.create_thread.assert_not_called()
         message.add_reaction.assert_awaited_once_with("🔒")
         message.author.send.assert_awaited_once()
-        notice = message.author.send.await_args.args[0]
+        notice = message.author.send.await_args.kwargs["embed"].description
         assert "<#789>" in notice, "the notice names the protected channel, not the thread"
         assert "**Who can post**" in notice and "**Nobody**" in notice, "names the rule"
         assert "server admin" in notice and "/agent-setup" in notice, "says who can change it"
@@ -2045,7 +2045,7 @@ class TestProtectedChannelNoticeNeedsAMatchedRule:
 
         message.channel.send.assert_not_called()
         message.add_reaction.assert_awaited_once_with("🔒")
-        notice = message.author.send.await_args.args[0]
+        notice = message.author.send.await_args.kwargs["embed"].description
         assert "<#789>" in notice and "its category is **Nobody**" in notice, (
             "a category rule is named as the category's, not the channel's"
         )

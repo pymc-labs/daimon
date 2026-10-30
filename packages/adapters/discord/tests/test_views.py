@@ -10,6 +10,7 @@ import discord
 import pytest
 import structlog
 from daimon.adapters.discord import views
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.views import (
     CancelView,
     GuardedView,
@@ -80,7 +81,7 @@ class TestGuardedView:
         result = await view.interaction_check(interaction)
         assert result is False, "should reject non-authorized user"
         interaction.response.send_message.assert_called_once_with(
-            "Only the command invoker can use these buttons.",
+            embed=build_notice_embed("Only the command invoker can use these buttons."),
             ephemeral=True,
         )
 
@@ -92,7 +93,7 @@ class TestGuardedView:
         result = await view.interaction_check(interaction)
         assert result is False, "should reject already-handled interaction"
         interaction.response.send_message.assert_called_once_with(
-            "Already handled.",
+            embed=build_notice_embed("Already handled."),
             ephemeral=True,
         )
 
@@ -165,7 +166,7 @@ class TestCancelView:
         result = await view.interaction_check(interaction2)
         assert result is False, "second press should be rejected"
         interaction2.response.send_message.assert_called_once_with(
-            "Already handled.",
+            embed=build_notice_embed("Already handled."),
             ephemeral=True,
         )
 
@@ -215,7 +216,9 @@ class TestCancelView:
         interaction = _member_interaction(user_id=456)
         assert await view.interaction_check(interaction) is False
         interaction.response.send_message.assert_called_once_with(
-            "Only the person who asked, or someone with Manage Server, can stop this reply.",
+            embed=build_notice_embed(
+                "Only the person who asked, or someone with Manage Server, can stop this reply."
+            ),
             ephemeral=True,
         )
         assert not cancel.is_set()
@@ -227,7 +230,7 @@ class TestCancelView:
         interaction = _member_interaction(user_id=456, administrator=True)
         assert await view.interaction_check(interaction) is False
         interaction.response.send_message.assert_called_once_with(
-            "Already handled.", ephemeral=True
+            embed=build_notice_embed("Already handled."), ephemeral=True
         )
 
     def test_timeout_is_none(self) -> None:

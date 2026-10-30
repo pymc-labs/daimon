@@ -18,6 +18,7 @@ import httpx
 import pytest
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
@@ -114,7 +115,7 @@ async def test_pending_status_replies_without_fetching_roster(
 
     interaction.edit_original_response.assert_awaited_once()
     kwargs = interaction.edit_original_response.call_args.kwargs
-    content = kwargs.get("content", "")
+    content = kwargs["embed"].description
     assert "no agents yet" not in content.lower(), (
         "a seeding tenant must never be told the server has no agents"
     )
@@ -141,7 +142,7 @@ async def test_failed_status_points_at_snag_followup(
 
     interaction.edit_original_response.assert_awaited_once()
     kwargs = interaction.edit_original_response.call_args.kwargs
-    content = kwargs.get("content", "")
+    content = kwargs["embed"].description
     assert "no agents yet" not in content.lower()
     assert "snag" in content.lower(), (
         f"failed status must point at the snag follow-up; got: {content!r}"
@@ -166,7 +167,7 @@ async def test_unknown_status_fails_closed_to_pending_style_message(
 
     interaction.edit_original_response.assert_awaited_once()
     kwargs = interaction.edit_original_response.call_args.kwargs
-    content = kwargs.get("content", "")
+    content = kwargs["embed"].description
     assert "no agents yet" not in content.lower()
     assert "try again" in content.lower(), (
         f"an unrecognized status must fail closed to the pending-style message; got: {content!r}"
@@ -220,7 +221,7 @@ async def test_stale_picture_option_is_refused_before_the_roster_loads(
     await cog.agent_setup.callback(cog, interaction)  # pyright: ignore[reportArgumentType]
 
     interaction.response.send_message.assert_awaited_once_with(
-        "Custom pictures are turned off.", ephemeral=True
+        embed=build_notice_embed("Custom pictures are turned off."), ephemeral=True
     )
     interaction.response.defer.assert_not_awaited()
     interaction.edit_original_response.assert_not_awaited()

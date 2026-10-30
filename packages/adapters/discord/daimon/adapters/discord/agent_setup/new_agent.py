@@ -130,7 +130,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
         )
         error = validate_model_id(model_value)
         if error is not None:
-            await interaction.response.send_message(error, ephemeral=True)
+            await interaction.response.send_message(embed=build_notice_embed(error), ephemeral=True)
             return
         await interaction.response.defer()
         tenant_id: uuid.UUID | None = None
@@ -163,8 +163,11 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                 )
             if self._panel_render_seq != self.state.render_seq:
                 await interaction.followup.send(
-                    f"Created **{new_name}**. The setup panel has moved on; run "
-                    "`/agent-setup` again to view it.",
+                    embed=build_notice_embed(
+                        f"Created **{new_name}**. The setup panel has moved on; run "
+                        "`/agent-setup` again to view it.",
+                        neutral=True,
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -173,9 +176,12 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             )
             if agent is None and not self.state.is_admin:
                 await interaction.followup.send(
-                    f"**{new_name}** was created. Not answering in any channel yet. "
-                    "An admin can make it answer in this channel; "
-                    "it will then appear in setup here.",
+                    embed=build_notice_embed(
+                        f"**{new_name}** was created. Not answering in any channel yet. "
+                        "An admin can make it answer in this channel; "
+                        "it will then appear in setup here.",
+                        neutral=True,
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -191,8 +197,11 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             details = await load_details_for(self.runtime, state=self.state, agent=agent)
             if self._panel_render_seq != self.state.render_seq:
                 await interaction.followup.send(
-                    f"Created **{new_name}**. The setup panel has moved on; run "
-                    "`/agent-setup` again to view it.",
+                    embed=build_notice_embed(
+                        f"Created **{new_name}**. The setup panel has moved on; run "
+                        "`/agent-setup` again to view it.",
+                        neutral=True,
+                    ),
                     ephemeral=True,
                 )
                 return

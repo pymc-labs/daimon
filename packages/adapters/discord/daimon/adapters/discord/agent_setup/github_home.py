@@ -12,6 +12,7 @@ from daimon.adapters.discord.agent_setup.github_embed_panel import (
 from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.github_connect_cards import (
     CONNECT_GITHUB_EMOJI,
@@ -102,7 +103,9 @@ class GitHubHomeView(PanelViewBase):
             interaction.guild_id != self.state.guild_id
             or interaction.user.id != self.allowed_user_id
         ):
-            await interaction.response.send_message("This panel is private.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed("This panel is private."), ephemeral=True
+            )
             return
         await self.swap_to(
             interaction,
@@ -118,11 +121,13 @@ class GitHubHomeView(PanelViewBase):
             interaction.guild_id != self.state.guild_id
             or interaction.user.id != self.allowed_user_id
         ):
-            await interaction.response.send_message("This panel is private.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed("This panel is private."), ephemeral=True
+            )
             return
         if not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
             await interaction.response.send_message(
-                "Ask a server admin to connect GitHub.", ephemeral=True
+                embed=build_notice_embed("Ask a server admin to connect GitHub."), ephemeral=True
             )
             return
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(self.state.guild_id))
@@ -147,7 +152,8 @@ class GitHubHomeView(PanelViewBase):
                 )
         except ValueError:
             await interaction.response.send_message(
-                "GitHub didn't answer. Try again in a minute.", ephemeral=True
+                embed=build_notice_embed("GitHub didn't answer. Try again in a minute."),
+                ephemeral=True,
             )
             return
         view = connect_button_view(url, timeout=600)

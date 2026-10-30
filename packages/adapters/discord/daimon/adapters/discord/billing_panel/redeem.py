@@ -128,7 +128,10 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
             else "completed",
         )
         try:
-            await interaction.followup.send(redeem_result_text(result), ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(redeem_result_text(result), neutral=not refused),
+                ephemeral=True,
+            )
         except discord.HTTPException as exc:
             _log.warning("billing_redeem.reply_failed", guild_id=interaction.guild_id, exc_info=exc)
             capture_exception_with_scope(exc)

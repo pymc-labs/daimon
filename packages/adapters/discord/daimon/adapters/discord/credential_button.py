@@ -231,17 +231,23 @@ class CredentialRequestButton(
         try:
             request_row = self.request_row
             if request_row is None:
-                await interaction.response.send_message(NO_LONGER_VALID_MESSAGE, ephemeral=True)
+                await interaction.response.send_message(
+                    embed=build_notice_embed(NO_LONGER_VALID_MESSAGE), ephemeral=True
+                )
                 return False
             if str(interaction.user.id) != request_row.requester_platform_user_id:
-                await interaction.response.send_message(WRONG_REQUESTER_MESSAGE, ephemeral=True)
+                await interaction.response.send_message(
+                    embed=build_notice_embed(WRONG_REQUESTER_MESSAGE), ephemeral=True
+                )
                 return False
             if not is_credential_interaction_valid(interaction, request_row):
-                await interaction.response.send_message(NO_LONGER_VALID_MESSAGE, ephemeral=True)
+                await interaction.response.send_message(
+                    embed=build_notice_embed(NO_LONGER_VALID_MESSAGE), ephemeral=True
+                )
                 return False
             if request_row.expires_at < datetime.now(UTC):
                 await interaction.response.send_message(
-                    _expired_message_for_row(request_row), ephemeral=True
+                    embed=build_notice_embed(_expired_message_for_row(request_row)), ephemeral=True
                 )
                 # The request-expiry poller retires an unclicked card on its
                 # next tick, but only best effort and in bounded batches; a
@@ -254,7 +260,9 @@ class CredentialRequestButton(
                 await edit_posted_card(interaction.client, row=request_row, state="expired")
                 return False
             if request_row.used_at is not None:
-                await interaction.response.send_message(ALREADY_USED_MESSAGE, ephemeral=True)
+                await interaction.response.send_message(
+                    embed=build_notice_embed(ALREADY_USED_MESSAGE), ephemeral=True
+                )
                 return False
             return True
         except Exception as err:

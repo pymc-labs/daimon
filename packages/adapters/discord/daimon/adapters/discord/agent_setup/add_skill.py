@@ -234,7 +234,9 @@ class AddSkillModal(discord.ui.Modal):
                 interaction, runtime=view.runtime, state=view.state, agent=agent
             )
         except SkillIngestError as exc:
-            await interaction.followup.send(f"{exc} Nothing was added.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(f"{exc} Nothing was added."), ephemeral=True
+            )
             return
         except (DaimonError, anthropic.APIError) as exc:
             request_id = generate_request_id()
@@ -244,7 +246,7 @@ class AddSkillModal(discord.ui.Modal):
             )
             return
         if refusal is not None:
-            await interaction.followup.send(refusal, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)
             return
         log.info("agent_setup.add_skill.preview", agent_name=agent.name)
         await view.swap_to(
@@ -353,10 +355,12 @@ class SkillPreviewView(PanelViewBase):
                 recheck=recheck,
             )
         except _AddRefused as exc:
-            await interaction.followup.send(exc.refusal, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(exc.refusal), ephemeral=True)
             return
         except SkillIngestError as exc:
-            await interaction.followup.send(f"{exc} Nothing was added.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(f"{exc} Nothing was added."), ephemeral=True
+            )
             return
         except (DaimonError, anthropic.APIError) as exc:
             request_id = generate_request_id()
@@ -368,7 +372,8 @@ class SkillPreviewView(PanelViewBase):
         log.info("agent_setup.add_skill.added", agent_name=name, action=result.action)
         done = "already had" if result.action == "unchanged" else "now has"
         await interaction.followup.send(
-            f"{name} {done} the skill **{preview.name}**.", ephemeral=True
+            embed=build_notice_embed(f"{name} {done} the skill **{preview.name}**.", neutral=True),
+            ephemeral=True,
         )
         try:
             details = await load_details_for(self.runtime, state=self.state, agent=self.agent)

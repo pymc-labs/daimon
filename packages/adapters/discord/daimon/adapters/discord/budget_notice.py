@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import cast
 
 import structlog
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
@@ -40,7 +41,10 @@ def discord_budget_notifier(
                 break
             try:
                 dm = await open_dm(int(notice.workspace_id), int(user_id))
-                await dm.send(text, allowed_mentions=discord.AllowedMentions.none())
+                await dm.send(
+                    embed=build_notice_embed(text, neutral=True),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
                 delivered += 1
             except (discord.HTTPException, LookupError, ValueError) as exc:
                 log.info("channel_budget.notice_undelivered", err_type=type(exc).__name__)

@@ -209,7 +209,7 @@ async def _apply_and_render(
         # The row changed under this tap (expired, erased, submitted, or
         # written by a tap that landed first) -- leave the message alone
         # rather than re-rendering a screen that no longer matches the row.
-        await interaction.followup.send(_STALE, ephemeral=True)
+        await interaction.followup.send(embed=build_notice_embed(_STALE), ephemeral=True)
         return
     # A re-render carries the agent-authored prompt and question verbatim in
     # its head text; nothing in a form legitimately needs to mention anyone.
@@ -504,7 +504,9 @@ class WizardCustomTextModal(discord.ui.Modal):
             except ValueError:
                 # The pure transition already refuses empty/whitespace text
                 # -- surface that as an ephemeral notice, not a state change.
-                await interaction.followup.send(_EMPTY_TEXT, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(_EMPTY_TEXT), ephemeral=True
+                )
         except Exception as err:
             # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
             # dispatcher swallows anything raised here

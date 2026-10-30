@@ -31,6 +31,7 @@ from uuid import UUID
 
 import structlog
 from daimon.adapters.discord.checks import ADMIN_NOUN, admin_caller
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.turn_card_recovery import turn_card_custom_id
 
 import discord
@@ -79,13 +80,13 @@ class GuardedView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # discord.py base uses broader type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
+                embed=build_notice_embed("Only the command invoker can use these buttons."),
                 ephemeral=True,
             )
             return False
         if self._handled:
             await interaction.response.send_message(
-                "Already handled.",
+                embed=build_notice_embed("Already handled."),
                 ephemeral=True,
             )
             return False
@@ -125,10 +126,14 @@ class CancelView(GuardedView):
         if interaction.user.id == self.allowed_user_id:
             return await super().interaction_check(interaction)
         if not admin_caller(interaction.user).is_server_admin:
-            await interaction.response.send_message(STOP_NOT_ALLOWED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(STOP_NOT_ALLOWED), ephemeral=True
+            )
             return False
         if self._handled:
-            await interaction.response.send_message("Already handled.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed("Already handled."), ephemeral=True
+            )
             return False
         return True
 

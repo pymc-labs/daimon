@@ -200,7 +200,9 @@ class MemoryCog(commands.Cog):
             if request.kind not in ("shared_list", "shared_show"):
                 agent = await _resolve_agent(runtime, interaction)
                 if agent is None:
-                    await interaction.followup.send(_EMPTY, ephemeral=True)
+                    await interaction.followup.send(
+                        embed=build_notice_embed(_EMPTY, neutral=True), ephemeral=True
+                    )
                     return
                 reply = await personal_memory_reply(
                     runtime.anthropic,
@@ -220,7 +222,9 @@ class MemoryCog(commands.Cog):
                 return
             resolved = await _resolve_store(runtime, interaction)
             if resolved is None:
-                await interaction.followup.send(_EMPTY, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(_EMPTY, neutral=True), ephemeral=True
+                )
                 return
             agent_name, store_id = resolved
             scope = resource_scope(
@@ -237,7 +241,9 @@ class MemoryCog(commands.Cog):
                     if item.type == "memory":
                         paths.append(item.path)
                 if not paths:
-                    await interaction.followup.send(_EMPTY, ephemeral=True)
+                    await interaction.followup.send(
+                        embed=build_notice_embed(_EMPTY, neutral=True), ephemeral=True
+                    )
                     return
                 body = "\n".join(f"- `{p}`" for p in sorted(paths))
                 await interaction.followup.send(
@@ -256,7 +262,9 @@ class MemoryCog(commands.Cog):
                     break
             if mem_id is None:
                 await interaction.followup.send(
-                    f"No memory file called `{path}`.\n\nRun `/memory` to see them all.",
+                    embed=build_notice_embed(
+                        f"No memory file called `{path}`.\n\nRun `/memory` to see them all."
+                    ),
                     ephemeral=True,
                 )
                 return

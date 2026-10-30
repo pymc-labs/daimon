@@ -82,7 +82,9 @@ class AgentSetupCog(commands.Cog):
         interaction: BotInteraction,
     ) -> None:
         if _has_stale_picture_options(interaction):
-            await interaction.response.send_message(CUSTOM_PICTURES_OFF, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(CUSTOM_PICTURES_OFF), ephemeral=True
+            )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         rid = generate_request_id()
@@ -97,7 +99,7 @@ class AgentSetupCog(commands.Cog):
             assert tenant_row is not None, "require_registered_guild guarantees a tenant row"
             if tenant_row.provision_status != "ready":
                 await interaction.edit_original_response(
-                    content=_not_ready_message(tenant_row.provision_status),
+                    embed=build_notice_embed(_not_ready_message(tenant_row.provision_status)),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return

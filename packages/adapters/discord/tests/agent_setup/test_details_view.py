@@ -924,7 +924,7 @@ async def test_coding_tools_refuses_a_live_member_with_the_explanatory_refusal(
     await button.callback(interaction)
 
     kwargs = interaction.response.send_message.call_args.kwargs
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.response.send_message.call_args.kwargs["embed"].description
     assert message == CODING_TOOLS_REFUSAL, "a member gets the refusal naming the way round it"
     assert message == (
         "Only an admin or this agent's owner can make a coding key.\n\n"
@@ -1066,7 +1066,7 @@ async def _click_coding_tools(
     sent = interaction.response.send_message.call_args
     content = sent.kwargs.get("content")
     if content is None:
-        assert sent.args[0] == CODING_TOOLS_REFUSAL
+        assert sent.kwargs["embed"].description == CODING_TOOLS_REFUSAL
         return None
     return content[content.index("Bearer ") + len("Bearer ") :].split('"')[0].strip()
 

@@ -502,7 +502,7 @@ async def test_second_tap_computed_from_the_same_base_row_is_refused_as_stale(
         "the second tap must not erase the answer the first tap recorded"
     )
     interaction_b.edit_original_response.assert_not_awaited()
-    stale_message = interaction_b.followup.send.call_args.args[0]
+    stale_message = interaction_b.followup.send.call_args.kwargs["embed"].description
     assert "changed" in stale_message, "the losing tap must say the form changed under it"
 
 
@@ -561,7 +561,7 @@ async def test_whitespace_only_modal_text_writes_nothing_and_replies(
 
     interaction.edit_original_response.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert message == "Type an answer first."
 
     async with db_session_factory() as session:

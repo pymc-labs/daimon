@@ -697,7 +697,7 @@ async def test_discord_move_command_seeds_and_runs_a_real_private_turn(
         return
     assert route is not None
     assert "Continue this task privately" in route.context
-    assert "discord.com/channels/123/100" in dm.send.call_args.args[0]
+    assert "discord.com/channels/123/100" in dm.send.call_args.kwargs["embed"].description
     message = MagicMock(spec=discord.Message)
     message.author.bot = False
     message.author.id = 42

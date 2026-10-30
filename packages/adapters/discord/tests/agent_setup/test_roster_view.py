@@ -534,9 +534,9 @@ async def test_roster_view_refuses_a_caller_who_did_not_run_the_command() -> Non
     allowed = await view.interaction_check(intruder)
 
     assert allowed is False, "only the invoker may use the panel"
-    assert intruder.response.send_message.call_args.args[0] == INVOKER_ONLY_MESSAGE, (
-        "the refusal names the rule"
-    )
+    assert (
+        intruder.response.send_message.call_args.kwargs["embed"].description == INVOKER_ONLY_MESSAGE
+    ), "the refusal names the rule"
     assert intruder.response.send_message.call_args.kwargs["ephemeral"] is True, (
         "the refusal is private to the person who clicked"
     )
@@ -588,9 +588,10 @@ async def test_superseded_roster_view_refuses_stale_interactions(
     allowed = await first.interaction_check(stale_click)
 
     assert allowed is False, "a view superseded by a newer render cannot dispatch its actions"
-    assert stale_click.response.send_message.call_args.args[0] == STALE_PANEL_MESSAGE, (
-        "the stale click is told to use the current panel"
-    )
+    assert (
+        stale_click.response.send_message.call_args.kwargs["embed"].description
+        == STALE_PANEL_MESSAGE
+    ), "the stale click is told to use the current panel"
 
 
 # ---------------------------------------------------------------------------

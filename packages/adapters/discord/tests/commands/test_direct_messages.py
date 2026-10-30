@@ -57,7 +57,7 @@ async def test_dm_policy_replies_use_server_words(
     await cog.dm.callback.__wrapped__(cog, interaction, action)  # pyright: ignore[reportFunctionMemberAccess]
     sent = interaction.followup.send.await_args
     if admin:
-        assert sent.args[0] == expected
+        assert sent.kwargs["embed"].description == expected
     else:
         assert sent.args == () and sent.kwargs["embed"].description == expected
         assert sent.kwargs["embed"].color.value == COLOR_RED
@@ -142,9 +142,9 @@ async def test_dm_from_a_thread_admits_and_records_its_parent_channel(
         start_dm.assert_not_awaited()
         member.create_dm.assert_not_awaited()
     else:
-        assert interaction.followup.send.await_args.args[0] == "Ready in your DMs.", (
-            "a channel within its budget opens the DM"
-        )
+        assert (
+            interaction.followup.send.await_args.kwargs["embed"].description == "Ready in your DMs."
+        ), "a channel within its budget opens the DM"
         assert start_dm.await_args.kwargs["source_channel_id"] == str(_PARENT), (
             "the DM records its source channel"
         )

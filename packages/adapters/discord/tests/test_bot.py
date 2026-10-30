@@ -2916,4 +2916,4 @@ async def test_replay_does_not_repeat_a_provisioning_notice(
     await bot.on_message(message)
     await bot.on_message(message, startup_replay=True)
     message.channel.send.assert_awaited_once()
-    assert "setting up" in message.channel.send.await_args.args[0]
+    assert "setting up" in message.channel.send.await_args.kwargs["embed"].description

@@ -14,6 +14,7 @@ from daimon.adapters.discord.agent_setup.coding_keys_view import (
     load_coding_keys_view,
 )
 from daimon.adapters.discord.agent_setup.details_view import DetailsView
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
 from daimon.core.stores.agent_owners import set_owner
@@ -151,7 +152,9 @@ async def test_a_member_pressing_the_keys_button_gets_the_refusal(
 
     await _find_button(view, "🔑 Coding keys").callback(interaction)
 
-    interaction.followup.send.assert_awaited_once_with(CODING_KEYS_REFUSAL, ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(
+        embed=build_notice_embed(CODING_KEYS_REFUSAL), ephemeral=True
+    )
 
 
 async def test_an_owner_revokes_their_own_key_from_the_list(

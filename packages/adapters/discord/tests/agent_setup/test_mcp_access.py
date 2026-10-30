@@ -363,7 +363,7 @@ async def test_on_coding_tools_refuses_unavailable_card_agent_without_minting(
     )
 
     kwargs = interaction.response.send_message.call_args.kwargs
-    refusal = interaction.response.send_message.call_args.args[0]
+    refusal = interaction.response.send_message.call_args.kwargs["embed"].description
     assert kwargs["ephemeral"] is True, "unavailable card target errors must remain private"
     assert "no longer available" in refusal, (
         "unavailable exact identity should explain that Details must be reopened"
@@ -584,8 +584,9 @@ async def test_revoke_confirmation_edits_message_content_and_clears_view(
     interaction_revoke.response.edit_message.assert_called_once()
     edit_kwargs = interaction_revoke.response.edit_message.call_args.kwargs
 
-    assert "revoked" in edit_kwargs.get("content", "").lower(), (
-        f"Revoke confirmation must edit the message content; got {edit_kwargs.get('content')!r}"
+    assert edit_kwargs.get("content") is None, "Revoke must clear the config block text"
+    assert "revoked" in edit_kwargs["embed"].description.lower(), (
+        f"Revoke confirmation must edit the message card; got {edit_kwargs['embed'].description!r}"
     )
     assert edit_kwargs.get("view") is None, (
         "Revoke confirmation must drop the button by passing view=None"

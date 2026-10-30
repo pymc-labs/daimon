@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.privacy_panel.panel import (
     PrivacyPanelView,
     build_privacy_main_container,
@@ -65,8 +66,10 @@ async def test_old_delete_button_answers_pause_without_loading_preview() -> None
     interaction.response.send_message = AsyncMock()
     await view._on_delete(interaction)
     interaction.response.send_message.assert_awaited_once_with(
-        "Deleting your account is paused during the event.\n\n"
-        "Ask the team running Daimon if you need it deleted now.",
+        embed=build_notice_embed(
+            "Deleting your account is paused during the event.\n\n"
+            "Ask the team running Daimon if you need it deleted now."
+        ),
         ephemeral=True,
     )
 
@@ -123,7 +126,7 @@ async def test_interaction_check_rejects_non_invoker() -> None:
     result = await view.interaction_check(interaction)
     assert result is False, "interaction_check must reject non-invoker (return False)"
     interaction.response.send_message.assert_awaited_once()
-    sent_text = interaction.response.send_message.call_args.args[0]
+    sent_text = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "command invoker" in sent_text, (
         f"Rejection message should mention 'command invoker'; got {sent_text!r}"
     )

@@ -274,7 +274,7 @@ async def test_submit_rejects_a_retired_model_id_without_creating(
     await modal.on_submit(interaction)
 
     interaction.response.send_message.assert_called_once()
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "claude-retired-99" in message, "the error must name the model that was refused"
     interaction.response.defer.assert_not_called()
     assert not create_called, "a retired model id must never reach create_blank_agent"
@@ -320,7 +320,7 @@ async def test_member_creation_confirms_success_without_showing_hidden_details(
 
     interaction.edit_original_response.assert_not_called()
     interaction.followup.send.assert_called_once()
-    text = interaction.followup.send.call_args.args[0]
+    text = interaction.followup.send.call_args.kwargs["embed"].description
     assert "Not answering in any channel yet" in text
     assert "An admin can make it answer" in text
     assert _state_after.selected_agent is None

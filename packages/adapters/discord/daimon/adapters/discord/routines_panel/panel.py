@@ -168,7 +168,9 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     "not_owner": ("Only its creator or a server admin can pause it."),
                 }
                 if result != "changed":
-                    await interaction.response.send_message(refusals[result], ephemeral=True)
+                    await interaction.response.send_message(
+                        embed=build_notice_embed(refusals[result]), ephemeral=True
+                    )
                     return
 
             await _rerender(interaction, self.view)
@@ -278,7 +280,7 @@ class RoutinesPanelView(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the person who opened this can use it.",
+                embed=build_notice_embed("Only the person who opened this can use it."),
                 ephemeral=True,
             )
             return False

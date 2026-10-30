@@ -234,7 +234,7 @@ class TestPerMessageTenantResolution:
 
         mock_resolve_config.assert_not_called()
         message.channel.send.assert_awaited_once()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-        sent_text: str = message.channel.send.await_args[0][0]  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+        sent_text: str = message.channel.send.await_args.kwargs["embed"].description  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
         assert "setting up" in sent_text.lower(), "pending guild must reply 'setting up'"  # pyright: ignore[reportUnknownMemberType]
 
 
@@ -287,7 +287,7 @@ class TestNonReadySelfHealGate:
                 await release_status_update.wait()
             return result_
 
-        async def wait_for_background_status(_text: str) -> None:
+        async def wait_for_background_status(*, embed: object) -> None:
             await asyncio.wait_for(status_update_open.wait(), timeout=2)
 
         async def finish_messages_during_status_update(
@@ -325,7 +325,7 @@ class TestNonReadySelfHealGate:
         )
         mock_reconcile.assert_awaited(), "failed guild must trigger a background re-seed"  # pyright: ignore[reportUnusedExpression]
         message.channel.send.assert_awaited_once()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-        sent_text: str = message.channel.send.await_args[0][0]  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+        sent_text: str = message.channel.send.await_args.kwargs["embed"].description  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
         assert "setting up" in sent_text.lower()  # pyright: ignore[reportUnknownMemberType]
         assert "failed" not in sent_text.lower(), "'failed' must never be shown to the user"  # pyright: ignore[reportUnknownMemberType]
 
@@ -367,7 +367,7 @@ class TestNonReadySelfHealGate:
         mock_reconcile.assert_awaited()
         mock_resolve_config.assert_not_called()
         message.channel.send.assert_awaited_once()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-        sent_text: str = message.channel.send.await_args[0][0]  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+        sent_text: str = message.channel.send.await_args.kwargs["embed"].description  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
         assert "setting up" in sent_text.lower()  # pyright: ignore[reportUnknownMemberType]
 
 

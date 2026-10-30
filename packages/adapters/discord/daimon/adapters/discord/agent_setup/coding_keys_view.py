@@ -18,6 +18,7 @@ from daimon.adapters.discord.agent_setup.budget import LAYOUT_TEXT_BUDGET
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.coding_keys import (
@@ -123,7 +124,9 @@ class CodingKeysView(PanelViewBase):
             page=page,
         )
         if view is None:
-            await interaction.followup.send(CODING_KEYS_REFUSAL, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(CODING_KEYS_REFUSAL), ephemeral=True
+            )
             return
         await self.swap_to(interaction, view)
 
@@ -135,7 +138,9 @@ class CodingKeysView(PanelViewBase):
         )
         if access is None or interaction.guild_id != self.state.guild_id:
             await _audit(self.runtime, interaction, tenant_id, jti, "denied", "not_allowed")
-            await interaction.followup.send(CODING_KEYS_REFUSAL, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(CODING_KEYS_REFUSAL), ephemeral=True
+            )
             return
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=self.agent.ma_agent_id)
         async with self.runtime.sessionmaker.begin() as session:
@@ -153,7 +158,9 @@ class CodingKeysView(PanelViewBase):
             log.info("agent_setup.coding_keys.revoked", jti=str(jti))
         else:
             await _audit(self.runtime, interaction, tenant_id, jti, "error", "not_revocable")
-            await interaction.followup.send("That key was already revoked.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed("That key was already revoked."), ephemeral=True
+            )
         await self._show(interaction, page=self.page.page)
 
     async def _on_back(self, interaction: discord.Interaction) -> None:

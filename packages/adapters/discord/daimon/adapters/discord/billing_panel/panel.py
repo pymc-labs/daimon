@@ -313,7 +313,10 @@ class _TopUpSelect(discord.ui.Select["BillingPanelView"]):
                 amount=amount,
             )
             await interaction.response.send_message(
-                f"Top up ${amount}: complete payment here (link is private):\n{url}",
+                embed=build_notice_embed(
+                    f"Top up ${amount}: complete payment here (link is private):\n{url}",
+                    neutral=True,
+                ),
                 ephemeral=True,
             )
         except (DaimonError, discord.HTTPException, httpx.HTTPStatusError) as exc:
@@ -398,7 +401,7 @@ class _InvokerOnly(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
+                embed=build_notice_embed("Only the command invoker can use these buttons."),
                 ephemeral=True,
             )
             return False

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.privacy_panel.modal import DeleteConfirmModal
 from daimon.core.errors import DaimonError
 from daimon.core.ma import SessionDeletionReport
@@ -33,8 +34,10 @@ async def test_paused_modal_does_not_purge(monkeypatch: pytest.MonkeyPatch) -> N
     interaction = _make_interaction_with_response()
     await modal.on_submit(interaction)
     interaction.response.send_message.assert_awaited_once_with(
-        "Deleting your account is paused during the event.\n\n"
-        "Ask the team running Daimon if you need it deleted now.",
+        embed=build_notice_embed(
+            "Deleting your account is paused during the event.\n\n"
+            "Ask the team running Daimon if you need it deleted now."
+        ),
         ephemeral=True,
     )
     purge.assert_not_awaited()

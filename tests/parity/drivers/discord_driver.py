@@ -780,7 +780,7 @@ class DiscordDriver:
             interaction, MagicMock(spec=discord.ui.Item), match
         )
         if not await button.interaction_check(interaction):
-            return str(interaction.response.send_message.call_args.args[0])
+            return str(interaction.response.send_message.call_args.kwargs["embed"].description)
         await button.callback(interaction)
         return None
 

@@ -154,7 +154,9 @@ async def test_an_owner_is_refused_for_another_agent_and_a_member_for_any(
     tenant_id, accounts, _ = people
     for user, agent in ((1, "OtherBot"), (3, "ResearchBot")):
         send = await _run(monkeypatch, db_session_factory, tenant_id, user=user, agent=agent)
-        assert "Only an admin or an owner of this agent" in send.await_args.args[0]
+        assert (
+            "Only an admin or an owner of this agent" in send.await_args.kwargs["embed"].description
+        )
         role, invitations = await _role_and_invitations(db_session_factory, accounts[user])
         assert role == Role.USER and invitations == []
 

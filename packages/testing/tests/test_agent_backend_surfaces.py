@@ -1090,7 +1090,7 @@ async def test_discord_stale_selection_refuses_without_losing_details(seam):
     view.swap_to = AsyncMock()
     await view._on_backend_select(event, select=selected)
     event.followup.send.assert_awaited_once()
-    assert "isn't available" in event.followup.send.await_args.args[0]
+    assert "isn't available" in event.followup.send.await_args.kwargs["embed"].description
     view.swap_to.assert_not_awaited()
     assert seam.calls == []
 

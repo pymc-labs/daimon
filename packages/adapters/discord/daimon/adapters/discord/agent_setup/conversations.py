@@ -66,12 +66,16 @@ async def open_setup_conversation(
         channel = channel.parent
     if not isinstance(channel, discord.TextChannel):
         await interaction.followup.send(
-            "Setup conversations need a server text channel. Open `/agent-setup` there.",
+            embed=build_notice_embed(
+                "Setup conversations need a server text channel. Open `/agent-setup` there."
+            ),
             ephemeral=True,
         )
         return
     if interaction.client.user is None:
-        await interaction.followup.send("The bot is still connecting. Try again.", ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed("The bot is still connecting. Try again."), ephemeral=True
+        )
         return
     thread: discord.Thread | None = None
     try:
@@ -112,7 +116,10 @@ async def open_setup_conversation(
                     creator_account_id=state.account_id,
                 )
                 await session.commit()
-            await thread.send(opener, allowed_mentions=discord.AllowedMentions.none())
+            await thread.send(
+                embed=build_notice_embed(opener, neutral=True),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         except Exception:
             # This is the platform creation boundary. Never leave a failed
             # opener advertised as ready; retain the original exception.
@@ -134,16 +141,18 @@ async def open_setup_conversation(
                     await session.commit()
             raise
         await interaction.followup.send(
-            f"[Open the thread]({thread.jump_url})",
+            embed=build_notice_embed(f"[Open the thread]({thread.jump_url})", neutral=True),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
     except discord.Forbidden:
         _log.exception("setup_conversation.permission_denied")
         await interaction.followup.send(
-            "I couldn't create or post in the setup thread here. Ask a server admin to give me "
-            "Create Public Threads, Send Messages in Threads, and Manage Threads in this channel, "
-            "then try again.",
+            embed=build_notice_embed(
+                "I couldn't create or post in the setup thread here. Ask a server admin to give "
+                "me Create Public Threads, Send Messages in Threads, and Manage Threads in "
+                "this channel, then try again."
+            ),
             ephemeral=True,
         )
     except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as error:

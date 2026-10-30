@@ -8,6 +8,7 @@ from __future__ import annotations
 import uuid
 
 from daimon.adapters.discord import layout, theme
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.privacy_panel.modal import DeleteConfirmModal
 from daimon.adapters.discord.privacy_panel.state import PurgePreview
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -157,7 +158,9 @@ class CascadePreviewView(discord.ui.LayoutView):
 
     async def _on_confirm(self, interaction: discord.Interaction) -> None:
         if not self.runtime.settings.privacy.delete_enabled:
-            await interaction.response.send_message(DELETE_PAUSED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(DELETE_PAUSED), ephemeral=True
+            )
             return
         await interaction.response.send_modal(
             DeleteConfirmModal(
@@ -185,7 +188,7 @@ class CascadePreviewView(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the command invoker can use these buttons.",
+                embed=build_notice_embed("Only the command invoker can use these buttons."),
                 ephemeral=True,
             )
             return False

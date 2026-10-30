@@ -62,7 +62,7 @@ async def test_each_allowed_recipient_gets_a_dm_and_one_failure_skips_only_them(
     assert delivered == 1, "only a DM that landed counts"
 
     dms["1"].send.assert_awaited_once()
-    text = dms["1"].send.await_args.args[0]
+    text = dms["1"].send.await_args.kwargs["embed"].description
     assert text.startswith("<#222> has used its $5.00 monthly budget.\n\n"), text
     dms["3"].send.assert_not_awaited()  # the DM policy leaves 3 out
 

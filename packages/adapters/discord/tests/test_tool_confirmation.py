@@ -103,7 +103,7 @@ async def test_tool_words_stay_literal_in_title_and_details(value: str, safe: st
     click = _interaction(999)
     await _buttons(view)[2].callback(click)
     kwargs = click.response.send_message.await_args.kwargs
-    assert click.response.send_message.await_args.args[0] == (f"File: {safe}")
+    assert click.response.send_message.await_args.kwargs["embed"].description == (f"File: {safe}")
     assert kwargs["ephemeral"] is True
     assert kwargs["allowed_mentions"].to_dict() == {"parse": []}
 
@@ -166,9 +166,9 @@ async def _post_and_click(
     stranger = _interaction(999)
     await (approve if choice == "approve" else deny).callback(stranger)
     stranger.response.send_message.assert_awaited_once()
-    assert stranger.response.send_message.await_args.args[0] == NOT_YOURS_MESSAGE.format(
-        requester="<@111>"
-    )
+    assert stranger.response.send_message.await_args.kwargs[
+        "embed"
+    ].description == NOT_YOURS_MESSAGE.format(requester="<@111>")
     assert stranger.response.send_message.await_args.kwargs["ephemeral"] is True
     assert stranger.response.send_message.await_args.kwargs["allowed_mentions"].users is False
     assert not waiting.done(), "a stranger's click answers nothing"
@@ -252,7 +252,7 @@ async def test_always_button_refuses_requester_without_admin_rights(
     monkeypatch.setattr(confirmation_module, "save_always_allow", save)
     click = _interaction(111)
     await _buttons(view)[2].callback(click)
-    assert click.followup.send.await_args.args[0] == (
+    assert click.followup.send.await_args.kwargs["embed"].description == (
         "Only an admin can allow this for everyone.\n"
         "Ask an admin, or use Approve for just this time."
     )
@@ -426,7 +426,9 @@ async def test_turn_cancel_after_always_settle_keeps_stopped_card(
     assert _texts(message.edit.await_args.kwargs["view"])[0] == "**Stopped**"
     assert interaction.edit_original_response.await_count == 1
     if save_result == "stale":
-        assert interaction.followup.send.await_args.args[0].startswith("Approved this time only.")
+        assert interaction.followup.send.await_args.kwargs["embed"].description.startswith(
+            "Approved this time only."
+        )
     else:
         interaction.followup.send.assert_not_awaited()
 
@@ -647,8 +649,8 @@ async def test_upload_card_and_details_are_scannable() -> None:
     await _buttons(view)[2].callback(click)
     click.response.send_message.assert_awaited_once()
     assert click.response.send_message.await_args.kwargs["ephemeral"] is True
-    assert click.response.send_message.await_args.args[0] == "Title: Bug"
-    assert "```" not in click.response.send_message.await_args.args[0]
+    assert click.response.send_message.await_args.kwargs["embed"].description == "Title: Bug"
+    assert "```" not in click.response.send_message.await_args.kwargs["embed"].description
 
 
 async def test_admin_confirmation_rechecks_each_click_before_settlement() -> None:
@@ -673,7 +675,8 @@ async def test_admin_confirmation_rechecks_each_click_before_settlement() -> Non
         denied = _interaction(111)
         await _buttons(view)[0].callback(denied)
         assert (
-            denied.response.send_message.await_args.args[0] == "Current admin permission required."
+            denied.response.send_message.await_args.kwargs["embed"].description
+            == "Current admin permission required."
         )
         denied.response.edit_message.assert_not_awaited()
         assert not waiting.done()
@@ -880,9 +883,8 @@ async def test_a_card_still_open_replies_once_mentioning_only_its_requester(monk
     answer = await discord_confirmation_hook(channel)(prompt)
     assert answer == "expired"
     (call,) = message.reply.await_args_list
-    assert call.args[0] == (
-        f"<@{prompt.requester_platform_user_id}> This is still waiting for your click."
-    )
+    assert call.args == (f"<@{prompt.requester_platform_user_id}>",)
+    assert call.kwargs["embed"].description == "This is still waiting for your click."
     mentions = call.kwargs["allowed_mentions"].to_dict()
     assert mentions.get("parse") == ["users"] and call.kwargs["mention_author"] is False
 

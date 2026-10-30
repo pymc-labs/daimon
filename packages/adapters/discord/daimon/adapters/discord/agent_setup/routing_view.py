@@ -471,7 +471,9 @@ class RoutingView(PanelViewBase):
         )
         user_id = str(interaction.user.id)
         if not await may_pick_environment(subject, runtime=self.runtime, state=self.state):
-            await interaction.response.send_message(REFUSED_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(REFUSED_MESSAGE), ephemeral=True
+            )
             await audit_environment_pick(
                 runtime=self.runtime,
                 state=self.state,
@@ -514,7 +516,9 @@ class RoutingView(PanelViewBase):
             return
         await self.swap_to(interaction, routing)
         await interaction.followup.send(
-            note, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+            embed=build_notice_embed(note, neutral=True),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     async def _on_permissions(self, interaction: discord.Interaction) -> None:

@@ -18,6 +18,7 @@ from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.operator_tokens import OperatorTokenError
@@ -225,7 +226,9 @@ class MintOperatorTokenModal(discord.ui.Modal):
             return
         secret = view.runtime.settings.mcp.jwt_secret
         if secret is None:
-            await interaction.response.send_message(NOT_CONFIGURED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(NOT_CONFIGURED), ephemeral=True
+            )
             return
         # Acknowledged before the mint: a slow mint and audit write must not
         # outlast the interaction and leave a live token nobody was shown.
@@ -246,7 +249,9 @@ class MintOperatorTokenModal(discord.ui.Modal):
             await view.audit(
                 interaction, op="operator_token_mint", outcome="denied", reason="scopes"
             )
-            await interaction.followup.send(f"{exc}. Nothing was minted.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(f"{exc}. Nothing was minted."), ephemeral=True
+            )
             return
         await view.audit(
             interaction,
