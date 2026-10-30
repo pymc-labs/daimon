@@ -29,6 +29,8 @@ Errors and notices are never hardcoded text in or beside the agent's reply:
   the turn controls), which decides whether and how to tell the person.
 - A failure that stops or prevents a turn, or happens with no turn running, is
   the platform's error card (Discord embed, Slack blocks, Teams card), never plain text.
+- Any other message of Daimon's own (a confirmation, information, a pointer) is a
+  neutral card. News the agent carries on from, like a hand-over, goes to the agent.
 
 `tests/parity/test_agent_notices.py` records the first rule.
 
