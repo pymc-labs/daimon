@@ -72,6 +72,7 @@ _ALLOWED_FILES: dict[str, str] = {
     "packages/core/daimon/core/session_preparation.py": "a note the model reads; never shown",
     "packages/core/daimon/core/smoke.py": "output of the operator's smoke check, run from the CLI",
     "packages/core/daimon/core/turn_origin.py": "the per-turn note to the model; never shown",
+    "packages/core/daimon/core/turn/agent_notices.py": "notices to the model; never shown",
 }
 #: Single strings that may use the terms: (file, start of the string) and why.
 _ALLOWED_TEXT: dict[tuple[str, str], str] = {
