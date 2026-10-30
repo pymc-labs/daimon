@@ -65,6 +65,29 @@ def is_expired(expires_at: datetime | None, now: datetime) -> bool:
     return expires_at is not None and expires_at <= now
 
 
+def is_paused_out(expires_at: datetime | None, paused_at: datetime | None, now: datetime) -> bool:
+    """Whether a permanent watch has been paused `PAUSED_PERMANENT_EXPIRY`: then it is expired.
+
+    The claim function expires such a watch only while the gate is on, so resume
+    and edit check it themselves.
+    """
+    return (
+        expires_at is None and paused_at is not None and paused_at <= now - PAUSED_PERMANENT_EXPIRY
+    )
+
+
+async def _lock_owner(session: AsyncSession, owner_account_id: uuid.UUID) -> None:
+    """Serialize one owner's watch counts (live and permanent) across create and edit.
+
+    Lock order: the global watch lock (813749201) first, when a caller takes it at
+    all, then this one. Never take the global lock while holding this one.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"watch:{owner_account_id}"},
+    )
+
+
 def _live_at(now: datetime):
     """SQL for "not expired at `now`", keeping permanent (NULL) watches."""
     return or_(Watch.expires_at.is_(None), Watch.expires_at > now)
@@ -178,10 +201,7 @@ async def register_page_watch(
         or live.channel_id != binding.parent_channel_id
     ):
         raise ValueError("Watch requires the owner's exact live conversation binding")
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"watch:{binding.requester_account_id}"},
-    )
+    await _lock_owner(session, binding.requester_account_id)
     count = await session.scalar(
         select(func.count())
         .select_from(Watch)
@@ -773,7 +793,12 @@ async def pause_watch(
 
 async def resume_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datetime) -> None:
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
-    if row is None or row.status != "paused" or is_expired(row.expires_at, now):
+    if (
+        row is None
+        or row.status != "paused"
+        or is_expired(row.expires_at, now)
+        or is_paused_out(row.expires_at, row.paused_at, now)
+    ):
         raise ValueError("Watch cannot resume")
     if (
         row.source_state.get("confirmed") is False
@@ -1055,6 +1080,7 @@ async def update_watch(
         current.source not in ("poll", "mcp_poll")
         or current.status not in ("active", "paused")
         or is_expired(current.expires_at, now)
+        or is_paused_out(current.expires_at, current.paused_at, now)
         or current.source_state.get("confirmed") is False
         or current.source_state.get("reason") in {"source_unmapped", "projection_unmapped"}
     ):
@@ -1118,6 +1144,8 @@ async def update_watch(
     if admin_level and admin_account_id is None:
         raise ValueError("Only an admin can approve that. Ask an admin or an owner.")
     if expires_at is None:
+        # The same owner lock as create, so the two cannot both take the last place.
+        await _lock_owner(session, current.owner_account_id)
         await require_permanent_room(session, current.owner_account_id, excluding=current.id)
     delivery = edit.delivery or current.delivery
     session_id = current.session_id
@@ -1162,6 +1190,9 @@ async def update_watch(
     }
     row.expires_at = expires_at
     row.permanent_approved_by = admin_account_id if expires_at is None else None
+    if row.status == "paused" and current.expires_at is not None and expires_at is None:
+        # The owner just acted on it: its 30 paused days as a permanent watch start now.
+        row.paused_at = now
     row.max_turns_per_day = max_turns
     row.delivery = delivery
     row.session_id = session_id

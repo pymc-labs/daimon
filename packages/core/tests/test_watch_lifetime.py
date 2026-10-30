@@ -10,6 +10,11 @@ from pathlib import Path
 import pytest
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.stores import watches
+from daimon.core.stores.domain import WatchRow
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+#: What the `permanent_watch` fixture yields.
+PermanentWatch = tuple[async_sessionmaker[AsyncSession], WatchRow, ContinuationRequest]
 
 _REPO = Path(__file__).resolve().parents[3]
 _MIGRATION = _REPO / "packages/core/alembic/versions/0164_watch_lifetime_caps.py"
@@ -69,11 +74,43 @@ def test_is_expired_treats_none_as_permanent():
     assert not watches.is_expired(now + timedelta(seconds=1), now)
 
 
-@pytest.fixture
-async def permanent_watch(db_session_factory, monkeypatch):
+async def _owner_binding(db: AsyncSession) -> ContinuationRequest:
+    """A tenant, an owner and the owner's live conversation the watches bind to."""
     from daimon.core.stores.identity import get_or_create_platform_principal
     from daimon.core.stores.thread_sessions import create_thread_session
     from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db)
+    principal = await get_or_create_platform_principal(
+        db, tenant_id=tenant.id, platform="discord", external_id="123"
+    )
+    await create_thread_session(
+        db,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="4242",
+        channel_id="4241",
+        account_id=principal.account_id,
+        ma_session_id="session-bound",
+        ma_agent_id="agent-bound",
+    )
+    return ContinuationRequest(
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="4241",
+        thread_id="4242",
+        requester_account_id=principal.account_id,
+        requester_external_user_id="123",
+        target_ma_agent_id="agent-bound",
+        target_name="analyst",
+        requested_work=None,
+        reason="watch_fired",
+        idempotency_key=uuid.uuid4(),
+    )
+
+
+@pytest.fixture
+async def permanent_watch(db_session_factory, monkeypatch):
     from daimon.testing.watch_fixtures import install_poll_ports
 
     monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
@@ -81,33 +118,7 @@ async def permanent_watch(db_session_factory, monkeypatch):
     async with db_session_factory.begin() as db:
         await install_poll_ports(db)
         await watches.set_watch_control(db, scope="global", enabled=True)
-        tenant = await make_tenant(db)
-        principal = await get_or_create_platform_principal(
-            db, tenant_id=tenant.id, platform="discord", external_id="123"
-        )
-        await create_thread_session(
-            db,
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id="4242",
-            channel_id="4241",
-            account_id=principal.account_id,
-            ma_session_id="session-bound",
-            ma_agent_id="agent-bound",
-        )
-        binding = ContinuationRequest(
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="4241",
-            thread_id="4242",
-            requester_account_id=principal.account_id,
-            requester_external_user_id="123",
-            target_ma_agent_id="agent-bound",
-            target_name="analyst",
-            requested_work=None,
-            reason="watch_fired",
-            idempotency_key=uuid.uuid4(),
-        )
+        binding = await _owner_binding(db)
         watch = await watches.register_poll_watch(
             db,
             binding,
@@ -119,7 +130,7 @@ async def permanent_watch(db_session_factory, monkeypatch):
             interval=60,
             expires_at=None,
             now=now,
-            permanent_approved_by=principal.account_id,
+            permanent_approved_by=binding.requester_account_id,
         )
     return db_session_factory, watch, binding
 
@@ -259,3 +270,145 @@ async def test_ceilings_read_tenant_then_global_then_defaults(permanent_watch):
             )
         with pytest.raises(ValueError):
             await watches.set_watch_limits(db, scope="global", per_watch=241, per_owner=None)
+
+
+async def _register(
+    factory: async_sessionmaker[AsyncSession],
+    binding: ContinuationRequest,
+    *,
+    expires_at: datetime | None,
+    approved_by: uuid.UUID | None = None,
+) -> WatchRow:
+    async with factory.begin() as db:
+        return await watches.register_poll_watch(
+            db,
+            binding,
+            instructions="Report changes.",
+            tool="read_thread",
+            arguments={"thread_id": "4343"},
+            projection=".rows",
+            rule="change",
+            interval=60,
+            expires_at=expires_at,
+            now=datetime.now(UTC),
+            permanent_approved_by=approved_by,
+        )
+
+
+async def _make_permanent(db: AsyncSession, watch: WatchRow, *, now: datetime) -> WatchRow:
+    return await watches.update_watch(
+        db,
+        watch.id,
+        tenant_id=watch.tenant_id,
+        owner_account_id=watch.owner_account_id,
+        expected_revision=watch.revision,
+        edit=watches.WatchEdit(lifetime="permanent"),
+        now=now,
+        admin_account_id=watch.owner_account_id,
+    )
+
+
+async def test_an_edit_and_a_create_cannot_both_take_the_last_permanent_place(
+    db_committing_engine: AsyncEngine, db_clean: None, monkeypatch: pytest.MonkeyPatch
+):
+    """Two real transactions: the edit holds the owner lock until it commits."""
+    import asyncio
+
+    from daimon.core._models import Watch
+    from sqlalchemy import func, select, text
+
+    monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with factory.begin() as db:
+        binding = await _owner_binding(db)
+    owner = binding.requester_account_id
+    for _ in range(watches.MAX_PERMANENT_PER_OWNER - 1):
+        await _register(factory, binding, expires_at=None, approved_by=owner)
+    dated = await _register(factory, binding, expires_at=datetime.now(UTC) + timedelta(days=5))
+    async with factory.begin() as db:
+        await _make_permanent(db, dated, now=datetime.now(UTC))
+        # The create starts while the edit is still uncommitted.
+        create = asyncio.create_task(
+            _register(factory, binding, expires_at=None, approved_by=owner)
+        )
+        # Commit only once the create has finished or waits on a lock.
+        for _ in range(200):
+            async with factory() as probe:
+                waiting = await probe.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_locks l JOIN pg_database d ON d.oid = l.database "
+                        "WHERE d.datname = current_database() "
+                        "AND l.locktype = 'advisory' AND NOT l.granted"
+                    )
+                )
+            if create.done() or waiting:
+                break
+            await asyncio.sleep(0.05)
+    with pytest.raises(ValueError, match="already have 5 permanent"):
+        await create
+    async with factory() as db:
+        count = await db.scalar(
+            select(func.count())
+            .select_from(Watch)
+            .where(Watch.owner_account_id == owner, Watch.expires_at.is_(None))
+        )
+    assert count == watches.MAX_PERMANENT_PER_OWNER
+
+
+@pytest.mark.fresh_schema
+async def test_a_long_paused_permanent_watch_cannot_resume_or_change_while_gated_off(
+    permanent_watch: PermanentWatch,
+):
+    from sqlalchemy import text
+
+    factory, watch, _ = permanent_watch
+    async with factory.begin() as db:
+        await watches.pause_watch(db, watch.id)
+        # With the gate off the claim function never expires it.
+        await watches.set_watch_control(db, scope="global", enabled=False)
+        await db.execute(
+            text("UPDATE watches SET paused_at=now()-interval '30 days 1 second' WHERE id=:id"),
+            {"id": watch.id},
+        )
+    async with factory.begin() as db:
+        with pytest.raises(ValueError, match="cannot resume"):
+            await watches.resume_watch(db, watch.id, now=datetime.now(UTC))
+    async with factory.begin() as db:
+        paused = await watches.get_watch(db, watch.id)
+        assert paused is not None
+        with pytest.raises(ValueError, match="cannot be changed"):
+            await watches.update_watch(
+                db,
+                watch.id,
+                tenant_id=watch.tenant_id,
+                owner_account_id=watch.owner_account_id,
+                expected_revision=paused.revision,
+                edit=watches.WatchEdit(instructions="Report other changes."),
+                now=datetime.now(UTC),
+                admin_account_id=watch.owner_account_id,
+            )
+
+
+@pytest.mark.fresh_schema
+async def test_making_a_long_paused_watch_permanent_restarts_its_paused_clock(
+    permanent_watch: PermanentWatch,
+):
+    from sqlalchemy import text
+
+    factory, _, binding = permanent_watch
+    dated = await _register(factory, binding, expires_at=datetime.now(UTC) + timedelta(days=5))
+    async with factory.begin() as db:
+        await watches.pause_watch(db, dated.id)
+        await db.execute(
+            text("UPDATE watches SET paused_at=now()-interval '29 days' WHERE id=:id"),
+            {"id": dated.id},
+        )
+    now = datetime.now(UTC)
+    async with factory.begin() as db:
+        paused = await watches.get_watch(db, dated.id)
+        assert paused is not None
+        edited = await _make_permanent(db, paused, now=now)
+    assert edited.expires_at is None and edited.status == "paused"
+    assert edited.paused_at == now
+    async with factory.begin() as db:
+        await watches.resume_watch(db, dated.id, now=datetime.now(UTC))
