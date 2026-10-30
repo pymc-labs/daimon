@@ -7,7 +7,12 @@ from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
 from daimon.core.config import SignedIdentityServer
 from daimon.core.mcp_skills.install import fetch_server_skill, server_access
 from daimon.core.mcp_skills.manifest import SkillRejected
-from daimon.core.mcp_skills.protocol import PROTOCOL_VERSION, SKILLS_EXTENSION, Endpoint
+from daimon.core.mcp_skills.protocol import (
+    MAX_LISTING_BYTES,
+    PROTOCOL_VERSION,
+    SKILLS_EXTENSION,
+    Endpoint,
+)
 from daimon.core.skills.ingest import SkillIngestError
 from daimon.testing.mcp_skills import SkillsServer, skill_md
 
@@ -104,6 +109,27 @@ async def test_what_cannot_be_added_says_why(skill: str, status: int, message: s
         with pytest.raises(SkillIngestError, match=message):
             await fetch_server_skill(http, ENDPOINT, server="docs", skill=skill)
     assert "resources/read" not in server.methods(), "no file should be read"
+
+
+async def test_a_listing_past_its_byte_budget_is_refused() -> None:
+    """Pages under the per-page cap that together pass the budget stop the walk."""
+    server = _server()
+    server.padding = MAX_LISTING_BYTES // 3
+
+    async with server.client() as http:
+        with pytest.raises(SkillIngestError, match="Try again later"):
+            await fetch_server_skill(http, ENDPOINT, server="docs", skill="live-report")
+    assert server.methods().count("skills/list") == 3, "the third page should pass the budget"
+
+
+async def test_a_stalling_server_hits_the_deadline() -> None:
+    """One deadline bounds the whole fetch, however slowly the server answers."""
+    server = _server()
+    server.stall = 1.0
+
+    async with server.client() as http:
+        with pytest.raises(SkillIngestError, match="took too long"):
+            await fetch_server_skill(http, ENDPOINT, server="docs", skill="triage", deadline_s=0.05)
 
 
 def test_server_access_uses_the_shared_token_or_the_relay() -> None:

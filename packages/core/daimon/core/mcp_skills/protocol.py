@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import base64
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 
@@ -23,7 +23,8 @@ from pydantic import JsonValue
 PROTOCOL_VERSION: Final = "2026-07-28"
 SKILLS_EXTENSION: Final = "io.modelcontextprotocol/skills"
 CLIENT_INFO: Final[dict[str, JsonValue]] = {"name": "daimon", "version": "0"}
-#: A `server/discover` or `skills/list` page; a file read gets its manifest size.
+#: A `server/discover` answer, or every `skills/list` page together; a file read
+#: gets its manifest size.
 MAX_LISTING_BYTES: Final = 4 * 1024 * 1024
 #: `skills/list` pages read before giving up on a server's listing.
 MAX_PAGES: Final = 50
@@ -36,14 +37,6 @@ class Endpoint:
 
     url: str
     bearer: str
-
-
-@dataclass(frozen=True, slots=True)
-class SkillListing:
-    """Every entry of a `skills/list` walk, and how long the server says it stays fresh."""
-
-    entries: tuple[JsonValue, ...]
-    ttl_ms: int | None
 
 
 def _header_value(value: str) -> str:
@@ -86,19 +79,14 @@ def request_headers(endpoint: Endpoint, method: str, uri: str | None = None) -> 
     return headers
 
 
-async def call(
+async def _post(
     http: httpx.AsyncClient,
     endpoint: Endpoint,
     method: str,
     params: Mapping[str, JsonValue],
     *,
-    max_bytes: int = MAX_LISTING_BYTES,
-) -> dict[str, JsonValue]:
-    """POST one request; return its complete `result`.
-
-    Raises `McpStatusError` for a non-200 answer or one past `max_bytes`, and
-    `ValueError` for an error or any result but a complete one.
-    """
+    max_bytes: int,
+) -> tuple[dict[str, JsonValue], int]:
     body = request_body(method, params)
     uri = params.get("uri") if method == "resources/read" else None
     headers = request_headers(endpoint, method, uri if isinstance(uri, str) else None)
@@ -114,6 +102,23 @@ async def call(
     result = rpc_result(bytes(content), content_type, body["id"])
     if result.get("resultType", "complete") != "complete":
         raise ValueError("MCP result is not complete")
+    return result, len(content)
+
+
+async def call(
+    http: httpx.AsyncClient,
+    endpoint: Endpoint,
+    method: str,
+    params: Mapping[str, JsonValue],
+    *,
+    max_bytes: int = MAX_LISTING_BYTES,
+) -> dict[str, JsonValue]:
+    """POST one request; return its complete `result`.
+
+    Raises `McpStatusError` for a non-200 answer or one past `max_bytes`, and
+    `ValueError` for an error or any result but a complete one.
+    """
+    result, _ = await _post(http, endpoint, method, params, max_bytes=max_bytes)
     return result
 
 
@@ -142,24 +147,28 @@ async def fetch_serves_skills(http: httpx.AsyncClient, endpoint: Endpoint) -> bo
     )
 
 
-async def fetch_skill_listing(http: httpx.AsyncClient, endpoint: Endpoint) -> SkillListing:
-    """Walk `skills/list` to its last page. The shortest page `ttlMs` wins."""
-    entries: list[JsonValue] = []
-    ttls: list[int] = []
+async def fetch_skill_listing(
+    http: httpx.AsyncClient, endpoint: Endpoint, *, keep: Callable[[JsonValue], bool]
+) -> tuple[JsonValue, ...]:
+    """Walk `skills/list` to its last page, holding only the entries `keep` accepts.
+
+    Every page together may take at most `MAX_LISTING_BYTES`.
+    """
+    kept: list[JsonValue] = []
+    budget = MAX_LISTING_BYTES
     cursor: str | None = None
     seen: set[str] = set()
     for _ in range(MAX_PAGES):
-        result = await call(http, endpoint, "skills/list", {"cursor": cursor} if cursor else {})
+        params: dict[str, JsonValue] = {"cursor": cursor} if cursor else {}
+        result, size = await _post(http, endpoint, "skills/list", params, max_bytes=budget)
+        budget -= size
         page = result.get("skills")
         if not isinstance(page, list):
             raise ValueError("invalid skills/list result")
-        entries.extend(page)
-        ttl = result.get("ttlMs")
-        if isinstance(ttl, int) and not isinstance(ttl, bool) and ttl >= 0:
-            ttls.append(ttl)
+        kept.extend(raw for raw in page if keep(raw))
         following = result.get("nextCursor")
         if not isinstance(following, str) or not following or following in seen:
-            return SkillListing(entries=tuple(entries), ttl_ms=min(ttls) if ttls else None)
+            return tuple(kept)
         seen.add(following)
         cursor = following
     raise ValueError("skills/list has too many pages")

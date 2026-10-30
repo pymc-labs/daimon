@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -27,6 +28,8 @@ class SkillsServer:
 
     `served` replaces a file's content by URI, `dynamic` lists skills without a
     manifest, and `status` answers every request with that status instead.
+    `padding` pads each listing page with that many bytes; `stall` waits that many
+    seconds before answering.
     Files ending `.bin` are served as blobs. Every request is kept in `requests`.
     """
 
@@ -34,6 +37,8 @@ class SkillsServer:
     served: dict[str, bytes] = field(default_factory=dict[str, bytes])
     dynamic: tuple[str, ...] = ()
     status: int = 200
+    padding: int = 0
+    stall: float = 0.0
     requests: list[tuple[str, dict[str, Any], httpx.Headers]] = field(
         default_factory=list[tuple[str, dict[str, Any], httpx.Headers]]
     )
@@ -75,10 +80,11 @@ class SkillsServer:
             return {"uri": uri, "blob": base64.b64encode(body).decode()}
         return {"uri": uri, "mimeType": "text/markdown", "text": body.decode()}
 
-    def handle(self, request: httpx.Request) -> httpx.Response:
+    async def handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         method, params = body["method"], body["params"]
         self.requests.append((method, params, request.headers))
+        await asyncio.sleep(self.stall)
         if self.status != 200:
             return httpx.Response(self.status)
         result: dict[str, Any]
@@ -91,6 +97,8 @@ class SkillsServer:
             start = int(params.get("cursor", "0"))
             listed = self.entries()
             result = {"skills": listed[start : start + 1], "ttlMs": 60_000}
+            if self.padding:
+                result["padding"] = "x" * self.padding
             if start + 1 < len(listed):
                 result["nextCursor"] = str(start + 1)
         elif method == "resources/read":

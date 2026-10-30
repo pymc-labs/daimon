@@ -13,6 +13,7 @@ import asyncio
 import ssl
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Final
 
 import httpx
 from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
@@ -36,6 +37,9 @@ from daimon.core.skills.ingest import SkillIngestError
 from pydantic import JsonValue
 
 __all__ = ["ServerAccess", "ServerSkill", "fetch_server_skill", "server_access"]
+
+#: One `add_skill` fetch, from `server/discover` to the last file read.
+FETCH_DEADLINE_S: Final = 120.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,17 +108,36 @@ def _is_wanted(raw: JsonValue, skill: str) -> bool:
 
 
 async def fetch_server_skill(
-    http: httpx.AsyncClient, endpoint: Endpoint, *, server: str, skill: str
+    http: httpx.AsyncClient,
+    endpoint: Endpoint,
+    *,
+    server: str,
+    skill: str,
+    deadline_s: float = FETCH_DEADLINE_S,
 ) -> ServerSkill:
     """The skill named `skill` (a name or `skill://` URI), every file verified.
 
-    Raises `SkillIngestError` when the server serves no such skill, or a check fails.
+    Raises `SkillIngestError` when the server serves no such skill, a check fails,
+    or the whole fetch takes longer than `deadline_s`.
     """
+    try:
+        async with asyncio.timeout(deadline_s):
+            return await _fetch_server_skill(http, endpoint, server=server, skill=skill)
+    except TimeoutError as err:
+        raise SkillIngestError(
+            f"'{server}' took too long to serve '{skill}'. Try again later."
+        ) from err
+
+
+async def _fetch_server_skill(
+    http: httpx.AsyncClient, endpoint: Endpoint, *, server: str, skill: str
+) -> ServerSkill:
     try:
         if not await fetch_serves_skills(http, endpoint):
             raise SkillIngestError(f"'{server}' does not serve skills.")
-        listing = await fetch_skill_listing(http, endpoint)
-        matches = [raw for raw in listing.entries if _is_wanted(raw, skill)]
+        matches = list(
+            await fetch_skill_listing(http, endpoint, keep=lambda raw: _is_wanted(raw, skill))
+        )
         if not matches:
             raise SkillIngestError(f"'{server}' serves no skill '{skill}'.")
         if len(matches) > 1:
