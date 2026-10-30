@@ -111,8 +111,6 @@ from daimon.core.continuity.messages import (
     render_access_changed_try_again,
     render_current_work_must_finish,
     render_preparation_failed,
-    render_replacement_summary,
-    render_unexpected_loss,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
 from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
@@ -5293,47 +5291,11 @@ class DaimonBot(commands.Bot):
             reused=prepared.reused,
         )
         watch.session_id = prepared.ma_session_id
-        # A planned transition the caller didn't necessarily ask to see this
-        # turn: say what happened to the workspace BEFORE the answer, so a
-        # replacement is never discovered only by its side effects.
-        # `prepared.continuity` is the bind's OWN decision, taken before the
-        # turn runs -- it can never be "replaced_after_loss" (that state only
-        # exists on the post-turn `RunOutcome`, set when `run_prepared_turn`'s
-        # recovery cycle recreates the session mid-call). That notice is
-        # posted after the turn instead, once the outcome is known.
-        replacement_summary: str | None = None
-        if (
-            prepared.continuity.announces_replacement()
-            and prepared.continuity.transfer_kind is not None
-        ):
-            # Not a separate message: the answer is an in-place edit of the
-            # embed posted at mention time, so a summary sent at any point
-            # after that lands BELOW the answer it explains ("the file
-            # vanished" above "here is why"). It becomes the answer's first
-            # paragraph instead. The fallback after the turn covers an answer
-            # that never arrives to carry it.
-            #
-            # A `None` transfer_kind here means a fresh start (no prior
-            # session to summarize a transfer from) -- that path already
-            # announces itself elsewhere, so no prefix is rendered.
-            replacement_summary = render_replacement_summary(prepared.continuity.transfer_kind, [])
-            lifecycle.answer_prefix = replacement_summary
-        if prepared.continuity.state == "replaced" and prepared.mapping_id is not None:
-            from daimon.core.stores.thread_sessions import github_key_restart_line
-
-            async with self.runtime.sessionmaker() as notice_session:
-                key_restart = await github_key_restart_line(
-                    notice_session, mapping_id=prepared.mapping_id
-                )
-            if key_restart is not None:
-                replacement_summary = key_restart
-                lifecycle.answer_prefix = key_restart
+        # What happened to the workspace is the agent's to say, from the turn controls.
         session_state = (
             None
             if prepared.continuity.state == "continued"
-            else SessionState(
-                state=prepared.continuity.state, applied=prepared.continuity.applied, lost=()
-            )
+            else prepared.continuity.session_state()
         )
 
         # Flag the turn as in flight. The render loop lives in THIS process, so
@@ -5490,13 +5452,6 @@ class DaimonBot(commands.Bot):
         if synthetic_prefix:
             user_message = synthetic_prefix + "\n" + user_message
 
-        if images_skipped:
-            await turn_send(
-                "Some images couldn't be inlined — I've linked them for the agent to "
-                "fetch instead: "
-                + ", ".join(f"`{att.filename}` ({r})" for att, r in images_skipped)
-            )
-
         # --- Run the turn (run_prepared_turn owns the driver
         # call and the one-shot dead-session recovery cycle). ---
 
@@ -5596,10 +5551,6 @@ class DaimonBot(commands.Bot):
                     thread, msg, turn_card_intent_id=turn_card_intent.id
                 ),
             )
-            # The replacement summary belongs to the turn, not to the lifecycle
-            # object that happens to render it -- a recovery cycle swaps the
-            # lifecycle and would otherwise drop it.
-            new_lifecycle.answer_prefix = lifecycle.answer_prefix
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
@@ -5722,29 +5673,6 @@ class DaimonBot(commands.Bot):
         state = outcome.state
         mapping_id = outcome.mapping_id
         final_lifecycle = lifecycle_holder[0]
-
-        # The recovery cycle inside run_prepared_turn only learns a session was
-        # lost mid-call, after the turn has already run -- so unlike the
-        # planned-replacement summary above, this notice can only be posted
-        # here, once `outcome.continuity` is known. Posted regardless of
-        # whether the recovered turn itself then answered or errored: the
-        # person needs to know the workspace was lost either way.
-        if outcome.continuity.state == "replaced_after_loss":
-            loss_kind: Literal["transcript", "history"] = (
-                "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
-            )
-            loss_notice = render_unexpected_loss(loss_kind)
-            # Edited in above the answer rather than sent under it, for the
-            # same ordering reason as the planned summary above. Falls back to
-            # a message when there is no answer to sit above (a tool-only or
-            # failed turn) or it will not fit.
-            if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                await turn_send(loss_notice)
-        if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
-            # The turn produced no answer to carry the summary (tool-only,
-            # cancelled, or failed). The person still has to be told what the
-            # replacement carried across, so it goes out on its own.
-            await turn_send(replacement_summary)
 
         if state.error is not None:
             log.warning(

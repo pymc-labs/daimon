@@ -2567,36 +2567,33 @@ class TestUnpromptedTurn:
         assert "silent" not in sends[0], "mention turns notify as they always have"
 
 
-class TestDegradedTurnNotice:
-    async def test_terminal_success_names_the_failed_mcp_server_under_the_reply(self) -> None:
-        """#79: a reply produced after an MCP failure is delivered, with the
-        dropped server named under it instead of a blank failure embed."""
-        from daimon.core.turn.state import McpServerFailure
+class TestDegradedTurnReply:
+    """A failed MCP server never adds text to the reply: the agent is told next turn."""
 
+    @staticmethod
+    def _failure() -> McpServerFailure:
+        return McpServerFailure(
+            server_name="notion",
+            error_type="mcp_authentication_failed_error",
+            message="access forbidden",
+            retry_status="exhausted",
+        )
+
+    async def test_terminal_success_reply_is_exactly_the_agents_text(self) -> None:
         lc, _sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
         state = TurnState(
             content=[TextBlock(kind="text", text="Here is the board.")],
-            mcp_failures=(
-                McpServerFailure(
-                    server_name="notion",
-                    error_type="mcp_authentication_failed_error",
-                    message="access forbidden",
-                    retry_status="exhausted",
-                ),
-            ),
+            mcp_failures=(self._failure(),),
         )
         await lc.on_terminal_success(state)
 
-        content = edits[-1][1]["content"]
-        assert content.startswith("Here is the board."), "the reply itself comes first"
-        assert "`notion`" in content, "the dropped server is named under the reply"
+        assert edits[-1][1]["content"] == "Here is the board.", (
+            "no system line is appended to the reply"
+        )
         assert lc.was_answered, "a degraded turn still counts as answered"
 
-    async def test_tool_only_turn_posts_the_notice_on_its_own(self) -> None:
-        """No reply to hang the notice under: it goes out as its own message."""
-        from daimon.core.turn.state import McpServerFailure
-
+    async def test_tool_only_turn_posts_no_notice(self) -> None:
         lc, sends, _edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
         state = TurnState(
@@ -2605,19 +2602,13 @@ class TestDegradedTurnNotice:
                     kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
                 )
             ],
-            mcp_failures=(
-                McpServerFailure(
-                    server_name="notion",
-                    error_type="mcp_authentication_failed_error",
-                    message="access forbidden",
-                    retry_status="exhausted",
-                ),
-            ),
+            mcp_failures=(self._failure(),),
         )
         await lc.on_terminal_success(state)
 
-        notices = [s for s in sends if "`notion`" in str(s.get("content", ""))]
-        assert len(notices) == 1, "the dropped server is named once, on its own line"
+        assert not [s for s in sends if "notion" in str(s.get("content", ""))], (
+            "a tool-only turn posts no line about the dropped server"
+        )
 
 
 async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
@@ -2631,8 +2622,6 @@ async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
     assert "everyone" not in mentions["parse"]
     assert "roles" not in mentions["parse"]
     assert not any(e.get("content") == sends[-1]["content"] for _, e in edits)
-    assert await lifecycle.prepend_revealed_answer("Recovered files.")
-    assert edits[-1][1]["content"].startswith("Recovered files.")
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -2747,13 +2736,12 @@ async def test_rejected_table_upload_retries_original_answer_as_text(status, not
         notify_on_completion=notify,
         requester_id=123,
     )
-    lifecycle.answer_prefix = "Recovered files."
     text = "| Name | Value |\n| --- | ---: |\n| Example | 42 |\n\n" + "Tail. " * 500
     await lifecycle.post_initial()
     with capture_logs() as logs:
         await lifecycle.on_terminal_success(_make_success_state(text))
     assert [part["content"] for part in delivered] == split_for_discord_safe(
-        ("<@123>\n" if notify else "") + "Recovered files.\n\n" + text
+        ("<@123>\n" if notify else "") + text
     )
     assert all("attachments" not in part and "files" not in part for part in delivered)
     assert all(part["allowed_mentions"].to_dict()["parse"] == [] for part in delivered)
@@ -2821,7 +2809,7 @@ async def test_answer_keeps_the_channel_budget_footer_on_the_visible_message(
     final_edit = edits[-1][1]
     assert final_edit["content"] == "Hello response"
     assert "embed" not in final_edit, "editing the answer must retain the terminal embed"
-    assert await lc.prepend_revealed_answer("Recovered files.")
+    await lc.edit_card(content="Hello response")
     assert "embed" not in edits[-1][1], "a later answer edit must retain the footer too"
 
 
@@ -2919,7 +2907,7 @@ async def test_missing_message_after_answer_delivery_is_a_logged_noop():
     await lifecycle.on_terminal_success(_make_success_state())
     missing[0] = True
     with capture_logs() as logs:
-        await lifecycle.prepend_revealed_answer("Recovered files.")
+        await lifecycle.edit_card(content="Late edit.")
     assert len(sent) == 1, "a stale edit must not duplicate an already delivered answer"
     assert any(entry["event"] == "turn.message_missing" and entry["delivered"] for entry in logs)
 
@@ -3251,32 +3239,15 @@ async def test_an_answer_repeated_after_a_tool_is_not_posted_twice(log_on: bool)
     assert sum(text.count(first) for text in posted) == 1, "the repeated answer posts once"
 
 
-@pytest.mark.parametrize("notice", ["cancel", "degraded", "continuity"])
-async def test_overflow_keeps_operational_notices_visible(notice):
+async def test_overflow_keeps_the_cancel_notice_visible():
     lc, _, edits = _make_lifecycle()
-    state = TurnState(content=[TextBlock(kind="text", text="Useful answer. " * 1000)])
-    if notice == "cancel":
-        state = dataclasses.replace(state, termination=TerminationReason.INTERRUPTED)
-        expected = "Stopped."
-    elif notice == "degraded":
-        state = dataclasses.replace(
-            state,
-            mcp_failures=(
-                McpServerFailure(
-                    server_name="notion",
-                    error_type="mcp_authentication_failed_error",
-                    message="access forbidden",
-                    retry_status="exhausted",
-                ),
-            ),
-        )
-        expected = "`notion`"
-    else:
-        lc.answer_prefix = "Recovered files."
-        expected = lc.answer_prefix
+    state = TurnState(
+        content=[TextBlock(kind="text", text="Useful answer. " * 1000)],
+        termination=TerminationReason.INTERRUPTED,
+    )
     await lc.on_terminal_success(state)
-    assert expected in edits[-1][1]["content"]
-    assert expected in edits[-1][1]["attachments"][0].fp.read().decode()
+    assert "Stopped." in edits[-1][1]["content"]
+    assert "Stopped." in edits[-1][1]["attachments"][0].fp.read().decode()
 
 
 async def test_unprompted_markup_only_output_stays_silent():
@@ -3292,16 +3263,16 @@ async def test_unprompted_markup_only_output_stays_silent():
     assert not lc.was_answered
 
 
-async def test_overflow_keeps_fallback_identity_and_bounds_long_notice():
+async def test_overflow_keeps_fallback_identity_on_the_visible_notice():
     lc, sends, edits = _make_lifecycle()
     lc._fallback_active = lambda: True
-    lc.answer_prefix = "Recovery details. " * 1000
-    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Answer.")]))
+    await lc.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="Answer. " * 2000)])
+    )
     visible = edits[-1][1]["content"]
     assert visible.startswith("-# test-agent\n")
     assert "answer.txt" in visible
     assert len(visible) <= 2000
-    assert lc.answer_prefix in edits[-1][1]["attachments"][0].fp.read().decode()
     assert not [sent for sent in sends if "content" in sent]
 
 
