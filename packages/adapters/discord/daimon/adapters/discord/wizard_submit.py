@@ -468,7 +468,7 @@ async def run_wizard_submit_turn_observed(
             _log.info(
                 "wizard_submit.skipped.over_cap", tenant_id=str(row.tenant_id), reason="queue_full"
             )
-            await channel.send(_OVER_CAP)
+            await channel.send(embed=build_notice_embed(_OVER_CAP))
             return
 
         # --- Stage one: admission -- admit(). Same four branches
