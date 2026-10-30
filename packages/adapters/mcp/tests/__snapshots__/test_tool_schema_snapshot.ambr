@@ -250,7 +250,8 @@
     'add_skill': dict({
       'description': '''
         Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in
-        this chat, or one folder of a GitHub repository. Pass exactly one source.
+        this chat, one folder of a GitHub repository, or a skill one of the agent's MCP
+        servers serves (``mcp_server`` with ``mcp_skill``). Pass exactly one source.
         <blank line>
         The first call only previews: name, description, files and the files the
         agent could run. Show that to the person; only when they confirm, call again
@@ -312,6 +313,30 @@
               }),
             ]),
             'default': None,
+          }),
+          'mcp_server': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+            'description': "One of the agent's MCP servers, by name, that serves the skill.",
+          }),
+          'mcp_skill': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+            'description': "The skill's name or skill:// URI on mcp_server.",
           }),
           'origin_context_id': dict({
             'anyOf': list([
