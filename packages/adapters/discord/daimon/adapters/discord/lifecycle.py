@@ -1133,9 +1133,10 @@ class DiscordTurnLifecycle:
             await self._edit_message(self._message_ref, embeds=[embed], view=None)
         self._terminal_shown = True
 
-    async def _show_card_error(self, title: str) -> None:
-        """End the turn's card as the red error card, with the usual next step."""
-        body = "Send your message again." if self._in_dm else "@mention Daimon to try again."
+    async def _show_card_error(self, title: str, body: str | None = None) -> None:
+        """End the turn's card as the red error card; `body` defaults to the usual retry step."""
+        if body is None:
+            body = "Send your message again." if self._in_dm else "@mention Daimon to try again."
         self._state = update(self._state, EmbedEvent(kind="error", label=title))
         self._state = dataclasses.replace(self._state, notice=body, notice_title=title)
         await self._flush_terminal()
@@ -1276,8 +1277,8 @@ class DiscordTurnLifecycle:
             await self._show_card_error(_TOOL_MARKUP_NOTICE)
             log.info("turn.terminal_success", has_text=False, tool_markup_only=True)
             return
-        if cancelled and response_text:
-            # The agent's partial text stays as it was; the card says it stopped.
+        if cancelled:
+            # Any partial text stays as the agent wrote it; the card says it stopped.
             self._state = update(self._state, EmbedEvent(kind="error", label=_STOPPED_TITLE))
             self._state = dataclasses.replace(
                 self._state, notice=_STOPPED_NEXT_STEP, notice_title=_STOPPED_TITLE
@@ -1288,12 +1289,6 @@ class DiscordTurnLifecycle:
         await self._flush_terminal(summary_on_card=not (notify and response_text))
 
         if cancelled and not response_text:
-            await self._edit_message(
-                self._message_ref,
-                content="Stopped.\nSend a message to start again.",
-                embed=None,
-                view=None,
-            )
             log.info("turn.terminal_success", has_text=False, cancelled=True)
             return
         if not response_text:
@@ -1312,12 +1307,7 @@ class DiscordTurnLifecycle:
                 self._summary_ref = self._message_ref
                 log.info("turn.terminal_success", has_text=False, tool_only=True)
                 return
-            await self._edit_message(
-                self._message_ref,
-                content="Stopped.\nSend a message to start again.",
-                embed=None,
-                view=None,
-            )
+            await self._show_card_error(_STOPPED_TITLE, _STOPPED_NEXT_STEP)
             log.info("turn.terminal_success", has_text=False)
             return
 

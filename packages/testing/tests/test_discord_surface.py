@@ -179,8 +179,9 @@ async def test_empty_and_interrupted_turn_capture_adapter_stop_notice(
         await lc.on_terminal_success(TurnState(termination=termination))
 
     capture = await h.run(invoke)
-    assert content(capture) == "Stopped.\nSend a message to start again."
-    assert capture.messages[0].embed_texts == ()
+    assert content(capture) == "", "the stop notice is a card, not reply text"
+    stopped = [text for message in capture.messages for text in message.embed_texts]
+    assert stopped[:2] == ["Stopped.", "Send a message to start again."]
 
 
 async def test_unprompted_empty_turn_retracts_card_and_has_complete_empty_text() -> None:

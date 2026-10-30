@@ -690,6 +690,16 @@ def _all_embeds(sends: list[Any], edits: list[Any]) -> list[discord.Embed]:
     return found
 
 
+def _assert_stopped_card(edit_kwargs: dict[str, Any]) -> None:
+    """The last card write is the red Stopped embed with its next step, and no reply text."""
+    assert not edit_kwargs.get("content"), "no plain text: the card is the whole notice"
+    (card,) = edit_kwargs["embeds"]
+    assert card.title == "Stopped."
+    assert card.description == "Send a message to start again."
+    assert card.colour is not None and card.colour.value == COLOR_RED
+    assert edit_kwargs.get("view") is None, "the Stop button is gone"
+
+
 async def test_interrupted_tool_turn_without_text_shows_cancelled() -> None:
     lc, sends, edits = _make_lifecycle(notify_on_completion=True)
     await lc.post_initial()
@@ -701,10 +711,8 @@ async def test_interrupted_tool_turn_without_text_shows_cancelled() -> None:
         TurnState(content=content, termination=TerminationReason.INTERRUPTED)
     )
 
-    rendered = "\n".join(
-        str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
-    )
-    assert "Stopped.\nSend a message to start again." in rendered
+    _assert_stopped_card(edits[-1][1])
+    rendered = "\n".join(str(kwargs.get("content", "")) for kwargs in sends)
     assert "<@123>" not in rendered, "cancellation must not send a completion ping"
     assert not lc.was_answered
 
@@ -1781,16 +1789,7 @@ class TestCancelViewWiring:
         state = TurnState()
         await lc.on_terminal_success(state)
         # The last edit should be the "Turn cancelled." clean-replace
-        cancel_edit = edits[-1]
-        assert cancel_edit[1].get("content") == "Stopped.\nSend a message to start again.", (
-            "empty-content terminal success must show 'Turn cancelled.'"
-        )
-        assert cancel_edit[1].get("embed") is None, (
-            "empty-content terminal success must remove embed"
-        )
-        assert cancel_edit[1].get("view") is None, (
-            "empty-content terminal success must remove cancel view"
-        )
+        _assert_stopped_card(edits[-1][1])
 
 
 # ---------------------------------------------------------------------------
@@ -1919,9 +1918,7 @@ class TestZeroMessageBehavior:
         state = TurnState()  # completely empty content
         await lc.on_terminal_success(state)
 
-        cancel_edit = edits[-1]
-        assert cancel_edit[1].get("content") == "Stopped.\nSend a message to start again."
-        assert cancel_edit[1].get("embed") is None
+        _assert_stopped_card(edits[-1][1])
 
 
 # ---------------------------------------------------------------------------
@@ -2219,10 +2216,7 @@ class TestWasAnswered:
         await lc.on_terminal_success(state)
 
         assert lc.was_answered is False, "a cancelled turn must not report an answer"
-        cancel_edit = edits[-1]
-        assert cancel_edit[1].get("content") == "Stopped.\nSend a message to start again.", (
-            "a cancelled turn must render as 'Turn cancelled.'"
-        )
+        _assert_stopped_card(edits[-1][1])
 
     async def test_was_answered_is_false_when_terminal_failure(self) -> None:
         """A failed turn must not report an answer."""
