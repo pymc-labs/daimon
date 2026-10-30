@@ -20,6 +20,8 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
+from .conftest import shown_text
+
 _TEAM = "T_HANDOVER"
 _CHANNEL = "C_PARENT"
 _THREAD_TS = "1700000000.000100"
@@ -124,7 +126,7 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
     assert _sent(fake_slack_web_client, "chat.postMessage") == []
     (ephemeral,) = _sent(fake_slack_web_client, "chat.postEphemeral")
     assert ephemeral["user"] == "U_CLICKER"
-    assert "Nothing was changed" in ephemeral["text"]
+    assert "Nothing was changed" in shown_text(ephemeral)
     async with db_session_factory() as session:
         routed = await resolve(
             session,

@@ -333,11 +333,11 @@ class SlackTurnLifecycle:
         """
         kwargs: dict[str, Any] = {"channel": self._channel, "thread_ts": self._thread_ts}
         if error or neutral:
-            kwargs["attachments"] = notice_attachments(text, neutral=neutral)
+            kwargs["attachments"] = notice_attachments(text, neutral=neutral, blocks=blocks)
         else:
             kwargs["text"] = text
-        if blocks is not None:
-            kwargs["blocks"] = blocks
+            if blocks is not None:
+                kwargs["blocks"] = blocks
         resp = await post_as_agent(self._client, self._identity, **kwargs)
         ts = cast(str, resp["ts"])
         await self.record_post(ts)

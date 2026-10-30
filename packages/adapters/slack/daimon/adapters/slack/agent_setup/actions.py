@@ -111,7 +111,7 @@ from daimon.adapters.slack.agent_setup.state import (
     encode_panel_metadata,
 )
 from daimon.adapters.slack.credential_submissions import post_ephemeral
-from daimon.adapters.slack.errors import render_error
+from daimon.adapters.slack.errors import render_error_notice
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.modal_limits import fit_title
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
@@ -1597,5 +1597,5 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                     channel=channel_id or user_id,
                     user=user_id,
-                    text=render_error(exc, request_id=request_id),
+                    **render_error_notice(exc, request_id=request_id),
                 )

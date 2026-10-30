@@ -16,6 +16,7 @@ from typing import Any, Final
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.admin_caller import admin_caller
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -101,7 +102,10 @@ async def handle_hand_over_click(runtime: SlackRuntime, payload: dict[str, Any])
     try:
         if not outcome.switched:
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                channel=channel_id, user=user_id, thread_ts=thread_ts, text=outcome.text
+                channel=channel_id,
+                user=user_id,
+                thread_ts=thread_ts,
+                **notice_fields(outcome.text),
             )
             return
         await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown

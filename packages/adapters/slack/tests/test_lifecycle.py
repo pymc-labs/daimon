@@ -65,6 +65,7 @@ import structlog
 import yarl
 from anthropic import BadRequestError, RateLimitError
 from daimon.adapters.slack import lifecycle as lifecycle_mod
+from daimon.adapters.slack.blockkit import ERROR_COLOR, NEUTRAL_COLOR
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.errors import TurnError
@@ -302,6 +303,22 @@ async def test_turn_posts_use_agent_header_and_record_intent(
     assert all(row["turn_card_intent_id"] == intent for row in recorded)
     assert all(row["channel_id"] == "C_TEST" for row in recorded)
     assert all(row["thread_ts"] == "1700000000.000000" for row in recorded)
+
+
+async def test_a_notice_posts_as_a_red_card_and_a_neutral_one_when_asked(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.post_notice("Refused.", error=True)
+    await lc.post_notice("Waiting.", neutral=True)
+    await lc.post_notice("Plain.")
+    _, refused, waiting, plain = [
+        call.kwargs["json"] for call in fake_slack_web_client.mock.requests[("POST", _POST_URL)]
+    ]
+    assert refused["attachments"][0]["color"] == ERROR_COLOR, "a refusal is an error card"
+    assert waiting["attachments"][0]["color"] == NEUTRAL_COLOR, "information is neutral"
+    assert plain["text"] == "Plain." and "attachments" not in plain, "no flag, no card"
 
 
 async def test_identity_off_posts_as_bot_and_keeps_agent_footer(

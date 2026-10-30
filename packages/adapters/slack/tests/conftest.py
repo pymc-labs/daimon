@@ -21,6 +21,17 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 _SLACK_API_BASE = "https://slack.com/api"
 
+
+def shown_text(body: dict[str, Any]) -> str:
+    """What a person reads in a Slack call body: its text, else its notice card's text."""
+    if body.get("text"):
+        return str(body["text"])
+    for attachment in body.get("attachments") or []:
+        if attachment.get("fallback"):
+            return str(attachment["fallback"])
+    return ""
+
+
 # Default ok payload for the POST-JSON chat methods. Exported so tests that
 # clear the defaults to stage failures can re-register the identical shape —
 # the ts value is load-bearing (tests assert on it as status_ts).

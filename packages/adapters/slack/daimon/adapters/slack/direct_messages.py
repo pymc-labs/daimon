@@ -11,6 +11,7 @@ import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.agent_post import post_as_agent
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.errors import bound_request_id, render_error
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
@@ -258,7 +259,9 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id,
                     user=user_id,
-                    text=_error_message(exc, settings=runtime.settings, team_id=team_id),
+                    **notice_fields(
+                        _error_message(exc, settings=runtime.settings, team_id=team_id)
+                    ),
                 )
 
 
@@ -275,7 +278,7 @@ async def _explain_no_private_chat(
         return
     try:
         await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-            channel=channel_id, text=cold_dm_text("slack", dms_on=dms_on)
+            channel=channel_id, **notice_fields(cold_dm_text("slack", dms_on=dms_on))
         )
     except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
         _COLD_DM_NOTICES.forget(person)

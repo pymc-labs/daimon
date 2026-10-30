@@ -19,6 +19,8 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.platform_words import DESCRIPTIONS, WORDS
 from yarl import URL
 
+from .conftest import shown_text
+
 _MANIFEST = Path(__file__).resolve().parents[4] / "docs" / "slack-app-manifest.yaml"
 
 
@@ -191,12 +193,13 @@ async def test_handle_help_command_reports_failure_ephemerally() -> None:
     notice = client.chat_postEphemeral.await_args_list[1].kwargs
     assert notice["channel"] == "C_HELP_TEST"
     assert notice["user"] == "U_HELP_TEST"
-    assert notice["text"].startswith("Slack didn't accept that.\n\nTry again.\n\n_Ref "), (
+    assert shown_text(notice).startswith("Slack didn't accept that.\n\nTry again.\n\nRef "), (
         "the notice carries the plain words and a short ref for log lookup"
     )
-    assert "down" not in notice["text"], "exception text stays in the logs"
-    assert notice["blocks"][-1]["type"] == "context", "the ref is drawn small"
-    assert notice["blocks"][-1]["elements"][0]["text"].startswith("Ref ")
+    assert "down" not in shown_text(notice), "exception text stays in the logs"
+    card = notice["attachments"][0]["blocks"]
+    assert card[-1]["type"] == "context", "the ref is drawn small"
+    assert card[-1]["elements"][0]["text"].startswith("Ref ")
 
 
 def test_help_uses_the_configured_bot_name() -> None:

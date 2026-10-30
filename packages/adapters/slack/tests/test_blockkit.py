@@ -22,6 +22,8 @@ from daimon.adapters.slack.blockkit import (
     TurnPhase,
     error_blocks_from_text,
     notice_attachments,
+    notice_fields,
+    notice_update_fields,
     to_blocks,
     to_fallback_text,
     to_interrupted_blocks,
@@ -345,6 +347,21 @@ class TestToBlocks:
         (attachment,) = notice_attachments("Still working.", neutral=True)
         assert attachment["color"] == NEUTRAL_COLOR, "information gets the neutral bar"
         assert attachment["color"] != ERROR_COLOR
+
+    def test_notice_fields_carry_only_the_attachment(self) -> None:
+        fields = notice_fields("Not allowed.")
+        assert list(fields) == ["attachments"], "no top-level text to print above the bar"
+        assert fields["attachments"][0]["color"] == ERROR_COLOR
+
+    def test_notice_update_fields_clear_the_status_card_it_replaces(self) -> None:
+        fields = notice_update_fields("Busy.", neutral=True)
+        assert fields["text"] == "" and fields["blocks"] == [], "the card's own blocks are gone"
+        assert fields["attachments"][0]["color"] == NEUTRAL_COLOR
+
+    def test_notice_attachment_keeps_the_given_buttons(self) -> None:
+        buttons = [{"type": "actions", "elements": []}]
+        (attachment,) = notice_attachments("Hand over?", neutral=True, blocks=buttons)
+        assert attachment["blocks"] == buttons, "the buttons replace the one section"
 
     def test_error_blocks_from_text_split_title_and_next_step(self) -> None:
         blocks = error_blocks_from_text("Something went wrong.\n\nMention me to try again.")

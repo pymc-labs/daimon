@@ -18,6 +18,8 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conftest import shown_text
+
 _TEAM = "T_DM_BUDGET"
 _CHANNEL = "C_SOURCE"
 
@@ -169,7 +171,7 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
     assert (call["is_dm"], call["dm_source_channel_id"]) == (True, _CHANNEL), (
         "admitted against the channel /dm-me ran in"
     )
-    reply = client.chat_postEphemeral.await_args.kwargs["text"]
+    reply = shown_text(client.chat_postEphemeral.await_args.kwargs)
     if over_budget:
         assert reply.startswith("This channel's budget is used up."), reply
         client.conversations_open.assert_not_awaited()

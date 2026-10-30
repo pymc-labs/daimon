@@ -10,6 +10,8 @@ from daimon.core.stores.domain import Role
 from slack_sdk.errors import SlackApiError
 from structlog.testing import capture_logs
 
+from .conftest import shown_text
+
 
 async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     monkeypatch: pytest.MonkeyPatch,
@@ -34,7 +36,7 @@ async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     client.conversations_open.assert_not_called()
     start_dm.assert_not_called()
     client.chat_postEphemeral.assert_awaited_once()
-    assert "Only conversations inside" in client.chat_postEphemeral.await_args.kwargs["text"]
+    assert "Only conversations inside" in shown_text(client.chat_postEphemeral.await_args.kwargs)
 
 
 def _client() -> MagicMock:
@@ -80,7 +82,7 @@ async def test_an_unknown_action_shows_the_usage_lines(monkeypatch: pytest.Monke
         MagicMock(), {"team_id": "T1", "user_id": "U1", "channel_id": "C020", "text": "help"}
     )
 
-    assert client.chat_postEphemeral.await_args.kwargs["text"] == (
+    assert shown_text(client.chat_postEphemeral.await_args.kwargs) == (
         "That option isn't recognized.\n\n"
         "Run `/dm-me` in a channel to continue privately. "
         "Admins: `/dm-me enable` or `/dm-me disable`."
@@ -101,7 +103,7 @@ async def test_missing_im_scopes_say_so_plainly_and_log_the_setup_steps(
             MagicMock(), {"team_id": "T1", "user_id": "U1", "channel_id": "C020", "text": ""}
         )
 
-    text = client.chat_postEphemeral.await_args.kwargs["text"]
+    text = shown_text(client.chat_postEphemeral.await_args.kwargs)
     assert text.startswith(
         "Daimon can't use DMs in this workspace yet.\n\n"
         "Ask a workspace admin to finish Daimon's DM setup.\n\n_Ref "

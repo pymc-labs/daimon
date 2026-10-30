@@ -73,6 +73,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
+from .conftest import shown_text
 from .harness import make_orchestrate_app
 
 
@@ -1002,12 +1003,13 @@ async def test_handle_app_mention_failure_posts_error_into_thread(
     body = posts[0].kwargs["json"]
     assert body["channel"] == "C_TEST"
     assert body["thread_ts"] == "1000000000.000001", "the error must land in the mention's thread"
-    assert "agent config is broken" not in body["text"], "exception text stays in the logs"
-    assert body["text"].startswith(
+    assert "agent config is broken" not in shown_text(body), "exception text stays in the logs"
+    assert shown_text(body).startswith(
         "Something went wrong on our side.\n\nTry again. If it keeps happening, tell an admin."
     )
-    assert body["blocks"][-1]["type"] == "context", "the ref is drawn small"
-    assert body["blocks"][-1]["elements"][0]["text"].startswith("Ref ")
+    card = body["attachments"][0]["blocks"]
+    assert card[-1]["type"] == "context", "the ref is drawn small"
+    assert card[-1]["elements"][0]["text"].startswith("Ref ")
 
 
 async def test_handle_app_mention_failure_uses_event_ts_as_thread_for_root_mention(
@@ -2383,7 +2385,7 @@ async def test_drain_runs_remaining_authors_when_one_authors_turn_raises(
         for req in reqs
     ]
 
-    assert any("something went wrong" in str(r.kwargs) for r in posts), (
+    assert any("Something went wrong" in str(r.kwargs) for r in posts), (
         "the author whose turn raised must be told, not silently dropped"
     )
 
@@ -2794,7 +2796,7 @@ async def test_failed_pending_reaction_removal_leaves_the_drained_turn_intact(
         if method == "POST" and url.path == "/api/chat.postMessage"
         for req in reqs
     ]
-    assert not any("something went wrong" in str(r.kwargs) for r in posts), (
+    assert not any("Something went wrong" in str(r.kwargs) for r in posts), (
         "a cosmetic cleanup failure must not surface as a turn failure"
     )
 
@@ -3557,7 +3559,7 @@ async def test_orchestrate_first_turn_when_no_agent_configured_posts_guidance_an
         if url == post_url
         for req in reqs
     ]
-    guidance = [b for b in post_bodies if "agent-setup" in str(b.get("text", ""))]
+    guidance = [b for b in post_bodies if "agent-setup" in shown_text(b)]
     assert guidance, (
         f"expected a chat.postMessage mentioning /agent-setup, got bodies: {post_bodies}"
     )
@@ -3642,7 +3644,7 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
     depleted = [
         b
         for b in post_bodies
-        if str(b.get("text", ""))
+        if shown_text(b)
         == "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
     ]
     assert depleted, (
@@ -3726,7 +3728,7 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
     cap_msgs = [
         b
         for b in post_bodies
-        if str(b.get("text", ""))
+        if shown_text(b)
         == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
     assert cap_msgs, (
@@ -3789,7 +3791,7 @@ async def test_run_thread_turn_when_over_channel_budget_blocks_before_session_cr
 
     post_url = URL("https://slack.com/api/chat.postMessage")
     texts = [
-        str((req.kwargs.get("json") or json.loads(req.kwargs.get("data") or "{}")).get("text"))
+        shown_text(req.kwargs.get("json") or json.loads(req.kwargs.get("data") or "{}"))
         for (_, url), reqs in fake_slack_web_client.mock.requests.items()
         if url == post_url
         for req in reqs
@@ -3994,7 +3996,7 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
     depleted = [
         b
         for b in post_bodies
-        if str(b.get("text", ""))
+        if shown_text(b)
         == "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
     ]
     assert depleted, (
@@ -4096,7 +4098,7 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
     cap_msgs = [
         b
         for b in post_bodies
-        if str(b.get("text", ""))
+        if shown_text(b)
         == "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ]
     assert cap_msgs, f"expected the exact over-cap copy via chat.postMessage, got: {post_bodies}"
@@ -4423,10 +4425,10 @@ async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_men
         "breach must leave exactly two posts -- the card, then the failure notice"
     )
     first_body = posts[0].kwargs["json"]
-    assert "_Ref " not in first_body.get("text", ""), (
+    assert "Ref " not in shown_text(first_body), (
         "the FIRST post must be the pre-bind status card, not the failure notice"
     )
-    failure_posts = [p for p in posts if "_Ref " in p.kwargs["json"].get("text", "")]
+    failure_posts = [p for p in posts if "Ref " in shown_text(p.kwargs["json"])]
     assert len(failure_posts) == 1, "exactly one post must be the boundary's failure notice"
     body = failure_posts[0].kwargs["json"]
     assert body["channel"] == channel
@@ -5464,7 +5466,9 @@ async def test_handle_block_action_when_non_author_clicks_cancel_event_unset(
     assert body["channel"] == "C_TEST"
     assert body["user"] == "U_OTHER"
     assert "thread_ts" not in body
-    assert body["text"] == "Only the person who asked, or a workspace admin, can stop this reply."
+    assert (
+        shown_text(body) == "Only the person who asked, or a workspace admin, can stop this reply."
+    )
 
 
 @pytest.mark.parametrize("lookup", ["admin", "failed"])
@@ -5506,7 +5510,7 @@ async def test_handle_block_action_when_another_person_clicks_cancel_checks_thei
         "host_team_id": "T_TEST",
     }
     notices = [
-        req.kwargs["json"]["text"]
+        shown_text(req.kwargs["json"])
         for (_, url), reqs in fake_slack_web_client.mock.requests.items()
         if url == URL("https://slack.com/api/chat.postEphemeral")
         for req in reqs
@@ -5547,7 +5551,7 @@ async def test_handle_block_action_when_status_ts_not_in_registry_tells_clicker_
     assert len(notices) == 1
     body = notices[0].kwargs["json"]
     assert body["user"] == "U_AUTHOR"
-    assert "already finished" in body["text"]
+    assert "already finished" in shown_text(body)
 
 
 async def test_finished_cancel_button_refusal_stays_in_its_parent_thread() -> None:
@@ -6549,9 +6553,7 @@ async def test_mention_from_a_user_outside_the_allowlist_is_refused_with_a_notic
         if url == post_url
         for req in reqs
     ]
-    refusals = [
-        b for b in post_bodies if "can't accept your request here" in str(b.get("text", ""))
-    ]
+    refusals = [b for b in post_bodies if "can't accept your request here" in shown_text(b)]
     assert refusals, f"expected the invoker refusal notice in-thread, got: {post_bodies}"
     assert refusals[0].get("thread_ts") == thread_ts
 
@@ -7245,7 +7247,7 @@ async def test_orchestrate_with_a_stale_setup_posts_the_out_of_date_notice(
     posts = fake_slack_web_client.mock.requests[
         ("POST", URL("https://slack.com/api/chat.postMessage"))
     ]
-    assert posts[-1].kwargs["json"]["text"] == (
+    assert shown_text(posts[-1].kwargs["json"]) == (
         "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
     )
 

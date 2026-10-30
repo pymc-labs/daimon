@@ -15,6 +15,7 @@ from typing import Any, cast
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
+from daimon.adapters.slack.blockkit import ERROR_COLOR
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import ChannelBudgetError
@@ -238,6 +239,20 @@ def render_error_payload(exc: Exception, *, request_id: str) -> dict[str, Any]:
     }
 
 
+def render_error_notice(exc: Exception, *, request_id: str) -> dict[str, Any]:
+    """`render_error_payload` as the red-barred notice a failure outside a reply uses."""
+    message, ref = _rendered(exc, request_id)
+    return {
+        "attachments": [
+            {
+                "color": ERROR_COLOR,
+                "fallback": message if ref is None else f"{message}\n\n{ref}",
+                "blocks": _error_blocks(message, ref),
+            }
+        ]
+    }
+
+
 def build_error_view(exc: Exception, *, title: str, request_id: str) -> dict[str, Any]:
     """Modal that replaces a "Loading…" placeholder when the background fetch fails.
 
@@ -280,5 +295,5 @@ async def surface_command_error(
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel_id,
                 user=user_id,
-                **render_error_payload(exc, request_id=request_id),
+                **render_error_notice(exc, request_id=request_id),
             )

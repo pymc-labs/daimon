@@ -64,6 +64,8 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
+from .conftest import shown_text
+
 _AGENT_ID = "agent_continuity_test"
 _ENV_ID = "env_continuity_test"
 
@@ -252,7 +254,7 @@ async def test_session_preparation_failed_renders_copy_and_does_not_run_turn(
     ]
     assert len(updates) == 1, "the status card must be edited in place with the failure copy"
     body = updates[0].kwargs["json"]
-    assert body["text"] == render_preparation_failed("uat-agent")
+    assert shown_text(body) == render_preparation_failed("uat-agent")
 
 
 @pytest.mark.parametrize("selfhosted", [False, True])
@@ -341,7 +343,7 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
     # lookup resolves the SAME fake agent ("uat-agent") -- this pins the
     # renderer call shape, not a distinct owner name (there is only one
     # agent in this fake).
-    assert body["text"] == render_responder_changed_without_handoff(
+    assert shown_text(body) == render_responder_changed_without_handoff(
         new_responder="uat-agent",
         owner="the previous agent" if selfhosted else "uat-agent",
         channel=f"<#{channel}>",
@@ -349,7 +351,7 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
     )
     buttons = [
         element
-        for block in body["blocks"]
+        for block in (body.get("blocks") or body["attachments"][0]["blocks"])
         if block["type"] == "actions"
         for element in block["elements"]
     ]
@@ -793,7 +795,7 @@ async def test_session_busy_renders_must_finish_copy_and_does_not_run_turn(
         for req in reqs
     ]
     assert len(updates) == 1, "the status card must be edited in place with the busy copy"
-    assert updates[0].kwargs["json"]["text"] == render_current_work_must_finish(
+    assert shown_text(updates[0].kwargs["json"]) == render_current_work_must_finish(
         "uat-agent", handoff=True
     )
 

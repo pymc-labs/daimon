@@ -122,22 +122,39 @@ def error_blocks_from_text(text: str) -> list[dict[str, Any]]:
     return error_blocks(title, next_step.strip())
 
 
-def notice_attachments(text: str, *, neutral: bool = False) -> list[dict[str, Any]]:
+def notice_attachments(
+    text: str, *, neutral: bool = False, blocks: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     """A red-barred (``neutral``: blurple) attachment carrying one system notice,
     so it never reads as the agent's words.
 
     For a message posted on its own and never edited: the top-level ``text`` is
     left out (Slack would print it above the bar), and the attachment's
-    ``fallback`` stands in for it in notifications.
+    ``fallback`` stands in for it in notifications. ``blocks`` replace the one
+    section, for a notice that carries buttons.
     """
     body = escape_mrkdwn(text)[:NOTICE_MAX_CHARS]
     return [
         {
             "color": NEUTRAL_COLOR if neutral else ERROR_COLOR,
             "fallback": text,
-            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": body}}],
+            "blocks": blocks or [{"type": "section", "text": {"type": "mrkdwn", "text": body}}],
         }
     ]
+
+
+def notice_fields(
+    text: str, *, neutral: bool = False, blocks: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """`chat.postMessage`/`postEphemeral` fields for a system notice on its own."""
+    return {"attachments": notice_attachments(text, neutral=neutral, blocks=blocks)}
+
+
+def notice_update_fields(
+    text: str, *, neutral: bool = False, blocks: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """`chat.update` fields that turn a status card into a system notice."""
+    return {"text": "", "blocks": [], **notice_fields(text, neutral=neutral, blocks=blocks)}
 
 
 def to_fallback_text(state: State, *, now: float | None) -> str:

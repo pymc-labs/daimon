@@ -76,6 +76,11 @@ from daimon.adapters.slack.billing_panel.redeem import (
     run_redeem_submission,
 )
 from daimon.adapters.slack.billing_panel.views import PANEL_ACTION_IDS, REDEEM_OPEN_ACTION_ID
+from daimon.adapters.slack.blockkit import (
+    error_blocks_from_text,
+    notice_fields,
+    notice_update_fields,
+)
 from daimon.adapters.slack.boot_sweep import (
     recover_slack_card_intents,
     retire_orphaned_turns,
@@ -107,7 +112,7 @@ from daimon.adapters.slack.direct_messages import (
 from daimon.adapters.slack.errors import (
     generate_request_id,
     not_set_up_notice,
-    render_error_payload,
+    render_error_notice,
     setup_out_of_date_notice,
 )
 from daimon.adapters.slack.external_access import (
@@ -583,7 +588,7 @@ class SlackApp:
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=request.parent_channel_id,
                 thread_ts=request.thread_id,
-                text="Stopped waiting for GitHub access. Ask again any time.",
+                **notice_fields("Stopped waiting for GitHub access. Ask again any time."),
             )
             return True
         except SlackApiError as error:
@@ -1589,7 +1594,9 @@ class SlackApp:
             client = await resolve_web_client(self.runtime, team_id=team_id)
             if client is not None:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                    channel=str(payload.get("channel_id") or ""), user=user_id, text=text
+                    channel=str(payload.get("channel_id") or ""),
+                    user=user_id,
+                    **notice_fields(text),
                 )
         except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.slash_refusal_notice_failed", team_id=team_id, exc_info=exc)
@@ -1634,7 +1641,7 @@ class SlackApp:
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel,
                 user=clicker,
-                text=text,
+                **notice_fields(text),
                 **({"thread_ts": parent_thread_ts} if parent_thread_ts else {}),
             )
         except (SlackApiError, InvalidToken, SQLAlchemyError) as exc:
@@ -1834,7 +1841,7 @@ class SlackApp:
                     await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                         channel=channel,
                         thread_ts=event.get("thread_ts") or event_ts,
-                        **render_error_payload(exc, request_id=request_id),
+                        **render_error_notice(exc, request_id=request_id),
                     )
 
     async def _channel_shared(
@@ -1983,7 +1990,7 @@ class SlackApp:
                 user=str(event.get("user") or ""),
                 # Real thread only — a shed root mention has no thread yet.
                 thread_ts=event.get("thread_ts"),
-                text=TENANT_CAP_NOTICE,
+                **notice_fields(TENANT_CAP_NOTICE),
             )
             return
 
@@ -2107,7 +2114,7 @@ class SlackApp:
                 with contextlib.suppress(SlackApiError):
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                         channel=channel,
-                        text=("Sorry, something went wrong handling that — please try again."),
+                        **notice_fields("Something went wrong handling that.\n\nTry again."),
                         thread_ts=thread_id,
                     )
             finally:
@@ -2171,7 +2178,7 @@ class SlackApp:
             with contextlib.suppress(SlackApiError):
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=q_channel,
-                    text="Sorry, something went wrong handling that — please try again.",
+                    **notice_fields("Something went wrong handling that.\n\nTry again."),
                     thread_ts=thread_id,
                 )
         await self._clear_pending_reactions(events, channel=channel, web_client=web_client)
@@ -2295,7 +2302,9 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                 channel=channel,
                 thread_ts=thread_id,
-                text="I couldn't verify your workspace role, so I didn't reply. Please retry.",
+                **notice_fields(
+                    "Couldn't check your workspace role, so there is no reply.\n\nTry again."
+                ),
             )
             return
         # users.info places the requester; the event's own team fields can only
@@ -2337,7 +2346,7 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=not_set_up_notice(foreign=standing.foreign),
+                **notice_fields(not_set_up_notice(foreign=standing.foreign)),
             )
             return
         except MAResolverMissError as err:
@@ -2350,7 +2359,7 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=setup_out_of_date_notice(foreign=standing.foreign),
+                **notice_fields(setup_out_of_date_notice(foreign=standing.foreign)),
             )
             return
         except AdmissionDenied as err:
@@ -2425,12 +2434,14 @@ class SlackApp:
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel,
                     thread_ts=thread_id,
-                    text=admission_refusal_message(
-                        err.reason,
-                        self.runtime.settings,
-                        foreign=standing.foreign,
-                        cause=err.cause,
-                        provider=err.provider,
+                    **notice_fields(
+                        admission_refusal_message(
+                            err.reason,
+                            self.runtime.settings,
+                            foreign=standing.foreign,
+                            cause=err.cause,
+                            provider=err.provider,
+                        )
                     ),
                 )
             return
@@ -2646,11 +2657,11 @@ class SlackApp:
                         channel=channel,
                         ts=lifecycle.status_ts,
                         text=explanation,
-                        blocks=[],
+                        blocks=error_blocks_from_text(explanation),
                     )
                     intent_terminal = True
                 else:
-                    await lifecycle.post_notice(explanation)
+                    await lifecycle.post_notice(explanation, error=True)
                 return
             except SessionBusyError:
                 # Nothing failed and nothing is misconfigured: the previous
@@ -2665,12 +2676,11 @@ class SlackApp:
                     await web_client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
                         ts=lifecycle.status_ts,
-                        text=busy_text,
-                        blocks=[],
+                        **notice_update_fields(busy_text, neutral=True),
                     )
                     intent_terminal = True
                 else:
-                    await lifecycle.post_notice(busy_text)
+                    await lifecycle.post_notice(busy_text, neutral=True)
                 return
             except SessionAgentMismatch as error:
                 # The recorded (previous) responder's display name is a
@@ -2716,12 +2726,11 @@ class SlackApp:
                     await web_client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
                         ts=lifecycle.status_ts,
-                        text=explanation,
-                        blocks=hand_over,
+                        **notice_update_fields(explanation, neutral=True, blocks=hand_over or None),
                     )
                     intent_terminal = True
                 else:
-                    await lifecycle.post_notice(explanation, blocks=hand_over)
+                    await lifecycle.post_notice(explanation, blocks=hand_over or None, neutral=True)
                 return
             ma_session_id = prepared.ma_session_id
             watermark = prepared.watermark
