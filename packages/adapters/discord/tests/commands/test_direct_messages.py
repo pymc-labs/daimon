@@ -13,6 +13,7 @@ import discord
 import pytest
 from daimon.adapters.discord.commands import direct_messages as dm_module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn_queue import TurnQueue
@@ -54,8 +55,26 @@ async def test_dm_policy_replies_use_server_words(
     runtime = MagicMock()
     cog = DirectMessageCog(MagicMock(runtime=runtime))
     await cog.dm.callback.__wrapped__(cog, interaction, action)  # pyright: ignore[reportFunctionMemberAccess]
-    assert interaction.followup.send.await_args.args[0] == expected
+    sent = interaction.followup.send.await_args
+    if admin:
+        assert sent.args[0] == expected
+    else:
+        assert sent.args == () and sent.kwargs["embed"].description == expected
+        assert sent.kwargs["embed"].color.value == COLOR_RED
+    assert sent.kwargs["ephemeral"] is True
     assert save.await_count == (1 if admin else 0)
+
+
+async def test_dm_from_somewhere_without_history_is_a_red_card() -> None:
+    interaction = MagicMock()
+    interaction.guild = None
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    cog = DirectMessageCog(MagicMock())
+    await cog.dm.callback.__wrapped__(cog, interaction, "move")  # pyright: ignore[reportFunctionMemberAccess]
+    sent = interaction.followup.send.await_args
+    assert sent.kwargs["embed"].color.value == COLOR_RED
+    assert sent.kwargs["embed"].description.startswith("You can't start a private conversation")
 
 
 async def _no_history(*, limit: int) -> AsyncIterator[discord.Message]:

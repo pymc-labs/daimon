@@ -395,7 +395,9 @@ class _ThreadOpenFailed(Exception):
 async def _explain_thread_open_failure(message: discord.Message) -> None:
     """The one reply a mention gets when its thread could not be created."""
     try:
-        await message.reply(THREAD_OPEN_FAILED_NOTICE, mention_author=False)
+        await message.reply(
+            embed=build_notice_embed(THREAD_OPEN_FAILED_NOTICE), mention_author=False
+        )
     except discord.HTTPException as exc:
         log.warning("discord.thread_open_failed_notice_failed", error=str(exc))
 

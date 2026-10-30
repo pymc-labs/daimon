@@ -322,12 +322,13 @@ class TestNewThreadCreation:
 
         await bot.on_message(message)
 
-        # The failure is answered with exactly one plain reply, never a
+        # The failure is answered with exactly one red card reply, never a
         # channel-level "opening your chat" notice or a second error.
         message.create_thread.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        message.reply.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-            "Couldn't open a thread. @mention Daimon again.", mention_author=False
-        )
+        message.reply.assert_awaited_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        reply = message.reply.await_args  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        assert reply.kwargs["mention_author"] is False  # pyright: ignore[reportUnknownMemberType]
+        assert reply.kwargs["embed"].description == "Couldn't open a thread. @mention Daimon again."  # pyright: ignore[reportUnknownMemberType]
         message.channel.send.assert_not_awaited()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert bot.turn_queue.in_flight() == 0
         assert bot.turn_queue.depth() == 0

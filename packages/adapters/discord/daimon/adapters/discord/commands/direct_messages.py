@@ -78,8 +78,10 @@ class DirectMessageCog(commands.Cog):
         channel = interaction.channel
         if guild is None or not isinstance(channel, (discord.TextChannel, discord.Thread)):
             await interaction.followup.send(
-                "You can't start a private conversation from here.\n\n"
-                "Run /dm-me in the channel you want to continue from.",
+                embed=build_notice_embed(
+                    "You can't start a private conversation from here.\n\n"
+                    "Run /dm-me in the channel you want to continue from."
+                ),
                 ephemeral=True,
             )
             return
@@ -91,7 +93,10 @@ class DirectMessageCog(commands.Cog):
             if action in {"enable", "disable"}:
                 if not is_admin:
                     await interaction.followup.send(
-                        "Only a server admin can turn Daimon DMs on or off here.", ephemeral=True
+                        embed=build_notice_embed(
+                            "Only a server admin can turn Daimon DMs on or off here."
+                        ),
+                        ephemeral=True,
                     )
                     return
                 async with runtime.sessionmaker.begin() as session:

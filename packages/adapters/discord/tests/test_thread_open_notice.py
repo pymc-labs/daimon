@@ -11,6 +11,7 @@ from daimon.adapters.discord.bot import (
     _explain_thread_open_failure,  # pyright: ignore[reportPrivateUsage]
     _open_thread_with_notice,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.discord.theme import COLOR_RED
 
 
 def _message() -> MagicMock:
@@ -96,10 +97,15 @@ async def test_a_failed_reaction_removal_still_returns_the_thread() -> None:
     message.reply.assert_not_awaited()
 
 
-async def test_the_failure_reply_is_plain_and_survives_its_own_failure() -> None:
+async def test_the_failure_reply_is_a_red_card_and_survives_its_own_failure() -> None:
     message = _message()
     await _explain_thread_open_failure(message)
-    message.reply.assert_awaited_once_with(THREAD_OPEN_FAILED_NOTICE, mention_author=False)
+    message.reply.assert_awaited_once()
+    assert message.reply.await_args.args == ()
+    assert message.reply.await_args.kwargs["mention_author"] is False
+    embed = message.reply.await_args.kwargs["embed"]
+    assert embed.description == THREAD_OPEN_FAILED_NOTICE
+    assert embed.color.value == COLOR_RED
     assert THREAD_OPEN_FAILED_NOTICE == "Couldn't open a thread. @mention Daimon again."
 
     message.reply.side_effect = discord.HTTPException(MagicMock(status=403), "forbidden")
