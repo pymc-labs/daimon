@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.teams.activity_feed import ActivityFeed
-from daimon.adapters.teams.card import answer_message, notice_card
+from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.card_actions import (
     button,
     submitted_fields,
@@ -371,7 +371,7 @@ class TeamsConfirmationCards:
                 )
                 sent = await self._sender.send(
                     conversation_id,
-                    answer_message(STILL_WAITING_MESSAGE, mention=requester),
+                    notice_card(STILL_WAITING_MESSAGE, error=False, mention=requester),
                     service_url=service_url,
                 )
                 if self._feed is not None:

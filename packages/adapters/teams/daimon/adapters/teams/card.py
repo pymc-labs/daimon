@@ -209,20 +209,14 @@ def _summary_line(summary: str) -> TextBlock:
     return TextBlock(text=summary, is_subtle=True, size="Small", wrap=True)
 
 
-def notice_card(
+def notice_adaptive_card(
     text: str,
     *,
     actions: Sequence[Action] = (),
     summary: str | None = None,
     error: bool = True,
-) -> MessageActivityInput:
-    """A terminal card: bailouts, failures, restarts; `actions` are its buttons, if any.
-
-    `summary` is a finished turn's line (`format_summary`), quiet under the text.
-    An error sits in a red "attention" container, so it reads as Daimon's own
-    notice; `error=False` is for a plain "Done." pointer.
-    Clipped as Slack clips its notices; the fallback repeats it, so it gets less.
-    """
+) -> AdaptiveCard:
+    """`notice_card`'s card on its own, for a reply that replaces a card in place."""
     body = fit_notice([text], tail=None, limit=TEAMS_LIMIT)
     fallback_parts = text.rsplit("\n\n", 1)
     fallback = (
@@ -246,7 +240,37 @@ def notice_card(
         elements.append(ActionSet(actions=list(actions)))
     if error:
         elements = [Container(style="attention", items=elements)]
-    return _card(elements, fallback=fallback)
+    return AdaptiveCard(body=elements, fallback_text=fallback)
+
+
+def notice_card(
+    text: str,
+    *,
+    actions: Sequence[Action] = (),
+    summary: str | None = None,
+    error: bool = True,
+    mention: Account | None = None,
+) -> MessageActivityInput:
+    """A terminal card: bailouts, failures, restarts; `actions` are its buttons, if any.
+
+    `summary` is a finished turn's line (`format_summary`), quiet under the text.
+    An error sits in a red "attention" container, so it reads as Daimon's own
+    notice; `error=False` is for information: a pointer, a confirmation, a prompt.
+    Clipped as Slack clips its notices; the fallback repeats it, so it gets less.
+    A `mention` leads the message's own text, outside the card, so it still notifies.
+    """
+    message = MessageActivityInput().add_card(
+        notice_adaptive_card(text, actions=actions, summary=summary, error=error)
+    )
+    if mention is not None:
+        tag = _mention_tag(mention)
+        message.text = tag
+        message.add_entity(MentionEntity(mentioned=mention, text=tag))
+    return message
+
+
+def _mention_tag(mention: Account) -> str:
+    return f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
 
 
 ANSWERED_BELOW = "Done."
@@ -309,7 +333,7 @@ def answer_message(
     message = MessageActivityInput(text=text + tail, text_format="markdown").add_ai_generated()
     if mention is None:
         return message
-    tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
+    tag = _mention_tag(mention)
     message.text = f"{tag}\n\n{text}{tail}"
     message.add_entity(MentionEntity(mentioned=mention, text=tag))
     return message

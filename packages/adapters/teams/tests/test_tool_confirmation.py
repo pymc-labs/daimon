@@ -797,12 +797,13 @@ async def test_a_card_still_open_reminds_with_an_at_mention_of_its_requester(mon
     reminders = [
         activity
         for _conversation, activity, _url in sender.sent
-        if "still waiting" in (activity.text or "")
+        if activity.attachments and "still waiting" in str(activity.attachments[0].content.body)
     ]
     (reminder,) = reminders
-    assert reminder.text is not None and reminder.text.endswith(
-        "This is still waiting for your click."
-    )
+    [card] = [a.content for a in reminder.attachments]
+    [block] = card.body
+    assert block.text.endswith("This is still waiting for your click."), "words in a neutral card"
+    assert reminder.text is not None and reminder.text.startswith("<at>")
     mentions = [
         entity for entity in reminder.entities or [] if getattr(entity, "type", None) == "mention"
     ]

@@ -12,6 +12,7 @@ from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
 from daimon.adapters.teams.billing_panel import channel_name_text
+from daimon.adapters.teams.card import notice_adaptive_card
 from daimon.adapters.teams.card_actions import button, clip, heading
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
 from daimon.core import channel_backend
@@ -627,5 +628,5 @@ def welcome_card(*, target_name: str | None, opener: str, thread_id: str) -> Ada
     return _card(setup_thread_name(target_name), [_text(opener), _text(how, subtle=True)], [end])
 
 
-def notice_card(text: str) -> AdaptiveCard:
-    return AdaptiveCard(body=[_text(text)], fallback_text=text)
+def notice_card(text: str, *, error: bool = True) -> AdaptiveCard:
+    return notice_adaptive_card(text, error=error)

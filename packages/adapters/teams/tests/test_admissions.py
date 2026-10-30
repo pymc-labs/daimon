@@ -127,6 +127,8 @@ async def test_a_drain_tells_the_chat_once_about_queued_messages_even_when_repea
         await teams._hold([two, three])  # a second drain pass
 
     assert _texts(sender) == [HOLDING], "one notice for the chat, however often it drains"
+    [held] = sender.activities
+    assert held.attachments[0].content.body[0].type == "TextBlock", "a hold is information, not red"
 
 
 async def test_a_drain_tells_a_chat_once_when_a_message_arrives_behind_a_queued_one(

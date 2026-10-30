@@ -1140,6 +1140,16 @@ def test_a_neutral_notice_card_is_not_in_the_attention_container() -> None:
     assert top(False)["type"] == "TextBlock", "information is plain"
 
 
+def test_a_notice_card_keeps_its_mention_in_the_message_text() -> None:
+    who = Account(id="29:abc", name="Ada")
+    message = card.notice_card("Still waiting.", error=False, mention=who)
+    assert message.text == "<at>Ada</at>", "outside the card, so it notifies"
+    [mention] = [e for e in message.entities or [] if getattr(e, "type", None) == "mention"]
+    assert mention.mentioned.id == "29:abc" and mention.text == message.text
+    [block] = message.attachments[0].content.body
+    assert block.text == "Still waiting."
+
+
 class _HungSender:
     async def send(
         self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None

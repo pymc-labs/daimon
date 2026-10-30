@@ -15,6 +15,7 @@ from typing import Final
 
 import structlog
 from daimon.adapters.teams.admin_caller import admin_caller
+from daimon.adapters.teams.card import notice_adaptive_card
 from daimon.adapters.teams.card_actions import (
     FAILED,
     button,
@@ -22,7 +23,6 @@ from daimon.adapters.teams.card_actions import (
     guarded,
     replace_card,
     submitted_fields,
-    text_lines,
     toast,
 )
 from daimon.adapters.teams.identity import DENIED, channel_thread_id
@@ -30,7 +30,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.thread_handoff import switch_thread_on_request
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
-from microsoft_teams.cards import AdaptiveCard, ExecuteAction
+from microsoft_teams.cards import ExecuteAction
 
 __all__ = ["VERB", "TeamsThreadHandoff", "hand_over_button"]
 
@@ -108,4 +108,4 @@ class TeamsThreadHandoff:
         offer = str(submitted_fields(activity.value.action.data).get("offer") or "")
         if not offer:
             return toast(outcome.text)
-        return replace_card(AdaptiveCard(body=text_lines(offer), fallback_text=offer))
+        return replace_card(notice_adaptive_card(offer, error=False))

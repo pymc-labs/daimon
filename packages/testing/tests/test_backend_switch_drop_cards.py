@@ -31,6 +31,7 @@ from daimon.core.confirmation import ApprovedConfirmation, prompt_for_tool_call
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.db import db_committing_engine  # noqa: F401
 
 PLATFORMS = ("discord", "slack", "teams")
@@ -453,7 +454,9 @@ class Card:
                 {"actions": [{"action_id": self._slack_action(deny)}], "user": {"id": user}}
             )
             ephemeral = self.client.chat_postEphemeral
-            return ephemeral.await_args.kwargs["text"] if ephemeral.await_count > before else None
+            if ephemeral.await_count == before:
+                return None
+            return shown_text(ephemeral.await_args.kwargs)
         from daimon.adapters.teams.tool_confirmation import VERB
         from microsoft_teams.api import AdaptiveCardInvokeActivity
 

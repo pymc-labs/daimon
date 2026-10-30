@@ -710,9 +710,9 @@ class TeamsApp:
                 log.error("teams.admission.notice_unrecorded", exc_info=exc)
                 continue
             if owed:
-                await self._tell(chat[-1:], HOLDING)
+                await self._tell(chat[-1:], HOLDING, error=False)
 
-    async def _tell(self, items: list[TeamsInbound], notice: str) -> None:
+    async def _tell(self, items: list[TeamsInbound], notice: str, *, error: bool = True) -> None:
         """One `notice` per chat, best effort: a failed send is not retried."""
         told: set[str] = set()
         for item in items:
@@ -720,7 +720,7 @@ class TeamsApp:
                 continue
             told.add(item.conversation_id)
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await self._say(item, notice)
+                await self._say(item, notice, error=error)
 
     async def _hold_arrival(self, activity: MessageActivity, service_url: str | None) -> None:
         """A message landing while the process drains: admit and hold it if it would
@@ -1149,17 +1149,22 @@ class TeamsApp:
                 await self._participation.record(trigger, tenant_id)
             await self._run_turns(key, tenant_id, [trigger])
 
-    async def _say(self, inbound: TeamsInbound, text: str, *, sender_only: bool = False) -> None:
-        """Post `text` in reply; `sender_only`, or to a targeted message, for its sender alone."""
+    async def _say(
+        self, inbound: TeamsInbound, text: str, *, sender_only: bool = False, error: bool = True
+    ) -> None:
+        """Post `text` in reply; `sender_only`, or to a targeted message, for its sender alone.
+
+        A red card unless `error=False`, for information.
+        """
         if inbound.unprompted:
             # Nobody asked: a refusal or notice per quiet burst would spam the thread.
             log.info("teams.notice.withheld", reason="unprompted")
             return
         if sender_only or inbound.is_targeted:
-            await self._private.tell_sender(inbound, text)
+            await self._private.tell_sender(inbound, text, error=error)
             return
         await self._sender.send(
-            inbound.conversation_id, notice_card(text), service_url=inbound.service_url
+            inbound.conversation_id, notice_card(text, error=error), service_url=inbound.service_url
         )
 
     async def _may_post(self, channel_id: str, thread_id: str) -> bool:

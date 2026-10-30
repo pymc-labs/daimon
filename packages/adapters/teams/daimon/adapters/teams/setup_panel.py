@@ -729,7 +729,11 @@ class SetupPanel:
                 chat_id=chat,
                 thread_id=str(data.get("thread") or ""),
             )
-            return replace_card(cards.notice_card(cards.ENDED if ended else ALREADY_ENDED))
+            return replace_card(
+                cards.notice_card(cards.ENDED, error=False)
+                if ended
+                else cards.notice_card(ALREADY_ENDED)
+            )
         return replace_card(
             await self._agents(actor.tenant_id, chat=chat, page=page, is_admin=actor.is_admin)
         )
