@@ -1645,7 +1645,7 @@ class TeamsApp:
         )
         if selfhosted:
             return text, ()
-        return text, (hand_over_button(agent_id=agent.id, agent_name=name),)
+        return text, (hand_over_button(agent_id=agent.id, agent_name=name, offer=text),)
 
     async def _bind_and_run(
         self,

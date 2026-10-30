@@ -87,7 +87,8 @@ class HandOverButton(
         thread = interaction.channel
         if interaction.guild_id is None or not isinstance(thread, discord.Thread):
             await interaction.response.send_message(
-                "This button only works in a conversation thread.", ephemeral=True
+                embed=build_notice_embed("This button only works in a conversation thread."),
+                ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -114,12 +115,9 @@ class HandOverButton(
             agent_id=self.agent_id,
         )
         if not outcome.switched:
-            await interaction.followup.send(outcome.text, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(outcome.text), ephemeral=True)
             return
-        await thread.send(
-            f"{interaction.user.mention} handed this conversation over. {outcome.text}",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        # The agent now answering is told (`switch_thread_on_request`); nothing is posted.
         if interaction.message is not None:
             # The notice's button has done its job.
             transport = DiscordPostTransport(
@@ -130,7 +128,7 @@ class HandOverButton(
                 builtin=False,
             )
             await transport.edit(interaction.message, view=None)
-        # The public post above is the answer; drop the private "thinking".
+        # The retired button is the answer; drop the private "thinking".
         await interaction.delete_original_response()
 
 

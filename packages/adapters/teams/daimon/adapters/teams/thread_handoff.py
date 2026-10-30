@@ -39,9 +39,17 @@ log = structlog.get_logger()
 VERB: Final = "thread_hand_over"
 
 
-def hand_over_button(*, agent_id: str, agent_name: str) -> ExecuteAction:
-    """One Hand over button carrying the agent's MA id."""
-    return button(VERB, f"Switch to {agent_name}", "hand_over", style="positive", agent=agent_id)
+def hand_over_button(*, agent_id: str, agent_name: str, offer: str) -> ExecuteAction:
+    """One Hand over button carrying the agent's MA id and its card's text, `offer`,
+    so a click can redraw the card without the button."""
+    return button(
+        VERB,
+        f"Switch to {agent_name}",
+        "hand_over",
+        style="positive",
+        agent=agent_id,
+        offer=offer,
+    )
 
 
 class TeamsThreadHandoff:
@@ -95,7 +103,9 @@ class TeamsThreadHandoff:
         )
         if not outcome.switched:
             return toast(outcome.text)
-        # Everyone sees who handed it over; the button has done its job.
-        who = activity.from_.name or "Someone"
-        text = f"{who} handed this conversation over. {outcome.text}"
-        return replace_card(AdaptiveCard(body=text_lines(text), fallback_text=text))
+        # The agent now answering is told (`switch_thread_on_request`); the offer
+        # keeps its words and drops its button. A card from before `offer` gets a pop-up.
+        offer = str(submitted_fields(activity.value.action.data).get("offer") or "")
+        if not offer:
+            return toast(outcome.text)
+        return replace_card(AdaptiveCard(body=text_lines(offer), fallback_text=offer))

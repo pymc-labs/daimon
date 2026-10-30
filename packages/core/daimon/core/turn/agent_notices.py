@@ -16,6 +16,7 @@ from daimon.core.turn.state import McpServerFailure
 
 __all__ = [
     "GITHUB_KEY_RESTART_NOTICE",
+    "HANDED_OVER_NOTICE",
     "LOST_WORKSPACE_NOTICE",
     "mcp_failure_notices",
     "render_agent_notices",
@@ -29,6 +30,11 @@ _REASON = {
 GITHUB_KEY_RESTART_NOTICE = (
     "The GitHub connection was updated, so this conversation restarted in a new workspace. "
     "Earlier messages are still in the chat; unsaved work from before is gone."
+)
+
+HANDED_OVER_NOTICE = (
+    "Someone here handed this conversation over to you. Its messages and working files "
+    "came across; you answer with your own keys, connections and memory."
 )
 
 LOST_WORKSPACE_NOTICE = (

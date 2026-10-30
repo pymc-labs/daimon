@@ -108,11 +108,7 @@ async def handle_hand_over_click(runtime: SlackRuntime, payload: dict[str, Any])
                 **notice_fields(outcome.text),
             )
             return
-        await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text=f"<@{user_id}> handed this conversation over. {outcome.text}",
-        )
+        # The agent now answering is told (`switch_thread_on_request`); nothing is posted.
         if notice_ts:
             # The notice's button has done its job; keep its text, drop the card's button.
             attachments: list[dict[str, Any]] = message.get("attachments") or [{}]
