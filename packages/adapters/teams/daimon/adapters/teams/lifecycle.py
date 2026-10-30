@@ -42,7 +42,6 @@ from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.teams_markdown import has_math
 from daimon.core.tenant_balance import debit_amount
-from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
@@ -110,7 +109,6 @@ def bound_request_id() -> str:
 
 
 # (timed out, failed) events per kind of edit to a shown answer.
-_PREFIX_EVENTS = ("teams.turn.answer_prefix_timed_out", "teams.turn.answer_prefix_failed")
 _SUFFIX_EVENTS = ("teams.turn.answer_suffix_timed_out", "teams.turn.answer_suffix_failed")
 
 
@@ -244,9 +242,6 @@ class TeamsTurnLifecycle:
         # The card no longer shows a live turn, so the boot sweep must not
         # touch it: its card intent can retire.
         self.card_closed = False
-        # A continuity notice that belongs above the answer it explains.
-        self.answer_prefix: str | None = None
-        self.answer_prefix_applied = False
         # The first answer message: the card itself unless a ping posted it fresh.
         self._answer_id: str | None = None
         # Each answer message's text as on screen, for later edits.
@@ -524,7 +519,6 @@ class TeamsTurnLifecycle:
         self._terminal = True
         await self._settle_stopping()
         answer = self._answer_text(state)
-        degraded = render_degraded_notice(state.mcp_failures)
         replaced = False
         try:
             if not answer and self._unprompted:
@@ -532,8 +526,6 @@ class TeamsTurnLifecycle:
             if not answer:
                 tool_only = any(isinstance(b, ToolUseBlock) for b in state.content)
                 text = card.TOOLS_DONE_NOTICE if tool_only else card.CANCELLED_NOTICE
-                if tool_only and degraded is not None:
-                    text = f"{degraded}\n\n{text}"
                 # As on Slack: a cancelled turn carries no controls, a tool-only one does.
                 # A tool-only turn's result is an answer too: it can be voted on.
                 actions = (*card.vote_actions(),) if tool_only else ()
@@ -543,11 +535,6 @@ class TeamsTurnLifecycle:
                 await self._close(text, actions=actions, summary=summary)
                 self._answered = tool_only
                 return
-            if self.answer_prefix is not None:
-                answer = f"{self.answer_prefix}\n\n{answer}"
-                self.answer_prefix_applied = True
-            if degraded is not None:
-                answer = f"{answer}\n\n{degraded}"
             if self._agent_name_prefix is not None:
                 answer = f"**{self._agent_name_prefix}**\n\n{answer}"
             chunks = split_fenced(answer, card.TEAMS_LIMIT)
@@ -627,18 +614,6 @@ class TeamsTurnLifecycle:
             log.warning("teams.turn.card_retire_failed", exc_info=True)
         # Closed either way: the boot sweep must not mark an answered turn interrupted.
         self.card_closed = True
-
-    async def prepend_revealed_answer(self, notice: str) -> bool:
-        """Edit `notice` in above the answer on screen; False if it cannot go there.
-
-        An unexpected workspace loss is known only after the answer replaced
-        the card, and a message sent then lands below the answer it explains.
-        False when no answer was shown, the notice would overflow the first
-        message, or the edit fails; the caller then sends it on its own.
-        """
-        return await self._amend(
-            self._answer_id, lambda text: f"{notice}\n\n{text}", _PREFIX_EVENTS
-        )
 
     async def append_to_answer(
         self, text: str | None = None, attachments: Sequence[Attachment] = ()

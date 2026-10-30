@@ -24,7 +24,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal, NamedTuple
+from typing import Any, NamedTuple
 
 import anthropic
 import daimon.core.turn.bookkeeping as turn_bookkeeping
@@ -106,9 +106,7 @@ from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
-    render_replacement_summary,
     render_responder_changed_without_handoff,
-    render_unexpected_loss,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
@@ -1711,10 +1709,6 @@ class TeamsApp:
             await lifecycle.close_with_notice(_NO_CONTEXT)
             return
 
-        summary: str | None = None
-        if prepared.continuity.announces_replacement() and prepared.continuity.transfer_kind:
-            summary = render_replacement_summary(prepared.continuity.transfer_kind, lost=[])
-            lifecycle.answer_prefix = summary
         if prepared.mapping_id is not None and lifecycle.message_id is not None:
             async with self.runtime.sessionmaker.begin() as session:
                 await mark_turn_active(
@@ -1730,7 +1724,6 @@ class TeamsApp:
             # Keep rendering into the card the person is already watching.
             previous = holder[-1]
             adopted = new_lifecycle(fresh_cancel, lifecycle.message_id)
-            adopted.answer_prefix = lifecycle.answer_prefix
             adopted.inherit_stop(previous)
             return adopted
 
@@ -1832,15 +1825,6 @@ class TeamsApp:
                 and admission.backend_revision.backend == "selfhosted"
             ),
         )
-        if outcome.continuity.state == "replaced_after_loss":
-            kind: Literal["transcript", "history"] = (
-                "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
-            )
-            # Above the answer or not at all: a message of its own lands below it.
-            if not await final.prepend_revealed_answer(render_unexpected_loss(kind)):
-                log.info("teams.turn.loss_notice_dropped")
-        if summary is not None and not final.answer_prefix_applied:
-            log.info("teams.turn.summary_dropped")
         if outcome.mapping_id is not None and final.final_message_id is not None:
             mark = final.final_message_id
             if inbound.kind != "dm":

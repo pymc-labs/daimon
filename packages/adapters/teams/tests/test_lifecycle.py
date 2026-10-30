@@ -364,17 +364,13 @@ async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
 async def test_answer_replaces_the_card_and_the_controls_follow_it() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
-    lifecycle.answer_prefix = "Picked up where we left off."
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
     answer, controls = sender.activities[1:]
     assert answer.id == "m-1" and not answer.attachments and not _rated(answer)
-    assert answer.text == "Picked up where we left off.\n\nThe posterior mean is 3.", (
-        "the answer alone, as on Discord and Slack"
-    )
+    assert answer.text == "The posterior mean is 3.", "the answer alone, as on Discord and Slack"
     assert controls.id is None and _rated(controls), "the 👍/👎 sit on the card below"
     assert _card_text(sender, -1) == "0s", "with nothing priced the summary line is the time"
-    assert lifecycle.answer_prefix_applied
     assert lifecycle.card_closed and lifecycle.final_message_id == "m-1"
 
 
@@ -647,10 +643,10 @@ async def test_a_completion_ping_posts_the_answer_mentioning_the_asker_then_clos
     ]
     assert lifecycle.card_closed and lifecycle.final_message_id == "m-2"
 
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert await lifecycle.append_to_answer("- [a](u)")
     edited = sender.activities[-1]
     assert edited.id == "m-2" and edited.text is not None
-    assert edited.text.startswith("<at>Ada</at>\n\nI lost the workspace."), "edits keep the ping"
+    assert edited.text.startswith("<at>Ada</at>\n\nThe posterior mean is 3."), "edits keep the ping"
 
 
 async def test_without_a_requester_a_ping_still_posts_fresh() -> None:
@@ -718,52 +714,16 @@ async def test_a_failed_answer_or_an_unprompted_turn_earns_no_check() -> None:
     assert phases == [], "no ✅ for an answer nobody saw, no reaction in a thread nobody asked in"
 
 
-async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
+async def test_file_links_are_edited_in_below_a_single_message_answer() -> None:
+    """The links land on the answer's own message."""
     sender = FakeSender()
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
-    final = sender.activities[-1]
-    assert final.id == "m-1" and final.text is not None
-    assert final.text == "I lost the workspace.\n\nThe posterior mean is 3."
-    assert not _rated(final) and not final.attachments, "the edit stays text, as Teams needs"
-
-
-async def test_a_late_notice_whose_edit_timed_out_counts_as_shown() -> None:
-    """A timed-out edit may have landed; sending the notice as well could show it twice."""
-    sender = FakeSender(timeout_on={3, 4})
-    lifecycle = await _posted(sender)
-    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
-
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
-    assert [a.id for a in sender.activities[3:]] == ["m-1", "m-1"], "edited, then retried once"
-
-
-async def test_a_late_notice_on_a_turn_without_an_answer_is_edited_into_its_card() -> None:
-    """No answer on screen: the turn's own closing card takes the notice, nothing new posts."""
-    sender = FakeSender()
-    lifecycle = await _posted(sender)
-    await lifecycle.on_terminal_success(TurnState(content=[]))
-    posted = len(sender.activities)
-
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
-    edit = sender.activities[-1]
-    assert len(sender.activities) == posted + 1 and edit.id == "m-1", "an edit of the card"
-    assert "I lost the workspace." in json.dumps(edit.model_dump(mode="json"))
-
-
-async def test_file_links_are_edited_in_below_a_prefixed_single_message_answer() -> None:
-    """Prefix and links land on the same message, each edit keeping the other."""
-    sender = FakeSender()
-    lifecycle = await _posted(sender)
-    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
-
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
     assert await lifecycle.append_to_answer("- [a](u)")
     final = sender.activities[-1]
     assert final.id == "m-1", "the answer is edited, nothing new is posted"
-    assert final.text == ("I lost the workspace.\n\nThe posterior mean is 3.\n\n- [a](u)")
+    assert final.text == "The posterior mean is 3.\n\n- [a](u)"
     assert not _rated(final) and not final.attachments
 
 
@@ -788,24 +748,24 @@ def _names(activity: MessageActivityInput) -> list[str]:
 
 
 async def test_previews_ride_the_links_edit_and_later_edits_keep_them() -> None:
-    """One edit adds links and images; another adds more; a notice above sends them again."""
+    """One edit adds links and images; another adds more; a later edit sends them again."""
     sender = FakeSender()
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
     assert await lifecycle.append_to_answer("- [a](u)", [_image("a.png")])
     assert await lifecycle.append_to_answer(attachments=[_image("deck.pptx")])
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
-    links, thumbnails, notice = sender.activities[-3:]
-    assert {links.id, thumbnails.id, notice.id} == {"m-1"}, "each one an edit of the answer"
+    assert await lifecycle.append_to_answer("- [b](v)")
+    links, thumbnails, later = sender.activities[-3:]
+    assert {links.id, thumbnails.id, later.id} == {"m-1"}, "each one an edit of the answer"
     assert links.text == (
         "The posterior mean is 3.\n\n- [a](u)\n\n![a.png](data:image/png;base64,AA==)"
     ), "the image follows the links, in the same text"
     assert links.text_format == "markdown", "Graph reads back a markdown message's images"
     assert _names(thumbnails) == ["a.png", "deck.pptx"], "added after the one already there"
     assert (thumbnails.text or "").startswith(links.text or "-"), "no text added"
-    assert notice.text and notice.text.startswith("I lost the workspace.")
-    assert _names(notice) == ["a.png", "deck.pptx"], "an edit never drops a shown preview"
+    assert later.text and "- [b](v)" in later.text, "the new link is added"
+    assert _names(later) == ["a.png", "deck.pptx"], "an edit never drops a shown preview"
 
 
 async def test_previews_the_answer_cannot_take_are_refused() -> None:
@@ -827,7 +787,7 @@ async def test_previews_the_answer_cannot_take_are_refused() -> None:
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
     assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "a 413"
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert await lifecycle.append_to_answer("- [a](u)")
     assert _names(sender.activities[-1]) == [], "a refused preview is not sent again"
 
 
@@ -881,7 +841,7 @@ async def test_an_answer_holds_no_more_previews_than_one_preview_message() -> No
 
     assert not await lifecycle.append_to_answer(attachments=[_image("a.pdf"), _image("b.pdf")])
     assert len(sender.sent) == edits, "no edit was tried"
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert await lifecycle.append_to_answer("- [a](u)")
     assert _names(sender.activities[-1]) == [a.name for a in charts], "the charts stay, alone"
 
 
@@ -988,7 +948,7 @@ async def test_outputs_quiet_time_runs_from_the_last_finished_tool_call() -> Non
 
 
 async def test_with_support_on_a_one_part_answer_and_its_edits_are_ones_teams_takes() -> None:
-    """Production's shape: one part, edited in place, then amended by later notices."""
+    """Production's shape: one part, edited in place, then amended by its links."""
     sender = FakeSender()
     lifecycle = await _posted(sender, ask_human=True)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
@@ -996,9 +956,8 @@ async def test_with_support_on_a_one_part_answer_and_its_edits_are_ones_teams_ta
     answer, controls = sender.activities[1:]
     assert answer.id == "m-1" and answer.text == "The posterior mean is 3.", "the card became it"
     assert controls.id is None and _asks(sender, -1), "the button follows in a post of its own"
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace."), "a notice fits above"
     assert await lifecycle.append_to_answer("- [a](u)"), "links fit below"
-    assert all(not a.attachments for a in sender.activities[-2:]), "both edits stay text"
+    assert not sender.activities[-1].attachments, "the edit stays text"
 
 
 async def test_a_completion_ping_with_support_on_posts_the_button_below_the_answer() -> None:
@@ -1021,7 +980,7 @@ async def test_a_tool_only_turn_carries_the_controls_and_a_cancelled_one_none() 
     assert _rated(sender.activities[-1]) and _asks(sender, -1), "✅ Done can be rated"
     assert len(sender.activities) == 2, "the Done card carries them itself"
     assert _card_body(sender, -1)[1]["text"] == "0s", "and the summary line"
-    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert await lifecycle.append_to_answer("- [a](u)")
     assert _rated(sender.activities[-1]) and _asks(sender, -1), "an edit keeps the controls"
 
     sender = FakeSender()
