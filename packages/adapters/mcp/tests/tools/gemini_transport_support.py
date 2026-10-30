@@ -1,6 +1,7 @@
 """Offline Gemini catalog and interaction transport for ordinary agent tests."""
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from mux.testing.drivers.gemini.fake import FakeTransport
@@ -30,11 +31,13 @@ class GeminiTransport(FakeTransport):
 
     async def create(self, request):
         self.requests.append(json.loads(json.dumps(dict(request))))
+        # Stamped now: the driver expires a workspace seven days after its last activity.
+        created = datetime.now(UTC).replace(microsecond=0)
         response = {
             "id": f"gemini-{len(self.requests)}",
             "status": "completed",
-            "created": "2026-10-23T15:00:00Z",
-            "updated": "2026-10-23T15:00:05Z",
+            "created": created.isoformat().replace("+00:00", "Z"),
+            "updated": (created + timedelta(seconds=5)).isoformat().replace("+00:00", "Z"),
             "tools": request.get("tools", []),
             "steps": [
                 {"type": "model_output", "content": [{"type": "text", "text": "gemini says X"}]}
