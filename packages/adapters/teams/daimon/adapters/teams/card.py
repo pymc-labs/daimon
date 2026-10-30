@@ -49,6 +49,7 @@ from microsoft_teams.cards import (
     ActionSet,
     AdaptiveCard,
     CardElement,
+    Container,
     ExecuteAction,
     OpenDialogData,
     SubmitAction,
@@ -209,11 +210,17 @@ def _summary_line(summary: str) -> TextBlock:
 
 
 def notice_card(
-    text: str, *, actions: Sequence[Action] = (), summary: str | None = None
+    text: str,
+    *,
+    actions: Sequence[Action] = (),
+    summary: str | None = None,
+    error: bool = True,
 ) -> MessageActivityInput:
     """A terminal card: bailouts, failures, restarts; `actions` are its buttons, if any.
 
     `summary` is a finished turn's line (`format_summary`), quiet under the text.
+    An error sits in a red "attention" container, so it reads as Daimon's own
+    notice; `error=False` is for a plain "Done." pointer.
     Clipped as Slack clips its notices; the fallback repeats it, so it gets less.
     """
     body = fit_notice([text], tail=None, limit=TEAMS_LIMIT)
@@ -237,6 +244,8 @@ def notice_card(
         elements.append(_summary_line(summary))
     if actions:
         elements.append(ActionSet(actions=list(actions)))
+    if error:
+        elements = [Container(style="attention", items=elements)]
     return _card(elements, fallback=fallback)
 
 

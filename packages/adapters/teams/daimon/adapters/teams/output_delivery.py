@@ -53,6 +53,7 @@ import anthropic
 import httpx
 import structlog
 from daimon.adapters.teams.attachments import FetchRefused, fetch_bytes
+from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.card_actions import Actor, card_actor, submitted_fields
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
@@ -246,9 +247,7 @@ class TeamsOutputDelivery:
         self._decoder = ThreadPoolExecutor(max_workers=2, thread_name_prefix="teams-preview")
 
     async def _say(self, conversation_id: str, service_url: str | None, text: str) -> None:
-        await self._sender.send(
-            conversation_id, MessageActivityInput(text=text), service_url=service_url
-        )
+        await self._sender.send(conversation_id, notice_card(text), service_url=service_url)
 
     def close(self) -> None:
         """Drop queued decodes; one already running finishes on its thread."""

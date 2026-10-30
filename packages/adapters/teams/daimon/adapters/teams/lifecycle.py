@@ -248,7 +248,7 @@ class TeamsTurnLifecycle:
         self._shown: dict[str, str] = {}
         # Shown messages that are notice cards, not answers: edited as cards,
         # with their buttons, whether they carry 👍/👎, and their summary line.
-        self._notices: dict[str, tuple[tuple[Action, ...], str | None]] = {}
+        self._notices: dict[str, tuple[tuple[Action, ...], str | None, bool]] = {}
         # Previews edited into an answer message as markdown images, kept apart
         # from `_shown` (TEAMS_LIMIT counts the text alone): every later edit
         # sends them again.
@@ -445,14 +445,15 @@ class TeamsTurnLifecycle:
         *,
         actions: tuple[Action, ...] = (),
         summary: str | None = None,
+        error: bool = True,
     ) -> None:
         """Replace the card with a final notice; an edit that timed out is sent once more."""
-        notice = card.notice_card(text, actions=actions, summary=summary)
+        notice = card.notice_card(text, actions=actions, summary=summary, error=error)
         self._message_id = message_id = await self._edit(notice, self._message_id)
         self.final_message_id = self._answer_id = message_id
         self.card_closed = True
         # A tool-only or failed turn's notice still carries what is edited into it.
-        self._notices[message_id] = (actions, summary)
+        self._notices[message_id] = (actions, summary, error)
         self._shown[message_id] = text
 
     async def _summary(self, state: TurnState, *, named_above: bool = False) -> str:
@@ -532,7 +533,7 @@ class TeamsTurnLifecycle:
                 if tool_only and self._ask_human:
                     actions = (*actions, card.ask_human_action())
                 summary = await self._summary(state)
-                await self._close(text, actions=actions, summary=summary)
+                await self._close(text, actions=actions, summary=summary, error=not tool_only)
                 self._answered = tool_only
                 return
             if self._agent_name_prefix is not None:
@@ -609,7 +610,7 @@ class TeamsTurnLifecycle:
     async def _retire_card(self) -> None:
         """Point the card at the answer posted below it; best effort, the answer landed."""
         try:
-            await self._edit(card.notice_card(card.ANSWERED_BELOW), self._message_id)
+            await self._edit(card.notice_card(card.ANSWERED_BELOW, error=False), self._message_id)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.card_retire_failed", exc_info=True)
         # Closed either way: the boot sweep must not mark an answered turn interrupted.
@@ -656,8 +657,8 @@ class TeamsTurnLifecycle:
             if len(attached) > MAX_PREVIEWS:
                 return False  # image_preview's size budget is MAX_PREVIEWS per message.
             if message_id in self._notices:
-                actions, summary = self._notices[message_id]
-                rendered = card.notice_card(updated, actions=actions, summary=summary)
+                actions, summary, error = self._notices[message_id]
+                rendered = card.notice_card(updated, actions=actions, summary=summary, error=error)
             else:
                 rendered = card.answer_message(updated, mention=mention, images=attached)
             try:

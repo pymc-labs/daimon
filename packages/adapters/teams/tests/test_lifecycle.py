@@ -105,8 +105,20 @@ async def test_initial_card_carries_the_cancel_key_and_later_renders_edit_it() -
     assert len(sender.sent) == 2 and sender.activities[1].id == "m-1"
 
 
-def _card_body(sender: FakeSender, index: int) -> list[dict[str, Any]]:
+def _raw_body(sender: FakeSender, index: int) -> list[dict[str, Any]]:
     return json.loads(_card_json(sender, index))["attachments"][0]["content"]["body"]
+
+
+def _unwrapped(body: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """An error card's elements: it sits whole in one "attention" container."""
+    if len(body) == 1 and body[0]["type"] == "Container":
+        assert body[0]["style"] == "attention", "an error card is a red container"
+        return body[0]["items"]
+    return body
+
+
+def _card_body(sender: FakeSender, index: int) -> list[dict[str, Any]]:
+    return _unwrapped(_raw_body(sender, index))
 
 
 def _has_stop_button(sender: FakeSender, index: int) -> bool:
@@ -859,7 +871,7 @@ async def test_no_answer_reads_as_cancelled_or_done() -> None:
 
 
 def _card_text(sender: FakeSender, index: int) -> str:
-    return json.loads(_card_json(sender, index))["attachments"][0]["content"]["body"][0]["text"]
+    return _card_body(sender, index)[0]["text"]
 
 
 def _rated(activity: MessageActivityInput) -> bool:
@@ -1004,6 +1016,35 @@ async def test_failure_closes_the_card_with_the_termination_notice_once() -> Non
     assert lifecycle.card_closed
 
 
+async def test_error_cards_are_red_containers_and_done_cards_are_not() -> None:
+    """A failure, a stop and an edit to either read as Daimon's error; "Done." does not."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    error = TurnError(kind="upstream", message="overloaded")
+    await lifecycle.on_terminal_failure(TurnState(error=error), error)
+    assert _raw_body(sender, 1)[0]["style"] == "attention", "a failure is an error card"
+    assert await lifecycle.append_to_answer("- [a](u)")
+    assert _raw_body(sender, -1)[0]["style"] == "attention", "an edit keeps the style"
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(TurnState())
+    assert _raw_body(sender, -1)[0]["style"] == "attention", "a stopped turn is an error card"
+    assert _card_body(sender, -1)[0]["text"] == card.CANCELLED_NOTICE
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+    await lifecycle.on_terminal_success(TurnState(content=[tool]))
+    assert _raw_body(sender, -1)[0]["type"] == "TextBlock", "a tool-only Done is no error"
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender, completion_ping=True)
+    await lifecycle.on_terminal_success(_answer("The answer."))
+    pointer = _raw_body(sender, 2)
+    assert pointer[0]["type"] == "TextBlock", "the Done pointer under a fresh answer is no error"
+
+
 async def test_direct_chat_terminal_notice_asks_for_a_message() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender, direct_chat=True)
@@ -1056,7 +1097,7 @@ def test_teams_draws_work_and_ref_as_small_text() -> None:
     rendered = card.notice_card(card.termination_text(notice)).model_dump(
         mode="json", by_alias=True
     )
-    body = rendered["attachments"][0]["content"]["body"]
+    body = _unwrapped(rendered["attachments"][0]["content"]["body"])
     assert body[0]["text"].startswith("Lost the connection. Daimon may still be working.")
     assert body[1]["size"] == "Small" and body[1]["isSubtle"]
     assert body[2]["text"] == "Ref 7C3QX2"
