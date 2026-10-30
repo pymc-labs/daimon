@@ -447,7 +447,10 @@ class Card:
             interaction.response.edit_message = AsyncMock()
             await confirm.callback(interaction)
             sent = interaction.response.send_message
-            return sent.await_args.args[0] if sent.await_count else None
+            if not sent.await_count:
+                return None
+            args, kwargs = sent.await_args
+            return args[0] if args else kwargs["embed"].description
         if self.chat.platform == "slack":
             before = self.client.chat_postEphemeral.await_count
             await self.cards.handle_click(
