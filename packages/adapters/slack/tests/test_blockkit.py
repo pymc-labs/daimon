@@ -338,10 +338,12 @@ class TestToBlocks:
         assert blocks[1]["text"]["text"] == "❌ *Stopped.*"
 
     def test_notice_attachment_is_a_red_bar_with_no_top_level_text(self) -> None:
-        (attachment,) = notice_attachments("It's 11 MB & too big.")
+        (attachment,) = notice_attachments("<@U1>, it's too big.")
         assert attachment["color"] == ERROR_COLOR
-        assert attachment["fallback"] == "It's 11 MB & too big."
-        assert attachment["blocks"][0]["text"]["text"] == "It's 11 MB &amp; too big."
+        assert attachment["fallback"] == "<@U1>, it's too big."
+        assert attachment["blocks"][0]["text"]["text"] == "<@U1>, it's too big.", (
+            "the text is mrkdwn, as a plain post's is: the mention stays live"
+        )
 
     def test_neutral_notice_attachment_is_not_red(self) -> None:
         (attachment,) = notice_attachments("Still working.", neutral=True)

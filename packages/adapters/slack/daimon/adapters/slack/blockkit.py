@@ -100,10 +100,11 @@ INTERRUPTED_NOTICE: str = (
 
 def error_title_block(title: str) -> dict[str, Any]:
     """The bold, cross-led first line of an error card; ``title`` is plain text."""
-    return {
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": f"{_EMOJI_CROSS} *{escape_mrkdwn(title)}*"},
-    }
+    return _error_title(escape_mrkdwn(title))
+
+
+def _error_title(title: str) -> dict[str, Any]:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": f"{_EMOJI_CROSS} *{title}*"}}
 
 
 def error_blocks(title: str, next_step: str) -> list[dict[str, Any]]:
@@ -115,11 +116,17 @@ def error_blocks(title: str, next_step: str) -> list[dict[str, Any]]:
 
 
 def error_blocks_from_text(text: str) -> list[dict[str, Any]]:
-    """An error card for a notice written as a title line, then the next step."""
+    """An error card for a notice written as a title line, then the next step.
+
+    ``text`` is mrkdwn, as a plain post's ``text`` is: mentions stay live.
+    """
     title, _, next_step = text.strip().partition("\n")
     if not next_step.strip():
-        return [error_title_block(title)]
-    return error_blocks(title, next_step.strip())
+        return [_error_title(title)]
+    return [
+        _error_title(title),
+        {"type": "section", "text": {"type": "mrkdwn", "text": next_step.strip()}},
+    ]
 
 
 def notice_attachments(
@@ -131,9 +138,10 @@ def notice_attachments(
     For a message posted on its own and never edited: the top-level ``text`` is
     left out (Slack would print it above the bar), and the attachment's
     ``fallback`` stands in for it in notifications. ``blocks`` replace the one
-    section, for a notice that carries buttons.
+    section, for a notice that carries buttons. ``text`` is mrkdwn, as a plain
+    post's ``text`` is: mentions and channel links stay live.
     """
-    body = escape_mrkdwn(text)[:NOTICE_MAX_CHARS]
+    body = text[:NOTICE_MAX_CHARS]
     return [
         {
             "color": NEUTRAL_COLOR if neutral else ERROR_COLOR,

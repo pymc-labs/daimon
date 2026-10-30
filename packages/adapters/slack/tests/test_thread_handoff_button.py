@@ -35,7 +35,11 @@ def _payload() -> dict[str, Any]:
         "user": {"id": "U_CLICKER", "team_id": _TEAM},
         "channel": {"id": _CHANNEL},
         "container": {"channel_id": _CHANNEL, "message_ts": "1700000000.000200"},
-        "message": {"ts": "1700000000.000200", "thread_ts": _THREAD_TS, "text": "notice"},
+        "message": {
+            "ts": "1700000000.000200",
+            "thread_ts": _THREAD_TS,
+            "attachments": [{"fallback": "notice", "blocks": [{"type": "actions"}]}],
+        },
         "actions": [{"action_id": HAND_OVER_ACTION_ID, "value": "ag_research"}],
     }
 
@@ -96,7 +100,9 @@ async def test_a_click_hands_the_thread_to_the_channels_agent(
     assert posted["thread_ts"] == _THREAD_TS
     assert "research-bot answers in this conversation from the next message" in posted["text"]
     (updated,) = _sent(fake_slack_web_client, "chat.update")
-    assert updated["blocks"] == [], "the notice loses its button"
+    (card,) = updated["attachments"]
+    assert card["fallback"] == "notice", "the notice card keeps its words"
+    assert all(block["type"] != "actions" for block in card["blocks"]), "and loses its button"
     async with db_session_factory() as session:
         routed = await resolve(
             session,

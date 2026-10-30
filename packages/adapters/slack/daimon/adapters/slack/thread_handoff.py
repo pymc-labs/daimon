@@ -16,7 +16,7 @@ from typing import Any, Final
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
 from daimon.adapters.slack.admin_caller import admin_caller
-from daimon.adapters.slack.blockkit import notice_fields
+from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -114,10 +114,13 @@ async def handle_hand_over_click(runtime: SlackRuntime, payload: dict[str, Any])
             text=f"<@{user_id}> handed this conversation over. {outcome.text}",
         )
         if notice_ts:
-            # The notice's button has done its job; keep its text.
-            notice_text = str(message.get("text") or "")
+            # The notice's button has done its job; keep its text, drop the card's button.
+            attachments: list[dict[str, Any]] = message.get("attachments") or [{}]
+            notice_text = str(attachments[0].get("fallback") or message.get("text") or "")
             await client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                channel=channel_id, ts=notice_ts, text=notice_text, blocks=[]
+                channel=channel_id,
+                ts=notice_ts,
+                **notice_update_fields(notice_text, neutral=True),
             )
     except SlackApiError as err:
         log.warning(
