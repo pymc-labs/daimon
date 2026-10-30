@@ -46,16 +46,24 @@ from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
 from daimon.core.session_preparation_stages import lock_preparation
+from daimon.core.stores.agent_notices import record_agent_notices, take_agent_notices
 from daimon.core.stores.domain import TransferKind
 from daimon.core.stores.thread_session_lineage import link_replacement
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
+    is_github_key_restart,
     mark_dead,
     transfer_active_turn,
 )
 from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
+from daimon.core.turn.agent_notices import (
+    GITHUB_KEY_RESTART_NOTICE,
+    LOST_WORKSPACE_NOTICE,
+    mcp_failure_notices,
+    render_agent_notices,
+)
 from daimon.core.turn.approvals import (
     agent_rule_lookup,
     channel_for_tool_rules,
@@ -887,6 +895,65 @@ async def _restore_handoff_summary(
         log.warning("turn.handoff_summary_restore_failed", error=type(error).__name__)
 
 
+#: A queued notice older than this is about a failure the thread has moved past.
+_NOTICE_TTL = timedelta(days=1)
+
+
+async def _with_agent_notices(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    user_message: str,
+    now: datetime,
+) -> tuple[str, list[str]]:
+    """The message after what Daimon has to tell the agent, and the queued notices taken.
+
+    Queued notices are failures of an earlier turn in the thread; a GitHub key
+    restart is this turn's own. Returns what was taken, so a turn that never
+    sent its message can queue them again.
+    """
+    try:
+        async with deps.sessionmaker.begin() as db:
+            taken = await take_agent_notices(
+                db,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                since=now - _NOTICE_TTL,
+            )
+            restarted = (
+                prepared.continuity.state == "replaced"
+                and prepared.mapping_id is not None
+                and await is_github_key_restart(db, mapping_id=prepared.mapping_id)
+            )
+    except SQLAlchemyError as error:  # notices are advisory; never block the turn
+        log.warning("turn.agent_notices_take_failed", error=type(error).__name__)
+        return user_message, []
+    notices = [*taken, GITHUB_KEY_RESTART_NOTICE] if restarted else taken
+    if not notices:
+        return user_message, taken
+    log.info("turn.agent_notices_sent", count=len(notices))
+    return f"{render_agent_notices(notices)}\n\n{user_message}", taken
+
+
+async def _queue_agent_notices(
+    deps: TurnDeps, texts: Sequence[str], *, tenant_id: uuid.UUID, platform: str, thread_id: str
+) -> None:
+    """Keep notices for the thread's next turn."""
+    if not texts:
+        return
+    try:
+        async with deps.sessionmaker.begin() as db:
+            await record_agent_notices(
+                db, tenant_id=tenant_id, platform=platform, thread_id=thread_id, texts=texts
+            )
+    except SQLAlchemyError as error:  # a lost notice must never mask the turn's own outcome
+        log.warning("turn.agent_notices_queue_failed", error=type(error).__name__)
+
+
 async def run_prepared_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -923,6 +990,7 @@ async def run_prepared_turn(
     # Marked by the driver once the message is handed to the provider: a summary
     # goes back only if this turn never sent it (`_restore_handoff_summary`).
     sent: list[bool] = []
+    taken_notices: list[str] = []
     if origin in _CHAT_RENDERED_ORIGINS:
         user_message, seeded = await _with_handoff_summary(
             deps,
@@ -931,6 +999,15 @@ async def run_prepared_turn(
             platform=platform,
             thread_id=thread_id,
             user_message=user_message,
+        )
+        user_message, taken_notices = await _with_agent_notices(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            user_message=user_message,
+            now=now(),
         )
     observation.thread_id = thread_id
     observation.account_id = prepared.admission.account_id
@@ -991,6 +1068,10 @@ async def run_prepared_turn(
             await _restore_handoff_summary(
                 deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
             )
+        if not sent:
+            await _queue_agent_notices(
+                deps, taken_notices, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+            )
         raise
     finally:
         try:
@@ -1015,6 +1096,23 @@ async def run_prepared_turn(
     if seeded is not None and not sent and result.state.error is not None:
         await _restore_handoff_summary(
             deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+        )
+    if origin in _CHAT_RENDERED_ORIGINS:
+        # No backend takes input mid-turn, so the agent hears on the thread's
+        # next turn of servers MA dropped from an answered reply, and of a lost
+        # workspace whose successor may never have been sent its framing.
+        failed = result.state.error is not None
+        lost = failed and result.continuity.state == "replaced_after_loss"
+        await _queue_agent_notices(
+            deps,
+            [
+                *([] if sent else taken_notices),
+                *(() if failed else mcp_failure_notices(result.state.mcp_failures)),
+                *((LOST_WORKSPACE_NOTICE,) if lost else ()),
+            ],
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
         )
     return result
 

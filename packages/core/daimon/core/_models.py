@@ -2533,6 +2533,30 @@ class ThreadAgentBinding(Base):
     handoff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class AgentNotice(Base):
+    """A failure the agent hears of on the next turn in its thread (`turn.agent_notices`)."""
+
+    __tablename__ = "agent_notices"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "platform", "thread_id", "text", name="uq_agent_notices_thread_text"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class TurnOrigin(Base):
     """Expiring control authority and target snapshot for one caller's running turn."""
 

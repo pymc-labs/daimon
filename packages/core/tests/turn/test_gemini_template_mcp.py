@@ -523,6 +523,22 @@ async def test_the_server_refuses_gated_tools_for_a_provider_turn_credential(
         assert ran.count("add_skill") == 1
 
 
+@pytest.fixture
+def no_agent_notices(monkeypatch):
+    """These fakes have no database; `test_run_agent_notices` covers notices."""
+    from daimon.core.turn import run as run_module
+
+    async def unchanged(*_args, user_message, **_kwargs):
+        return user_message, []
+
+    async def dropped(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(run_module, "_with_agent_notices", unchanged)
+    monkeypatch.setattr(run_module, "_queue_agent_notices", dropped)
+
+
+@pytest.mark.usefixtures("no_agent_notices")
 async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch):
     import asyncio
     from types import SimpleNamespace
@@ -586,6 +602,7 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
     await asyncio.wait_for(finished.wait(), timeout=2)
 
 
+@pytest.mark.usefixtures("no_agent_notices")
 async def test_a_second_cancel_during_revocation_still_restores_the_callers_log_fields(
     monkeypatch,
 ):
@@ -654,6 +671,7 @@ async def test_a_second_cancel_during_revocation_still_restores_the_callers_log_
     assert left == {"backend": "the caller's"}, "the turn's fields never outlive it"
 
 
+@pytest.mark.usefixtures("no_agent_notices")
 async def test_a_failing_revocation_still_restores_the_callers_log_fields(
     monkeypatch,
 ):
@@ -717,6 +735,7 @@ async def test_a_failing_revocation_still_restores_the_callers_log_fields(
     assert left == {"backend": "the caller's"}, "the turn's fields never outlive it"
 
 
+@pytest.mark.usefixtures("no_agent_notices")
 async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_is_logged(
     monkeypatch,
 ):
@@ -724,6 +743,7 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
     from types import SimpleNamespace
 
     from daimon.core.turn import run as run_module
+    from daimon.core.turn.state import TurnState
     from structlog.testing import capture_logs
 
     release = asyncio.Event()
@@ -733,7 +753,9 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
         raise RuntimeError("revocation failed")
 
     async def answered(*_args, **_kwargs):
-        return SimpleNamespace(ma_session_id="session", state=None, recovered=False)
+        return SimpleNamespace(
+            ma_session_id="session", state=TurnState(), recovered=False, continuity=None
+        )
 
     monkeypatch.setattr(run_module, "run_prepared_turn_impl", answered)
     monkeypatch.setattr(run_module, "_FINALIZE_TIMEOUT_S", 0.05)

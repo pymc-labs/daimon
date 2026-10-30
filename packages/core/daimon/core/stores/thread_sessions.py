@@ -161,12 +161,6 @@ async def list_live_sessions_for_agent(
     ]
 
 
-GITHUB_KEY_RESTART_LINE = (
-    "GitHub connection updated. Chat restarted. Earlier messages are still here; "
-    "unsaved work from before is gone."
-)
-
-
 async def mark_github_key_restart(
     session: AsyncSession, *, tenant_id: _uuid.UUID, agent_id: _uuid.UUID
 ) -> int:
@@ -185,15 +179,13 @@ async def mark_github_key_restart(
     return len(live)
 
 
-async def github_key_restart_line(session: AsyncSession, *, mapping_id: _uuid.UUID) -> str | None:
-    """Return the one-time prefix for a replacement of a marked PAT session."""
+async def is_github_key_restart(session: AsyncSession, *, mapping_id: _uuid.UUID) -> bool:
+    """Whether this session replaced a PAT session marked when its key was retired."""
     current = await session.get(ThreadSession, mapping_id)
     if current is None or current.predecessor_id is None:
-        return None
+        return False
     old = await session.get(ThreadSession, current.predecessor_id)
-    if old is None or not old.github_key_restart_notice:
-        return None
-    return GITHUB_KEY_RESTART_LINE
+    return old is not None and old.github_key_restart_notice
 
 
 async def get_thread_session_at(
