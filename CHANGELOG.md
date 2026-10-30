@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reply text to the card. Every other message from Daimon, such as a confirmation, a settings
   change that waits for the next message or a pointer to your DMs, is a neutral card.
   Migration 0147 adds the queue of notices.
+- **Add a skill an agent's MCP server serves.** `add_skill` takes `mcp_server` and `mcp_skill`
+  (a name or `skill://` URI) for a server that declares the MCP Skills extension
+  (`io.modelcontextprotocol/skills`, protocol revision 2026-07-28). Daimon reads every file,
+  checks it against the size and SHA-256 the server lists, and refuses a mismatch or a skill
+  built per request. The preview and the person's approval work as for any other source; the
+  skill becomes the agent's own, and its origin records the server, URI and manifest digest.
+  A shared-token server is asked with its token, a relay server with a token naming the person
+  and the channel; personal sign-in servers are refused. Nothing is listed or added without a
+  request.
 - A long reply no longer ends "Lost the connection" because its connection dropped twice. A reconnect that brings new parts of the reply now resets the count, so only two drops in a row with nothing new between them end it.
 - A turn whose AI service sends nothing for 5, 10, 15 or 30 minutes logs `turn.would_stall` once per step, per backend, saying whether a tool call was open, to measure how long healthy replies go quiet. It changes nothing about how a turn ends.
 - Turn log lines name the backend, profile and model they ran on, and `turn.user_failure` carries `backend`, so failures and lost connections can be counted and alerted on per backend.
