@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.teams.activity_feed import ActivityFeed
-from daimon.adapters.teams.card import answer_message
+from daimon.adapters.teams.card import answer_message, notice_card
 from daimon.adapters.teams.card_actions import (
     button,
     submitted_fields,
@@ -533,7 +533,7 @@ class TeamsConfirmationCards:
         if conversation_type not in {"personal", "channel", "groupChat", "meeting"}:
             log.warning("teams.tool_confirmation.private_notice_unknown_conversation")
             return
-        notice = MessageActivityInput(text=message)
+        notice = notice_card(message, error=True)
         if conversation_type != "personal":
             notice.recipient = ctx.activity.from_.model_copy(update={"is_targeted": True})
         try:
