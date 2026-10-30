@@ -239,9 +239,10 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=dm_channel,
-                text=(
+                **notice_fields(
                     f"Continuing from <#{channel_id}>.\n\nSend your next message here. "
-                    "To start a new private conversation, run /dm-me in a channel."
+                    "To start a new private conversation, run /dm-me in a channel.",
+                    neutral=True,
                 ),
                 unfurl_links=False,
             )
@@ -252,7 +253,9 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 "Run `/dm-me` in a channel to continue privately. "
                 "Admins: `/dm-me enable` or `/dm-me disable`."
             )
-        fields: dict[str, Any] = notice_fields(refusal) if refusal else {"text": reply}
+        fields: dict[str, Any] = (
+            notice_fields(refusal) if refusal else notice_fields(reply, neutral=True)
+        )
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id, user=user_id, **fields
         )
@@ -383,6 +386,8 @@ async def handle_direct_message(
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                 await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id,
-                    text=_error_message(exc, settings=runtime.settings, team_id=team_id),
+                    **notice_fields(
+                        _error_message(exc, settings=runtime.settings, team_id=team_id)
+                    ),
                     **thread_kwargs,
                 )

@@ -31,6 +31,7 @@ from daimon.adapters.slack.agent_setup.read import (
     load_panel_roster,
     public_mcp_url,
 )
+from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -171,6 +172,7 @@ async def handle_coding_tools_click(
             channel_id=channel_id or user_id,
             user_id=user_id,
             text=NOT_CONFIGURED_MESSAGE,
+            error=True,
         )
         return
 
@@ -195,6 +197,7 @@ async def handle_coding_tools_click(
                 f"`{agent_name}` is no longer available — it may have been deleted. "
                 "Reopen /agent-setup for the current list."
             ),
+            error=True,
         )
         return
 
@@ -216,6 +219,7 @@ async def handle_coding_tools_click(
             channel_id=channel_id or user_id,
             user_id=user_id,
             text=POLICY_UNREADABLE_REFUSAL,
+            error=True,
         )
         return
     if not decision:
@@ -230,6 +234,7 @@ async def handle_coding_tools_click(
             channel_id=channel_id or user_id,
             user_id=user_id,
             text=NEEDS_ADMIN_MESSAGE,
+            error=True,
         )
         await _audit(
             runtime,
@@ -319,6 +324,7 @@ async def handle_revoke_token_click(
             response_url,
             text="Only the person who minted this token can revoke it.",
             replace_original=False,
+            error=True,
         )
         await audit(outcome="denied", reason="not_minter")
         return
@@ -331,12 +337,15 @@ async def handle_revoke_token_click(
             response_url,
             text="That token was already revoked.",
             replace_original=True,
+            error=True,
         )
         await audit(outcome="error", reason="already_revoked")
         return
     log.info("slack.coding_tools.revoked", jti=str(jti))
     await audit(outcome="allowed", reason="completed")
-    await _respond(runtime, response_url, text=TOKEN_REVOKED_MESSAGE, replace_original=True)
+    await _respond(
+        runtime, response_url, text=TOKEN_REVOKED_MESSAGE, replace_original=True, error=False
+    )
 
 
 async def _audit(
@@ -400,14 +409,15 @@ async def _authorize_mint(
 
 
 async def _respond(
-    runtime: SlackRuntime, response_url: str, *, text: str, replace_original: bool
+    runtime: SlackRuntime, response_url: str, *, text: str, replace_original: bool, error: bool
 ) -> None:
-    """Answer the click on its own message via Slack's response_url."""
+    """Answer the click on its own message via Slack's response_url, as a notice card."""
     if not response_url:
         return
+    fields = (notice_update_fields if replace_original else notice_fields)(text, neutral=not error)
     await runtime.http_client.post(
         response_url,
-        json={"replace_original": replace_original, "text": text},
+        json={"replace_original": replace_original, **fields},
     )
 
 

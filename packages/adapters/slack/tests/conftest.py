@@ -12,6 +12,7 @@ import pytest
 from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
 from daimon.adapters.slack.app import SlackApp
+from daimon.testing.adapters.slack.notices import shown_text as shown_text
 from daimon.testing.db import db_clean as db_clean
 from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
@@ -20,16 +21,6 @@ from daimon.testing.db import db_session_factory as db_session_factory
 from slack_sdk.web.async_client import AsyncWebClient
 
 _SLACK_API_BASE = "https://slack.com/api"
-
-
-def shown_text(body: dict[str, Any]) -> str:
-    """What a person reads in a Slack call body: its text, else its notice card's text."""
-    if body.get("text"):
-        return str(body["text"])
-    for attachment in body.get("attachments") or []:
-        if attachment.get("fallback"):
-            return str(attachment["fallback"])
-    return ""
 
 
 # Default ok payload for the POST-JSON chat methods. Exported so tests that

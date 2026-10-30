@@ -536,7 +536,10 @@ class SlackApp:
                     aiohttp.ClientSession() as followup_client,
                     followup_client.post(
                         response_url,
-                        json={"text": notice.text, "response_type": "ephemeral"},
+                        json={
+                            **notice_fields(notice.text, neutral=True),
+                            "response_type": "ephemeral",
+                        },
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as response,
                 ):
@@ -562,13 +565,13 @@ class SlackApp:
                     channel=notice.origin_parent_channel_id,
                     user=notice.requester_platform_user_id,
                     thread_ts=notice.origin_thread_id,
-                    text=notice.text,
+                    **notice_fields(notice.text, neutral=True),
                 )
             else:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=notice.origin_parent_channel_id,
                     user=notice.requester_platform_user_id,
-                    text=notice.text,
+                    **notice_fields(notice.text, neutral=True),
                 )
             return True
         except aiohttp.ClientError:

@@ -12,6 +12,7 @@ import anthropic
 import httpx
 import pytest
 from daimon.adapters.slack import direct_messages as dm_module
+from daimon.adapters.slack.blockkit import ERROR_COLOR, NEUTRAL_COLOR
 from daimon.core.errors import TurnError
 from daimon.core.stores.domain import Role
 from daimon.core.turn.errors import AdmissionDenied
@@ -48,7 +49,8 @@ async def test_dm_policy_replies_use_workspace_words(
     )
     sent = client.chat_postEphemeral.await_args.kwargs
     assert shown_text(sent) == expected
-    assert ("attachments" in sent) is (role is Role.USER)
+    colour = sent["attachments"][0]["color"]
+    assert colour == (ERROR_COLOR if role is Role.USER else NEUTRAL_COLOR)
     assert save.await_count == (1 if role is Role.ADMIN else 0)
 
 
@@ -218,7 +220,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
         runtime, {**event, "ts": "1.1", "text": "hi"}, team_id=_TEAM
     )
 
-    reply = client.chat_postMessage.await_args.kwargs["text"]
+    reply = shown_text(client.chat_postMessage.await_args.kwargs)
     assert reply.startswith("This channel's budget is used up."), reply
     assert "thread_ts" not in client.chat_postMessage.await_args.kwargs
 
@@ -320,7 +322,7 @@ async def test_a_failed_dm_turn_never_shows_the_provider_text(
         team_id=_TEAM,
     )
 
-    text = client.chat_postMessage.await_args.kwargs["text"]
+    text = shown_text(client.chat_postMessage.await_args.kwargs)
     assert text.startswith(
         "Daimon couldn't reach its AI service.\n\nTry again in a minute.\n\n_Ref "
     )

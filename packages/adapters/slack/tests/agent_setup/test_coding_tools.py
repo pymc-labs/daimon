@@ -31,6 +31,7 @@ from daimon.adapters.slack.agent_setup.coding_tools import (
     render_coding_tools_message,
 )
 from daimon.adapters.slack.agent_setup.panel_views import ACTION_REVOKE_TOKEN
+from daimon.adapters.slack.blockkit import ERROR_COLOR, notice_update_fields
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_agent_uuid
@@ -41,6 +42,7 @@ from daimon.core.stores.agent_owners import set_owner
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.security_audit import list_events
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
@@ -221,7 +223,8 @@ async def test_coding_tools_click_by_a_member_refuses_and_mints_nothing(
         posted = _ephemerals(mock)
 
     assert len(posted) == 1, "a refused click is explained, never silent"
-    assert posted[0]["text"] == NEEDS_ADMIN_MESSAGE, "the refusal names the way round it"
+    assert shown_text(posted[0]) == NEEDS_ADMIN_MESSAGE, "the refusal names the way round it"
+    assert posted[0]["attachments"][0]["color"] == ERROR_COLOR, "a refusal is a red card"
     assert "Bearer" not in json.dumps(posted[0]), "a refused click mints nothing"
     assert await _audited(db_session_factory, tenant.id) == [
         ("panel:coding_token_mint", "denied")
@@ -252,7 +255,7 @@ async def test_coding_tools_click_when_unconfigured_posts_a_note(
         )
         posted = _ephemerals(mock)
 
-    assert [entry["text"] for entry in posted] == [NOT_CONFIGURED_MESSAGE], (
+    assert [shown_text(entry) for entry in posted] == [NOT_CONFIGURED_MESSAGE], (
         "an unconfigured deployment says so, once"
     )
 
@@ -311,8 +314,11 @@ async def test_revoke_replaces_the_original_message_and_kills_the_token(
     )
 
     assert http_client.posts == [
-        (_RESPONSE_URL, {"replace_original": True, "text": TOKEN_REVOKED_MESSAGE})
-    ], "the revoked token's message is replaced where it stands"
+        (
+            _RESPONSE_URL,
+            {"replace_original": True, **notice_update_fields(TOKEN_REVOKED_MESSAGE, neutral=True)},
+        )
+    ], "the revoked token's message is replaced where it stands, as a neutral card"
     async with db_session_factory() as session:
         row = await get_mcp_token(session, jti=jti)
     assert row is not None and row.revoked_at is not None, "the registry row is revoked"
@@ -344,7 +350,8 @@ async def test_revoke_by_someone_other_than_the_minter_is_refused(
     assert len(http_client.posts) == 1, "the refused click is answered"
     _url, body = http_client.posts[0]
     assert body["replace_original"] is False, "someone else's message is not replaced"
-    assert "minted" in body["text"], "the refusal says who may revoke"
+    assert "minted" in shown_text(body), "the refusal says who may revoke"
+    assert body["attachments"][0]["color"] == ERROR_COLOR, "a refusal is a red card"
     async with db_session_factory() as session:
         row = await get_mcp_token(session, jti=jti)
     assert row is not None and row.revoked_at is None, "the token is still live"
@@ -496,5 +503,5 @@ async def test_an_owner_of_another_agent_is_refused_and_mints_nothing(
 
     posted = await _click_as(runtime, tenant.id, is_admin=False)
 
-    assert [entry["text"] for entry in posted] == [NEEDS_ADMIN_MESSAGE]
+    assert [shown_text(entry) for entry in posted] == [NEEDS_ADMIN_MESSAGE]
     assert "Bearer" not in json.dumps(posted)

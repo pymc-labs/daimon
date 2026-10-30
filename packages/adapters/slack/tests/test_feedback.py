@@ -41,6 +41,7 @@ import yarl
 from aioresponses import aioresponses as AioResponsesMock
 from cryptography.fernet import Fernet
 from daimon.adapters.slack import feedback as feedback_module
+from daimon.adapters.slack.blockkit import NEUTRAL_COLOR
 from daimon.adapters.slack.click_replies import open_modal
 from daimon.adapters.slack.feedback import (
     FEEDBACK_DETAILS_ACTION_ID,
@@ -391,7 +392,9 @@ async def test_a_form_slack_would_not_open_falls_back_to_an_ephemeral_with_a_but
     assert len(await _rows(db_session_factory)) == 1, "the vote still counts"
     (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
     assert ephemeral["thread_ts"] == _THREAD_TS
-    buttons = [e for b in ephemeral["blocks"] if b["type"] == "actions" for e in b["elements"]]
+    card = ephemeral["attachments"][0]
+    assert card["color"] == NEUTRAL_COLOR, "the offer of the form is a neutral card"
+    buttons = [e for b in card["blocks"] if b["type"] == "actions" for e in b["elements"]]
     assert [b["action_id"] for b in buttons] == [FEEDBACK_DETAILS_ACTION_ID]
     assert json.loads(buttons[0]["value"])["message_ts"] == _MESSAGE_TS
 
@@ -512,7 +515,8 @@ async def test_submission_records_the_down_vote_with_text_and_reasons(
     assert row["feedback_text"] == "the numbers were wrong"
     assert row["feedback_reasons"] == ["inaccurate", "incomplete"]
     (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
-    assert ephemeral["text"] == "Thanks for the feedback."
+    assert shown_text(ephemeral) == "Thanks for the feedback."
+    assert ephemeral["attachments"][0]["color"] == NEUTRAL_COLOR, "thanks is a neutral card"
     assert ephemeral["thread_ts"] == "1.0"
 
 
@@ -616,7 +620,10 @@ async def test_a_views_open_timeout_still_records_the_vote_and_offers_the_button
     (row,) = await _rows(db_session_factory)
     assert row["vote"] == "down"
     (ephemeral,) = _calls(fake_slack_web_client, _EPHEMERAL_URL)
-    assert ephemeral["blocks"][-1]["elements"][0]["action_id"] == FEEDBACK_DETAILS_ACTION_ID
+    assert (
+        ephemeral["attachments"][0]["blocks"][-1]["elements"][0]["action_id"]
+        == FEEDBACK_DETAILS_ACTION_ID
+    )
 
 
 async def test_a_top_level_answer_gets_its_ephemeral_outside_any_thread(

@@ -27,9 +27,11 @@ import yarl
 from aioresponses import aioresponses as AioResponsesMock
 from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
+from daimon.adapters.slack.blockkit import NEUTRAL_COLOR
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
@@ -264,8 +266,8 @@ async def test_handle_topup_select_admin_ephemeral_text_contains_url(
         if ephemeral_reqs:
             for call in ephemeral_reqs:
                 body: dict[str, Any] = call.kwargs.get("json") or {}
-                text_val = body.get("text", "")
-                posted_texts.append(str(text_val))
+                posted_texts.append(shown_text(body))
+                assert body["attachments"][0]["color"] == NEUTRAL_COLOR, "a payment link is neutral"
 
     # At least one ephemeral was sent with the payment URL
     matching = [t for t in posted_texts if _CHECKOUT_RESPONSE_URL in t]

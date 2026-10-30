@@ -23,7 +23,7 @@ import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Final
 
 import anthropic
 import httpx
@@ -153,8 +153,8 @@ async def post_ephemeral(
     thread_ts: str | None = None,
     error: bool = False,
 ) -> None:
-    """A message only ``user_id`` sees; ``error`` posts a refusal as the red notice card."""
-    fields: dict[str, Any] = notice_fields(text) if error else {"text": text}
+    """A notice card only ``user_id`` sees: red for an ``error``, blurple otherwise."""
+    fields = notice_fields(text, neutral=not error)
     await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
         channel=channel_id,
         user=user_id,

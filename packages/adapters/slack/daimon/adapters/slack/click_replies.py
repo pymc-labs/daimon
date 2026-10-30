@@ -90,10 +90,11 @@ async def post_ephemeral(
 
     ``thread_ts`` is the answer's place key, which falls back to the answer's
     own ts; it names a thread only when it differs from ``message_ts``.
-    ``error`` posts a refusal or failure as the red notice card.
+    Always a notice card: red for an ``error`` (a refusal or failure), blurple
+    otherwise; ``blocks`` replace its one section, for a notice with a button.
     """
     in_thread = bool(thread_ts) and thread_ts != message_ts
-    fields: dict[str, Any] = notice_fields(text) if error else {"text": text, "blocks": blocks}
+    fields = notice_fields(text, neutral=not error, blocks=blocks)
     try:
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,

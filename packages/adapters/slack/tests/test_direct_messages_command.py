@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack import direct_messages
+from daimon.adapters.slack.blockkit import NEUTRAL_COLOR
 from daimon.core.stores.domain import Role
 from slack_sdk.errors import SlackApiError
 from structlog.testing import capture_logs
@@ -67,10 +68,12 @@ async def test_the_dm_opens_with_the_two_line_continue_notice(
         MagicMock(), {"team_id": "T1", "user_id": "U1", "channel_id": "C020", "text": ""}
     )
 
-    assert client.chat_postMessage.await_args.kwargs["text"] == (
+    sent = client.chat_postMessage.await_args.kwargs
+    assert shown_text(sent) == (
         "Continuing from <#C020>.\n\nSend your next message here. "
         "To start a new private conversation, run /dm-me in a channel."
     )
+    assert sent["attachments"][0]["color"] == NEUTRAL_COLOR, "the opener is a neutral card"
 
 
 async def test_an_unknown_action_shows_the_usage_lines(monkeypatch: pytest.MonkeyPatch) -> None:

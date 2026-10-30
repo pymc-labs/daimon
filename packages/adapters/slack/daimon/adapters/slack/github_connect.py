@@ -10,6 +10,7 @@ import anthropic
 import httpx
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, list_agents_by_tenant
@@ -46,12 +47,19 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
     if client is None:
         return
 
-    async def reply(message: str, *, attachments: list[dict[str, Any]] | None = None) -> None:
+    async def reply(
+        message: str, *, attachments: list[dict[str, Any]] | None = None, error: bool = True
+    ) -> None:
+        # The connect card is itself an attachment; a bare message becomes a notice card.
+        fields: dict[str, Any] = (
+            {"text": message, "attachments": attachments}
+            if attachments
+            else notice_fields(message, neutral=not error)
+        )
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=message,
-            attachments=attachments,
+            **fields,
             unfurl_links=False,
             unfurl_media=False,
         )
@@ -59,7 +67,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
     try:
         parts = str(payload.get("text") or "").strip().split(maxsplit=1)
         if not parts or parts[0].casefold() != "connect":
-            await reply("Run /github connect [agent].")
+            await reply("Run /github connect [agent].", error=False)
             return
         admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
         user_info = await client.users_info(user=user_id)  # pyright: ignore[reportUnknownMemberType]
@@ -86,7 +94,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             agents = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
             matches = [row for row in agents if row.name.casefold() == name.casefold()]
             if len(matches) != 1:
-                await reply("Choose one current agent.")
+                await reply("Choose one current agent.", error=False)
                 return
             target_name = matches[0].name
             target_ma_id = str(matches[0].id)
@@ -102,7 +110,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                     default=runtime.deployment_default,
                 )
             if roster.answering is None:
-                await reply("Choose an agent: /github connect [agent].")
+                await reply("Choose an agent: /github connect [agent].", error=False)
                 return
             target_name = roster.answering.name
             target_ma_id = roster.answering.ma_agent_id
@@ -229,7 +237,7 @@ async def handle_github_update_click(runtime: SlackRuntime, payload: dict[str, A
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=str(channel.get("id") or ""),
             user=str(user.get("id") or ""),
-            text=PINNED_AGENT_MESSAGE,
+            **notice_fields(PINNED_AGENT_MESSAGE),
         )
 
 
@@ -240,7 +248,10 @@ async def handle_github_cancel_click(runtime: SlackRuntime, payload: dict[str, A
     try:
         response = await runtime.http_client.post(
             response_url,
-            json={"replace_original": True, "text": "Update cancelled."},
+            json={
+                "replace_original": True,
+                **notice_update_fields("Update cancelled.", neutral=True),
+            },
         )
         response.raise_for_status()
     except httpx.HTTPError:
