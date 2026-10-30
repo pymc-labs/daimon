@@ -9,6 +9,7 @@ each person in separately has no token Daimon may use, so it is refused.
 
 from __future__ import annotations
 
+import asyncio
 import ssl
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -130,7 +131,7 @@ async def fetch_server_skill(
             content = await fetch_resource(http, endpoint, file.uri, size=file.size)
             verify_file(file, content)
             files[file.path] = content
-        verify_frontmatter(entry, files["SKILL.md"])
+        await asyncio.to_thread(verify_frontmatter, entry, files["SKILL.md"])
     except SkillRejected as err:
         raise SkillRejected(f"'{skill}' from '{server}' failed a check: {err}.") from err
     except SkillIngestError:

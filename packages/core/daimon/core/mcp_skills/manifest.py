@@ -14,7 +14,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final, cast
+from typing import Final, Protocol, cast
 from urllib.parse import unquote, urlsplit
 
 import yaml
@@ -31,6 +31,9 @@ MAX_FILES: Final = min(SPEC_MAX_FILES, PROVIDER_MAX_FILES)
 _NAME = re.compile(r"^(?!.*--)[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SAFE_PATH = re.compile(r"^[A-Za-z0-9._/-]+$")
+#: Frontmatter is a few fields; anything larger is refused before it is parsed.
+MAX_FRONTMATTER_BYTES: Final = 8 * 1024
+_MAX_DEPTH: Final = 16
 
 
 class SkillRejected(SkillIngestError):
@@ -166,8 +169,44 @@ def _json_like(value: object) -> object:
     return value
 
 
+class _EventStream(Protocol):
+    def check_event(self) -> bool: ...
+    def get_event(self) -> yaml.Event: ...
+    def dispose(self) -> None: ...
+
+
+def _refuse_references(block: str) -> None:
+    """Refuse anchors, aliases and merge keys, which can expand a few bytes without bound,
+    and nesting deep enough to exhaust the composer's recursion.
+
+    Runs over parse events, before anything is built from them.
+    """
+    depth = 0
+    # The stubs leave the loader's event methods untyped.
+    loader = cast("_EventStream", yaml.SafeLoader(block))
+    try:
+        while loader.check_event():
+            event = loader.get_event()
+            if isinstance(event, yaml.CollectionStartEvent):
+                depth += 1
+                if depth > _MAX_DEPTH:
+                    raise SkillRejected("SKILL.md frontmatter is nested too deeply")
+            elif isinstance(event, yaml.CollectionEndEvent):
+                depth -= 1
+            if isinstance(event, yaml.AliasEvent) or (
+                isinstance(event, yaml.NodeEvent) and event.anchor is not None
+            ):
+                raise SkillRejected("SKILL.md frontmatter uses YAML anchors or aliases")
+            if isinstance(event, yaml.ScalarEvent) and event.value == "<<" and not event.style:
+                raise SkillRejected("SKILL.md frontmatter uses a YAML merge key")
+    finally:
+        loader.dispose()
+
+
 def read_frontmatter(skill_md: bytes) -> dict[str, object]:
-    """The YAML frontmatter `SKILL.md` must begin with."""
+    """The YAML frontmatter `SKILL.md` must begin with: plain YAML, at most 8 KiB.
+
+    CPU-bound: async callers run it off the event loop."""
     try:
         text = skill_md.decode()
     except UnicodeDecodeError as err:
@@ -178,10 +217,15 @@ def read_frontmatter(skill_md: bytes) -> dict[str, object]:
     end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
     if end is None:
         raise SkillRejected("SKILL.md frontmatter is not closed")
+    block = "\n".join(lines[1:end])
+    if len(block.encode()) > MAX_FRONTMATTER_BYTES:
+        raise SkillRejected("SKILL.md frontmatter is too large")
     try:
-        loaded: object = yaml.safe_load("\n".join(lines[1:end]))
-    except yaml.YAMLError as err:
-        raise SkillRejected("SKILL.md frontmatter is not YAML") from err
+        _refuse_references(block)
+        loaded: object = yaml.safe_load(block)
+    # Deep nesting overflows the parser's recursion: refused like any other bad YAML.
+    except (yaml.YAMLError, RecursionError) as err:
+        raise SkillRejected("SKILL.md frontmatter is not plain YAML") from err
     normalized = _json_like(loaded)
     if not isinstance(normalized, dict):
         raise SkillRejected("SKILL.md frontmatter is not a mapping")

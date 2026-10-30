@@ -196,3 +196,31 @@ def test_verify_frontmatter_reads_dates_as_strings() -> None:
     assert entry is not None, "fixture entry should parse"
 
     verify_frontmatter(entry, b"---\nname: triage\ndescription: d\nsince: 2026-01-02\n---\n")
+
+
+_BOMB = "\n".join(
+    ["name: triage", "description: d", "a0: &a0 [x, x, x, x, x, x, x, x, x]"]
+    + [f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 9) + "]" for i in range(1, 9)]
+)
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "message"),
+    [
+        (_BOMB, "anchors or aliases"),
+        ("name: triage\ndescription: d\nloop: &l [*l]", "anchors or aliases"),
+        ("name: triage\ndescription: d\nx:\n  <<: {a: 1}", "merge key"),
+        ("name: triage\ndescription: d\nx: " + "[" * 3000 + "]" * 3000, "nested too deeply"),
+        ("name: triage\ndescription: " + "d" * 9000, "too large"),
+    ],
+    ids=["alias-bomb", "self-reference", "merge-key", "deep-nesting", "oversized"],
+)
+def test_frontmatter_that_could_expand_or_recurse_is_rejected(
+    frontmatter: str, message: str
+) -> None:
+    """Anchors, aliases, merge keys, deep nesting and oversized frontmatter never parse."""
+    entry = parse_entry(_entry())
+    assert entry is not None, "fixture entry should parse"
+
+    with pytest.raises(SkillRejected, match=message):
+        verify_frontmatter(entry, f"---\n{frontmatter}\n---\nbody\n".encode())
