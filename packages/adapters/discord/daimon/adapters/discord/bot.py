@@ -5109,17 +5109,20 @@ class DaimonBot(commands.Bot):
                 self._spawn(_unmark_queued(added))
         if slot != "started":
             ended = {
-                "cancelled": "Stopped.\nSend a message to start again.",
+                "cancelled": "Send a message to start again.",
                 "timed_out": QUEUE_TIMED_OUT_TEXT,
                 "balance_depleted": admission_refusal_message(
                     "balance_depleted", self.runtime.settings
                 ),
                 "queue_full": TENANT_CAP_NOTICE,
             }[slot]
+            ended_embed = build_notice_embed(
+                ended, title="Stopped." if slot == "cancelled" else None
+            )
             if lifecycle.message_ref is not None:
-                await lifecycle.edit_card(content=ended, embed=None, view=None)
+                await lifecycle.edit_card(content=None, embed=ended_embed, view=None)
             else:
-                await turn_send(ended)
+                await turn_send(embed=ended_embed)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -5710,7 +5713,8 @@ class DaimonBot(commands.Bot):
             if prepared.continuity.pending:
                 await turn_send(
                     embed=build_notice_embed(
-                        render_current_work_must_finish(agent.name, handoff=False)
+                        render_current_work_must_finish(agent.name, handoff=False),
+                        neutral=True,
                     )
                 )
             # Any task handed to another agent in THIS thread, with work to

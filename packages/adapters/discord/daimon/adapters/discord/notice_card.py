@@ -1,8 +1,8 @@
-"""The red embed Daimon posts for a system notice, so it never reads as the agent's words."""
+"""The embed Daimon posts for a system notice, so it never reads as the agent's words."""
 
 from __future__ import annotations
 
-from daimon.adapters.discord.theme import COLOR_RED
+from daimon.adapters.discord.theme import COLOR_BLURPLE, COLOR_RED
 
 import discord
 
@@ -10,6 +10,12 @@ import discord
 _DESCRIPTION_MAX_CHARS = 4096
 
 
-def build_notice_embed(text: str, *, title: str | None = None) -> discord.Embed:
-    """A red embed carrying one system notice, sent on its own."""
-    return discord.Embed(color=COLOR_RED, title=title, description=text[:_DESCRIPTION_MAX_CHARS])
+def build_notice_embed(
+    text: str, *, title: str | None = None, neutral: bool = False
+) -> discord.Embed:
+    """One system notice, sent on its own: red for a failure, `neutral` for information."""
+    return discord.Embed(
+        color=COLOR_BLURPLE if neutral else COLOR_RED,
+        title=title,
+        description=text[:_DESCRIPTION_MAX_CHARS],
+    )

@@ -26,6 +26,7 @@ import discord
 import httpx
 import pytest
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.theme import COLOR_BLURPLE
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -596,6 +597,9 @@ async def test_pending_change_posts_must_finish_copy_after_the_answer(
         "still working on the previous message here" in t and "picks it up on the next message" in t
         for t in sent_texts
     ), f"expected the must-finish copy posted as a card after the answer, got {sent_texts}"
+    assert {card.color.value for card in cards} == {COLOR_BLURPLE}, (
+        "information is a neutral card, not the red error card"
+    )
 
 
 @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)

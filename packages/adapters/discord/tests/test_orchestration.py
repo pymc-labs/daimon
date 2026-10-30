@@ -21,6 +21,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.adapters.discord.theme import COLOR_RED
 from daimon.adapters.discord.views import CancelView
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
@@ -3428,6 +3429,10 @@ class TestOverCapQueue:
     def _card_texts(card: MagicMock) -> list[str]:
         return [str(c.kwargs.get("content")) for c in card.edit.await_args_list]
 
+    @staticmethod
+    def _card_embeds(card: MagicMock) -> list[discord.Embed]:
+        return [c.kwargs["embed"] for c in card.edit.await_args_list if c.kwargs.get("embed")]
+
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
@@ -3484,7 +3489,13 @@ class TestOverCapQueue:
         view._cancel.set()  # pyright: ignore[reportPrivateUsage]  # the Stop click
         await asyncio.wait_for(turn, 5)
 
-        assert self._card_texts(card) == ["Stopped.\nSend a message to start again."]
+        (embed,) = self._card_embeds(card)
+        assert (embed.title, embed.description, embed.color.value) == (  # type: ignore[union-attr]
+            "Stopped.",
+            "Send a message to start again.",
+            COLOR_RED,
+        ), "a stop while queued ends the card on the red Stopped card, not plain text"
+        assert self._card_texts(card) == ["None"], "no plain content beside the card"
         assert bot.turn_queue.depth() == 0
         held.release()
         await asyncio.sleep(0.05)
@@ -3524,7 +3535,11 @@ class TestOverCapQueue:
 
         await asyncio.wait_for(bot.on_message(message), 5)
 
-        assert self._card_texts(card) == ["Something went wrong. Mention me to try again."]
+        (embed,) = self._card_embeds(card)
+        assert embed.description == "Something went wrong. Mention me to try again.", (
+            "the max wait ends the card with the ordinary error"
+        )
+        assert embed.color.value == COLOR_RED, "the queue ending is the red error card"  # type: ignore[union-attr]
         mock_create_session.assert_not_called()
         assert bot.turn_queue.depth() == 0
         assert bot.turn_queue.in_flight() == 1, "only the other guild's turn holds a slot"
@@ -3682,7 +3697,9 @@ class TestOverCapQueue:
                 else:
                     ctx.create_session.assert_awaited_once()
                 if exit_kind == "stop":
-                    assert str(ctx.card.edit.await_args.kwargs["content"]).startswith("Stopped.")
+                    assert ctx.card.edit.await_args.kwargs["embed"].title == "Stopped.", (
+                        "the stopped wait ends on the Stopped card"
+                    )
                 assert ctx.bot.turn_queue.depth() == 0
 
     @pytest.mark.parametrize("exit_kind", ["stop", "timeout", "grant"])
