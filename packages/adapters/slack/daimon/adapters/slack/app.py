@@ -214,9 +214,7 @@ from daimon.core.continuity.continuation import check_wake_responder, load_askin
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
-    render_replacement_summary,
     render_responder_changed_without_handoff,
-    render_unexpected_loss,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
@@ -2738,42 +2736,6 @@ class SlackApp:
                 if prepared.continuity.state != "continued"
                 else None
             )
-            # `prepared.continuity` is the bind's OWN decision, taken before
-            # the turn runs -- it can never be "replaced_after_loss" (that
-            # state only exists on the post-turn `RunOutcome`, set when
-            # `run_prepared_turn`'s recovery cycle recreates the session
-            # mid-call). That notice is posted after the turn instead, once
-            # the outcome is known.
-            replacement_summary: str | None = None
-            if (
-                prepared.continuity.announces_replacement()
-                and prepared.continuity.transfer_kind is not None
-            ):
-                # Not a separate message: the answer is an in-place edit of the
-                # status card posted at mention time, and Slack orders by the
-                # original ts -- so a summary posted at any point after that
-                # card reads BELOW the answer it explains ("the file vanished"
-                # above "here is why"). It becomes the answer's first paragraph
-                # instead. The fallback after the turn covers an answer that
-                # never arrives to carry it.
-                #
-                # A `None` transfer_kind here means a fresh start (no prior
-                # session to summarize a transfer from) -- that path already
-                # announces itself elsewhere, so no prefix is rendered.
-                replacement_summary = render_replacement_summary(
-                    prepared.continuity.transfer_kind, lost=[]
-                )
-                lifecycle.answer_prefix = replacement_summary
-            if prepared.continuity.state == "replaced" and prepared.mapping_id is not None:
-                from daimon.core.stores.thread_sessions import github_key_restart_line
-
-                async with self.runtime.sessionmaker() as notice_session:
-                    key_restart = await github_key_restart_line(
-                        notice_session, mapping_id=prepared.mapping_id
-                    )
-                if key_restart is not None:
-                    replacement_summary = key_restart
-                    lifecycle.answer_prefix = key_restart
 
             # Turn marker: message ts + channel + start time, written as soon as
             # the mapping row is known and the card exists. Slack passes
@@ -2930,17 +2892,6 @@ class SlackApp:
                 if synthetic_prefix:
                     user_message = synthetic_prefix + "\n" + user_message
 
-                # Only claim the images were "linked" when the proxy is configured —
-                # that's the branch that actually minted fetchable URLs into the prefix.
-                if images_skipped:
-                    await lifecycle.post_notice(
-                        (
-                            "Some images couldn't be inlined — I've linked them for the agent to "
-                            "fetch instead: "
-                            + ", ".join(f"`{f['name']}` ({r})" for f, r in images_skipped)
-                        ),
-                    )
-
             # --- Run the turn (run_prepared_turn owns the driver
             # call and the one-shot dead-session recovery cycle). lifecycle and
             # lifecycle_holder were constructed above, before bind_session. ---
@@ -3027,10 +2978,6 @@ class SlackApp:
                     identity=turn_identity,
                     ma_agent_id=str(agent.id),
                 )
-                # The replacement summary belongs to the turn, not to the
-                # lifecycle object that happens to render it -- a recovery
-                # cycle swaps the lifecycle and would otherwise drop it.
-                new_lifecycle.answer_prefix = lifecycle.answer_prefix
                 lifecycle_holder[0] = new_lifecycle
                 # An adopting lifecycle never posts, so it never re-registers
                 # itself -- the entry left by the original post is still bound
@@ -3142,30 +3089,6 @@ class SlackApp:
 
             mapping_id = outcome.mapping_id
             final_lifecycle = lifecycle_holder[0]
-
-            # The recovery cycle inside run_prepared_turn only learns a
-            # session was lost mid-call, after the turn has already run -- so
-            # unlike the planned-replacement summary above, this notice can
-            # only be posted here, once `outcome.continuity` is known. Posted
-            # regardless of whether the recovered turn itself then answered
-            # or errored: the person needs to know the workspace was lost
-            # either way.
-            if outcome.continuity.state == "replaced_after_loss":
-                loss_kind: Literal["transcript", "history"] = (
-                    "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
-                )
-                loss_notice = render_unexpected_loss(loss_kind)
-                # Edited in above the answer rather than posted under it, for
-                # the same ordering reason as the planned summary above. Falls
-                # back to a message when there is no answer to sit above (a
-                # tool-only or failed turn) or it will not fit.
-                if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                    await final_lifecycle.post_notice(loss_notice)
-            if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
-                # The turn produced no answer to carry the summary (tool-only,
-                # cancelled, or failed). The person still has to be told what
-                # the replacement carried across, so it goes out on its own.
-                await final_lifecycle.post_notice(replacement_summary)
 
             # --- Watermark --- Preserves Slack's original gate exactly (unconditional
             # on final_ts, no state.error branch) -- Discord's inline sequence had an

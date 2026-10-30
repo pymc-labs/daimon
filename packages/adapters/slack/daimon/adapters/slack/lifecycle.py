@@ -63,9 +63,7 @@ from daimon.adapters.slack.blockkit import (
 from daimon.adapters.slack.errors import bound_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
 from daimon.adapters.slack.mrkdwn import (
-    escape_mrkdwn_preserving_mentions,
     markdown_block_fallback,
-    prose_mentions,
     seal_markdown_block,
 )
 from daimon.adapters.slack.progress_receipt import InitialProgressReceipt
@@ -82,7 +80,6 @@ from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
-from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, fit_notice, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
@@ -255,18 +252,6 @@ class SlackTurnLifecycle:
         self._last_flush: float = 0.0
         self._terminal: bool = False
         self.final_ts: str | None = None
-        # A continuity notice that belongs ABOVE the answer it explains. The
-        # answer replaces the status card in place, so a notice posted as its
-        # own message always sorts below it no matter when it was sent --
-        # Slack orders by the original ts. Set before the answer is revealed
-        # (a planned replacement, known at bind time); `prepend_revealed_answer`
-        # covers the fact learned only after the turn ran.
-        self.answer_prefix: str | None = None
-        self.answer_prefix_applied: bool = False
-        # The first chunk and blocks actually rendered into the status card,
-        # kept so a late notice can be edited in above them exactly once.
-        self._revealed_first_chunk: str | None = None
-        self._revealed_first_blocks: list[dict[str, Any]] | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
         # Admission adds eyes; terminal hooks clear them for every tenant.
@@ -690,33 +675,12 @@ class SlackTurnLifecycle:
                 # cancelled." — matches the Discord parity reference.
                 if any(isinstance(block, ToolUseBlock) for block in state.content):
                     await self._flush_terminal(feedback=True)
-                    # No reply to hang the notice under on a tool-only
-                    # turn, so a dropped server is named on its own line.
-                    tool_only_notice = render_degraded_notice(state.mcp_failures)
-                    if tool_only_notice is not None:
-                        resp = await post_as_agent(
-                            self._client,
-                            self._identity,
-                            channel=self._channel,
-                            thread_ts=self._thread_ts,
-                            blocks=[{"type": "markdown", "text": tool_only_notice}],
-                            text=tool_only_notice,
-                        )
-                        await self.record_post(cast(str, resp["ts"]))
                 else:
                     await self._flush_cancelled()
                 self.final_ts = self._status_ts
                 return
 
             repair_notice = "I couldn't send the full answer.\nMention me to try again."
-            if self.answer_prefix is not None:
-                final_text = f"{self.answer_prefix}\n\n{final_text}"
-                self.answer_prefix_applied = True
-            # Same trailer as Discord — a dropped server is named under
-            # the reply rather than swallowing the reply.
-            degraded_notice = render_degraded_notice(state.mcp_failures)
-            if degraded_notice is not None:
-                final_text = f"{final_text}\n\n{degraded_notice}"
             deliveries = await render_slack_tables(
                 final_text,
                 enabled=self._render_tables,
@@ -780,8 +744,6 @@ class SlackTurnLifecycle:
                         await self.record_post(current_ts)
                     if index == 0:
                         self._answer_ts = current_ts
-                        self._revealed_first_chunk = notification_chunk
-                        self._revealed_first_blocks = blocks
                         surface_replaced = True
                 except SlackApiError as exc:
                     if block.get("type") != "table":
@@ -816,54 +778,6 @@ class SlackTurnLifecycle:
             if self._pending_registered and self._deregister_pending is not None:
                 self._deregister_pending(self._cancel_key)
                 self._pending_registered = False
-
-    async def prepend_revealed_answer(self, notice: str) -> bool:
-        """Edit `notice` in above an answer already on screen; False if it cannot go there.
-
-        For a fact the turn only produces on its way out (an unexpected
-        workspace loss, discovered by the driver's mid-call recovery): by the
-        time the caller knows it, the answer has replaced the status card.
-        Sending the notice afterwards puts it below the answer it explains, so
-        instead the card is updated once with the notice on top.
-
-        Returns False -- caller posts it as an ordinary message instead --
-        when there is no revealed answer to sit above, when the notice would
-        push the first chunk past Slack's per-block ceiling (re-splitting would
-        strand the overflow messages already posted), or when the edit fails.
-        """
-        if self._revealed_first_chunk is None or self._revealed_first_blocks is None:
-            return False
-        escaped_notice = escape_mrkdwn_preserving_mentions(notice)
-        updated = seal_markdown_block(
-            f"{escaped_notice}\n\n{self._revealed_first_chunk}",
-            mentions=prose_mentions(escaped_notice) | prose_mentions(self._revealed_first_chunk),
-        )
-        if len(split_for_slack_safe(updated)) > 1:
-            return False
-        blocks = list(self._revealed_first_blocks)
-        if any(block.get("type") == "table" for block in blocks):
-            blocks.insert(
-                0, {"type": "markdown", "text": escape_mrkdwn_preserving_mentions(notice)}
-            )
-        else:
-            blocks[0] = {"type": "markdown", "text": updated}
-        try:
-            if self._notify_on_completion and self._answer_ts is not None:
-                await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
-                    channel=self._channel,
-                    ts=self._answer_ts,
-                    blocks=blocks,
-                    text=_notification_text(updated),
-                )
-            else:
-                await self._post_or_update(blocks, _notification_text(updated))
-        except _SLACK_SEND_ERRORS:
-            log.warning("turn.answer_prefix.edit_failed", exc_info=True)
-            return False
-        self._revealed_first_chunk = updated
-        self._revealed_first_blocks = blocks
-        self.answer_prefix_applied = True
-        return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         """Log failure, attempt to flush error state, then deregister.

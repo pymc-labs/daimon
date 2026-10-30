@@ -37,7 +37,6 @@ from daimon.adapters.slack.admin import SlackRequester
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.continuity.messages import render_unexpected_loss
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
@@ -5124,9 +5123,8 @@ async def test_a_recovered_turn_keeps_editing_the_card_the_marker_points_at(
         "recovered turn must not post a second card before anything else runs"
     )
     assert _post_count() == 1, (
-        "a recovered turn must not post a second status card, and the "
-        "unexpected-loss notice is edited in above the answer rather than "
-        "posted as its own message -- so the card is the only post"
+        "a recovered turn must not post a second status card, and no "
+        "loss notice is posted as its own message -- so the card is the only post"
     )
 
     # 2. The marker addresses the live card.
@@ -5174,30 +5172,11 @@ async def test_a_recovered_turn_keeps_editing_the_card_the_marker_points_at(
         "the registry entry must no longer be bound to the first attempt's Event"
     )
 
-    # 5. The loss notice reaches the reader exactly once, history variant (the
-    # fake transport gives the transcript rescue a real APIError, which
-    # `_replay_previous_session` degrades to None -- logged above as
-    # "turn.recovery_transcript_unavailable"), and it sits ABOVE the answer it
-    # explains rather than under it: the answer replaced the status card, and
-    # Slack orders by the original ts, so a later message always reads below.
-    notice = render_unexpected_loss("history")
-    post_calls = [
-        req
-        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
-        if url == post_url
-        for req in reqs
-    ]
-    posted_texts = [req.kwargs["json"].get("text") for req in post_calls]
-    assert notice not in posted_texts, (
-        f"the loss notice must not arrive as its own message, got {posted_texts}"
-    )
-    final_blocks = json.dumps(last_update_body.get("blocks", []))
-    assert json.dumps(notice)[1:-1] in final_blocks, (
-        f"the loss notice must be rendered into the answer card, got {final_blocks}"
-    )
+    # 5. No system line is added: the answer card carries exactly the agent's
+    # text (what was lost is the agent's to say), and nothing else is posted.
     answer_body = last_update_body["blocks"][0]["text"]
-    assert answer_body.startswith(notice + "\n\n"), (
-        f"the loss notice must be the answer's first paragraph, got {answer_body!r}"
+    assert answer_body == _ANSWER, (
+        f"the recovered answer must be exactly the agent's text, got {answer_body!r}"
     )
     assert rebound_author == "U_TEST_RECOVER", "the rebind must not change who is allowed to cancel"
 
