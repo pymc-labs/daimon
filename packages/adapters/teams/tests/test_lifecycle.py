@@ -1045,6 +1045,33 @@ async def test_error_cards_are_red_containers_and_done_cards_are_not() -> None:
     assert pointer[0]["type"] == "TextBlock", "the Done pointer under a fresh answer is no error"
 
 
+async def test_stopped_turn_with_partial_text_ends_on_the_red_stopped_card() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    stopped = dataclasses.replace(
+        _answer("Half an answer"), termination=TerminationReason.INTERRUPTED
+    )
+    await lifecycle.on_terminal_success(stopped)
+
+    answer, marker = sender.activities[1:]
+    assert answer.text == "Half an answer", "the agent's words are left as they were"
+    assert _raw_body(sender, -1)[0]["style"] == "attention", "the Stopped card is red"
+    assert _card_body(sender, -1)[0]["text"] == card.CANCELLED_NOTICE
+    assert not _rated(marker) and not _asks(sender, -1), "a stopped turn has no votes"
+
+
+async def test_stopped_tool_only_turn_ends_on_the_red_stopped_card_without_votes() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+    stopped = TurnState(content=[tool], termination=TerminationReason.INTERRUPTED)
+    await lifecycle.on_terminal_success(stopped)
+
+    assert _raw_body(sender, -1)[0]["style"] == "attention", "stopped, not Done"
+    assert _card_body(sender, -1)[0]["text"] == card.CANCELLED_NOTICE
+    assert not _rated(sender.activities[-1]), "no vote buttons on a stopped turn"
+
+
 async def test_direct_chat_terminal_notice_asks_for_a_message() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender, direct_chat=True)

@@ -52,7 +52,7 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.status_lines import format_summary
-from daimon.core.turn.termination import termination_reason
+from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
 from microsoft_teams.api import Account, Attachment, MessageActivityInput, SentActivity
 from microsoft_teams.cards import Action, AdaptiveCard, ExecuteAction
@@ -520,12 +520,16 @@ class TeamsTurnLifecycle:
         self._terminal = True
         await self._settle_stopping()
         answer = self._answer_text(state)
+        # A stopped turn ends on the red Stopped card, with no vote buttons.
+        cancelled = state.termination == TerminationReason.INTERRUPTED
         replaced = False
         try:
             if not answer and self._unprompted:
                 return  # an unprompted turn with nothing to say leaves the thread as it was
             if not answer:
-                tool_only = any(isinstance(b, ToolUseBlock) for b in state.content)
+                tool_only = not cancelled and any(
+                    isinstance(b, ToolUseBlock) for b in state.content
+                )
                 text = card.TOOLS_DONE_NOTICE if tool_only else card.CANCELLED_NOTICE
                 # As on Slack: a cancelled turn carries no controls, a tool-only one does.
                 # A tool-only turn's result is an answer too: it can be voted on.
@@ -557,7 +561,9 @@ class TeamsTurnLifecycle:
             self.final_message_id = current
             if fresh:  # retire before the best-effort controls so a lost post can't strand it
                 await self._retire_card()
-            await self._post_controls(state, hold=self._hold_controls and _may_have_outputs(state))
+            await self._post_controls(
+                state, hold=self._hold_controls and _may_have_outputs(state), cancelled=cancelled
+            )
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
@@ -582,14 +588,21 @@ class TeamsTurnLifecycle:
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
 
-    async def _post_controls(self, state: TurnState, *, hold: bool = False) -> None:
+    async def _post_controls(
+        self, state: TurnState, *, hold: bool = False, cancelled: bool = False
+    ) -> None:
         """The summary line, Ask a human and 👍/👎 below the answer; best effort, it landed.
 
         `hold` keeps them for `release_controls`, timed as the turn ended.
+        A stopped turn gets the red Stopped card with the summary, and no votes.
         """
         named = self._agent_name_prefix is not None
         summary = await self._summary(state, named_above=named)
-        controls = card.controls_card(summary, ask_human=self._ask_human)
+        controls = (
+            card.notice_card(card.CANCELLED_NOTICE, summary=summary)
+            if cancelled
+            else card.controls_card(summary, ask_human=self._ask_human)
+        )
         if hold:
             self._held_controls = controls
         else:
