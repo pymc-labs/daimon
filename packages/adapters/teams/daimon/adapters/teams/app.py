@@ -41,7 +41,7 @@ from daimon.adapters.teams.admissions import (
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
-from daimon.adapters.teams.card import CANCELLED_NOTICE
+from daimon.adapters.teams.card import CANCELLED_NOTICE, notice_card
 from daimon.adapters.teams.card_actions import replace_card, toast
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.channel_subscriptions import ChannelSubscriptions, SeenChannel
@@ -189,7 +189,6 @@ from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivity,
-    MessageActivityInput,
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import ExecuteAction
@@ -985,7 +984,7 @@ class TeamsApp:
 
         async def reply(text: str) -> object:
             return await self._sender.send(
-                conversation, MessageActivityInput(text=text), service_url=source.service_url
+                conversation, notice_card(text), service_url=source.service_url
             )
 
         await self._refuse(parsed, conversation, message.id, source.kind, reply)
@@ -1160,9 +1159,7 @@ class TeamsApp:
             await self._private.tell_sender(inbound, text)
             return
         await self._sender.send(
-            inbound.conversation_id,
-            MessageActivityInput(text=text),
-            service_url=inbound.service_url,
+            inbound.conversation_id, notice_card(text), service_url=inbound.service_url
         )
 
     async def _may_post(self, channel_id: str, thread_id: str) -> bool:
@@ -1694,7 +1691,9 @@ class TeamsApp:
                     and admission.backend_revision.backend == "selfhosted"
                 ),
             )
-            await lifecycle.close_with_notice(text, actions=actions)
+            await lifecycle.close_with_notice(
+                text, actions=actions, error=isinstance(error, SessionPreparationFailed)
+            )
             if reraise:
                 raise
             return
@@ -1995,9 +1994,7 @@ class TeamsApp:
 
         async def notify(text: str) -> None:
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await self._sender.send(
-                    key, MessageActivityInput(text=text), service_url=service_url
-                )
+                await self._sender.send(key, notice_card(text), service_url=service_url)
 
         async def latest_message_at(_row: TaskContinuationRow) -> datetime | None:
             return self._last_message_at.get(key)

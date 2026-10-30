@@ -1131,6 +1131,15 @@ def test_teams_draws_work_and_ref_as_small_text() -> None:
     assert body[2]["size"] == "Small" and body[2]["isSubtle"]
 
 
+def test_a_neutral_notice_card_is_not_in_the_attention_container() -> None:
+    def top(error: bool) -> dict[str, Any]:
+        card_ = card.notice_card("Busy.", error=error)
+        return card_.model_dump(mode="json", by_alias=True)["attachments"][0]["content"]["body"][0]
+
+    assert top(True).get("style") == "attention", "a failure reads as Daimon's own notice"
+    assert top(False)["type"] == "TextBlock", "information is plain"
+
+
 class _HungSender:
     async def send(
         self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None

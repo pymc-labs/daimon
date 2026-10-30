@@ -743,3 +743,20 @@ def status_log_on(_status_log_off: None) -> Iterator[None]:
 
     with status_log_override(True):
         yield
+
+
+def shown_text(activity: MessageActivityInput) -> str | None:
+    """What a person reads in `activity`: its text, else its notice card's first text block."""
+    if activity.text:
+        return activity.text
+    for attachment in activity.attachments or []:
+        items = getattr(attachment.content, "body", None) or []
+        while items:
+            first = items[0]
+            if getattr(first, "text", None):
+                return first.text
+            items = getattr(first, "items", None) or []
+        fallback = getattr(attachment.content, "fallback_text", None)
+        if fallback:
+            return fallback
+    return None

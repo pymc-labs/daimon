@@ -424,9 +424,17 @@ class TeamsTurnLifecycle:
         return self._clock() - self._tool_done_at
 
     async def close_with_notice(
-        self, text: str, *, actions: Sequence[ExecuteAction] = (), summary: str | None = None
+        self,
+        text: str,
+        *,
+        actions: Sequence[ExecuteAction] = (),
+        summary: str | None = None,
+        error: bool = True,
     ) -> None:
-        """Terminal render for adapter-side bailouts. Never raises on a send error."""
+        """Terminal render for adapter-side bailouts. Never raises on a send error.
+
+        `error=False` is for information, such as a change that waits for the next message.
+        """
         if self._terminal:
             return
         self._terminal = True
@@ -435,7 +443,7 @@ class TeamsTurnLifecycle:
             log.info("teams.turn.unprompted_notice_dropped")
             return
         try:
-            await self._close(text, actions=tuple(actions), summary=summary)
+            await self._close(text, actions=tuple(actions), summary=summary, error=error)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.notice_failed", exc_info=True)
 

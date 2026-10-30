@@ -40,6 +40,7 @@ from .conftest import (
     make_channel_activity,
     make_inbound,
     make_message_activity,
+    shown_text,
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
@@ -102,7 +103,7 @@ async def _boot(teams: TeamsApp) -> None:
 
 
 def _texts(sender: FakeSender) -> list[str | None]:
-    return [a.text for a in sender.activities]
+    return [shown_text(a) for a in sender.activities]
 
 
 async def test_a_drain_tells_the_chat_once_about_queued_messages_even_when_repeated(
