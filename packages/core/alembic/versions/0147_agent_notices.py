@@ -1,7 +1,7 @@
 """agent_notices: failures the agent hears of on the next turn in a thread.
 
-One row per notice for `(tenant_id, platform, thread_id)`; the same text is
-kept once. The next turn in that thread takes and deletes them. Holds no
+One row per notice for `(tenant_id, platform, thread_id, agent_id)`; the same
+text is kept once. That agent's next turn in the thread takes and deletes them. Holds no
 person's data. Additive only; downgrading drops the pending notices.
 
 downgrade: destructive
@@ -29,6 +29,7 @@ def upgrade() -> None:
         sa.Column("tenant_id", UUID(as_uuid=True), nullable=False),
         sa.Column("platform", sa.Text(), nullable=False),
         sa.Column("thread_id", sa.Text(), nullable=False),
+        sa.Column("agent_id", sa.Text(), nullable=False),
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column(
             "created_at",
@@ -41,7 +42,12 @@ def upgrade() -> None:
             ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_agent_notices_tenants"
         ),
         sa.UniqueConstraint(
-            "tenant_id", "platform", "thread_id", "text", name="uq_agent_notices_thread_text"
+            "tenant_id",
+            "platform",
+            "thread_id",
+            "agent_id",
+            "text",
+            name="uq_agent_notices_thread_agent_text",
         ),
     )
 

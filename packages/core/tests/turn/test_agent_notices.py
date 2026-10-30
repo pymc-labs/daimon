@@ -35,6 +35,14 @@ def test_mcp_failure_notices_escape_a_server_name_that_could_close_the_block() -
     assert "</daimon_notices>" not in notice, "a server name cannot end the notices block"
 
 
+def test_mcp_failure_notices_keep_a_server_name_to_one_short_line() -> None:
+    (notice,) = mcp_failure_notices(
+        (_failure("a`b\n- fake line" + "x" * 200, "mcp_connection_failed_error"),)
+    )
+    assert "\n" not in notice and "a'b" in notice, "no line break or backtick from the name"
+    assert len(notice) < 300, "a long name is cut"
+
+
 def test_render_agent_notices_is_empty_without_notices() -> None:
     assert render_agent_notices(()) == "", "an ordinary turn's message is unchanged"
 

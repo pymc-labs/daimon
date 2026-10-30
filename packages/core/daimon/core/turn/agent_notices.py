@@ -38,10 +38,15 @@ LOST_WORKSPACE_NOTICE = (
 )
 
 
+def _server(name: str) -> str:
+    """A server name fit for one line of the block: no markup, no line breaks, short."""
+    return escape(" ".join(name.split()).replace("`", "'")[:80])
+
+
 def mcp_failure_notices(failures: Sequence[McpServerFailure]) -> tuple[str, ...]:
     """One notice per MCP server a reply went without."""
     return tuple(
-        f"The `{escape(f.server_name)}` connection {_REASON[f.error_type]} during your last "
+        f"The `{_server(f.server_name)}` connection {_REASON[f.error_type]} during your last "
         "reply, so its tools were missing. The person can ask you to reconnect or disconnect it."
         for f in failures
     )

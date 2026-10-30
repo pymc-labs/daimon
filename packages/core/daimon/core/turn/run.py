@@ -907,13 +907,14 @@ async def _with_agent_notices(
     platform: str,
     thread_id: str,
     user_message: str,
+    reseed_user_message: Callable[[], Awaitable[str]],
     now: datetime,
-) -> tuple[str, list[str]]:
-    """The message after what Daimon has to tell the agent, and the queued notices taken.
+) -> tuple[str, Callable[[], Awaitable[str]], list[str]]:
+    """The message and its recovery reseed after what Daimon has to tell the agent.
 
-    Queued notices are failures of an earlier turn in the thread; a GitHub key
-    restart is this turn's own. Returns what was taken, so a turn that never
-    sent its message can queue them again.
+    Queued notices are failures of this agent's earlier turns in the thread; a
+    GitHub key restart is this turn's own. Also returns the notices, so a turn
+    that never sent its message can queue them again.
     """
     try:
         async with deps.sessionmaker.begin() as db:
@@ -922,6 +923,7 @@ async def _with_agent_notices(
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,
+                agent_id=prepared.admission.agent.id,
                 since=now - _NOTICE_TTL,
             )
             restarted = (
@@ -931,24 +933,40 @@ async def _with_agent_notices(
             )
     except SQLAlchemyError as error:  # notices are advisory; never block the turn
         log.warning("turn.agent_notices_take_failed", error=type(error).__name__)
-        return user_message, []
+        return user_message, reseed_user_message, []
     notices = [*taken, GITHUB_KEY_RESTART_NOTICE] if restarted else taken
     if not notices:
-        return user_message, taken
+        return user_message, reseed_user_message, []
     log.info("turn.agent_notices_sent", count=len(notices))
-    return f"{render_agent_notices(notices)}\n\n{user_message}", taken
+    block = render_agent_notices(notices)
+
+    async def reseed() -> str:  # a recovered session is told too
+        return f"{block}\n\n{await reseed_user_message()}"
+
+    return f"{block}\n\n{user_message}", reseed, notices
 
 
 async def _queue_agent_notices(
-    deps: TurnDeps, texts: Sequence[str], *, tenant_id: uuid.UUID, platform: str, thread_id: str
+    deps: TurnDeps,
+    texts: Sequence[str],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    agent_id: str,
 ) -> None:
-    """Keep notices for the thread's next turn."""
+    """Keep notices for this agent's next turn in the thread."""
     if not texts:
         return
     try:
         async with deps.sessionmaker.begin() as db:
             await record_agent_notices(
-                db, tenant_id=tenant_id, platform=platform, thread_id=thread_id, texts=texts
+                db,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                agent_id=agent_id,
+                texts=texts,
             )
     except SQLAlchemyError as error:  # a lost notice must never mask the turn's own outcome
         log.warning("turn.agent_notices_queue_failed", error=type(error).__name__)
@@ -1000,13 +1018,14 @@ async def run_prepared_turn(
             thread_id=thread_id,
             user_message=user_message,
         )
-        user_message, taken_notices = await _with_agent_notices(
+        user_message, reseed_user_message, taken_notices = await _with_agent_notices(
             deps,
             prepared,
             tenant_id=tenant_id,
             platform=platform,
             thread_id=thread_id,
             user_message=user_message,
+            reseed_user_message=reseed_user_message,
             now=now(),
         )
     observation.thread_id = thread_id
@@ -1070,7 +1089,12 @@ async def run_prepared_turn(
             )
         if not sent:
             await _queue_agent_notices(
-                deps, taken_notices, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+                deps,
+                taken_notices,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                agent_id=prepared.admission.agent.id,
             )
         raise
     finally:
@@ -1113,6 +1137,7 @@ async def run_prepared_turn(
             tenant_id=tenant_id,
             platform=platform,
             thread_id=thread_id,
+            agent_id=prepared.admission.agent.id,
         )
     return result
 

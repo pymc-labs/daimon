@@ -34,18 +34,32 @@ async def test_the_next_turn_takes_queued_notices_in_front_of_its_message(
     async with db_session_factory.begin() as db:
         tenant = await make_tenant(db)
         await record_agent_notices(
-            db, tenant_id=tenant.id, platform="discord", thread_id="T", texts=["dropped"]
+            db,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="T",
+            agent_id="agt",
+            texts=["dropped"],
         )
     deps = SimpleNamespace(sessionmaker=db_session_factory)
-    prepared = SimpleNamespace(continuity=ContinuityOutcome(), mapping_id=None)
+    prepared = SimpleNamespace(
+        admission=SimpleNamespace(agent=SimpleNamespace(id="agt")),
+        continuity=ContinuityOutcome(),
+        mapping_id=None,
+    )
+
+    async def reseed() -> str:
+        return "hi again"
+
     kwargs: dict[str, Any] = {
         "tenant_id": tenant.id,
         "platform": "discord",
         "thread_id": "T",
+        "reseed_user_message": reseed,
         "now": datetime.now(UTC),
     }
 
-    first, taken = await run_module._with_agent_notices(  # pyright: ignore[reportPrivateUsage]
+    first, first_reseed, taken = await run_module._with_agent_notices(  # pyright: ignore[reportPrivateUsage]
         deps,  # pyright: ignore[reportArgumentType]
         prepared,  # pyright: ignore[reportArgumentType]
         user_message="hi",
@@ -54,14 +68,18 @@ async def test_the_next_turn_takes_queued_notices_in_front_of_its_message(
     assert first.startswith("<daimon_notices>") and first.endswith("</daimon_notices>\n\nhi"), (
         "the notices lead the person's message"
     )
-    assert taken == ["dropped"], "what was taken comes back, to queue again if never sent"
-    again, _ = await run_module._with_agent_notices(  # pyright: ignore[reportPrivateUsage]
+    assert (await first_reseed()).endswith("</daimon_notices>\n\nhi again"), (
+        "a session recovered mid-turn is told too"
+    )
+    assert taken == ["dropped"], "what was told comes back, to queue again if never sent"
+    again, again_reseed, _ = await run_module._with_agent_notices(  # pyright: ignore[reportPrivateUsage]
         deps,  # pyright: ignore[reportArgumentType]
         prepared,  # pyright: ignore[reportArgumentType]
         user_message="still there?",
         **kwargs,
     )
     assert again == "still there?", "a notice is told once"
+    assert again_reseed is reseed, "and the reseed is untouched"
 
 
 def _outcome(state: TurnState, continuity: ContinuityOutcome | None = None) -> Any:
@@ -81,8 +99,10 @@ async def _run(monkeypatch: pytest.MonkeyPatch, outcome: Any, *, sent: bool) -> 
     async def no_summary(*_a: Any, user_message: str, **_k: Any) -> tuple[str, None]:
         return user_message, None
 
-    async def with_notices(*_a: Any, user_message: str, **_k: Any) -> tuple[str, list[str]]:
-        return f"[notices]\n\n{user_message}", ["earlier"]
+    async def with_notices(
+        *_a: Any, user_message: str, reseed_user_message: Any, **_k: Any
+    ) -> tuple[str, Any, list[str]]:
+        return f"[notices]\n\n{user_message}", reseed_user_message, ["earlier"]
 
     async def queue(_deps: Any, texts: list[str], **_k: Any) -> None:
         queued.append(list(texts))

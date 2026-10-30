@@ -528,8 +528,8 @@ def no_agent_notices(monkeypatch):
     """These fakes have no database; `test_run_agent_notices` covers notices."""
     from daimon.core.turn import run as run_module
 
-    async def unchanged(*_args, user_message, **_kwargs):
-        return user_message, []
+    async def unchanged(*_args, user_message, reseed_user_message, **_kwargs):
+        return user_message, reseed_user_message, []
 
     async def dropped(*_args, **_kwargs):
         return None

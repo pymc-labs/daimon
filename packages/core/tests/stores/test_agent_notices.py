@@ -1,4 +1,4 @@
-"""Notices queued for a thread's next turn are taken once, per thread, and go stale."""
+"""Notices queued for an agent's next turn are taken once, per thread and agent, and go stale."""
 
 from datetime import UTC, datetime, timedelta
 
@@ -12,7 +12,7 @@ async def test_take_returns_the_threads_notices_once_without_duplicates(
 ) -> None:
     """A text queued twice is taken once, and a second take finds nothing."""
     tenant = await make_tenant(db_session)
-    where = {"tenant_id": tenant.id, "platform": "discord", "thread_id": "t1"}
+    where = {"tenant_id": tenant.id, "platform": "discord", "thread_id": "t1", "agent_id": "a1"}
     await record_agent_notices(db_session, **where, texts=["a", "b", "a"])
     await record_agent_notices(db_session, **where, texts=["a"])
     await record_agent_notices(db_session, **{**where, "thread_id": "t2"}, texts=["other"])
@@ -28,10 +28,22 @@ async def test_take_returns_the_threads_notices_once_without_duplicates(
 async def test_take_drops_notices_older_than_since(db_session: AsyncSession) -> None:
     """A stale notice is deleted without being returned."""
     tenant = await make_tenant(db_session)
-    where = {"tenant_id": tenant.id, "platform": "slack", "thread_id": "t1"}
+    where = {"tenant_id": tenant.id, "platform": "slack", "thread_id": "t1", "agent_id": "a1"}
     await record_agent_notices(db_session, **where, texts=["old"])
 
     later = datetime.now(UTC) + timedelta(minutes=1)
     assert await take_agent_notices(db_session, **where, since=later) == [], "stale is dropped"
     early = later - timedelta(days=2)
     assert await take_agent_notices(db_session, **where, since=early) == [], "and deleted"
+
+
+async def test_another_agents_notices_wait_for_it(db_session: AsyncSession) -> None:
+    """After a hand-off, the new agent never hears of the old one's servers."""
+    tenant = await make_tenant(db_session)
+    where = {"tenant_id": tenant.id, "platform": "teams", "thread_id": "t1"}
+    await record_agent_notices(db_session, **where, agent_id="a1", texts=["first's"])
+
+    since = datetime.now(UTC) - timedelta(days=1)
+    assert await take_agent_notices(db_session, **where, agent_id="a2", since=since) == []
+    taken = await take_agent_notices(db_session, **where, agent_id="a1", since=since)
+    assert taken == ["first's"], "the first agent still gets its own"

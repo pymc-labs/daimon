@@ -227,8 +227,10 @@ async def test_a_summary_goes_back_only_when_its_turn_never_sent(
             mark.append(True)
         raise RuntimeError("provider failed")
 
-    async def no_notices(*_a: Any, user_message: str, **_k: Any) -> tuple[str, list[str]]:
-        return user_message, []
+    async def no_notices(
+        *_a: Any, user_message: str, reseed_user_message: Any, **_k: Any
+    ) -> tuple[str, Any, list[str]]:
+        return user_message, reseed_user_message, []
 
     async def no_queue(*_a: Any, **_k: Any) -> None:
         return None

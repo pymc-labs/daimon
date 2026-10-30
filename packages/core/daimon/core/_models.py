@@ -2534,12 +2534,17 @@ class ThreadAgentBinding(Base):
 
 
 class AgentNotice(Base):
-    """A failure the agent hears of on the next turn in its thread (`turn.agent_notices`)."""
+    """A failure the agent hears of on its next turn in the thread (`turn.agent_notices`)."""
 
     __tablename__ = "agent_notices"
     __table_args__ = (
         UniqueConstraint(
-            "tenant_id", "platform", "thread_id", "text", name="uq_agent_notices_thread_text"
+            "tenant_id",
+            "platform",
+            "thread_id",
+            "agent_id",
+            "text",
+            name="uq_agent_notices_thread_agent_text",
         ),
     )
 
@@ -2551,6 +2556,8 @@ class AgentNotice(Base):
     )
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The provider's agent id: a hand-off must not pass one agent's notices to another.
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
