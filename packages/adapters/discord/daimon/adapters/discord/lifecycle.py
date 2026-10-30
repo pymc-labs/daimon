@@ -115,6 +115,8 @@ _SEALED_RESPONSE_MIN_CHARS = 500
 # Reserve one of the five answer messages for the terminal answer/card.
 _MAX_ANSWER_MESSAGES = 5
 _OUTPUT_COLLAPSED_NOTICE = "Additional output was combined into the attached answer.txt."
+_STOPPED_TITLE = "Stopped."
+_STOPPED_NEXT_STEP = "Send a message to start again."
 _TOOL_MARKUP_NOTICE = "The model returned tool-call markup without an answer."
 _TOOL_CALL_MARKUP = re.compile(
     r"<(?P<tag>invoke_[\w:.-]+|tool_call|tool_use|function_call)\b[^>]*>"
@@ -512,6 +514,8 @@ class DiscordTurnLifecycle:
         self._sealed_message_count = 0
         self._last_sealed_text: str | None = None
         self._deferred_sealed_text: list[str] = []
+        # The final reply was only tool markup: the card shows the error, not the markup.
+        self._tool_markup_only = False
         self._output_limit_logged = False
         self._was_answered: bool = False
         # The first chunk actually rendered into the message: once set, the
@@ -1129,6 +1133,13 @@ class DiscordTurnLifecycle:
             await self._edit_message(self._message_ref, embeds=[embed], view=None)
         self._terminal_shown = True
 
+    async def _show_card_error(self, title: str) -> None:
+        """End the turn's card as the red error card, with the usual next step."""
+        body = "Send your message again." if self._in_dm else "@mention Daimon to try again."
+        self._state = update(self._state, EmbedEvent(kind="error", label=title))
+        self._state = dataclasses.replace(self._state, notice=body, notice_title=title)
+        await self._flush_terminal()
+
     async def _persist_sealed_responses(self, state: TurnState) -> None:
         """Post sealed answers (text blocks a later tool call made immutable)
         as permanent messages, once each. Without this, an answer composed
@@ -1199,7 +1210,8 @@ class DiscordTurnLifecycle:
             text = join_messages(_without_adjacent_repeats(messages, self._last_sealed_text))
         if _pure_tool_markup(text):
             log.warning("turn.final_tool_markup_suppressed", turn_id=str(self._turn_id))
-            text = "" if self._unprompted else _TOOL_MARKUP_NOTICE
+            self._tool_markup_only = not self._unprompted
+            text = ""
         return text
 
     def _note_discord_time(self, snowflake: object) -> None:
@@ -1260,21 +1272,30 @@ class DiscordTurnLifecycle:
             and not cancelled
         )
         self._apply_usage(state)
-        self._state = update(self._state, EmbedEvent(kind="done", label=""))
+        if self._tool_markup_only and not response_text and not cancelled:
+            await self._show_card_error(_TOOL_MARKUP_NOTICE)
+            log.info("turn.terminal_success", has_text=False, tool_markup_only=True)
+            return
+        if cancelled and response_text:
+            # The agent's partial text stays as it was; the card says it stopped.
+            self._state = update(self._state, EmbedEvent(kind="error", label=_STOPPED_TITLE))
+            self._state = dataclasses.replace(
+                self._state, notice=_STOPPED_NEXT_STEP, notice_title=_STOPPED_TITLE
+            )
+        else:
+            self._state = update(self._state, EmbedEvent(kind="done", label=""))
         # A pinged answer is a fresh message with the summary; the card goes.
         await self._flush_terminal(summary_on_card=not (notify and response_text))
 
-        if cancelled:
-            if not response_text:
-                await self._edit_message(
-                    self._message_ref,
-                    content="Stopped.\nSend a message to start again.",
-                    embed=None,
-                    view=None,
-                )
-                log.info("turn.terminal_success", has_text=False, cancelled=True)
-                return
-            response_text = f"{response_text}\n\nStopped.\nSend a message to start again."
+        if cancelled and not response_text:
+            await self._edit_message(
+                self._message_ref,
+                content="Stopped.\nSend a message to start again.",
+                embed=None,
+                view=None,
+            )
+            log.info("turn.terminal_success", has_text=False, cancelled=True)
+            return
         if not response_text:
             # If tools ran but no final text, leave done embed visible.
             # If content is entirely empty, show "Turn cancelled."
@@ -1318,14 +1339,7 @@ class DiscordTurnLifecycle:
                 replied_user=False,
             )
             response_text = f"<@{self._requester_id}>\n{response_text}"
-        collapsed_notice = "\n\n".join(
-            part
-            for part in (
-                _OUTPUT_COLLAPSED_NOTICE,
-                "Stopped.\nSend a message to start again." if cancelled else None,
-            )
-            if part
-        )
+        collapsed_notice = _OUTPUT_COLLAPSED_NOTICE
         if notify:
             collapsed_notice = f"<@{self._requester_id}>\n{collapsed_notice}"
         if use_name_prefix:

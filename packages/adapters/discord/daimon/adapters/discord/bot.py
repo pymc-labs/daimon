@@ -52,6 +52,7 @@ from daimon.adapters.discord.lifecycle import (
     edit_recovered_card,
 )
 from daimon.adapters.discord.names import remember_guild_user
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.post_transport import (
@@ -5707,7 +5708,11 @@ class DaimonBot(commands.Bot):
             # -- said only after the answer, so it never reads as a caveat on
             # work that already finished.
             if prepared.continuity.pending:
-                await turn_send(render_current_work_must_finish(agent.name, handoff=False))
+                await turn_send(
+                    embed=build_notice_embed(
+                        render_current_work_must_finish(agent.name, handoff=False)
+                    )
+                )
             # Any task handed to another agent in THIS thread, with work to
             # continue, gets its first turn dispatched now -- still inside this
             # turn's concurrency guard, so nothing else can land in the thread

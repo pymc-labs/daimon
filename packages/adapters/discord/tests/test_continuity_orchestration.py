@@ -590,11 +590,12 @@ async def test_pending_change_posts_must_finish_copy_after_the_answer(
     ):
         await bot.on_message(message)
 
-    sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
+    cards = [c.kwargs["embed"] for c in message.channel.send.call_args_list if "embed" in c.kwargs]
+    sent_texts = [card.description or "" for card in cards]
     assert any(
         "still working on the previous message here" in t and "picks it up on the next message" in t
         for t in sent_texts
-    ), f"expected the must-finish copy posted after the answer, got {sent_texts}"
+    ), f"expected the must-finish copy posted as a card after the answer, got {sent_texts}"
 
 
 @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)

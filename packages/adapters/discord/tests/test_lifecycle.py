@@ -681,17 +681,21 @@ def _make_success_state(text: str = "Hello response") -> TurnState:
     return TurnState(content=[TextBlock(kind="text", text=text)])
 
 
-@pytest.mark.parametrize("partial_text", ["", "Partial analysis before cancellation."])
-async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answer(
-    partial_text: str,
-) -> None:
+def _all_embeds(sends: list[Any], edits: list[Any]) -> list[discord.Embed]:
+    found: list[discord.Embed] = []
+    for kwargs in [*sends, *[kw for _, kw in edits]]:
+        found.extend(kwargs.get("embeds") or [])
+        if kwargs.get("embed") is not None:
+            found.append(kwargs["embed"])
+    return found
+
+
+async def test_interrupted_tool_turn_without_text_shows_cancelled() -> None:
     lc, sends, edits = _make_lifecycle(notify_on_completion=True)
     await lc.post_initial()
     content = [
         ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
     ]
-    if partial_text:
-        content.append(TextBlock(kind="text", text=partial_text))
 
     await lc.on_terminal_success(
         TurnState(content=content, termination=TerminationReason.INTERRUPTED)
@@ -701,9 +705,36 @@ async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answe
         str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
     )
     assert "Stopped.\nSend a message to start again." in rendered
-    if partial_text:
-        assert partial_text in rendered
     assert "<@123>" not in rendered, "cancellation must not send a completion ping"
+    assert not lc.was_answered
+
+
+async def test_interrupted_turn_keeps_partial_answer_and_shows_stopped_on_the_red_card() -> None:
+    lc, sends, edits = _make_lifecycle(notify_on_completion=True)
+    await lc.post_initial()
+    partial_text = "Partial analysis before cancellation."
+    content = [
+        ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}),
+        TextBlock(kind="text", text=partial_text),
+    ]
+
+    await lc.on_terminal_success(
+        TurnState(content=content, termination=TerminationReason.INTERRUPTED)
+    )
+
+    answers = [
+        str(kwargs["content"])
+        for kwargs in [*sends, *[kw for _, kw in edits]]
+        if kwargs.get("content")
+    ]
+    assert answers, "the partial answer is posted"
+    assert all("Stopped." not in text for text in answers), "the reply text carries no system line"
+    assert all("Send a message to start again" not in text for text in answers)
+    assert any(text.strip() == partial_text for text in answers), "partial text is untouched"
+    stopped = [e for e in _all_embeds(sends, edits) if e.title == "Stopped."]
+    assert stopped, "the turn's card says it stopped"
+    assert stopped[-1].colour is not None and stopped[-1].colour.value == COLOR_RED
+    assert "Send a message to start again." in (stopped[-1].description or "")
     assert not lc.was_answered
 
 
@@ -3038,9 +3069,12 @@ async def test_r20_captured_final_markup_flood_is_one_notice(notify):
     )
     await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=text)]))
     visible = [m.content for m in thread.messages.values() if m.content]
-    assert len(visible) == 1
-    assert "tool-call markup without an answer" in visible[0]
-    assert "<invoke_fleet_check>" not in visible[0]
+    assert visible == [], "the markup is never shown as reply text"
+    cards = [embed for m in thread.messages.values() for embed in m.embeds]
+    assert len(cards) == 1, "one error card is the whole notice"
+    assert cards[0].title == "The model returned tool-call markup without an answer."
+    assert cards[0].colour is not None and cards[0].colour.value == COLOR_RED
+    assert "<invoke_fleet_check>" not in (cards[0].description or "")
 
 
 async def test_repeated_and_markup_sealed_blocks_do_not_post():
@@ -3239,15 +3273,17 @@ async def test_an_answer_repeated_after_a_tool_is_not_posted_twice(log_on: bool)
     assert sum(text.count(first) for text in posted) == 1, "the repeated answer posts once"
 
 
-async def test_overflow_keeps_the_cancel_notice_visible():
+async def test_overflow_cancel_shows_stopped_on_the_card_not_in_the_text():
     lc, _, edits = _make_lifecycle()
     state = TurnState(
         content=[TextBlock(kind="text", text="Useful answer. " * 1000)],
         termination=TerminationReason.INTERRUPTED,
     )
     await lc.on_terminal_success(state)
-    assert "Stopped." in edits[-1][1]["content"]
-    assert "Stopped." in edits[-1][1]["attachments"][0].fp.read().decode()
+    last = edits[-1][1]
+    assert "Stopped." not in last["content"], "the collapsed notice carries no system line"
+    assert "Stopped." not in last["attachments"][0].fp.read().decode()
+    assert [e.title for e in last["embeds"]] == ["Stopped."], "the card carries it"
 
 
 async def test_unprompted_markup_only_output_stays_silent():
