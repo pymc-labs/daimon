@@ -45,6 +45,7 @@ from daimon.adapters.discord.billing_panel.state import (
 )
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.billing_panel import (
     ADD_CREDIT,
@@ -318,7 +319,7 @@ class _TopUpSelect(discord.ui.Select["BillingPanelView"]):
         except (DaimonError, discord.HTTPException, httpx.HTTPStatusError) as exc:
             rid = generate_request_id()
             await interaction.response.send_message(
-                render_error(exc, request_id=rid), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=rid)), ephemeral=True
             )
 
 
@@ -382,7 +383,7 @@ class _MemberLookupSelect(discord.ui.UserSelect["BillingPanelView"]):
         except (DaimonError, discord.HTTPException) as exc:
             rid = generate_request_id()
             await interaction.response.send_message(
-                render_error(exc, request_id=rid), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=rid)), ephemeral=True
             )
 
 

@@ -202,7 +202,10 @@ def _shown(interaction: MagicMock) -> Any:
 
 
 def _followups(interaction: MagicMock) -> list[str]:
-    return [call.args[0] for call in interaction.followup.send.await_args_list]
+    return [
+        call.args[0] if call.args else call.kwargs["embed"].description
+        for call in interaction.followup.send.await_args_list
+    ]
 
 
 async def _route(

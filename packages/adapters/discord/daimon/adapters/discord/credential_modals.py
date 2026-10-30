@@ -106,6 +106,7 @@ from daimon.adapters.discord.credential_repo_bind import (
     resolve_ma_agent_for_uuid,
     resolve_repo_binding_credential,
 )
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import FormPinRefused, agent_pin_names
@@ -541,7 +542,8 @@ class EnvCredentialModal(discord.ui.Modal):
         except Exception:
             _log.exception("credential_modal.env_write_failed", key=self._row.target)
             await interaction.followup.send(
-                "Something went wrong — please try again.", ephemeral=True
+                embed=build_notice_embed("Something went wrong — please try again."),
+                ephemeral=True,
             )
             return
 
@@ -716,7 +718,8 @@ class EnvFileModal(discord.ui.Modal):
             # Named boundary: discord.py swallows whatever escapes on_submit.
             _log.exception("credential_modal.env_file_write_failed", key_count=len(entries))
             await interaction.followup.send(
-                "Something went wrong — please try again.", ephemeral=True
+                embed=build_notice_embed("Something went wrong — please try again."),
+                ephemeral=True,
             )
             return
 

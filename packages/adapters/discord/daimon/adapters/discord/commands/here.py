@@ -10,6 +10,7 @@ from daimon.adapters.discord.checks import (
     resolve_tenant_for_interaction,
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
@@ -150,6 +151,7 @@ class HereCog(commands.Cog):
             )
         except (DaimonError, discord.HTTPException) as exc:
             await interaction.edit_original_response(
-                content=render_error(exc, request_id=generate_request_id()),
+                content=None,
+                embed=build_notice_embed(render_error(exc, request_id=generate_request_id())),
                 allowed_mentions=discord.AllowedMentions.none(),
             )

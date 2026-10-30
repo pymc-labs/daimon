@@ -26,6 +26,7 @@ from typing import Any, Final, Self, cast
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import admin_caller
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.thread_handoff import switch_thread_on_request
@@ -76,10 +77,11 @@ class HandOverButton(
             # Dynamic-item dispatch is an adapter boundary: discord.py swallows
             # anything raised here, so log it and tell the clicker.
             _log.exception("thread_handoff.callback_failed", err_type=type(err).__name__)
+            card = build_notice_embed(_FAILED)
             if interaction.response.is_done():
-                await interaction.followup.send(_FAILED, ephemeral=True)
+                await interaction.followup.send(embed=card, ephemeral=True)
             else:
-                await interaction.response.send_message(_FAILED, ephemeral=True)
+                await interaction.response.send_message(embed=card, ephemeral=True)
 
     async def _hand_over(self, interaction: discord.Interaction[commands.Bot]) -> None:
         thread = interaction.channel

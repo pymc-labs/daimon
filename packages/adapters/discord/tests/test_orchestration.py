@@ -808,7 +808,7 @@ class TestNewThreadCreation:
 
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         # One notice whatever is missing; CR-01: it points at /agent-setup.
         assert sent_text == (
             "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `/agent-setup`."
@@ -864,8 +864,8 @@ class TestNewThreadCreation:
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         card.edit.assert_awaited_once()
         edit_kwargs = card.edit.call_args.kwargs
-        assert edit_kwargs["view"] is None and edit_kwargs["embed"] is None
-        error_text: str = edit_kwargs["content"]
+        assert edit_kwargs["view"] is None and edit_kwargs["content"] is None
+        error_text: str = edit_kwargs["embed"].description
         assert "rid:" not in error_text, "the full trace id stays in logs"
         assert error_text.startswith(
             "Daimon couldn't reach its AI service.\n\nTry again in a minute.\n\n-# Ref "
@@ -918,7 +918,7 @@ class TestNewThreadCreation:
 
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         assert mock_thread.send.await_count == 2, "card, then the error below it"
-        error_text: str = mock_thread.send.call_args.args[0]
+        error_text: str = mock_thread.send.call_args.kwargs["embed"].description
         assert "couldn't reach its AI service" in error_text
         retire.assert_not_awaited()  # the card is still up: recovery owns its intent
         mock_run_turn.assert_not_called()
@@ -979,7 +979,7 @@ class TestNewThreadCreation:
         assert any(c is not None and "The answer" in c for c in contents)
         db_error = "Something went wrong on our side."
         assert not any(c is not None and db_error in c for c in contents), "answer overwritten"
-        error_text: str = mock_thread.send.call_args.args[0]
+        error_text: str = mock_thread.send.call_args.kwargs["embed"].description
         assert db_error in error_text
 
     @patch("daimon.adapters.discord.bot.retire_terminal_turn_card", new_callable=AsyncMock)
@@ -1035,7 +1035,10 @@ class TestNewThreadCreation:
         await bot.on_message(message)
 
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        assert "couldn't reach its AI service" in replacement.edit.call_args.kwargs["content"]
+        assert (
+            "couldn't reach its AI service"
+            in replacement.edit.call_args.kwargs["embed"].description
+        )
         retire.assert_not_awaited()
 
 
@@ -1376,7 +1379,7 @@ class TestHandleMentionErrorBoundary:
 
         # The error lands on the turn's own card in its thread, not the channel.
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = card.edit.call_args.kwargs["content"]
+        error_text: str = card.edit.call_args.kwargs["embed"].description
         assert "rid:" not in error_text, (
             f"error boundary must not publish trace ids; got: {error_text!r}"
         )
@@ -1422,7 +1425,7 @@ class TestHandleMentionErrorBoundary:
 
         # The error lands on the turn's own card in its thread, not the channel.
         message.channel.send.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        error_text: str = card.edit.call_args.kwargs["content"]
+        error_text: str = card.edit.call_args.kwargs["embed"].description
         assert "couldn't reach its AI service" in error_text, (
             f"the connection failure should have a plain retry instruction; got: {error_text!r}"
         )
@@ -1550,7 +1553,7 @@ class TestInvokerAccessPolicy:
         mock_run_turn.assert_not_called()
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "can't accept your request here" in sent_text, sent_text
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -2462,7 +2465,7 @@ class TestBillingAdmissionGate:
         mock_run_turn.assert_not_called()
         message.create_thread.assert_not_called()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert sent_text == (
             "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
         )
@@ -3353,7 +3356,7 @@ class TestUnpromptedAdmission:
         mention = _make_thread_message()
         await bot._orchestrate(mention, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
         mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent: str = mention.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "credit" in sent.lower(), "a mention still gets the depleted-credit notice"
 
     @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
@@ -3389,7 +3392,7 @@ class TestUnpromptedAdmission:
         mention = _make_thread_message()
         await bot._orchestrate(mention, "123456", tenant.id)  # pyright: ignore[reportPrivateUsage]
         mention.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent: str = mention.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent: str = mention.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "budget is used up" in sent, "a mention gets the channel budget notice"
 
 

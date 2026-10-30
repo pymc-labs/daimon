@@ -272,7 +272,11 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
         assert current.get("content") == "Recovered answer"
         assert len(sends) == post_count
         return
-    if "embed" in current:
+    if "embed" in current and ending == "external":
+        assert current["embed"].description == "Outer turn failure", (
+            "an outer failure ends the card on the error card"
+        )
+    elif "embed" in current:
         assert current["embed"] is None
     else:
         assert current["embeds"] == final_embeds
@@ -604,7 +608,7 @@ async def test_uncertain_terminal_repairs_late_progress(
         await asyncio.wait_for(asyncio.gather(*pending), 1)
     if lc._terminal_reassert_task is not None:
         await asyncio.wait_for(lc._terminal_reassert_task, 1)
-    assert current["content"] == "Done"
+    assert current["embed"].description == "Done", "the terminal card is the notice"
     assert current["view"] is None
     assert terminal_edits == 2
     assert sends == 1

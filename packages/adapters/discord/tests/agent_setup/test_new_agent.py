@@ -524,7 +524,7 @@ async def test_real_discord_name_collision_is_rendered_without_a_sentry_capture(
 
     assert captured == [], "an expected refusal must not be captured as an exception"
     interaction.followup.send.assert_called_once()
-    message = interaction.followup.send.call_args.args[0]
+    message = interaction.followup.send.call_args.kwargs["embed"].description
     assert message.startswith(
         "This server already has an agent with that name. Pick a different name.\n\n-# Ref "
     ), "the caller sees the reason and a short ref, without an exception body"
@@ -544,7 +544,7 @@ async def test_unregistered_server_keeps_setup_guidance_from_real_tenant_resolut
     await modal.on_submit(interaction)
 
     interaction.followup.send.assert_called_once()
-    assert interaction.followup.send.call_args.args[0].startswith(
+    assert interaction.followup.send.call_args.kwargs["embed"].description.startswith(
         "This server is not registered. Ask a server admin to finish setup.\n\n-# Ref "
     )
     assert interaction.followup.send.call_args.kwargs["ephemeral"] is True

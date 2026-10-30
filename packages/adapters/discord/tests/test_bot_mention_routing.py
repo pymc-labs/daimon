@@ -152,7 +152,7 @@ class TestAgentResolveMiss:
         mock_create_session.assert_not_called()
         mock_run_turn.assert_not_called()
         message.channel.send.assert_called_once()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+        sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
         assert sent_text == (
             "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
         ), "should render the plain 'out of date' notice"

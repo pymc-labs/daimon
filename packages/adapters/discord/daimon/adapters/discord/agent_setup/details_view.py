@@ -40,6 +40,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin, refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import (
@@ -777,7 +778,7 @@ class DetailsView(PanelViewBase):
             request_id = generate_request_id()
             log.exception("agent_setup.add_skill.check_failed", request_id=request_id)
             await interaction.response.send_message(
-                render_error(exc, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )
             return
         if refusal is not None:

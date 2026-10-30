@@ -3147,7 +3147,7 @@ class DaimonBot(commands.Bot):
                         cap=cap,
                         reason="queue_full",
                     )
-                    await message.channel.send(TENANT_CAP_NOTICE)
+                    await message.channel.send(embed=build_notice_embed(TENANT_CAP_NOTICE))
                     return
                 log.info(
                     "turn.skipped.global_concurrency_shed",
@@ -3156,7 +3156,7 @@ class DaimonBot(commands.Bot):
                     channel_id=str(thread_id),
                     reason="queue_full",
                 )
-                await message.channel.send(GLOBAL_CAP_NOTICE)
+                await message.channel.send(embed=build_notice_embed(GLOBAL_CAP_NOTICE))
                 return
 
             with (
@@ -3413,7 +3413,7 @@ class DaimonBot(commands.Bot):
             return
         rid = generate_request_id()
         try:
-            await message.channel.send(render_error(exc, request_id=rid))
+            await message.channel.send(embed=build_notice_embed(render_error(exc, request_id=rid)))
         except discord.HTTPException:
             log.exception("mention_prologue_error_send_failed", guild_id=guild_id)
 
@@ -3631,9 +3631,11 @@ class DaimonBot(commands.Bot):
                 builtin=True,
             )
             if isinstance(target, discord.Thread):
-                await safe_thread_send(target, error_text, transport=transport)
+                await safe_thread_send(
+                    target, embed=build_notice_embed(error_text), transport=transport
+                )
             else:
-                await transport.send(error_text)
+                await transport.send(embed=build_notice_embed(error_text))
         except Exception as post_exc:  # the error post is the last resort; never raise from it
             if thread is not None and (stop := stop_reason_of(post_exc, write="send")) is not None:
                 self._thread_stops.signal(thread.id, reason=stop[0], code=stop[1], phase="failure")
@@ -4087,7 +4089,7 @@ class DaimonBot(commands.Bot):
             if current.message_ref is not None:
                 await current.end_card(text)
             else:
-                await transport.send(text)
+                await transport.send(embed=build_notice_embed(text))
             shown_on = current.message_ref
             if shown_on is not None and str(shown_on.id) != current.card_message_id:
                 return  # an earlier card still shows its Stop button; recovery retires it
@@ -4737,7 +4739,7 @@ class DaimonBot(commands.Bot):
             if unprompted:
                 return  # nobody asked; a notice per quiet burst would spam the thread
             target = thread or message.channel
-            await target.send(NOT_SET_UP_NOTICE)
+            await target.send(embed=build_notice_embed(NOT_SET_UP_NOTICE))
             return
         except MAResolverMissError as err:
             log.warning(
@@ -4749,7 +4751,7 @@ class DaimonBot(commands.Bot):
             if unprompted:
                 return
             target = thread or message.channel
-            await target.send(SETUP_OUT_OF_DATE_NOTICE)
+            await target.send(embed=build_notice_embed(SETUP_OUT_OF_DATE_NOTICE))
             return
         except AdmissionDenied as err:
             if unprompted:
@@ -4825,8 +4827,13 @@ class DaimonBot(commands.Bot):
                 )
             if err.reason != "writers_none":
                 await target.send(
-                    admission_refusal_message(
-                        err.reason, self.runtime.settings, cause=err.cause, provider=err.provider
+                    embed=build_notice_embed(
+                        admission_refusal_message(
+                            err.reason,
+                            self.runtime.settings,
+                            cause=err.cause,
+                            provider=err.provider,
+                        )
                     )
                 )
             return
@@ -5061,7 +5068,7 @@ class DaimonBot(commands.Bot):
                 # when the card itself now shows the error.
                 await current.end_card(text)
             else:
-                await turn_send(text)
+                await turn_send(embed=build_notice_embed(text))
             shown_on = current.message_ref
             if shown_on is not None and str(shown_on.id) != current.card_message_id:
                 # An earlier edit replaced the card; the original may still show
@@ -5250,11 +5257,11 @@ class DaimonBot(commands.Bot):
             # Nothing was attempted -- bind_session did not run the turn
             # against a configuration nobody asked for, so no turn to render
             # here either; the copy says what was preserved and asks for a retry.
-            failure_text = render_preparation_failed(agent.name)
+            failure_embed = build_notice_embed(render_preparation_failed(agent.name))
             if lifecycle.message_ref is not None:
-                await lifecycle.edit_card(content=failure_text, embed=None, view=None)
+                await lifecycle.edit_card(content=None, embed=failure_embed, view=None)
             else:
-                await turn_send(failure_text)
+                await turn_send(embed=failure_embed)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -5271,15 +5278,17 @@ class DaimonBot(commands.Bot):
             # finishes first and the switch applies to their next one. A seal
             # that landed while the turn was prepared defers it the same way;
             # the next message is prepared read-only, so it says to send again.
-            busy_text = (
+            sealed = "seal" in busy.pending_reasons
+            busy_embed = build_notice_embed(
                 render_access_changed_try_again()
-                if "seal" in busy.pending_reasons
-                else render_current_work_must_finish(agent.name, handoff=True)
+                if sealed
+                else render_current_work_must_finish(agent.name, handoff=True),
+                neutral=not sealed,
             )
             if lifecycle.message_ref is not None:
-                await lifecycle.edit_card(content=busy_text, embed=None, view=None)
+                await lifecycle.edit_card(content=None, embed=busy_embed, view=None)
             else:
-                await turn_send(busy_text)
+                await turn_send(embed=busy_embed)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,

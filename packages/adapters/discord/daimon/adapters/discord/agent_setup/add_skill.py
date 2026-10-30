@@ -23,6 +23,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import ADMIN_NOUN, admin_caller
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
@@ -239,7 +240,7 @@ class AddSkillModal(discord.ui.Modal):
             request_id = generate_request_id()
             log.exception("agent_setup.add_skill.preview_failed", request_id=request_id)
             await interaction.followup.send(
-                render_error(exc, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )
             return
         if refusal is not None:
@@ -361,7 +362,7 @@ class SkillPreviewView(PanelViewBase):
             request_id = generate_request_id()
             log.exception("agent_setup.add_skill.failed", agent_name=name, request_id=request_id)
             await interaction.followup.send(
-                render_error(exc, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )
             return
         log.info("agent_setup.add_skill.added", agent_name=name, action=result.action)

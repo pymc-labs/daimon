@@ -10,6 +10,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.checks import ADMIN_NOUN
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.roster import RosterAgent
@@ -148,4 +149,6 @@ async def open_setup_conversation(
     except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as error:
         request_id = generate_request_id()
         _log.exception("setup_conversation.failed", request_id=request_id)
-        await interaction.followup.send(render_error(error, request_id=request_id), ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True
+        )

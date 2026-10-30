@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import discord
 import pytest
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.thread_send import safe_thread_send
 
 
@@ -53,3 +54,22 @@ class TestSafeThreadSend:
 
         assert exc_info.value.code == 50001, "should re-raise non-archive exceptions"
         thread.edit.assert_not_called()
+
+    async def test_embed_only_send_posts_no_content(self) -> None:
+        thread = AsyncMock(spec=discord.Thread)
+        card = build_notice_embed("Try again.")
+
+        await safe_thread_send(thread, embed=card)
+
+        thread.send.assert_called_once_with(embed=card)
+
+    async def test_an_archived_thread_gets_the_same_embed_on_retry(self) -> None:
+        thread = AsyncMock(spec=discord.Thread)
+        thread.send.side_effect = [_make_http_exception(50083), Mock(spec=discord.Message)]
+        card = build_notice_embed("Try again.")
+
+        await safe_thread_send(thread, embed=card)
+
+        assert thread.send.call_args_list[1].kwargs == {"embed": card}, (
+            "the retry sends the card, not plain text"
+        )

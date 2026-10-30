@@ -15,6 +15,7 @@ import anthropic
 import structlog
 from daimon.adapters.discord.checks import require_registered_guild
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -269,7 +270,7 @@ class MemoryCog(commands.Cog):
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             log.warning("memory.handler.failed", rid=rid, error=str(exc))
             await interaction.followup.send(
-                render_error(exc, request_id=rid),
+                embed=build_notice_embed(render_error(exc, request_id=rid)),
                 ephemeral=True,
             )
 

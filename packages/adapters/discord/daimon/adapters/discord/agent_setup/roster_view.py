@@ -32,6 +32,7 @@ from daimon.adapters.discord.agent_setup.navigation import STALE_PANEL_MESSAGE, 
 from daimon.adapters.discord.agent_setup.state import DenyingRole, PanelState, WebhookBlock
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.roster import Page, RosterAgent, paginate
@@ -354,7 +355,7 @@ class RosterView(PanelViewBase):
                 "agent_setup.details.failed", agent_name=agent.name, request_id=request_id
             )
             await interaction.followup.send(
-                render_error(error, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True
             )
             return
         # Multiple clicks on one still-live roster can complete out of order.
@@ -405,7 +406,7 @@ class RosterView(PanelViewBase):
             request_id = generate_request_id()
             log.exception("agent_setup.routing.failed", request_id=request_id)
             await interaction.followup.send(
-                render_error(error, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True
             )
             return
         await self.swap_to(interaction, routing)

@@ -272,4 +272,7 @@ async def test_database_error_answers_the_deferred_reply(
         await cog.agent_setup.callback(cog, interaction)  # pyright: ignore[reportArgumentType]
 
     interaction.followup.send.assert_awaited_once()
-    assert "Something went wrong on our side." in interaction.followup.send.await_args.args[0]
+    assert (
+        "Something went wrong on our side."
+        in interaction.followup.send.await_args.kwargs["embed"].description
+    )

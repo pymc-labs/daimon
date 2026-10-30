@@ -395,7 +395,7 @@ class TestInflightCapRejection:
         await bot.on_message(message)
 
         message.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_text: str = message.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_text: str = message.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "too many chats at once" in sent_text, (
             f"over-cap reply must contain 'too many chats at once'; got: {sent_text!r}"
         )
@@ -583,7 +583,7 @@ class TestInflightIsolation:
         await bot.on_message(message_a)
 
         message_a.channel.send.assert_called_once()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        sent_a: str = message_a.channel.send.call_args[0][0]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+        sent_a: str = message_a.channel.send.call_args.kwargs["embed"].description  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         assert "too many chats at once" in sent_a, (
             f"guild A (saturated) should be rejected; got: {sent_a!r}"
         )

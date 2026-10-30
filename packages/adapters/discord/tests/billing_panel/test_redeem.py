@@ -246,7 +246,7 @@ async def test_modal_submit_answers_when_the_database_fails() -> None:
 
     interaction.response.defer.assert_awaited_once()
     rerender.assert_not_awaited()
-    assert interaction.followup.send.call_args.kwargs == {"ephemeral": True}, (
+    assert interaction.followup.send.call_args.kwargs["ephemeral"] is True, (
         "the failure should be answered ephemerally"
     )
 

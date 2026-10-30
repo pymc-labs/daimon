@@ -375,6 +375,6 @@ async def test_a_purge_that_rolled_back_tells_the_person_nothing_was_deleted(
     monkeypatch.setattr("daimon.adapters.discord.privacy_panel.modal.purge_account", purge)
     interaction = _make_interaction_with_response()
     await modal.on_submit(interaction)
-    sent = interaction.followup.send.await_args.args[0]
+    sent = interaction.followup.send.await_args.kwargs["embed"].description
     assert "nothing was deleted" in sent
     interaction.edit_original_response.assert_not_awaited()

@@ -82,6 +82,7 @@ from daimon.adapters.discord.credential_origin import is_credential_interaction_
 from daimon.adapters.discord.credential_repo_bind import (
     refuse_if_shared_and_not_admin_for_request,
 )
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.credential_requests import (
@@ -262,7 +263,9 @@ class CredentialRequestButton(
             _log.exception(
                 "credential_button.interaction_check_failed", err_type=type(err).__name__
             )
-            await interaction.response.send_message(_CHECK_FAILED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(_CHECK_FAILED), ephemeral=True
+            )
             return False
 
     async def callback(  # type: ignore[override]  # see from_custom_id
@@ -314,7 +317,9 @@ class CredentialRequestButton(
             # dynamic-item dispatch is an adapter boundary (see module docstring); discord.py's own
             # dispatcher swallows anything raised here
             _log.exception("credential_button.callback_failed", err_type=type(err).__name__)
-            await interaction.response.send_message(_CALLBACK_FAILED, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(_CALLBACK_FAILED), ephemeral=True
+            )
 
     async def _open_repo_modal(
         self,

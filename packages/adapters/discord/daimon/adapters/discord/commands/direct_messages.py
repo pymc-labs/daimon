@@ -18,6 +18,7 @@ from daimon.adapters.discord.checks import (
     is_member_guild_admin,
     require_registered_guild,
 )
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.config import Settings
 from daimon.core.direct_messages import (
     ColdDmNotices,
@@ -170,7 +171,7 @@ class DirectMessageCog(commands.Cog):
                 "Couldn't open the conversation. Check that your DMs are open and retry.",
                 settings=self.bot.runtime.settings,
             )
-            await interaction.followup.send(message, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(message), ephemeral=True)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -193,7 +194,9 @@ class DirectMessageCog(commands.Cog):
         if not self._cold_dm_notices.first_time(person):
             return
         try:
-            await message.channel.send(cold_dm_text("discord", dms_on=dms_on))
+            await message.channel.send(
+                embed=build_notice_embed(cold_dm_text("discord", dms_on=dms_on))
+            )
         except discord.HTTPException as exc:
             self._cold_dm_notices.forget(person)
             log.warning("discord.dm.cold_notice_failed", error_type=type(exc).__name__)
@@ -228,7 +231,9 @@ class DirectMessageCog(commands.Cog):
                 else Role.USER
             )
             if not message.content.strip():
-                await message.channel.send("Send a text message to continue this conversation.")
+                await message.channel.send(
+                    embed=build_notice_embed("Send a text message to continue this conversation.")
+                )
                 return
             # A DM has no card: over the cap it waits under the typing
             # indicator. Only the process-wide cap applies, as before; a
@@ -249,14 +254,16 @@ class DirectMessageCog(commands.Cog):
                     reason="queue_full",
                 )
                 await message.channel.send(
-                    GLOBAL_CAP_NOTICE, allowed_mentions=discord.AllowedMentions.none()
+                    embed=build_notice_embed(GLOBAL_CAP_NOTICE),
+                    allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
             try:
                 async with message.channel.typing():
                     if await ticket.wait(asyncio.Event()) != "started":
                         await message.channel.send(
-                            QUEUE_TIMED_OUT_TEXT, allowed_mentions=discord.AllowedMentions.none()
+                            embed=build_notice_embed(QUEUE_TIMED_OUT_TEXT),
+                            allowed_mentions=discord.AllowedMentions.none(),
                         )
                         return
                     answer = await reply_to_dm(
@@ -298,4 +305,7 @@ class DirectMessageCog(commands.Cog):
                 settings=self.bot.runtime.settings,
             )
             with contextlib.suppress(discord.HTTPException):
-                await message.channel.send(error, allowed_mentions=discord.AllowedMentions.none())
+                await message.channel.send(
+                    embed=build_notice_embed(error),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )

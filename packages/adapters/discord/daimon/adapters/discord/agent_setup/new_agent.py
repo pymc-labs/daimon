@@ -22,6 +22,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.agent_setup.write import create_blank_agent, validate_model_id
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError, UserFacingError
@@ -218,7 +219,9 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                 err_type=type(err).__name__,
                 request_id=rid,
             )
-            await interaction.followup.send(render_error(err, request_id=rid), ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(render_error(err, request_id=rid)), ephemeral=True
+            )
             return
         except Exception as err:
             # Modal-submit boundary: discord.py dispatches on_submit as a bare
@@ -235,6 +238,8 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             _capture_new_agent_exception(
                 err, tenant_id=tenant_id, guild_id=interaction.guild_id, rid=rid
             )
-            await interaction.followup.send(render_error(err, request_id=rid), ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(render_error(err, request_id=rid)), ephemeral=True
+            )
             return
         log.info("agent_setup.new.created", new_name=new_name, model=model_value)

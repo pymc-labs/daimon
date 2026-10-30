@@ -14,6 +14,7 @@ import anthropic
 import structlog
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.privacy_panel.embeds import build_post_delete_container
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
@@ -79,7 +80,7 @@ class DeleteConfirmModal(discord.ui.Modal, title="Confirm delete"):
         except (DaimonError, anthropic.APIError) as exc:
             log.warning("privacy.purge.failed", rid=rid, error=str(exc))
             await interaction.followup.send(
-                render_error(exc, request_id=rid),
+                embed=build_notice_embed(render_error(exc, request_id=rid)),
                 ephemeral=True,
             )
             return

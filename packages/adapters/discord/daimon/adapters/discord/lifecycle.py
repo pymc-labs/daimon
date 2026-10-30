@@ -39,6 +39,7 @@ from daimon.adapters.discord.embed import (
     update_activity,
 )
 from daimon.adapters.discord.errors import bound_request_id
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import AnswerMessage
 from daimon.adapters.discord.progress_receipt import InitialProgressReceipt
 from daimon.adapters.discord.split import split_for_discord_safe
@@ -654,8 +655,8 @@ class DiscordTurnLifecycle:
                 return
             await self._edit_message(
                 self._message_ref,
-                content=text,
-                embed=None,
+                content=None,
+                embed=build_notice_embed(text),
                 view=None,
                 _allow_replacement=False,
                 recover_missing=False,

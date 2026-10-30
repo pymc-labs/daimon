@@ -26,7 +26,7 @@ import discord
 import httpx
 import pytest
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.theme import COLOR_BLURPLE
+from daimon.adapters.discord.theme import COLOR_BLURPLE, COLOR_RED
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -295,9 +295,11 @@ async def test_session_preparation_failed_posts_copy_and_runs_no_turn(
 
     mock_run_prepared_turn.assert_not_called()
     posted = [
-        c.kwargs.get("content") for c in message.channel.send.return_value.edit.call_args_list
+        c.kwargs["embed"].description
+        for c in message.channel.send.return_value.edit.call_args_list
+        if c.kwargs.get("embed") is not None
     ]
-    assert any(p is not None and "could not get test-agent ready" in p.lower() for p in posted), (
+    assert any("could not get test-agent ready" in p.lower() for p in posted), (
         f"expected the preparation-failed copy, got {posted}"
     )
     assert any(p is not None and "ask again to retry" in p.lower() for p in posted)
@@ -765,11 +767,19 @@ async def test_session_busy_posts_must_finish_copy_and_runs_no_turn(
 
     mock_run_prepared_turn.assert_not_called()
     edited = [
-        c.kwargs.get("content") for c in message.channel.send.return_value.edit.call_args_list
+        c.kwargs["embed"].description
+        for c in message.channel.send.return_value.edit.call_args_list
+        if c.kwargs.get("embed") is not None
     ]
     assert render_current_work_must_finish("test-agent", handoff=True) in edited, (
         f"expected the busy copy edited into the status embed, got {edited}"
     )
+    colors = {
+        c.kwargs["embed"].color.value
+        for c in message.channel.send.return_value.edit.call_args_list
+        if c.kwargs.get("embed") is not None and c.kwargs["embed"].description in edited
+    }
+    assert colors == {COLOR_BLURPLE}, "must-finish is information, a neutral card"
     await _assert_no_recoverable_cards(db_session_factory)
 
 
@@ -808,9 +818,14 @@ async def test_session_busy_for_a_seal_says_to_send_again(
 
     mock_run_prepared_turn.assert_not_called()
     edited = [
-        c.kwargs.get("content") for c in message.channel.send.return_value.edit.call_args_list
+        c.kwargs["embed"].description
+        for c in message.channel.send.return_value.edit.call_args_list
+        if c.kwargs.get("embed") is not None
     ]
     assert render_access_changed_try_again() in edited, edited
+    assert (
+        message.channel.send.return_value.edit.call_args.kwargs["embed"].color.value == COLOR_RED
+    ), "a sealed change is a refusal, the red card"
     await _assert_no_recoverable_cards(db_session_factory)
 
 

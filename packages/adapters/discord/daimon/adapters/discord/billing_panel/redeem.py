@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 import structlog
 from daimon.adapters.discord.billing_panel.read import invoking_channel_id, is_guild_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.billing_panel import redeemed_text
 from daimon.core.errors import DaimonError
@@ -114,7 +115,7 @@ class RedeemCodeModal(discord.ui.Modal, title="Redeem a promo code"):
             capture_exception_with_scope(exc)
             await audit(outcome="error", reason="failed")
             await interaction.followup.send(
-                render_error(exc, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )
             return
         # The redemption has committed: audit what it did before any reply,

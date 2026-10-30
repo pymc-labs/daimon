@@ -117,13 +117,15 @@ async def test_dm_from_a_thread_admits_and_records_its_parent_channel(
     assert (call["is_dm"], call["dm_source_channel_id"]) == (True, str(_PARENT)), (
         "admitted against the thread's parent channel"
     )
-    (reply,), _ = interaction.followup.send.await_args
     if over_budget:
+        reply = interaction.followup.send.await_args.kwargs["embed"].description
         assert reply == _OVER_BUDGET, "the member is told why"
         start_dm.assert_not_awaited()
         member.create_dm.assert_not_awaited()
     else:
-        assert reply == "Ready in your DMs.", "a channel within its budget opens the DM"
+        assert interaction.followup.send.await_args.args[0] == "Ready in your DMs.", (
+            "a channel within its budget opens the DM"
+        )
         assert start_dm.await_args.kwargs["source_channel_id"] == str(_PARENT), (
             "the DM records its source channel"
         )
@@ -174,7 +176,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
 
     await cog.on_message(message)
 
-    (reply,), _ = message.channel.send.await_args
+    reply = message.channel.send.await_args.kwargs["embed"].description
     assert reply == _OVER_BUDGET, "the member is told why the DM stopped"
     assert bot.turn_queue.in_flight() == 0, "the slot is returned"
 

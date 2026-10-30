@@ -20,6 +20,7 @@ from daimon.adapters.discord.checks import (
     resolve_tenant_for_interaction,
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_identity import CUSTOM_PICTURES_OFF
 from daimon.core.errors import DaimonError
@@ -115,4 +116,6 @@ class AgentSetupCog(commands.Cog):
                 await send_pending_new_repo_notice(runtime, interaction, tenant_id=tenant_id)
                 await send_pending_removal_notice(runtime, interaction, tenant_id=tenant_id)
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            await interaction.followup.send(render_error(exc, request_id=rid), ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(render_error(exc, request_id=rid)), ephemeral=True
+            )

@@ -53,6 +53,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.channel_environments import EnvironmentPicker
@@ -508,7 +509,7 @@ class RoutingView(PanelViewBase):
                 actor_account_id=str(self.state.account_id),
             )
             await interaction.followup.send(
-                render_error(error, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True
             )
             return
         await self.swap_to(interaction, routing)
