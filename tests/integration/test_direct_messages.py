@@ -388,7 +388,7 @@ async def test_discord_answers_an_unselected_dm_once_without_guild_or_model_call
     await cog.on_message(message)
     bot.get_guild.assert_not_called()
     message.channel.send.assert_awaited_once()
-    assert "/dm-me" in message.channel.send.await_args.args[0]
+    assert "/dm-me" in message.channel.send.await_args.kwargs["embed"].description
 
 
 async def test_discord_refuses_a_departed_member_before_running_a_dm(
@@ -480,7 +480,10 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
             release.set()
             await asyncio.gather(first, second)
     assert replies == ["reply", "reply"]
-    assert not any(call.args[0] == GLOBAL_CAP_NOTICE for call in channel.send.await_args_list)
+    assert not any(
+        "embed" in call.kwargs and call.kwargs["embed"].description == GLOBAL_CAP_NOTICE
+        for call in channel.send.await_args_list
+    )
     assert bot.turn_queue.in_flight() == 0
 
     with (
@@ -947,7 +950,7 @@ async def test_slack_missing_im_grants_refuses_before_open_or_policy_write(
         )
         assert not any("conversations." in str(url) for _, url in http.requests)
         replies = [
-            call.kwargs["json"]["text"]
+            call.kwargs["json"]["attachments"][0]["fallback"]
             for (method, url), calls in http.requests.items()
             if "chat.postEphemeral" in str(url)
             for call in calls
@@ -999,7 +1002,7 @@ async def test_slack_open_failure_requires_reauthorization_without_creating_rout
         http.post("https://slack.com/api/chat.postEphemeral", payload={"ok": True})
         await handle_dm_command(runtime, {"team_id": "T1", "user_id": "42", "channel_id": "C1"})
         replies = [
-            call.kwargs["json"]["text"]
+            call.kwargs["json"]["attachments"][0]["fallback"]
             for (_, url), calls in http.requests.items()
             if "chat.postEphemeral" in str(url)
             for call in calls
@@ -1678,7 +1681,9 @@ async def test_discord_dm_move_from_thread_under_sealed_parent_refuses_with_real
 
     thread.history.assert_not_called()
     member.create_dm.assert_not_called()
-    assert "Only conversations inside" in interaction.followup.send.await_args.args[0]
+    assert "Only conversations inside" in (
+        interaction.followup.send.await_args.kwargs["embed"].description
+    )
 
 
 async def test_slack_dm_move_withholds_a_thread_sealed_on_its_own_with_real_admission(

@@ -746,7 +746,8 @@ class SlackDriver:
             return None
         if not refusals:
             raise AssertionError("the click neither opened a form nor said why not")
-        return str(refusals[0].get("text") or "")
+        attachments = refusals[0].get("attachments") or [{}]
+        return str(attachments[0].get("fallback") or refusals[0].get("text") or "")
 
     async def submit_private_input(
         self,
