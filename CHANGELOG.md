@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A watch that reports in a new thread or the owner's DM reports its events again. Those reports start a fresh session that mounts the agent's memory but has no file tools, and the model wrote file and memory tool calls as plain text instead of the report. Every watch turn now says it has no file, shell or memory tools.
+
 - Admins can hide the line under each finished answer that names the agent, the time taken, the cost and the money left. On Discord, `/cost-footer hide` (or `show`) changes it for the whole server, and `/cost-footer` alone says which is set; on Slack and Teams, ask the agent, which calls the admin-only `set_cost_footer` (`get_cost_footer` reads it). It is shown by default, so nothing changes until an admin hides it. Hidden, answers end with no summary, Slack's card reads "Done." and Teams keeps only the vote buttons; billing and `/billing` are unchanged (migration `0167_cost_footer`).
 
 - A watch owner notice that cannot be delivered no longer retries every five minutes until the watch is deleted. When Discord will never deliver it (the owner closed their DMs, blocked the bot, left the server or is a bot account) the attempt is recorded as `refused` and the notice stops; any other failure retries after 5, 10, 20 and 40 minutes, then hourly, and is dropped a day after its first attempt. Every notice kind follows the same rule (migration `0166_watch_notice_refused`).

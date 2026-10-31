@@ -386,6 +386,23 @@ async def test_report_wake_is_never_listed_by_the_thread_path(
 
 
 @pytest.mark.fresh_schema
+@pytest.mark.parametrize("delivery", ["thread", "dm", "new_thread"])
+async def test_seed_says_the_turn_has_no_memory_tools(db_session_factory, monkeypatch, delivery):
+    # A DM or new-thread report starts a fresh session that mounts the agent's
+    # memory but cannot read it; told nothing, the model typed tool calls as text.
+    factory, *_rest, key = await enrolled_page_watch(
+        db_session_factory, monkeypatch, source="poll", delivery=delivery
+    )
+    async with factory() as db:
+        row = await get_continuation(db, idempotency_key=key)
+        assert row is not None
+        seed = await watches.watch_seed(db, row, now=datetime.now(UTC))
+    assert seed is not None
+    assert watches.WATCH_TURN_TOOLS in seed
+    assert seed.index(watches.WATCH_TURN_TOOLS) < seed.index("<untrusted_content")
+
+
+@pytest.mark.fresh_schema
 async def test_seed_refuses_a_reason_that_does_not_match_delivery(db_session_factory, monkeypatch):
     factory, now, *_rest, watch, key = await enrolled_page_watch(
         db_session_factory, monkeypatch, source="poll", delivery="dm"
