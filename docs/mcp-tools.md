@@ -386,11 +386,12 @@ Authenticated turn origins and identity-pinned configuration targets.
 
 ## `skill_uploads`
 
-add_skill: add one pasted, attached or GitHub skill to one agent, after a preview.
+add_skill: add one pasted, attached, GitHub or MCP-served skill to one agent, after a
+preview.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `add_skill` | all callers | Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in this chat, or one folder of a GitHub repository. |
+| `add_skill` | all callers | Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in this chat, one folder of a GitHub repository, or a skill one of the agent's MCP servers serves (``mcp_server`` with ``mcp_skill``). |
 
 ## `skills`
 

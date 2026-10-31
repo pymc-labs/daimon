@@ -1,4 +1,4 @@
-"""add_skill: add one pasted, attached or GitHub skill to one agent, after a preview.
+"""add_skill: add one pasted, attached, GitHub or MCP-served skill to one agent, after a preview.
 
 ``register_skill_upload_tools(mcp, runtime)`` wires the tool; ``_add_skill_impl``
 is testable without a FastMCP Context. The checks and the upload live in
@@ -24,6 +24,7 @@ attach.
 from __future__ import annotations
 
 import asyncio
+import ssl
 import uuid
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -65,10 +66,20 @@ from daimon.adapters.mcp.tools.skills import (
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.adapters.mcp.tools.slack._files import require_file_source, resolve_file_link
 from daimon.adapters.mcp.tools.slack._leak_policy import get_destination, is_dm_destination
+from daimon.core.agent_mcp_credentials import resolve_agent_mcp_credentials
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.config import SignedIdentityServer
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_identity import (
+    caller_claims,
+    load_signing_key,
+    origin_turn_place,
+    relay_base,
+    sign_identity,
+)
+from daimon.core.mcp_skills.install import fetch_server_skill, server_access
 from daimon.core.operation_policy import OperationKind, decide_operation
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.add import (
@@ -86,6 +97,7 @@ from daimon.core.skills.ingest import (
     UPLOAD_SUFFIXES,
     SkillBundle,
     SkillPreview,
+    bundle_from_files,
     bundle_from_markdown,
     bundle_from_upload,
     confirmation_hash,
@@ -455,6 +467,82 @@ async def _fetch_slack_attachment(
     return data, filename
 
 
+def _mcp_http(verify: bool | ssl.SSLContext) -> httpx.AsyncClient:
+    """The client an MCP server's skill is read with: the configured URL, no redirects."""
+    return httpx.AsyncClient(timeout=30.0, follow_redirects=False, verify=verify)
+
+
+async def _load_mcp_skill(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow | None,
+    *,
+    agent: BetaManagedAgentsAgent,
+    agent_name: str,
+    server: str,
+    skill: str,
+) -> tuple[SkillBundle, str]:
+    """The skill `server` (one of the agent's MCP servers) serves, checked, and its origin.
+
+    A relay server gets the relay's signed identity for the person asking: the
+    agent, the workspace, the person and, from a chat turn, the channel.
+    """
+    url = next((s.url for s in agent.mcp_servers if s.name == server), None)
+    if url is None:
+        raise ToolError(f"'{agent_name}' has no connection named '{server}'.")
+    ledger_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id)
+    credentials = (
+        await resolve_agent_mcp_credentials(
+            sessionmaker=runtime.session_factory,
+            fernet=runtime.fernet,
+            tenant_id=auth.tenant_id,
+            agent_id=ledger_id,
+        )
+        if runtime.fernet is not None
+        else ()
+    )
+    identity = runtime.settings.mcp_identity
+    public_url = runtime.settings.mcp.public_url
+    key = (
+        load_signing_key(identity.signing_key.get_secret_value())
+        if identity.signing_key is not None
+        else None
+    )
+    # As the relay: a sender from another organisation is not one of the workspace's people.
+    foreign = await _sender_is_foreign(runtime, auth, origin) is not False
+
+    def relay_token(configured: SignedIdentityServer) -> str | None:
+        workspace = f"{auth.platform}:{auth.external_id}"
+        if key is None or (
+            configured.workspaces is not None and workspace not in configured.workspaces
+        ):
+            return None
+        claims = caller_claims(
+            issuer=configured.issuer,
+            audience=configured.audience,
+            agent_id=str(ledger_id),
+            platform=auth.platform or "",
+            workspace_id=auth.external_id,
+            platform_user_id=None if foreign else auth.platform_user_id,
+            agent_name=agent_name,
+            place=origin_turn_place(origin) if origin is not None and not foreign else None,
+        )
+        return sign_identity(claims, key=key, now=datetime.now(UTC))
+
+    access = server_access(
+        server=server,
+        url=url,
+        credentials=credentials,
+        relay_base=relay_base(str(public_url)) if public_url is not None else None,
+        relay_servers={configured.name: configured for configured in identity.servers},
+        relay_token=relay_token,
+    )
+    async with _mcp_http(access.verify) as http:
+        fetched = await fetch_server_skill(http, access.endpoint, server=server, skill=skill)
+    bundle = await asyncio.to_thread(bundle_from_files, fetched.files)
+    return bundle, fetched.origin(server)
+
+
 def _upstream_recovery(chat_confirms: bool) -> str:
     # A chat approval was used up above; only a card approval can be retried as is.
     if chat_confirms:
@@ -476,11 +564,15 @@ async def _add_skill_impl(
     repo_url: str | None = None,
     path: str = "",
     branch: str = "main",
+    mcp_server: str | None = None,
+    mcp_skill: str | None = None,
     content_hash: str | None = None,
     origin_context_id: str | None = None,
 ) -> AddSkillResult:
-    if sum(source is not None for source in (skill_md, attachment_url, repo_url)) != 1:
-        raise ToolError("Pass exactly one of skill_md, attachment_url or repo_url.")
+    if sum(source is not None for source in (skill_md, attachment_url, repo_url, mcp_server)) != 1:
+        raise ToolError("Pass exactly one of skill_md, attachment_url, repo_url or mcp_server.")
+    if (mcp_server is None) != (mcp_skill is None):
+        raise ToolError("Pass mcp_server and mcp_skill together.")
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     # Gemini uses a separate default-off operator grant and the catalog.
     # Otherwise retain the existing OpenAI/Anthropic selection unchanged.
@@ -489,6 +581,7 @@ async def _add_skill_impl(
     )
     if hosted is None:
         hosted = await openai_skill_host(runtime, auth, origin, operation="skill-add")
+    mcp_agent: BetaManagedAgentsAgent | None = None
     if hosted is None:
         agent = await resolve_setup_agent(
             runtime,
@@ -507,6 +600,7 @@ async def _add_skill_impl(
             )
 
         await recheck(agent)
+        mcp_agent = agent
         target_id = agent.id
         github_agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
 
@@ -523,6 +617,8 @@ async def _add_skill_impl(
                 recheck=recheck,
             )
     else:
+        if mcp_server is not None:
+            raise ToolError(f"'{agent_name}' cannot take a skill from a connection.")
         host = hosted
         # The same identity and channel-isolation rules as resolve_setup_agent.
         view = await resolve_host_agent(
@@ -568,21 +664,32 @@ async def _add_skill_impl(
         if content_hash is not None and no_card is not None and not chat_confirms:
             foreign = await _sender_is_foreign(runtime, auth, origin)
             raise ToolError(_no_card_refusal(auth.platform, no_card, agent_name, foreign=foreign))
-        async with httpx.AsyncClient(timeout=30.0) as http:
-            bundle, source = await _load_bundle(
+        if mcp_server is not None and mcp_skill is not None and mcp_agent is not None:
+            bundle, source = await _load_mcp_skill(
                 runtime,
                 auth,
-                http,
-                skill_md=skill_md,
-                attachment_url=attachment_url,
-                repo_url=repo_url,
-                branch=branch,
-                path=path,
-                origin_context_id=origin_context_id,
-                agent_id=github_agent_id,
+                origin,
+                agent=mcp_agent,
                 agent_name=agent_name,
-                expected_ma_agent_id=target_id if hosted is None else None,
+                server=mcp_server,
+                skill=mcp_skill,
             )
+        else:
+            async with httpx.AsyncClient(timeout=30.0) as http:
+                bundle, source = await _load_bundle(
+                    runtime,
+                    auth,
+                    http,
+                    skill_md=skill_md,
+                    attachment_url=attachment_url,
+                    repo_url=repo_url,
+                    branch=branch,
+                    path=path,
+                    origin_context_id=origin_context_id,
+                    agent_id=github_agent_id,
+                    agent_name=agent_name,
+                    expected_ma_agent_id=target_id if hosted is None else None,
+                )
         bound = confirmation_hash(bundle.preview, agent_id=target_id)
         preview = bundle.preview.model_copy(update={"content_hash": bound})
         if content_hash is None:
@@ -701,6 +808,13 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             str, Field(description="The skill's folder in repo_url; empty for its only skill.")
         ] = "",
         branch: str = "main",
+        mcp_server: Annotated[
+            str | None,
+            Field(description="One of the agent's MCP servers, by name, that serves the skill."),
+        ] = None,
+        mcp_skill: Annotated[
+            str | None, Field(description="The skill's name or skill:// URI on mcp_server.")
+        ] = None,
         content_hash: Annotated[
             str | None,
             Field(description="The preview's content_hash, once the person has confirmed it."),
@@ -708,7 +822,8 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str | None = None,
     ) -> AddSkillResult:
         """Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in
-        this chat, or one folder of a GitHub repository. Pass exactly one source.
+        this chat, one folder of a GitHub repository, or a skill one of the agent's MCP
+        servers serves (``mcp_server`` with ``mcp_skill``). Pass exactly one source.
 
         The first call only previews: name, description, files and the files the
         agent could run. Show that to the person; only when they confirm, call again
@@ -735,6 +850,8 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             repo_url=repo_url,
             path=path,
             branch=branch,
+            mcp_server=mcp_server,
+            mcp_skill=mcp_skill,
             content_hash=content_hash,
             origin_context_id=origin_context_id,
         )

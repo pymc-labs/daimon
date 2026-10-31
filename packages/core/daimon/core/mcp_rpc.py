@@ -63,22 +63,30 @@ async def mcp_request(
     session = response.headers.get("mcp-session-id")
     if session:
         headers["Mcp-Session-Id"] = session
+    return rpc_result(response.content, response.headers.get("content-type", ""), body["id"])
+
+
+def rpc_result(content: bytes, content_type: str, request_id: object) -> dict[str, JsonValue]:
+    """The `result` of the response to `request_id`, sent as JSON or as SSE frames.
+
+    Raises `ValueError` for an error response or anything but one matching result.
+    """
     try:
-        if response.headers.get("content-type", "").startswith("text/event-stream"):
+        if content_type.startswith("text/event-stream"):
             frames = [
                 cast(JsonValue, json.loads(line[5:].strip()))
-                for line in response.text.splitlines()
+                for line in content.decode().splitlines()
                 if line.startswith("data:")
             ]
             results = [
-                item for item in frames if isinstance(item, dict) and item.get("id") == body["id"]
+                item for item in frames if isinstance(item, dict) and item.get("id") == request_id
             ]
             if len(results) != 1:
                 raise ValueError("MCP response is ambiguous")
             payload = results[0]
         else:
-            payload = cast(JsonValue, response.json())
-        if not isinstance(payload, dict) or payload.get("id") != body["id"] or "error" in payload:
+            payload = cast(JsonValue, json.loads(content))
+        if not isinstance(payload, dict) or payload.get("id") != request_id or "error" in payload:
             raise ValueError("invalid MCP response")
         result = payload.get("result")
         if not isinstance(result, dict):

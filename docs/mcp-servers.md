@@ -108,6 +108,21 @@ workspace's agents reach the server. Request bodies over 4 MiB are refused.
 Only agents on Anthropic Managed Agents can use the relay. Self-hosted harness,
 GPT and Gemini agents cannot.
 
+## Add a skill a server serves
+
+A server that implements the MCP Skills extension (`io.modelcontextprotocol/skills`,
+protocol revision 2026-07-28) can serve skills. Ask the agent to add one by
+server and skill name, or by its `skill://` URI. It goes through the same
+preview and approval as any added skill, and becomes the agent's own.
+
+Daimon checks every file against the size and SHA-256 the server lists, and
+refuses a skill that fails or whose files are built per request. Adding it
+again publishes a new version only when its content changed.
+
+A server with a shared token is asked with it. A relay server is asked with a
+signed token naming the person asking and the channel. A server that signs
+each person in separately cannot serve skills to Daimon.
+
 ## Give an agent Google Workspace access
 
 An agent can act as one Workspace user, with scopes you choose. Set

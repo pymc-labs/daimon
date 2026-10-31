@@ -157,13 +157,20 @@ def parse_skill_frontmatter(path: Path) -> tuple[SkillSpec, str]:
     return parse_skill_markdown(path.read_text(), source=str(path))
 
 
+def split_frontmatter(content: str) -> tuple[str, str] | None:
+    """`(frontmatter, body)` of a SKILL.md, or None without a closed `---` block."""
+    match = _FRONTMATTER_RE.match(content)
+    return None if match is None else (match.group("frontmatter"), match.group("body"))
+
+
 def parse_skill_markdown(content: str, *, source: str) -> tuple[SkillSpec, str]:
     """`parse_skill_frontmatter` for text already in hand; `source` names it in errors."""
-    match = _FRONTMATTER_RE.match(content)
-    if match is None:
+    parts = split_frontmatter(content)
+    if parts is None:
         raise DefaultsError(f"{source}: missing YAML frontmatter (expected leading '---')")
+    block, body = parts
     try:
-        frontmatter = yaml.safe_load(match.group("frontmatter"))
+        frontmatter = yaml.safe_load(block)
     except yaml.YAMLError as err:
         raise DefaultsError(f"{source}: frontmatter YAML parse error: {err}") from err
     if not isinstance(frontmatter, dict):
@@ -172,7 +179,7 @@ def parse_skill_markdown(content: str, *, source: str) -> tuple[SkillSpec, str]:
         spec = SkillSpec.model_validate(frontmatter)
     except ValidationError as err:
         raise DefaultsError(f"{source}: {err}") from err
-    return spec, match.group("body")
+    return spec, body
 
 
 def load_skill_spec(skill_dir: Path) -> tuple[SkillSpec, str]:

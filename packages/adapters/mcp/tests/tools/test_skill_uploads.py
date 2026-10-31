@@ -18,9 +18,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import anthropic
 import httpx
+import jwt
 import pytest
 from aioresponses import aioresponses
 from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from anthropic.types.beta.skills import VersionCreateResponse
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import skill_uploads
@@ -28,9 +32,12 @@ from daimon.adapters.mcp.tools.skill_uploads import (
     AddSkillResult,
     _add_skill_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
+from daimon.core.config import SignedIdentityServer
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_identity import relay_url
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.session_snapshot import SessionSnapshot, desired_snapshot
 from daimon.core.skills.ingest import bundle_from_markdown
@@ -51,6 +58,7 @@ from daimon.core.turn_origin import turn_origin
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.mcp_skills import SkillsServer, skill_md
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
@@ -81,6 +89,8 @@ class _World:
     state: FakeMAState
     created: list[str] = field(default_factory=list[str])
     sessions: dict[str, dict[str, Any]] = field(default_factory=dict[str, dict[str, Any]])
+    published: list[str] = field(default_factory=list[str])
+    """Skill ids a new version was published to."""
 
     def auth(
         self, *, admin: bool = True, platform: str | None = None, external_id: str | None = None
@@ -106,8 +116,25 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, managed: bool = F
     state.agents[agent.id] = agent.model_dump(mode="json")
     skills: list[dict[str, Any]] = []
     created: list[str] = []
+    published: list[str] = []
 
     def skills_handler(request: httpx.Request) -> httpx.Response:
+        version = re.fullmatch(r"/v1/skills/(?P<id>[^/]+)/versions", request.url.path)
+        if request.method == "POST" and version is not None:
+            published.append(version["id"])
+            return httpx.Response(
+                200,
+                json=VersionCreateResponse(
+                    id=f"ver_{len(published)}",
+                    skill_id=version["id"],
+                    version=str(len(published) + 1),
+                    type="skill_version",
+                    name="SKILL.zip",
+                    directory="/",
+                    description="",
+                    created_at="2026-01-01T00:00:00Z",
+                ).model_dump(mode="json"),
+            )
         if request.url.path != "/v1/skills":
             raise NotHandled
         if request.method == "GET":
@@ -143,6 +170,8 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, managed: bool = F
     settings.mcp.app_root_url = "https://daimon.example"
     settings.mcp.jwt_secret = SecretStr("proxy-secret")
     settings.microsoft_accounts.configured = False
+    settings.mcp_identity.signing_key = None
+    settings.mcp_identity.servers = []
     runtime = McpRuntime(
         session_factory=factory,
         client=build_fake_anthropic(
@@ -152,7 +181,7 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, managed: bool = F
         deployment_default=DeploymentDefault(),
         fernet=make_fernet(),
     )
-    return _World(tenant.id, account.id, runtime, state, created, sessions)
+    return _World(tenant.id, account.id, runtime, state, created, sessions, published)
 
 
 def _daimon_toolset(*, gated: bool) -> dict[str, Any]:
@@ -198,6 +227,7 @@ async def _chat_turn(
     gated: bool = True,
     live: bool = True,
     responder: str = "agent_helper",
+    channel: str | None = None,
 ) -> tuple[AuthIdentity, str]:
     """A Discord chat turn in ROOM: its caller and verified origin, with a live session."""
     now = datetime.now(UTC)
@@ -218,6 +248,8 @@ async def _chat_turn(
             shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
+            platform_channel_id=channel,
+            platform_message_id="666666666666666666" if channel else None,
         )
     if live:
         await _live_session(world, thread_id=CHAT_THREAD, responder=responder, gated=gated)
@@ -1396,3 +1428,205 @@ async def test_a_repo_skill_uses_the_agents_app_grant_for_an_admin(
             name="notes",
         )
     assert row is not None and row.origin == "example/widgets/skills/notes@main"
+
+
+_MCP_URL = "https://skills.example.com/mcp"
+
+
+async def _mcp_world(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    url: str = _MCP_URL,
+    token: str | None = "tok-1",
+) -> tuple[_World, SkillsServer]:
+    """`helper` with one MCP server, `docs`, that serves `triage`; reads go to the stub."""
+    world = await _world(factory)
+    servers = ma_agent(mcp_servers=[{"type": "url", "name": "docs", "url": url}]).mcp_servers
+    world.state.agents["agent_helper"]["mcp_servers"] = [
+        server.model_dump(mode="json") for server in servers
+    ]
+    world.state.agents["agent_helper"]["tools"].append(
+        {"type": "mcp_toolset", "mcp_server_name": "docs"}
+    )
+    if token is not None:
+        assert world.runtime.fernet is not None, "the test runtime has a fernet"
+        await save_agent_mcp_credential(
+            sessionmaker=factory,
+            fernet=world.runtime.fernet,
+            tenant_id=world.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_helper"),
+            mcp_server_url=url,
+            plaintext_token=token,
+        )
+    server = SkillsServer(
+        skills={"triage": {"SKILL.md": skill_md("triage"), "scripts/run.sh": b"echo hi\n"}}
+    )
+    monkeypatch.setattr(skill_uploads, "_mcp_http", lambda verify: server.client(verify=verify))
+    return world, server
+
+
+async def _mcp_add(
+    world: _World, auth: AuthIdentity, origin: str, skill: str, **extra: Any
+) -> AddSkillResult:
+    return await _add_skill_impl(
+        world.runtime,
+        auth,
+        agent_name="helper",
+        expected_ma_agent_id="agent_helper",
+        mcp_server="docs",
+        mcp_skill=skill,
+        origin_context_id=origin,
+        **extra,
+    )
+
+
+@pytest.mark.parametrize("skill", ["triage", "skill://example/triage/SKILL.md"])
+async def test_an_mcp_served_skill_is_previewed_then_added_on_approval(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    skill: str,
+) -> None:
+    """By name or URI: the preview uploads nothing; the approved confirm adds it, once."""
+    world, server = await _mcp_world(db_session_factory, monkeypatch)
+    auth, origin = await _chat_turn(world)
+
+    preview = await _mcp_add(world, auth, origin, skill)
+
+    assert preview.status == "preview", "the first call only previews"
+    assert (preview.preview.name, preview.preview.files) == (
+        "triage",
+        ["SKILL.md", "scripts/run.sh"],
+    )
+    assert world.created == [], "a preview uploads nothing"
+    assert all(h["authorization"] == "Bearer tok-1" for _, _, h in server.requests), "shared token"
+
+    added = await _mcp_add(world, auth, origin, skill, content_hash=preview.preview.content_hash)
+
+    assert added.added is not None and added.added.action == "created", "the skill is uploaded"
+    assert world.created == [
+        tenant_scoped_display_title(tenant_id=world.tenant_id, name="triage", agent_name="helper")
+    ], "it is the agent's own skill, as any added skill"
+    attached = world.state.agents["agent_helper"]["skills"]
+    assert attached == [{"type": "custom", "skill_id": added.added.skill_id}], "and attached"
+    async with db_session_factory() as session:
+        row = await load_user_skill(
+            session,
+            tenant_id=world.tenant_id,
+            principal_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_helper"),
+            agent_name="helper",
+            name="triage",
+        )
+    assert row is not None and row.origin.startswith(
+        "connection docs: skill://example/triage/SKILL.md sha256:"
+    ), "the ledger records the server, the URI and the manifest digest"
+
+
+async def test_an_mcp_skill_needs_the_persons_approval(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """From a conversation that cannot ask the person first, nothing is uploaded."""
+    world, _server = await _mcp_world(db_session_factory, monkeypatch)
+    auth, origin = await _chat_turn(world, gated=False)
+    preview = await _mcp_add(world, auth, origin, "triage")
+
+    with pytest.raises(ToolError, match="this conversation can't show one"):
+        await _mcp_add(world, auth, origin, "triage", content_hash=preview.preview.content_hash)
+    assert world.created == [] and world.published == [], "nothing is uploaded"
+
+
+async def test_reinstalling_an_mcp_skill_publishes_only_a_changed_one(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same manifest adds no version; a changed file publishes one to the same skill."""
+    world, server = await _mcp_world(db_session_factory, monkeypatch)
+    auth, origin = await _chat_turn(world)
+
+    async def install() -> AddSkillResult:
+        preview = await _mcp_add(world, auth, origin, "triage")
+        return await _mcp_add(
+            world, auth, origin, "triage", content_hash=preview.preview.content_hash
+        )
+
+    first = await install()
+    again = await install()
+    assert again.added is not None and again.added.action == "unchanged", "unchanged: no upload"
+    assert len(world.created) == 1 and world.published == [], "no new skill or version"
+
+    server.skills["triage"]["scripts/run.sh"] = b"echo bye\n"
+    changed = await install()
+
+    assert first.added is not None and changed.added is not None, "both installs add"
+    assert changed.added.action == "updated", "a changed skill is updated"
+    assert world.published == [first.added.skill_id], "as a new version of the same skill"
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [("digest", "digest does not match"), ("dynamic", "built per request")],
+)
+async def test_an_mcp_skill_that_fails_a_check_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    message: str,
+) -> None:
+    """A file that does not match its manifest, or a skill built per request, is not added."""
+    world, server = await _mcp_world(db_session_factory, monkeypatch)
+    if change == "digest":
+        server.served[SkillsServer.uri("triage", "scripts/run.sh")] = b"rm -rf\n!"
+    else:
+        server.skills.clear()
+        server.dynamic = ("triage",)
+    auth, origin = await _chat_turn(world)
+
+    with pytest.raises(ToolError, match=message):
+        await _mcp_add(world, auth, origin, "triage")
+    assert world.created == [], "nothing is uploaded"
+
+
+async def test_a_server_that_signs_people_in_is_not_read(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a shared token Daimon has nothing to ask a personal-OAuth server with."""
+    world, server = await _mcp_world(db_session_factory, monkeypatch, token=None)
+    auth, origin = await _chat_turn(world)
+
+    with pytest.raises(ToolError, match="signs each person in"):
+        await _mcp_add(world, auth, origin, "triage")
+    assert server.requests == [], "the server is not asked"
+
+
+async def test_a_relay_server_is_asked_for_the_person_and_the_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Behind the identity relay, the signed token names who asked and where."""
+    key = Ed25519PrivateKey.generate()
+    pem = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    ).decode()
+    tickets = SignedIdentityServer(
+        name="tickets",
+        url="https://tickets.example.com/mcp",
+        issuer="https://daimon.example.com",
+        audience="tickets",
+    )
+    public_url = "https://daimon.example.com/mcp"
+    world, server = await _mcp_world(
+        db_session_factory, monkeypatch, url=relay_url(public_url, "tickets"), token=None
+    )
+    settings = world.runtime.settings
+    settings.mcp.public_url = public_url
+    settings.mcp_identity.signing_key = SecretStr(pem)
+    settings.mcp_identity.servers = [tickets]
+    auth, origin = await _chat_turn(world, channel=ROOM)
+
+    await _mcp_add(world, auth, origin, "triage")
+
+    token = server.requests[0][2]["authorization"].removeprefix("Bearer ")
+    claims = jwt.decode(token, key.public_key(), algorithms=["EdDSA"], audience="tickets")
+    assert claims["sub"] == f"discord:{USER}", "the token names the person asking"
+    assert claims["channel"] == ROOM, "and the channel they asked in"
+    assert claims["agent"] == str(
+        derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_helper")
+    ), "and the agent the skill is for"
