@@ -59,7 +59,7 @@ class ServerSkill:
 
     def origin(self, server: str) -> str:
         """Where it came from, for the skill ledger: server, URI and manifest digest."""
-        return f"mcp {server}: {self.entry.uri} sha256:{self.entry.manifest_digest}"
+        return f"connection {server}: {self.entry.uri} sha256:{self.entry.manifest_digest}"
 
 
 def server_access(
@@ -92,7 +92,7 @@ def server_access(
             f"'{server}' signs each person in separately, so Daimon cannot read its skills."
         )
     try:
-        assert_public_https_url(url, what="MCP server URL")
+        assert_public_https_url(url, what="connection URL")
     except McpUrlError as err:
         raise SkillIngestError(f"Daimon cannot read skills from '{server}': {err}") from err
     return ServerAccess(Endpoint(url=url, bearer=credential.token))

@@ -489,7 +489,7 @@ async def _load_mcp_skill(
     """
     url = next((s.url for s in agent.mcp_servers if s.name == server), None)
     if url is None:
-        raise ToolError(f"'{agent_name}' has no MCP server named '{server}'.")
+        raise ToolError(f"'{agent_name}' has no connection named '{server}'.")
     ledger_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id)
     credentials = (
         await resolve_agent_mcp_credentials(
@@ -618,7 +618,7 @@ async def _add_skill_impl(
             )
     else:
         if mcp_server is not None:
-            raise ToolError(f"'{agent_name}' cannot take a skill from an MCP server.")
+            raise ToolError(f"'{agent_name}' cannot take a skill from a connection.")
         host = hosted
         # The same identity and channel-isolation rules as resolve_setup_agent.
         view = await resolve_host_agent(

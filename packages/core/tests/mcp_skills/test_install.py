@@ -46,9 +46,9 @@ async def test_a_skill_is_found_by_name_or_uri_and_every_file_verified(skill: st
         "SKILL.md": skill_md("triage"),
         "scripts/run.sh": b"echo hi\n",
     }, "every listed file should be read"
-    assert fetched.origin("docs").startswith(f"mcp docs: {SkillsServer.uri('triage')} sha256:"), (
-        "the origin names the server, the URI and the manifest digest"
-    )
+    assert fetched.origin("docs").startswith(
+        f"connection docs: {SkillsServer.uri('triage')} sha256:"
+    ), "the origin names the server, the URI and the manifest digest"
     assert server.methods().count("skills/list") == 3, "every listing page should be walked"
     assert server.methods().count("resources/read") == 2, "only this skill's files are read"
     for method, params, headers in server.requests:

@@ -1518,7 +1518,7 @@ async def test_an_mcp_served_skill_is_previewed_then_added_on_approval(
             name="triage",
         )
     assert row is not None and row.origin.startswith(
-        "mcp docs: skill://example/triage/SKILL.md sha256:"
+        "connection docs: skill://example/triage/SKILL.md sha256:"
     ), "the ledger records the server, the URI and the manifest digest"
 
 
