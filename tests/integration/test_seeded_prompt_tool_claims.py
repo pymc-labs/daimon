@@ -81,6 +81,7 @@ _ADMIN_HANDOFF_TOOLS: set[str] = {
     "set_agent_rule",
     "set_channel_budget",
     "set_plain_text_mentions",
+    "set_cost_footer",
 }
 
 
