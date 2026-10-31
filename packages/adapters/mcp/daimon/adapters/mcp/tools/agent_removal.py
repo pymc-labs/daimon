@@ -40,6 +40,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     resolve_setup_agent,
 )
 from daimon.adapters.mcp.tools.skill_uploads import require_skill_change
+from daimon.core.agent_mcp_credentials import forget_mirrored_mcp_token
 from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.skills import resolve_custom_skill_titles
@@ -168,8 +169,9 @@ async def _detach_mcp_server_impl(
     except anthropic.ConflictError as exc:
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
     # The shared token the form stored for this URL is mirrored into every
-    # caller's vault at session create; without this delete a re-attach at
-    # the same URL would silently reuse the token that was just rejected.
+    # caller's vault at session create; without these deletes a re-attach at
+    # the same URL would silently reuse the token that was just rejected. The
+    # stored token goes first, so a mirror that starts after it has nothing to copy.
     agent_id: uuid.UUID = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     async with runtime.session_factory.begin() as session:
         await delete_agent_mcp_credential(
@@ -177,6 +179,19 @@ async def _detach_mcp_server_impl(
             tenant_id=auth.tenant_id,
             agent_id=agent_id,
             mcp_server_url=target_server.url.rstrip("/"),
+        )
+    failed = await forget_mirrored_mcp_token(
+        runtime.client,
+        sessionmaker=runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        agent_id=agent_id,
+        mcp_server_url=target_server.url,
+    )
+    if failed:
+        raise ToolError(
+            f"'{server_name}' is disconnected from '{agent_name}' and its saved key is deleted, "
+            "but some saved copies of that key could not be removed. "
+            "Tell them an operator needs to remove those copies. Do not retry."
         )
     return await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
 

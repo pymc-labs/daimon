@@ -83,10 +83,16 @@ def _spec_agent_router(
     tools: list[dict[str, Any]] | None = None,
     skills: list[dict[str, Any]] | None = None,
     managed: bool = False,
+    vaults: dict[str, list[str]] | None = None,
 ) -> tuple[dict[str, Any], list[str], AsyncAnthropic]:
     """MARouter + fake client for one agent; captures the PATCH body and a
     request log (method+path) so tests can assert zero requests were issued.
-    `managed` stamps the reconciler's provenance marker, i.e. a seeded agent."""
+    `managed` stamps the reconciler's provenance marker, i.e. a seeded agent.
+    `vaults` maps each vault's display name to the URLs of its static
+    credentials; a credential delete removes its URL from the list."""
+    held = vaults if vaults is not None else {}
+    names = list(held)
+    listed: dict[str, tuple[str, str]] = {}
     captured: dict[str, Any] = {}
     request_log: list[str] = []
     metadata = {"daimon_tenant": str(tenant_id), "daimon_name": agent_name}
@@ -120,10 +126,57 @@ def _spec_agent_router(
             200, json=ma_agent(id=agent_id, name=agent_name).model_dump(mode="json")
         )
 
+    def on_list_vaults(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        rows = [
+            {
+                "id": f"vlt_{index}",
+                "type": "vault",
+                "display_name": name,
+                "metadata": {},
+                "archived_at": None,
+                "created_at": "2026-10-01T00:00:00Z",
+                "updated_at": "2026-10-01T00:00:00Z",
+            }
+            for index, name in enumerate(names)
+        ]
+        return list_response(rows)
+
+    def on_list_credentials(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        name = names[int(m["index"])]
+        for slot, url in enumerate(held[name]):
+            listed[f"vcrd_{m['index']}_{slot}"] = (name, url)
+        rows = [
+            {
+                "id": f"vcrd_{m['index']}_{slot}",
+                "type": "vault_credential",
+                "vault_id": f"vlt_{m['index']}",
+                "display_name": None,
+                "metadata": {},
+                "created_at": "2026-10-01T00:00:00Z",
+                "updated_at": "2026-10-01T00:00:00Z",
+                "auth": {"type": "static_bearer", "mcp_server_url": url},
+            }
+            for slot, url in enumerate(held[name])
+        ]
+        return list_response(rows)
+
+    def on_delete_credential(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        request_log.append("DELETE /v1/vaults/{id}/credentials/{id}")
+        name, url = listed.pop(m["cid"])
+        held[name].remove(url)
+        return httpx.Response(200, json={"id": m["cid"], "type": "vault_credential_deleted"})
+
     router = MARouter()
     router.add("GET", r"/v1/agents", on_list)
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
+    router.add("GET", r"/v1/vaults$", on_list_vaults)
+    router.add("GET", r"/v1/vaults/vlt_(?P<index>\d+)/credentials$", on_list_credentials)
+    router.add(
+        "DELETE",
+        r"/v1/vaults/vlt_\d+/credentials/(?P<cid>[^/]+)$",
+        on_delete_credential,
+    )
     return captured, request_log, build_fake_anthropic(router.dispatch)
 
 
@@ -361,6 +414,54 @@ async def test_detach_mcp_server_impl_forgets_the_shared_token_for_that_url(
     assert remaining == (), "the stored token for the detached URL must be gone"
 
 
+async def test_detach_mcp_server_impl_removes_the_tokens_copies_from_callers_vaults(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Every caller's vault holds a copy of a bridge key, mirrored in at
+    session create. Detaching the key's server must remove those copies, and
+    leave another agent's own key for the same server where it is."""
+    tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
+    account_id, caller = uuid.uuid4(), uuid.uuid4()
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_removal")
+    other_agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_other")
+    bridge = "https://bridge.internal.example/mcp"
+    daimon_url = "https://daimon.example/mcp"
+    vaults = {
+        f"daimon-mcp:{account_id}:{agent_id}": [daimon_url, bridge],
+        f"daimon-mcp:{caller}:{agent_id}": [daimon_url, bridge],
+        f"daimon-mcp:{caller}:{other_agent_id}": [daimon_url, bridge],
+    }
+    _captured, request_log, client = _spec_agent_router(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        agent_name="demo",
+        mcp_servers=[{"name": "bridge", "type": "url", "url": bridge}],
+        vaults=vaults,
+    )
+    auth = AuthIdentity(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        is_admin=True,
+        is_platform_admin=True,
+        token_kind="cli",
+    )
+
+    await _detach_mcp_server_impl(
+        _runtime(client, session_factory=db_session_factory),
+        auth,
+        agent_name="demo",
+        server_name="bridge",
+    )
+
+    assert vaults == {
+        f"daimon-mcp:{account_id}:{agent_id}": [daimon_url],
+        f"daimon-mcp:{caller}:{agent_id}": [daimon_url],
+        f"daimon-mcp:{caller}:{other_agent_id}": [daimon_url, bridge],
+    }, "the detached agent's copies go; another agent's own key stays"
+    assert request_log.count("DELETE /v1/vaults/{id}/credentials/{id}") == 2
+
+
 async def test_detach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -457,6 +558,7 @@ async def test_detach_mcp_server_impl_retries_once_on_version_conflict(
     router.add("GET", r"/v1/agents", on_list)
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
+    router.add("GET", r"/v1/vaults$", lambda _r, _m: list_response([]))
     client = build_no_retry_anthropic(router)
 
     auth = AuthIdentity(
