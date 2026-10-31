@@ -70,6 +70,8 @@ def request_body(method: str, params: Mapping[str, JsonValue]) -> dict[str, Json
 def request_headers(endpoint: Endpoint, method: str, uri: str | None = None) -> dict[str, str]:
     headers = {
         "Accept": "application/json, text/event-stream",
+        # Decoded size is what the byte caps count; a compressed body could blow past them.
+        "Accept-Encoding": "identity",
         "Authorization": f"Bearer {endpoint.bearer}",
         "MCP-Protocol-Version": PROTOCOL_VERSION,
         "Mcp-Method": method,
@@ -91,7 +93,10 @@ async def _post(
     uri = params.get("uri") if method == "resources/read" else None
     headers = request_headers(endpoint, method, uri if isinstance(uri, str) else None)
     async with http.stream("POST", endpoint.url, json=body, headers=headers) as response:
-        if response.status_code != 200:
+        if (
+            response.status_code != 200
+            or response.headers.get("content-encoding", "identity") != "identity"
+        ):
             raise McpStatusError(response.status_code)
         content = bytearray()
         async for chunk in response.aiter_bytes():

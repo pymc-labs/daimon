@@ -122,6 +122,17 @@ async def test_a_listing_past_its_byte_budget_is_refused() -> None:
     assert server.methods().count("skills/list") == 3, "the third page should pass the budget"
 
 
+async def test_a_compressed_reply_is_refused() -> None:
+    """Byte caps count what arrives, so a compressed body is never decoded."""
+    server = _server()
+    server.gzip = True
+
+    async with server.client() as http:
+        with pytest.raises(SkillIngestError, match="Try again later"):
+            await fetch_server_skill(http, ENDPOINT, server="docs", skill="triage")
+    assert server.requests[0][2]["accept-encoding"] == "identity", "identity should be asked for"
+
+
 async def test_a_stalling_server_hits_the_deadline() -> None:
     """One deadline bounds the whole fetch, however slowly the server answers."""
     server = _server()

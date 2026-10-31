@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -29,7 +30,7 @@ class SkillsServer:
     `served` replaces a file's content by URI, `dynamic` lists skills without a
     manifest, and `status` answers every request with that status instead.
     `padding` pads each listing page with that many bytes; `stall` waits that many
-    seconds before answering.
+    seconds before answering; `gzip` compresses every reply.
     Files ending `.bin` are served as blobs. Every request is kept in `requests`.
     """
 
@@ -39,6 +40,7 @@ class SkillsServer:
     status: int = 200
     padding: int = 0
     stall: float = 0.0
+    gzip: bool = False
     requests: list[tuple[str, dict[str, Any], httpx.Headers]] = field(
         default_factory=list[tuple[str, dict[str, Any], httpx.Headers]]
     )
@@ -112,7 +114,14 @@ class SkillsServer:
                     "error": {"code": -32601, "message": method},
                 },
             )
-        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+        reply = json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": result}).encode()
+        if self.gzip:
+            return httpx.Response(
+                200,
+                content=gzip.compress(reply),
+                headers={"content-type": "application/json", "content-encoding": "gzip"},
+            )
+        return httpx.Response(200, content=reply, headers={"content-type": "application/json"})
 
     def client(self, *, verify: object = True) -> httpx.AsyncClient:
         """A client whose every request this server answers."""
