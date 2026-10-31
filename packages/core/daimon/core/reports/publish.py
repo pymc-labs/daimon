@@ -217,6 +217,7 @@ async def publish_report(
             label=label,
             secret=jwt_secret,
             now=now,
+            purpose="report",
         )
     seam_jti = token_jti(seam_token)
 

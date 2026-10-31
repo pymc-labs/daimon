@@ -276,7 +276,6 @@ async def test_finish_cas_publishes_one_unattended_wake(db_engine, db_clean):
             tenant_id=job.tenant_id,
             platform="discord",
             thread_id=job.thread_id,
-            include_future=True,
         )
     assert len(wakes) == 1
     assert wakes[0].reason == "job_finished" and not wakes[0].attended

@@ -212,7 +212,6 @@ async def test_real_preparation_uses_original_consent_after_latest_setting_chang
     )
     await service.clear_backend(source, accepted.local, actor)
     selected = await read_preparation_counterpart(request)
-    assert selected.worker is None
     assert selected.target_spec.declared_drops == accepted.declared_drops
     assert selected.target_spec.system.startswith("Authoritative source instructions\n\n")
     assert selected.verified_counterpart == selected.counterpart
@@ -1410,14 +1409,6 @@ async def test_portable_native_no_drop_consent_survives_store_and_retained_prepa
     assert prepared.target_spec == source.effective_spec
     assert prepared.source.resource_requirements == source.resource_requirements
     assert len(prepared.source.resource_requirements) == 1
-    assert classify_source_obligations(
-        source,
-        source.effective_spec,
-        environment=source.environment.spec,
-        resources=source.resource_requirements,
-        retained_agent=source.source.ref,
-        worker_ceiling=True,
-    )
     assert agent_payload(prepared.target_spec)["model"] == {
         "id": "claude-haiku-5-5",
         "speed": "standard",
@@ -1562,3 +1553,25 @@ async def test_agent_origin_openai_host_preserves_original_consent_before_paid_r
             await mux_state.get_config_agent_revision(db, revision, agent_id=source.agent_id)
             == accepted
         )
+
+
+async def test_a_stale_switch_consent_names_reconfirm_not_missing_provider(monkeypatch):
+    """SMOKE 42591c55 J6g: a keyless preview's consent came back as "not set up".
+
+    The provider is fine; the stored switch consent needs a fresh preview. The
+    generic `backend_unsupported` path used to make admission say "runs on Gemini,
+    which isn't set up here yet", a dead end. Preserve the re-confirm word.
+    """
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.errors import AdmissionDenied
+
+    async def refuse(_request):
+        raise AgentBackendRefused("re_confirm")
+
+    monkeypatch.setattr(runtime_manifest, "prepare_source", refuse)
+    with pytest.raises(AdmissionDenied) as refused:
+        await runtime_manifest.read_preparation_counterpart(object())  # type: ignore[arg-type]
+    assert refused.value.reason == "backend_unsupported"
+    assert refused.value.cause == "re_confirm", "never the generic agent_backend cause"
+    assert isinstance(refused.value.__cause__, AgentBackendRefused)

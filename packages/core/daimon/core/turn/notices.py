@@ -262,6 +262,22 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "{agent} runs on {provider}, which isn't set up here yet.",
         'Ask {who} to say "switch {agent_mid} to {default}", or to finish setting up {provider}.',
     ),
+    # The provider is set up; the stored switch consent is stale. Never say the
+    # provider is missing (J6g): a fresh preview and Confirm is the fix.
+    "re_confirm": _Copy(
+        "{agent}'s model-provider switch needs to be confirmed again.",
+        "Ask again to preview the switch to {provider}, then Confirm on the new card.",
+    ),
+    # Nothing is missing: say so, and that the same message works shortly.
+    "preparation_busy": _Copy(
+        "Daimon is busy right now and couldn't get {agent} ready on {provider}.",
+        "Try again in a minute.",
+    ),
+    # The cause is unknown, so never claim the provider isn't set up.
+    "preparation_failed": _Copy(
+        "Daimon couldn't get {agent} ready on {provider}.",
+        "Try again; if it keeps happening, give {who} the reference.",
+    ),
 }
 _PROVIDER_NAMES = {
     MANAGED_AGENTS.provider: "Anthropic",
@@ -288,6 +304,28 @@ def _model_label(model: str | None) -> str:
 def provider_name(provider: str | None) -> str:
     """How copy names a model provider: "OpenAI", or "a model provider" when unknown."""
     return _PROVIDER_NAMES.get(provider or "", "a model provider")
+
+
+def conversations_follow_line(
+    agent: str | None, target: str | None, before: str | None = None
+) -> str:
+    """What a provider switch does to existing conversations: each person's own
+    conversation follows it on their next message; a shared one stays (#1495).
+
+    `target` None is "use the default"; `before` None is unknown here.
+    """
+    who = agent or "this agent"
+    if before is not None and (target or DEFAULT_BACKEND) == before:
+        return (
+            f"Each person's own conversation with {who} moves to the new setting on their "
+            "next message; shared threads keep the current one."
+        )
+    stays = f"on {provider_name(before)}" if before is not None else "on their current provider"
+    return (
+        f"Each person's own conversation with {who} moves to "
+        f"{provider_name(target or DEFAULT_BACKEND)} on their next message; shared threads "
+        f"stay {stays}."
+    )
 
 
 def switched_meanwhile_text(agent: str, now_on: str | None, wanted: str | None) -> str:
@@ -495,8 +533,7 @@ def provider_quota_copy(error: BaseException | None) -> tuple[str, str] | None:
     """Plain words for a provider quota refusal anywhere in `error`'s chain, else None.
 
     A model this deployment's provider plan gives no quota at all, or one that
-    is only rate-limited for now. Shared by a turn's notice and a fleet
-    worker's failure line, so both name the same cause and fix.
+    is only rate-limited for now.
     """
     for cause in _error_chain(error):
         if isinstance(cause, ProviderError) and cause.category == "rate_limited":

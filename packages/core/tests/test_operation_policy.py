@@ -197,10 +197,20 @@ def test_the_owner_may_change_its_agents_spec_and_connections(operation: Operati
     assert decide_operation(operation, is_admin=False, target=unowned) == "needs_admin"
 
 
-@pytest.mark.parametrize(
-    "operation", ["repo_bind", "skill_repo_connect", "github_connect", "github_grant"]
-)
-def test_the_owner_may_not_spend_the_workspaces_github_installation(
+@pytest.mark.parametrize("operation", ["github_connect", "github_grant"])
+def test_the_owner_may_connect_and_grant_repos_for_its_own_agent(
+    operation: OperationKind,
+) -> None:
+    assert decide_operation(operation, is_admin=False, target=_OWNED) == "allow"
+    unowned = _OWNED.model_copy(update={"owned_by_caller": False})
+    assert decide_operation(operation, is_admin=False, target=unowned) == "needs_admin"
+    managed = _OWNED.model_copy(update={"is_daimon_managed": True})
+    assert decide_operation(operation, is_admin=False, target=managed) == "needs_admin"
+    assert decide_operation(operation, is_admin=True, target=managed) == "allow"
+
+
+@pytest.mark.parametrize("operation", ["repo_bind", "skill_repo_connect"])
+def test_the_owner_may_not_use_the_retired_pasted_token_repo_forms(
     operation: OperationKind,
 ) -> None:
     assert decide_operation(operation, is_admin=False, target=_OWNED) == "needs_admin"
@@ -215,6 +225,7 @@ def test_ownership_never_unlocks_a_defaults_managed_agent() -> None:
 def test_a_member_s_change_to_an_unmanaged_agent_reads_its_owner() -> None:
     assert needs_reachability_read("agent_spec_edit", is_admin=False, is_daimon_managed=False)
     assert needs_reachability_read("mcp_connect", is_admin=False, is_daimon_managed=False)
+    assert needs_reachability_read("github_connect", is_admin=False, is_daimon_managed=False)
     assert not needs_reachability_read("repo_bind", is_admin=False, is_daimon_managed=False)
     assert not needs_reachability_read("key_add", is_admin=False, is_daimon_managed=False)
     assert not needs_reachability_read("agent_spec_edit", is_admin=False, is_daimon_managed=True)

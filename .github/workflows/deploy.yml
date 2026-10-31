@@ -200,6 +200,7 @@ jobs:
           file: Dockerfile
           tags: ${{ steps.tags.outputs.daimon }}
           push: true
+          build-args: DAIMON_RELEASE=${{ inputs.sha }}
           provenance: false
           sbom: false
           cache-from: type=gha,scope=daimon
@@ -271,13 +272,14 @@ jobs:
           fi
           echo "window=$LEGACY" >> "$GITHUB_OUTPUT"
           echo "MCP bounded non-internal legacy window=$LEGACY cutoff=$CUTOFF"
-          # Production keeps today's behaviour until Carlos approves the new
-          # defaults: the four emergency stops, pinned on every prod deploy.
-          # To flip: delete PROD_PIN (and the matching daimon-infra pins).
+          # Production runs the mux path with both backend switches off (stage 1
+          # of the SDK cutover), pinned on every prod deploy. Rollback: pin legacy
+          # again here and in the daimon-infra pins. Backends on (stage 2): delete
+          # PROD_PIN and those pins.
           PROD_PIN=""
           if [ "${DEPLOY_ENVIRONMENT:-}" = production ]; then
-            PROD_PIN=",DAIMON_TURN__PATH=legacy,DAIMON_TURN__CHANNEL_BACKENDS=false"
-            PROD_PIN="$PROD_PIN,DAIMON_TURN__AGENT_BACKENDS=false,DAIMON_FLEET__ENABLED=false"
+            PROD_PIN=",DAIMON_TURN__PATH=mux,DAIMON_TURN__CHANNEL_BACKENDS=false"
+            PROD_PIN="$PROD_PIN,DAIMON_TURN__AGENT_BACKENDS=false"
           fi
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --image "${{ steps.images.outputs.daimon }}" \
@@ -454,12 +456,12 @@ jobs:
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
               sudo chmod 755 /usr/local/bin/daimon-refresh-env
               sudo /usr/local/bin/daimon-refresh-env
-              # Production keeps the four emergency stops until Carlos approves
-              # the new defaults; the last env_file entry wins. To flip: delete
-              # this block (and the MCP PROD_PIN and the daimon-infra pins).
+              # Production pins the mux path with both backend switches off; the
+              # last env_file entry wins. Keep it in step with the MCP PROD_PIN and
+              # the daimon-infra pins (rollback and stage 2 notes are there).
               if [ "${{ inputs.environment }}" = production ]; then
-                printf "%s\n" DAIMON_TURN__PATH=legacy DAIMON_TURN__CHANNEL_BACKENDS=false \
-                  DAIMON_TURN__AGENT_BACKENDS=false DAIMON_FLEET__ENABLED=false \
+                printf "%s\n" DAIMON_TURN__PATH=mux DAIMON_TURN__CHANNEL_BACKENDS=false \
+                  DAIMON_TURN__AGENT_BACKENDS=false \
                   | sudo tee -a /etc/daimon/daimon.env >/dev/null
               fi
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.worker.yml /etc/daimon/compose.worker.yml
@@ -775,6 +777,68 @@ jobs:
             sleep 60
             verify
           fi
+
+      # The VM startup scripts run on every boot, and the copy baked in when the
+      # VM was created names an old image. They prefer these keys, so a reboot
+      # restarts the release this deploy just verified instead of that old one.
+      # Written only here, after the health gate, the settle wait and the defaults
+      # verify have all passed, and never read back into the refresh steps above.
+      # The keys are deploy-owned: Terraform ignores them. A failed write fails
+      # the deploy, because a green deploy must leave a VM that reboots into it.
+      # The services are already live when this runs: if only this step fails,
+      # do not roll back. Re-run the job or write the keys by hand.
+      - name: Record deployed image digests for VM boot
+        if: steps.fresh.outputs.superseded != 'true'
+        env:
+          DAIMON_IMAGE: ${{ steps.images.outputs.daimon }}
+          NOTEBOOK_IMAGE: ${{ steps.images.outputs.notebook }}
+          REPORT_IMAGE: ${{ steps.images.outputs.report }}
+          VM_PREFIX: ${{ vars.GCP_AR_REPO }}
+        run: |
+          set -euo pipefail
+          # Full registry/name@sha256:<hex> for an image given as a tag or a digest.
+          pinned_reference() {
+            local image="$1" base digest
+            base="${image%@*}"
+            base="${base%:*}"
+            digest="$(gcloud artifacts docker images describe "$image" \
+              --format='value(image_summary.digest)')"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "No image digest for $image" >&2
+              return 1
+            fi
+            printf '%s@%s\n' "$base" "$digest"
+          }
+          recorded_value() {
+            # extract() reads one key's value; no other key is output.
+            gcloud compute instances describe "$1" --zone "$ZONE" \
+              --format="value(metadata.items.extract($2).flatten())"
+          }
+          # add-metadata merges into the existing keys, so the startup script and
+          # the declared secret list are never touched. A concurrent metadata
+          # write makes gcloud fail on a stale fingerprint: retry, then verify.
+          record() {
+            local vm="$1" key="$2" value="$3" attempt
+            for attempt in 1 2 3; do
+              if gcloud compute instances add-metadata "$vm" --zone "$ZONE" \
+                --metadata "$key=$value" \
+                && [ "$(recorded_value "$vm" "$key")" = "$value" ]; then
+                echo "$vm $key=$value"
+                return 0
+              fi
+              sleep 5
+            done
+            echo "Could not record $key on $vm" >&2
+            return 1
+          }
+          daimon="$(pinned_reference "$DAIMON_IMAGE")"
+          notebook="$(pinned_reference "$NOTEBOOK_IMAGE")"
+          report="$(pinned_reference "$REPORT_IMAGE")"
+          # Also when the workers VM is stopped: the refresh above skipped it, and
+          # this is what its next boot should start.
+          record "$VM_PREFIX-workers" daimon-image "$daimon"
+          record "$VM_PREFIX-notebook" notebook-image "$notebook"
+          record "$VM_PREFIX-notebook" report-image "$report"
 
       - name: Mark tested staging images promotable
         if: (steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'

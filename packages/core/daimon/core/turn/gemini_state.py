@@ -15,7 +15,7 @@ import base64
 import json
 import os
 import sqlite3
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -228,6 +228,25 @@ class _GeminiStorage:
 
     def __init__(self, database: PayloadDatabase) -> None:
         self._database = database
+
+    @asynccontextmanager
+    async def read(self) -> AsyncIterator[Records]:
+        """The last committed Records for a pure read (mux `read_records`); never saved.
+
+        A database with no committed-snapshot read (SQLite, one local process) serves
+        it from its transaction.
+        """
+        reader = getattr(self._database, "read", None)
+        if not callable(reader):
+            async with self.transaction() as records:
+                yield records
+            return
+        body = await cast(Callable[[], Awaitable[str | None]], reader)()
+        yield (
+            Records()
+            if body is None
+            else _RECORDS.validate_python(_decode(_JSON.validate_json(body)))
+        )
 
     @asynccontextmanager
     async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Records]:

@@ -84,6 +84,9 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
         will_happen_lines.append(
             f"• Remove you from {amount(preview.channel_admins.count, 'channel admin list')}"
         )
+    if preview.mux_slots.count > 0:
+        n = amount(preview.mux_slots.count, "saved conversation")
+        will_happen_lines.append(f"• 💬 Delete Daimon's copy of {n}, with its messages")
     if preview.account.count > 0:
         will_happen_lines.append("• 🪪 Remove your account")
 
@@ -91,9 +94,17 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
         "\n".join(will_happen_lines) if will_happen_lines else "_Nothing to delete._"
     )
 
+    shared_conversations = preview.retained_shared_conversations.count
+    shared_line = (
+        f"• Your messages in {amount(shared_conversations, 'shared conversation')}"
+        " stay for the people still using them.\n"
+        if shared_conversations > 0
+        else ""
+    )
     kept_text = (
         "📋 *What is intentionally kept elsewhere*\n\n"
         "• Usage records are retained for service integrity and cannot be erased on request.\n"
+        f"{shared_line}"
         "• Uploaded skill files stay in Managed Agents; shared agents may keep using them.\n"
         "• The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications."
@@ -291,6 +302,16 @@ def build_deleting_view() -> dict[str, Any]:
                 },
             },
         ],
+    }
+
+
+def build_delete_failed_view(message: str) -> dict[str, Any]:
+    """The modal that replaces "Deleting…" when the purge rolled back: nothing was deleted."""
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Privacy"},
+        "close": {"type": "plain_text", "text": "Close"},
+        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": message}}],
     }
 
 

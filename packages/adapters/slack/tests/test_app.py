@@ -1322,6 +1322,10 @@ async def test_initial_card_post_failure_keeps_prepared_intent(
         "text": "<@U_BOT> hello",
     }
     admission = MagicMock()
+    # What the turn controls read: on the default provider, no move (M03).
+    admission.backend_revision = None
+    admission.backend_follow = None
+    admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
 
@@ -1372,6 +1376,10 @@ async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_
         "text": "<@U_BOT> hello",
     }
     admission = MagicMock()
+    # What the turn controls read: on the default provider, no move (M03).
+    admission.backend_revision = None
+    admission.backend_follow = None
+    admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
     with (
@@ -1427,6 +1435,10 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
         "text": "<@U_BOT> hello",
     }
     admission = MagicMock()
+    # What the turn controls read: on the default provider, no move (M03).
+    admission.backend_revision = None
+    admission.backend_follow = None
+    admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id
     admission.agent.id = "agent_test_id"
     admission.agent.name = "test-agent"
@@ -1530,6 +1542,10 @@ async def test_cancelled_initial_card_post_keeps_prepared_intent(
         "text": "<@U_BOT> hello",
     }
     admission = MagicMock()
+    # What the turn controls read: on the default provider, no move (M03).
+    admission.backend_revision = None
+    admission.backend_follow = None
+    admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
     with (

@@ -118,6 +118,29 @@ async def list_live_thread_sessions(
     return [ThreadSessionRow.model_validate(row) for row in rows]
 
 
+async def thread_session_accounts(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> set[_uuid.UUID | None]:
+    """Everyone who has had a session in one thread, live or closed (None: no account).
+
+    For a decision about the thread itself, like `list_live_thread_sessions`.
+    """
+    rows = await session.scalars(
+        select(ThreadSession.account_id)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_id,
+        )
+        .distinct()
+    )
+    return set(rows)
+
+
 async def list_live_sessions_for_agent(
     session: AsyncSession, *, tenant_id: _uuid.UUID, agent_id: _uuid.UUID
 ) -> list[ThreadSessionRow]:
@@ -302,8 +325,11 @@ async def create_thread_session(
     transfer_file_id: str | None = None,
     transfer_kind: TransferKind | None = None,
     seal_ids: frozenset[str] | None = None,
+    id: _uuid.UUID | None = None,
 ) -> ThreadSessionRow:
     """Insert a new thread-session mapping row and return the Pydantic domain type.
+
+    `id` is the row's id when the caller had to name it before the session existed.
 
     account_id is the calling user's account and is persisted on the row so that
     get_live_thread_session can scope future lookups to the same caller.
@@ -342,6 +368,8 @@ async def create_thread_session(
     }
     if created_at is not None:
         kwargs["created_at"] = created_at
+    if id is not None:
+        kwargs["id"] = id
     orm = ThreadSession(**kwargs)
     session.add(orm)
     await session.flush()

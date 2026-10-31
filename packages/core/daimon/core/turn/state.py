@@ -183,6 +183,9 @@ class TurnState:
     """Servers that failed this turn, newest status per server name."""
     retrying_error: TurnError | None = None
     """The last `retrying` error MA reported; only surfaces if nothing follows."""
+    package_install_error: TurnError | None = None
+    """An `exhausted` package-installation failure the session carried on past;
+    only surfaces if the turn then produced no content or did not end cleanly."""
     termination: TerminationReason | None = None
     """How the turn ended. Every driver exit sets it; `None` means still running
     (the reducer sets it early only when MA terminates the session)."""

@@ -83,5 +83,10 @@ RUN --mount=type=bind,from=builder,source=/app/uv.lock,target=/app/uv.lock \
     && python -c "import openai; from daimon.core.turn.runtimes import ensure_channel_runtime; assert ensure_channel_runtime('openai.persistent_workspace')" \
     && python -m compileall -q -j 0 packages
 
+# The commit this image was built from; daimon logs it as `release`. Last, so a
+# new commit does not invalidate the layers above.
+ARG DAIMON_RELEASE=""
+ENV DAIMON_RELEASE=${DAIMON_RELEASE}
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # No CMD — docker-compose services or fly.toml [processes] supply the command.

@@ -371,6 +371,97 @@ def test_image_selection_shell_validation(
             assert "daimon=example/daimon:abc1234" in lines
 
 
+_RECORD_STEP = "Record deployed image digests for VM boot"
+_FAKE_GCLOUD = r"""
+gcloud() {
+  printf '%s\n' "$*" >> "$FAKE_LOG"
+  case "$*" in
+    "artifacts docker images describe "*)
+      case "$5" in
+        *@sha256:*) printf '%s\n' "${5#*@}" ;;
+        *) printf 'sha256:%s\n' "$(printf '%s' "$5" | sha256sum | cut -c1-64)" ;;
+      esac ;;
+    "compute instances add-metadata "*)
+      [ -z "${FAKE_FAIL_WRITE:-}" ] || return 1
+      printf '%s\n' "$4 ${8%%=*} ${8#*=}" >> "$FAKE_STATE" ;;
+    "compute instances describe "*)
+      key="${7#--format=value(metadata.items.extract(}"
+      grep -F "$4 ${key%).flatten())} " "$FAKE_STATE" | tail -n 1 | cut -d' ' -f3 ;;
+    *) return 1 ;;
+  esac
+}
+"""
+
+
+def _record_step() -> dict[str, Any]:
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    return next(step for step in steps if step.get("name") == _RECORD_STEP)
+
+
+def test_boot_digests_are_recorded_after_every_gate_and_before_promotion() -> None:
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    record = names.index(_RECORD_STEP)
+    assert names.index("Health gate") < record
+    assert names.index("Wait for notebook-host VM refresh") < record
+    assert names.index("Verify deployed installs match shipped defaults") < record
+    assert record < names.index("Mark tested staging images promotable")
+    assert _record_step()["if"] == "steps.fresh.outputs.superseded != 'true'"
+
+
+def test_boot_digests_write_only_the_deploy_owned_keys() -> None:
+    script = _record_step()["run"]
+    assert "daimon-secret-env" not in script
+    assert "startup-script" not in script
+    keys = re.findall(r"record \"\$VM_PREFIX-\w+\" ([\w-]+)", script)
+    assert keys == ["daimon-image", "notebook-image", "report-image"]
+
+
+@pytest.mark.parametrize("fail_write", [False, True])
+def test_boot_digests_script_records_full_digest_references(
+    tmp_path: Path, fail_write: bool
+) -> None:
+    step = _record_step()
+    base = "example.test/proj/images"
+    env = {
+        **os.environ,
+        "FAKE_LOG": str(tmp_path / "log"),
+        "FAKE_STATE": str(tmp_path / "state"),
+        "ZONE": "zone-a",
+        "VM_PREFIX": "env-daimon",
+        "DAIMON_IMAGE": f"{base}/daimon:abc1234",
+        "NOTEBOOK_IMAGE": f"{base}/notebook-host@sha256:{'b' * 64}",
+        "REPORT_IMAGE": f"{base}/report-host:abc1234",
+    }
+    if fail_write:
+        env["FAKE_FAIL_WRITE"] = "1"
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", "sleep() { :; }\n" + _FAKE_GCLOUD + step["run"]],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if fail_write:
+        assert result.returncode != 0
+        assert "Could not record daimon-image on env-daimon-workers" in result.stderr
+        return
+    assert result.returncode == 0, result.stderr
+    written: dict[tuple[str, str], str] = {}
+    for line in (tmp_path / "state").read_text().splitlines():
+        vm, key, value = line.split(" ")
+        written[(vm, key)] = value
+    assert set(written) == {
+        ("env-daimon-workers", "daimon-image"),
+        ("env-daimon-notebook", "notebook-image"),
+        ("env-daimon-notebook", "report-image"),
+    }
+    for value in written.values():
+        assert re.fullmatch(rf"{re.escape(base)}/[a-z-]+@sha256:[0-9a-f]{{64}}", value)
+    assert written[("env-daimon-notebook", "notebook-image")].endswith("b" * 64)
+    assert "daimon:" not in "".join(written.values())
+
+
 @pytest.mark.parametrize(
     "state",
     [
@@ -522,10 +613,9 @@ def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
     assert result.returncode == 0, result.stderr
     updates = (tmp_path / "updates").read_text()
     pins = (
-        "DAIMON_TURN__PATH=legacy",
+        "DAIMON_TURN__PATH=mux",
         "DAIMON_TURN__CHANNEL_BACKENDS=false",
         "DAIMON_TURN__AGENT_BACKENDS=false",
-        "DAIMON_FLEET__ENABLED=false",
     )
     if environment == "production":
         assert all(pin in updates for pin in pins), updates
@@ -533,8 +623,8 @@ def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
         assert "TURN__" not in updates and "FLEET__" not in updates, updates
 
 
-def test_production_worker_refresh_pins_the_old_turn_behaviour() -> None:
-    """The prod worker env gets the four stops after every env refresh, staging none."""
+def test_production_worker_refresh_pins_mux_with_backends_off() -> None:
+    """The prod worker env gets mux with both backend switches off after every refresh."""
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
     script = next(
         step["run"]
@@ -546,10 +636,9 @@ def test_production_worker_refresh_pins_the_old_turn_behaviour() -> None:
     assert pin < script.index("docker compose -f compose.worker.yml pull"), "before recreate"
     block = script[pin : script.index("fi", pin)]
     for line in (
-        "DAIMON_TURN__PATH=legacy",
+        "DAIMON_TURN__PATH=mux",
         "DAIMON_TURN__CHANNEL_BACKENDS=false",
         "DAIMON_TURN__AGENT_BACKENDS=false",
-        "DAIMON_FLEET__ENABLED=false",
     ):
         assert line in block
     assert "tee -a /etc/daimon/daimon.env" in block
@@ -589,21 +678,24 @@ def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> Non
             "path": "mux",
             "channel_backends": "true",
             "agent_backends": "true",
-            "fleet_enabled": "true",
+        },
+        {
+            "configuration": "mux-only",
+            "path": "mux",
+            "channel_backends": "false",
+            "agent_backends": "false",
         },
         {
             "configuration": "legacy-off",
             "path": "legacy",
             "channel_backends": "false",
             "agent_backends": "false",
-            "fleet_enabled": "false",
         },
     ]
     for flag, matrix_key in (
         ("DAIMON_TURN__PATH", "path"),
         ("DAIMON_TURN__CHANNEL_BACKENDS", "channel_backends"),
         ("DAIMON_TURN__AGENT_BACKENDS", "agent_backends"),
-        ("DAIMON_FLEET__ENABLED", "fleet_enabled"),
         ("DAIMON_CI_CONFIGURATION", "configuration"),
     ):
         assert job["env"][flag] == f"${{{{ matrix.{matrix_key} }}}}"

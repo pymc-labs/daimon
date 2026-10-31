@@ -1,0 +1,48 @@
+name: Self-hosting Compose
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/self-hosting.yml'
+      - 'deploy/lanes/**'
+  push:
+    paths:
+      - '.github/workflows/self-hosting.yml'
+      - 'deploy/lanes/**'
+
+permissions:
+  contents: read
+
+jobs:
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render valid configuration and reject a missing required setting
+        run: |
+          set -euo pipefail
+          workdir=$(mktemp -d)
+          cp deploy/lanes/compose.lane.yml "$workdir/compose.lane.yml"
+          cat > "$workdir/.env" <<'EOF'
+          DAIMON_LANE_IMAGE=daimon:local
+          DAIMON_LANE_SHA=local
+          POSTGRES_PASSWORD=placeholder
+          DAIMON_ANTHROPIC__API_KEY=placeholder
+          DAIMON_MCP__JWT_SECRET=placeholder
+          DAIMON_MCP__PUBLIC_URL=https://example.invalid/mcp
+          DAIMON_DISCORD__BOT_TOKEN=placeholder
+          EOF
+          docker compose --project-directory "$workdir" --env-file "$workdir/.env" \
+            -f "$workdir/compose.lane.yml" config > "$workdir/valid.out" 2>&1
+          cat "$workdir/valid.out"
+          grep -q '^  mcp:' "$workdir/valid.out"
+          grep -v '^POSTGRES_PASSWORD=' "$workdir/.env" > "$workdir/missing.env"
+          if env -u POSTGRES_PASSWORD docker compose --project-directory "$workdir" \
+            --env-file "$workdir/missing.env" -f "$workdir/compose.lane.yml" \
+            config > "$workdir/missing.out" 2>&1; then
+            cat "$workdir/missing.out"
+            echo 'Compose accepted a missing database password' >&2
+            exit 1
+          fi
+          cat "$workdir/missing.out"
+          grep -q 'POSTGRES_PASSWORD is required' "$workdir/missing.out"

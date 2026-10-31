@@ -265,7 +265,7 @@ def test_native_agent_tool_projection_uses_the_closed_anthropic_compiler():
         )
 
 
-def test_conversation_worker_is_explicit_without_changing_openai_selection():
+def test_conversation_conformance_profile_is_not_a_host_selection():
     from mux.profiles import (
         CONVERSATION_ONLY,
         RUNNABLE_PROFILES,
@@ -276,7 +276,8 @@ def test_conversation_worker_is_explicit_without_changing_openai_selection():
     selected = backend_selection("openai")
     assert selected.profile == PERSISTENT_WORKSPACE.profile_id
     conversation = selected.model_copy(update={"profile": CONVERSATION_ONLY.profile_id})
-    assert conversation.profile in RUNNABLE_PROFILES and runnable_selection(conversation)
+    assert conversation.profile not in RUNNABLE_PROFILES
+    assert not runnable_selection(conversation)
     assert not runnable_selection(conversation.model_copy(update={"model": "unapproved-model"}))
     assert not runnable_selection(conversation.model_copy(update={"thread_mode": "shared"}))
     assert neutral_catalog_profile_for("openai") is PERSISTENT_WORKSPACE

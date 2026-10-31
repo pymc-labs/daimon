@@ -92,8 +92,8 @@ class ProviderActionView(discord.ui.LayoutView):
             container.add_item(row)
             container.add_item(
                 discord.ui.TextDisplay(
-                    "-# Only the requester may answer · Expires "
-                    f"<t:{int(prompt.context.expires_at.timestamp())}:R>"
+                    "-# Only the requester may answer. It expires "
+                    f"<t:{int(prompt.context.expires_at.timestamp())}:R>."
                 )
             )
         self.add_item(container)

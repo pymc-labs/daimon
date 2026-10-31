@@ -8,8 +8,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
 from daimon.adapters.slack.admin import resolve_is_platform_admin
-from daimon.adapters.slack.admin_caller import admin_caller
-from daimon.adapters.slack.agent_policy import gather_target_facts
 from daimon.adapters.slack.agent_setup import panel_views
 from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.agent_setup.github_requests import update_requester_card
@@ -19,14 +17,10 @@ from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.modal_limits import finish_modal
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.agent_pins import agent_pin_names
-from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import admin_card
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
-from daimon.core.operation_policy import decide_operation
 from daimon.core.stores.github_access import list_authorized_repos
 from daimon.core.stores.github_access_requests import (
     AccessRequest,
@@ -82,25 +76,9 @@ async def _may_manage_request(
     account_id: uuid.UUID,
     is_admin: bool,
 ) -> bool:
-    if is_admin:
-        return True
-    live_agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=request.tenant_id, agent_id=request.agent_id
-    )
-    if live_agent is None or live_agent.id != request.ma_agent_id:
-        return False
-    caller = await admin_caller(client, user_id=user_id)
-    facts = await gather_target_facts(
-        runtime,
-        operation="github_grant",
-        tenant_id=request.tenant_id,
-        agent_names=agent_pin_names(live_agent.name, live_agent.metadata),
-        ma_agent_id=str(live_agent.id),
-        is_daimon_managed=live_agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-        caller=caller,
-        caller_account_id=account_id,
-    )
-    return decide_operation("github_grant", is_admin=False, target=facts) == "allow"
+    # The waiting list is admin-only: an agent's owner connects repos for their own
+    # agent from its repos panel, not from requests other people made.
+    return is_admin
 
 
 async def _can_see_request(client: AsyncWebClient, row: AccessRequest, user_id: str) -> bool:

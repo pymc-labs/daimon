@@ -112,11 +112,16 @@ from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
-from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL, MA_METADATA_KEY_ISOLATED
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_BUDGET_CHANNEL,
+    MA_METADATA_KEY_ISOLATED,
+    MA_METADATA_KEY_NAME,
+)
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
-from daimon.core.mcp_vault import refresh_mounted_mcp_vaults
+from daimon.core.mcp_identity import identity_relay_urls
+from daimon.core.mcp_vault import archive_relay_vaults, refresh_mounted_mcp_vaults
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
@@ -538,6 +543,36 @@ async def _describe_agent_impl(
     )
 
 
+async def _refuse_another_provider(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    ma_agent_id: str,
+    name: str,
+    nothing: str = "Nothing was started.",
+) -> None:
+    """Agent keys and the hub open Managed Agents sessions, so an agent whose backend
+    is another provider is refused plainly here, never answered (and billed) on the
+    Claude record its definition is saved with. A session opened before a switch
+    doesn't continue on Claude either."""
+    from daimon.core.stores import agent_backends
+    from daimon.core.turn.notices import provider_name
+    from mux.contracts.config import DEFAULT_BACKEND
+
+    async with runtime.session_factory() as session:
+        revision = await agent_backends.current(
+            session,
+            auth.tenant_id,
+            derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent_id),
+        )
+    backend = revision.backend if revision is not None else None
+    if backend is not None and backend != DEFAULT_BACKEND:
+        raise ToolError(
+            f"{name} runs on {provider_name(backend)}; agent keys and the hub can only "
+            f"talk to agents on Claude for now. Ask it in chat instead. {nothing}"
+        )
+
+
 @observed_agent_turn
 async def _start_turn_impl(
     runtime: McpRuntime,
@@ -601,6 +636,12 @@ async def _start_turn_impl(
     """
     require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
+    await _refuse_another_provider(
+        runtime,
+        auth,
+        ma_agent_id=ma_agent.id,
+        name=ma_agent.metadata.get(MA_METADATA_KEY_NAME) or ma_agent.name,
+    )
     billing_exempt: ExemptReason | None = (
         "mcp-internal-caller" if auth.platform_user_id is None else None
     )
@@ -784,6 +825,14 @@ async def _continue_turn_impl(
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)
+    # Switched since this session opened: it would go on answering on Claude.
+    await _refuse_another_provider(
+        runtime,
+        auth,
+        ma_agent_id=session.agent.id,
+        name=session.agent.name,
+        nothing="Nothing was sent.",
+    )
 
     async def ready() -> BetaManagedAgentsSession:
         """Every check a send needs, then the gate, right before the send."""
@@ -804,16 +853,20 @@ async def _continue_turn_impl(
         mcp = runtime.settings.mcp
         if mcp.public_url is not None and mcp.jwt_secret is not None:
             assert auth.agent_id is not None  # verified above, including after fence acquisition
+            public_url = str(mcp.public_url)
             await refresh_mounted_mcp_vaults(
                 runtime.client,
                 vault_ids=current.vault_ids,
                 account_id=auth.account_id,
                 agent_id=auth.agent_id,
                 jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
-                public_url=str(mcp.public_url),
+                public_url=public_url,
                 now=now(),
                 session_factory=runtime.session_factory,
                 scope=mcp_scope(auth),
+                relay_urls=identity_relay_urls(
+                    (server.url for server in current.agent.mcp_servers), public_url=public_url
+                ),
             )
         await gate(runtime, auth, current)
         return current
@@ -942,10 +995,16 @@ async def _archive_my_session_impl(
     cross-agent handles.
     """
     require_outside_chat_turn(auth)
-    require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
+    mounted = await _verify_agent_owns_session(runtime, auth, handle)
+    require_session_driver(mounted, auth)
     async with session_mutation_fence(runtime.session_factory, handle):
         require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
         await archive_session_record(runtime.client, handle, scope=mcp_scope(auth))
+    try:
+        await archive_relay_vaults(runtime.client, mounted.vault_ids, scope=mcp_scope(auth))
+    except Exception:
+        # The scheduler's janitor archives it once no live session mounts it.
+        log.exception("mcp.agent_chat.relay_vault_cleanup_failed", session_id=handle)
     try:
         await close_headless_app_session(
             runtime.client,

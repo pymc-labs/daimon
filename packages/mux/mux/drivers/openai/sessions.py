@@ -89,7 +89,7 @@ class OpenAISessions:
             legacy_account_id=scope.account_id,
         )
 
-    async def _decode(self, scope: Scope, raw: Object, *, creating: bool = False) -> Session:
+    async def _decode(self, scope: Scope, raw: Object) -> Session:
         self._c.record(scope, raw)
         binding = self._binding(scope, raw)
         expected_agent = binding.native_refs.get("agent")
@@ -173,30 +173,12 @@ class OpenAISessions:
                 ),
                 "requested_revision": rev,
                 "effective_revision": rev,
-                "state": "provisioning"
-                if creating and self._controls.require_spend_control_echo
-                else states[status],
+                "state": states[status],
                 "active_root_turn": active,
                 "required_actions": required_actions(raw),
-                "native": {"spend_control": raw.get("spend_control")}
-                if self._controls.require_spend_control_echo
-                else None,
             }
         )
-        if not creating:
-            self.validate_spend_control(session)
         return session
-
-    def validate_spend_control(self, session: Session) -> None:
-        """Creation receipts are retained before an untrusted control echo is checked."""
-        if not self._controls.require_spend_control_echo:
-            return
-        control = session.native.get("spend_control") if isinstance(session.native, dict) else None
-        limit = control.get("limit") if isinstance(control, dict) else None
-        if type(limit) is not int or limit != self._controls.spend_limit_usd_cents:
-            raise ContinuityLost(
-                session.binding.id, ("session spend control differs from admission",)
-            )
 
     @owned
     async def create(
@@ -299,7 +281,7 @@ class OpenAISessions:
                         managed.retained(error)
                 raise
             try:
-                session = await self._decode(scope, raw, creating=True)
+                session = await self._decode(scope, raw)
             except BaseException as error:
                 if isinstance(error, ValueError | KeyError | TypeError):
                     malformed = ProviderError(
@@ -318,6 +300,36 @@ class OpenAISessions:
             self._mcp_bindings[(scope.tenant_id, scope.account_id, session.ref.id)] = binding
             session = session.model_copy(update={"binding": binding})
         return session
+
+    async def refresh_mcp(self, scope: Scope, ref: ResourceRef, *, key: str) -> None:
+        """Before a new turn: give the session's owned MCP vault this turn's bearer.
+
+        Only for a session whose own vault this driver created; a session without
+        one (no MCP, or independently supplied vaults) is left as it is. A session
+        created this turn already holds this turn's bearer; writing it again is
+        idempotent.
+        """
+        self._c.check(scope, ref, "session")
+        binding = self._binding_lookup(scope, ref.id) if self._binding_lookup is not None else None
+        binding = binding or self._mcp_bindings.get((scope.tenant_id, scope.account_id, ref.id))
+        managed = session_mcp.from_binding(self._c, scope, binding)
+        if managed is None:
+            return
+        if self._mcp_secrets is None:
+            raise self._c.unsupported("host_mcp_secret_resolver")
+        # The binding names the session's agent; the turn's own retrieve right after
+        # this still checks the native session against it.
+        agent_id = (binding.native_refs.get("agent") if binding is not None else None) or None
+        if agent_id is None:
+            raw = await self._c.call("GET", "/agents/sessions/" + segment(ref.id))
+            if raw.get("id") != ref.id:
+                raise ValueError("wrong session identity")
+            await self._decode(scope, raw)
+            agent_id = text(object_json(raw["agent"])["id"])
+        agent = await self._c.call("GET", "/agents/" + segment(agent_id))
+        if agent.get("id") != agent_id:
+            raise ValueError("wrong session agent identity")
+        await session_mcp.rotate(self._c, scope, managed, agent, self._mcp_secrets, key=key)
 
     @owned
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:

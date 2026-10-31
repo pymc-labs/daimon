@@ -152,6 +152,7 @@ from daimon.core.turn.admission import (
     AdmissionDenied,
     MissingTurnConfigError,
     admit,
+    backend_facts,
 )
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -162,7 +163,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
-from daimon.core.turn.outcomes import observe_turn, record_refusal
+from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
@@ -214,6 +215,21 @@ DRAIN_GRACE_S = 60.0
 CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
+# Daimon's own short-lived contention (an admin's settings write held the policy fence
+# past the wait): nothing is wrong, and the same message works in a moment.
+_DAIMON_BUSY = "Daimon is busy right now. Try again in a moment."
+
+
+def failure_notice(exc: BaseException) -> str:
+    """The card's closing words for a turn that failed unexpectedly."""
+    from daimon.core.errors import TurnError
+    from daimon.core.session_fence_retry import FenceUnavailable
+    from daimon.core.stores.access_policy import PolicyBusyError
+
+    cause = exc.cause if isinstance(exc, TurnError) else exc
+    return _DAIMON_BUSY if isinstance(cause, (PolicyBusyError, FenceUnavailable)) else _FAILED
+
+
 _SHED = "Too many chats at once right now. Try again in a moment."
 _CANCEL_NOT_AUTHOR = "Only the person who asked, or a Daimon admin, can stop this reply."
 _CANCEL_ROLE_UNKNOWN = "I couldn't check your role just now. Try again in a moment."
@@ -1127,6 +1143,7 @@ class TeamsApp:
                 platform="teams",
                 channel_id=trigger.channel_id,
                 thread_id=trigger.thread_id,
+                alertable=False,
             )
             log.info(
                 "turn.skipped.concurrency_shed",
@@ -1394,6 +1411,7 @@ class TeamsApp:
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
                 origin="chat" if continuation is None else "handoff",
+                alertable=not inbound.unprompted,
             ):
                 await self._run_turn_observed(
                     inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
@@ -1608,7 +1626,8 @@ class TeamsApp:
                     "teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc
                 )
                 capture_exception_with_scope(exc)
-                await holder[-1].close_with_notice(_FAILED)
+                finish_with_error(exc)
+                await holder[-1].close_with_notice(failure_notice(exc))
                 await holder[-1].release_controls()  # An answer that landed keeps its own.
                 if reraise:
                     raise
@@ -1770,11 +1789,14 @@ class TeamsApp:
             is_setup=config.thread_binding_kind == "setup",
             sender_foreign=inbound.is_foreign,
             shared_channel=admission.shared_channel,
+            platform_channel_id=inbound.conversation_id,
+            platform_message_id=None if inbound.from_form else inbound.activity_id,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"
             controls = render_turn_origin(
                 origin,
+                **backend_facts(admission),
                 responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
@@ -1810,6 +1832,7 @@ class TeamsApp:
                 watch_row=watch_row,
                 origin="handoff" if notice is not None else "chat",
                 user_message=message,
+                request_text=None if inbound.unprompted else inbound.text,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,

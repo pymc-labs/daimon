@@ -142,11 +142,8 @@ def capability_policy(
 def unattended_entry_point(origin: TurnContext) -> UnattendedEntryPoint:
     """The entry point of a prepared turn nobody attends, by its origin.
 
-    A fleet worker and a routine are their own; every other prepared
-    unattended turn is a timer or a finished worker waking its thread.
+    A routine is its own; every other prepared unattended turn is a wake.
     """
-    if origin == "worker":
-        return "fleet_worker"
     if origin == "routine":
         return "routine"
     return "wake"

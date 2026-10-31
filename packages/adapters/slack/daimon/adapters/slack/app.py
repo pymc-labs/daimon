@@ -267,7 +267,7 @@ from daimon.core.stores.turn_card_intents import (
 )
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn import turn_deadline
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit
+from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
 from daimon.core.turn.errors import (
     SessionAgentMismatch,
     SessionBusyError,
@@ -3008,6 +3008,7 @@ class SlackApp:
                 return (
                     render_turn_origin(
                         recovery_origin,
+                        **backend_facts(admission),
                         responder_handle=responder_handle(self.runtime.settings),
                         responder_account=account,
                         session_state=session_state,
@@ -3114,6 +3115,8 @@ class SlackApp:
                     role=Role.ADMIN if admission.is_platform_admin else Role.USER,
                     sender_foreign=admission.hold is not None and admission.hold.client,
                     shared_channel=admission.shared_channel,
+                    platform_channel_id=channel,
+                    platform_message_id=str(event.get("ts") or "") or None,
                 ) as origin:
                     outcome = await run_prepared_turn(
                         self.runtime.turn_deps,
@@ -3125,6 +3128,7 @@ class SlackApp:
                         user_message=(
                             render_turn_origin(
                                 origin,
+                                **backend_facts(admission),
                                 responder_handle=responder_handle(self.runtime.settings),
                                 responder_account=account,
                                 session_state=session_state,
@@ -3133,6 +3137,7 @@ class SlackApp:
                             + "\n"
                             + user_message
                         ),
+                        request_text=user_text,
                         lifecycle=lifecycle,
                         cancel=cancel_event,
                         reseed_user_message=_reseed_user_message,
@@ -3575,6 +3580,7 @@ class SlackApp:
             return (
                 render_turn_origin(
                     recovery_origin,
+                    **backend_facts(follow_admission),
                     responder_handle=responder_handle(self.runtime.settings),
                     responder_account=account,
                     handoff=handoff_notice,
@@ -3653,6 +3659,7 @@ class SlackApp:
                 sender_foreign=follow_admission.hold is not None and follow_admission.hold.client,
                 shared_channel=follow_admission.shared_channel,
                 is_setup=follow_admission.config.thread_binding_kind == "setup",
+                platform_channel_id=channel,
             ) as follow_origin:
                 await run_prepared_turn(
                     self.runtime.turn_deps,
@@ -3667,6 +3674,7 @@ class SlackApp:
                     user_message=(
                         render_turn_origin(
                             follow_origin,
+                            **backend_facts(follow_admission),
                             responder_handle=responder_handle(self.runtime.settings),
                             responder_account=account,
                             handoff=handoff_notice,

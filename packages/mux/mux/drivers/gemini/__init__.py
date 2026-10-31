@@ -42,7 +42,7 @@ from mux.drivers.gemini.skill_deployment import (
     SkillBundlePublisher,
     verify_retained_deployments,
 )
-from mux.drivers.gemini.storage import Records, Storage
+from mux.drivers.gemini.storage import Records, Storage, read_records
 from mux.drivers.gemini.transport import NO_TOOLS_FUNCTION, NO_TOOLS_TOOL, SDKTransport, Transport
 from mux.errors import UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
@@ -54,16 +54,18 @@ class GeminiUsage(Base):
         return await self.retrying(lambda: self._reconcile(scope, session))
 
     async def _reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
+        # Provider reads first, holding no lock; then a short write to apply them.
+        fetched = await self._fetch_interactions(scope, session)
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
-            for interaction, root in record.interactions.items():
-                self._observe(record, await self._get(record, interaction), root)
+            self._apply_fetched(record, fetched)
             return tuple(record.observation_history.values())
 
     async def list(
         self, scope: Scope, session: ResourceRef, *, page: PageRequest
     ) -> Page[UsageObservation]:
-        async with self._storage.transaction() as records:
+        # A committed snapshot: listing usage never waits behind the account's writers.
+        async with read_records(self._storage) as records:
             record = self._record(records, scope, session)
             return page_values(tuple(record.observation_history.values()), page)
 
@@ -90,16 +92,11 @@ class GeminiManagedAgents:
         resource_catalog_enabled: bool = False,
         resource_catalog_transport: AgentCatalogTransport | None = None,
         native_agent: Agent | None = None,
-        max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
-        max_input_tokens: int | None = None,
     ) -> None:
         if type(resource_catalog_enabled) is not bool:
             raise ValueError("resource catalog capability must be an explicit bool")
-        if max_output_tokens is not None and (
-            ((native_agent is not None or resource_catalog_enabled) and max_input_tokens is None)
-            or max_total_tokens is not None
-        ):
+        if max_output_tokens is not None and (native_agent is not None or resource_catalog_enabled):
             raise UnsupportedCapability(("model_interaction_resources",), PROFILE.profile_id)
         self.catalog_adapter: GeminiCatalogAdapter | None = None
         if resource_catalog_enabled:
@@ -126,9 +123,7 @@ class GeminiManagedAgents:
             mcp_secrets=mcp_secrets,
             native_agent=native_agent,
             gcs_secrets=gcs_secrets,
-            max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
-            max_input_tokens=max_input_tokens,
         )
         self.events = GeminiEvents(
             transport,
@@ -139,9 +134,7 @@ class GeminiManagedAgents:
             native_agent=native_agent,
             gcs_secrets=gcs_secrets,
             mcp_secrets=mcp_secrets,
-            max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
-            max_input_tokens=max_input_tokens,
         )
         self.usage = GeminiUsage(transport, storage, account_scope_id)
         self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)

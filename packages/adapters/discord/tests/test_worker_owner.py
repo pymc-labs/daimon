@@ -329,6 +329,11 @@ async def test_runtime_owner_leaves_the_turn_pool_capacity_available(
     )
     async with build_runtime(settings) as runtime:
         engine = runtime.sessionmaker.kw["bind"]
+        # The context-provider keep-warm task's first config read borrows a slot briefly.
+        for _ in range(50):
+            if engine.pool.checkedout() == 0:
+                break
+            await asyncio.sleep(0.05)
         assert engine.pool.checkedout() == 0, "the owner connection must not consume a turn slot"
         async with runtime.sessionmaker() as session:
             assert await owner_is_alive(session, runtime.owner_key)

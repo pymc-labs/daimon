@@ -187,7 +187,7 @@ async def _set_setup_target_impl(
                 "conversation is opened with the Set up agents button in the "
                 "setup panel. Nothing was changed."
             )
-        if binding.kind == "handoff":
+        if binding.kind in ("handoff", "owner"):
             raise ToolError(
                 f"This is a handoff conversation: {binding.responder_name} answers here "
                 "because this task was handed to it, so there is no setup target to "

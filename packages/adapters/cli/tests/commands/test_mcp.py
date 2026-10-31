@@ -662,3 +662,24 @@ def test_mcp_sweep_credentials_via_runner_dry_run(
     assert mutating_calls == [], (
         f"dry_run (no --apply) must not issue any writes; got: {mutating_calls}"
     )
+
+
+def test_identity_keygen_prints_a_key_its_public_half_matches(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.cli.commands import mcp as mcp_cmd
+    from daimon.core.config import McpIdentitySettings
+
+    made = runner.invoke(main_mod.app, ["mcp", "identity-keygen"])
+    assert made.exit_code == 0, made.stdout
+    secret_line, jwk_line = made.stdout.splitlines()[:2]
+    seed = secret_line.removeprefix("DAIMON_MCP_IDENTITY__SIGNING_KEY=")
+    settings = _build_settings().model_copy(
+        update={"mcp_identity": McpIdentitySettings(signing_key=SecretStr(seed))}
+    )
+    monkeypatch.setattr(mcp_cmd, "load_settings", lambda: settings)
+    shown = runner.invoke(main_mod.app, ["mcp", "identity-public-key"])
+    assert shown.exit_code == 0, shown.stdout
+    assert shown.stdout.splitlines()[0] == jwk_line, "the stored key's public half matches"
+    assert seed not in shown.stdout, "the public key command never prints the private key"

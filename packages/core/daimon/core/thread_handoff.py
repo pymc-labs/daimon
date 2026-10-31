@@ -47,7 +47,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import anthropic as anthropic_pkg
 import structlog
@@ -56,6 +56,7 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import (
     Action,
+    AgentReach,
     AgentRef,
     Place,
     SessionFacts,
@@ -67,6 +68,7 @@ from daimon.core.authz import (
 )
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.continuity.handoff import (
+    HandoffAllowed,
     HandoffRefused,
     HandoffRefusedInSetupThread,
     decide_handoff,
@@ -91,8 +93,14 @@ from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
 from daimon.core.stores.thread_agent_bindings import lock_binding, upsert_responder_binding
-from daimon.core.stores.thread_sessions import list_live_thread_sessions, record_session_seals
+from daimon.core.stores.thread_sessions import (
+    list_live_thread_sessions,
+    record_session_seals,
+    thread_session_accounts,
+)
+from daimon.core.stores.turn_origins import thread_requester_accounts
 from daimon.core.turn.invocation import human_invocation
+from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -136,6 +144,12 @@ class HandoffCaller:
     admin: AdminCaller
     via_agent_key: bool = False
     human_invocation: bool = False
+    # A person's own unheld credential (not a client): their own agents count. Only a
+    # caller that checked this sets it; the ownership itself is read here, never passed.
+    may_own: bool = False
+    # Who the caller is, for `authorize` itself (not only this opt-in).
+    client: bool = False
+    hold: TurnHold | None = None
 
 
 log = structlog.get_logger(__name__)
@@ -279,7 +293,27 @@ async def _subject(
         is_admin=live.is_admin,
         platform_user_id=who.platform_user_id,
         via_agent_key=caller.via_agent_key,
+        client=caller.client,
     )
+
+
+async def _others_in_thread(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    account_id: uuid.UUID | None,
+    now: datetime,
+) -> bool:
+    """Anyone but `account_id` spoke in the thread: a session, live or closed, or a
+    recent turn (one with no session yet, like a turn still starting)."""
+    people = await thread_session_accounts(
+        session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+    ) | await thread_requester_accounts(
+        session, tenant_id=tenant_id, platform=platform, thread_id=thread_id, now=now
+    )
+    return any(person != account_id for person in people)
 
 
 async def hand_over_thread(
@@ -351,6 +385,19 @@ async def hand_over_thread(
             action=DelegatedAction.ROUTING,
         )
         subject = replace(subject, via_agent_key=caller.via_agent_key)
+    owned = False
+    if caller.may_own and caller.account_id is not None and not caller.via_agent_key:
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.stores import agent_owners
+
+        # FOR SHARE: a revoke of the ownership waits for this binding, never races it.
+        owned = await agent_owners.is_owner(
+            session,
+            tenant_id,
+            derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=destination.ma_agent_id),
+            caller.account_id,
+            lock=True,
+        )
     reachable = await is_agent_reachable_in_tenant(
         session, tenant_id=tenant_id, agent_name=destination.name, default=default
     )
@@ -361,30 +408,54 @@ async def hand_over_thread(
         default=default,
     )
     answers_here = channel_config.agent_name == destination.name
-    access = authorize(
-        policy,
-        subject=subject,
-        action=Action.HAND_OFF,
-        surface=Surface.HANDOFF,
-        agent=destination.agent,
-        # A DM scope runs in no channel, so it is outside every pin.
-        place=Place.from_origin(parent_channel_id=parent_channel_id, thread_id=thread_id),
-        answers_here=answers_here,
-        recorded_seal_ids=snapshot_seals
-        | frozenset(seal for item in recorded for seal in item.facts.seal_ids),
-    )
-    decision = decide_handoff(
-        destination_ma_agent_id=destination.ma_agent_id,
-        destination_name=destination.name,
-        destination_reachable=reachable,
-        existing_binding_kind=binding.kind if binding is not None else None,
-        origin_responder_ma_agent_id=(
-            current_responder_ma_agent_id
-            or (binding.responder_ma_agent_id if binding is not None else None)
-        ),
-        access=access,
-        caller_is_admin=caller.admin.is_server_admin and not caller.via_agent_key,
-    )
+
+    def decide(as_owner: bool) -> HandoffAllowed | HandoffRefused:
+        access = authorize(
+            policy,
+            subject=subject,
+            action=Action.HAND_OFF,
+            surface=Surface.HANDOFF,
+            agent=destination.agent,
+            # A DM scope runs in no channel, so it is outside every pin.
+            place=Place.from_origin(parent_channel_id=parent_channel_id, thread_id=thread_id),
+            answers_here=answers_here,
+            reach=AgentReach(owned=as_owner),
+            recorded_seal_ids=snapshot_seals
+            | frozenset(seal for item in recorded for seal in item.facts.seal_ids),
+            hold=caller.hold,
+        )
+        return decide_handoff(
+            destination_ma_agent_id=destination.ma_agent_id,
+            destination_name=destination.name,
+            destination_reachable=reachable,
+            existing_binding_kind=binding.kind if binding is not None else None,
+            origin_responder_ma_agent_id=(
+                current_responder_ma_agent_id
+                or (binding.responder_ma_agent_id if binding is not None else None)
+            ),
+            access=access,
+            caller_is_admin=caller.admin.is_server_admin and not caller.via_agent_key,
+            caller_owns=as_owner,
+        )
+
+    # The ordinary rules first; ownership only widens what they refuse.
+    kind: Literal["handoff", "owner"] = "handoff"
+    decision = decide(False)
+    if isinstance(decision, HandoffRefused) and owned:
+        if await _others_in_thread(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            account_id=caller.account_id,
+            now=now,
+        ):
+            # The binding moves the whole thread: never someone else's turns onto a
+            # private copy its owner controls.
+            raise ThreadHandoffRefused(
+                HandoffRefused(reason="shared_thread", destination_name=destination.name)
+            )
+        decision, kind = decide(True), "owner"
     if isinstance(decision, HandoffRefused):
         raise ThreadHandoffRefused(decision)
     return await upsert_responder_binding(
@@ -397,6 +468,7 @@ async def hand_over_thread(
         responder_name=destination.name,
         created_by_account_id=caller.account_id,
         now=now,
+        kind=kind,
     )
 
 
@@ -443,6 +515,10 @@ def render_handoff_refused(refusal: HandoffRefused, *, channel: str) -> str:
         "own_agents_only": f"{channel} only runs its own agents, and {name} isn't one of them.",
         "unreachable": f"{name} doesn't answer anywhere here any more.",
         "same_agent": f"{name} already answers in this conversation.",
+        "shared_thread": (
+            "Other people are in this thread, so I can't move it to your private copy. "
+            "Start a new thread with me and ask again."
+        ),
         "admin_required": (
             f"{name} isn't an agent of {channel}. An admin can hand this conversation to it."
         ),

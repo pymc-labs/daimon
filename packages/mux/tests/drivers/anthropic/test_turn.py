@@ -629,27 +629,6 @@ def test_host_root_identity_still_wins_over_native_records():
     assert _fold(events).state == "idle"
 
 
-def test_budget_reached_ends_root_and_allows_the_next_fleet_wake():
-    normalizer = EventNormalizer(SESSION)
-    running = normalizer.normalize(native("session.status_running", "root"), observed_at=NOW)
-    stopped = normalizer.normalize(
-        native("session.status_idle", "budget-stop", stop_reason={"type": "budget_reached"}),
-        observed_at=NOW,
-    )
-    assert stopped.type == "session.turn_ended"
-    assert stopped.turn_id == "root"
-    assert stopped.payload == {
-        "root_turn_id": "root",
-        "outcome": "completed",
-        "native_reason": "budget_reached",
-    }
-    projection = _fold([running, stopped])
-    assert projection.state == "idle" and projection.active_root_turn is None
-    wake = normalizer.normalize(native("session.status_running", "wake"), observed_at=NOW)
-    assert wake.turn_id == "wake"
-    assert _fold([running, stopped, wake]).active_root_turn == "wake"
-
-
 def test_retries_exhausted_records_an_errored_turn_with_native_reason():
     # FOLLOWUPS: M0's host preserves COMPLETED for an answer with no settled
     # error, even though this neutral stop record correctly says errored.

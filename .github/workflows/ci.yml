@@ -238,7 +238,7 @@ jobs:
           if-no-files-found: ignore
 
   # Exercise the staging switches together, and the default/off path, through
-  # real turn, native agent, and fleet entry points. This blocks staging even
+  # real turn and native agent entry points. This blocks staging even
   # while the broader mux ratchet above still has known failures.
   pytest-staging-config:
     name: pytest-staging-config (${{ matrix.configuration }})
@@ -248,8 +248,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { configuration: enabled, path: mux, channel_backends: "true", agent_backends: "true", fleet_enabled: "true" }
-          - { configuration: legacy-off, path: legacy, channel_backends: "false", agent_backends: "false", fleet_enabled: "false" }
+          - { configuration: enabled, path: mux, channel_backends: "true", agent_backends: "true" }
+          - { configuration: mux-only, path: mux, channel_backends: "false", agent_backends: "false" }
+          - { configuration: legacy-off, path: legacy, channel_backends: "false", agent_backends: "false" }
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -270,7 +271,6 @@ jobs:
       DAIMON_TURN__PATH: ${{ matrix.path }}
       DAIMON_TURN__CHANNEL_BACKENDS: ${{ matrix.channel_backends }}
       DAIMON_TURN__AGENT_BACKENDS: ${{ matrix.agent_backends }}
-      DAIMON_FLEET__ENABLED: ${{ matrix.fleet_enabled }}
       DAIMON_CI_CONFIGURATION: ${{ matrix.configuration }}
       TMPDIR: /dev/shm
     steps:
@@ -678,6 +678,7 @@ jobs:
           file: Dockerfile
           tags: ${{ steps.tags.outputs.daimon }}
           push: true
+          build-args: DAIMON_RELEASE=${{ github.sha }}
           provenance: false
           sbom: false
           cache-from: type=gha,scope=daimon

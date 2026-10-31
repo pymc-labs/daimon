@@ -390,6 +390,63 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
     assert len(session_bodies) == 0, "no create_session call on the happy path"
 
 
+async def test_every_log_line_of_a_turn_names_its_backend(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-1",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = _deps(sessionmaker=db_session_factory, router=router)
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    env = ma_environment(id="env_1", tenant_id=tenant.id)
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(account_id=account.id, agent=agent, env=env),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    with structlog.testing.capture_logs(
+        processors=[structlog.contextvars.merge_contextvars]
+    ) as logs:
+        await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
+
+    turn_lines = [entry for entry in logs if entry["event"] in {"turn.started", "turn.completed"}]
+    assert {entry["event"] for entry in turn_lines} == {"turn.started", "turn.completed"}
+    for entry in turn_lines:
+        assert entry["backend"] == "anthropic"
+        assert entry["profile"] == "anthropic.managed_agents"
+    assert not {"backend", "profile", "model"} & set(structlog.contextvars.get_contextvars()), (
+        "the fields are unbound once the turn returns, so no other turn's lines inherit them"
+    )
+
+
 async def test_reattaching_to_a_session_debits_calls_no_worker_streamed(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1069,22 +1126,29 @@ async def test_recovery_rebinds_the_recorder_to_the_recreated_sessions_model(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-recovery-model",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    with structlog.testing.capture_logs(
+        processors=[structlog.contextvars.merge_contextvars]
+    ) as logs:
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-recovery-model",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+        )
 
     assert outcome.recovered is True, "the dead session must be recovered exactly once"
+    completed = [entry for entry in logs if entry["event"] == "turn.completed"]
+    assert completed and completed[-1]["model"] == "claude-opus-5", (
+        "the replacement session's lines name its own model"
+    )
     async with db_session_factory() as s:
         rows = await usage_events.list_for_tenant(s, tenant_id=tenant.id)
         entries = await tenant_ledger.list_for_tenant(s, tenant_id=tenant.id)
@@ -2312,6 +2376,78 @@ async def test_an_ordinary_turn_sends_exactly_the_user_message(
     )
     assert text == "hello", "an ordinary turn sends the message and nothing else"
     assert outcome.continuity.state == "continued"
+
+
+async def test_a_chat_turn_sends_mcp_context_in_front_of_the_message(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The agent's MCP servers are asked about the person's own words, and what
+    they answer goes in front of the full message the adapter built."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-context",
+        ma_session_id="sess_1",
+    )
+    await db_session.commit()
+
+    asked: list[str] = []
+
+    async def fetch(*, prompt: str, **_: object) -> str:
+        asked.append(prompt)
+        return "<mcp_context>Acme renewed in May.</mcp_context>\n\n"
+
+    sent: list[tuple[str, list[dict[str, object]]]] = []
+    router = _router(session_bodies=[], dead_session_ids=set(), sent_batches=sent)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router), turn_context=fetch
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_1",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-context",
+        external_user_id="user-1",
+        user_message="<turn_controls>{}</turn_controls>\nwhat about acme?",
+        request_text="what about acme?",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+    )
+
+    assert asked == ["what about acme?"], "only the person's words are sent to the servers"
+    _, batch = sent[0]
+    text = "".join(
+        block["text"]
+        for block in batch[0]["content"]  # pyright: ignore[reportUnknownVariableType]
+        if block["type"] == "text"
+    )
+    assert text == (
+        "<mcp_context>Acme renewed in May.</mcp_context>\n\n\n"
+        "<turn_controls>{}</turn_controls>\nwhat about acme?"
+    ), "the answer leads the message the adapter built"
 
 
 async def test_recovery_reports_a_replacement_after_loss_and_keeps_the_framing_prefix(
@@ -3982,7 +4118,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         assert len(confirmations) == failed_batch - 1
 
 
-@pytest.mark.parametrize("origin", ["chat", "worker"], ids=["wake", "fleet_worker"])
+@pytest.mark.parametrize("origin", ["chat"], ids=["wake"])
 @pytest.mark.parametrize("snapshot_kind", ["always_allow", "coordinator"])
 async def test_prepared_runtime_without_session_reads_refuses_before_the_message(
     origin: Any,
@@ -4101,7 +4237,6 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
         ("chat", True, True),
         ("chat", True, False),
         ("chat", False, True),
-        ("worker", True, False),
         ("github_access_ready", True, True),
         ("private_input_applied", True, True),
     ],
@@ -4242,14 +4377,12 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
         async def before_send() -> None:
             bound = await read_origin()
             assert bound is not None
-            assert bound.chat_session_id == (None if kind == "worker" else grant)
-            assert bound.attended is (
-                origin_attended if kind == "worker" else origin_attended and caller_attended
-            )
+            assert bound.chat_session_id == grant
+            assert bound.attended is (origin_attended and caller_attended)
             if kind in ("github_access_ready", "private_input_applied"):
                 assert bound.attended is True
                 assert bound.human_invocation is False
-            assert current_execution_origin_id.get() == (None if kind == "worker" else origin.id)
+            assert current_execution_origin_id.get() == origin.id
             async with db_session_factory() as db:
                 previous = await get_active_origin(
                     db,
@@ -4260,7 +4393,7 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
                     now=datetime.now(UTC),
                 )
             assert previous is not None
-            assert previous.chat_session_id == (grant if kind == "worker" else None)
+            assert previous.chat_session_id is None
             seen.append(bound.id)
             if cancel_during_cleanup:
                 entered.set()
@@ -4280,7 +4413,7 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
             recovery_lifecycle=_recovery_lifecycle,
             attended=caller_attended,
             # Continuation reasons decide the grant; their rendering context stays chat.
-            origin="worker" if kind == "worker" else "chat",
+            origin="chat",
             render_interval_s=0.001,
             before_send=before_send,
         )
@@ -4290,9 +4423,8 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
                 async with asyncio.timeout(5):
                     await entered.wait()
                     task.cancel()
-                    if kind != "worker":
-                        await cleaning.wait()
-                        task.cancel()
+                    await cleaning.wait()
+                    task.cancel()
                     finish.set()
                     with pytest.raises(asyncio.CancelledError):
                         await task
@@ -4310,7 +4442,7 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
     assert seen == [origin.id]
 
 
-@pytest.mark.parametrize(("origin", "entry_point"), [("chat", "wake"), ("worker", "fleet_worker")])
+@pytest.mark.parametrize(("origin", "entry_point"), [("chat", "wake")])
 @pytest.mark.parametrize("unconstrainable", ["with_coordinator", "with_hidden_capability"])
 async def test_unattended_prepared_turn_refuses_a_coordinator_and_builtins(
     origin: Any,
@@ -4320,7 +4452,7 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_builtins(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Wakes and fleet workers gate through their own entry point's capability policy.
+    """Wakes gate through their own entry point's capability policy.
 
     The gate the driver runs before the message refuses a coordinator session
     before any update; the decider always refuses built-in calls.
@@ -4422,7 +4554,7 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_builtins(
     assert bash.allow is False
 
 
-@pytest.mark.parametrize("origin", ["chat", "worker"], ids=["wake", "fleet_worker"])
+@pytest.mark.parametrize("origin", ["chat"], ids=["wake"])
 @pytest.mark.parametrize(
     ("server", "enabled"),
     [("linear", False), ("daimon-mcp", True), ("daimon-mcp", False)],
@@ -4436,7 +4568,7 @@ async def test_unattended_prepared_turn_makes_every_mcp_call_pause(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Wakes and fleet workers: trusted Daimon tools, and foreign ones with
+    """Wakes: trusted Daimon tools, and foreign ones with
     safety off, pause before running; the decider allows them as before."""
     from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
     from daimon.core.turn import mutation_gate

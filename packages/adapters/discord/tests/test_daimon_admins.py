@@ -293,9 +293,13 @@ async def test_explicit_action_admits_delegate_without_promoting_account(
 async def test_delegate_github_connect_button_refuses_at_adapter(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A delegate who does not own the agent is refused like any member: no link."""
     import uuid
+    from types import SimpleNamespace
 
+    from daimon.adapters.discord import github_connect_button as button_module
     from daimon.adapters.discord.github_connect_button import GitHubConnectButton
 
     tenant = await make_tenant(db_session, workspace_id=str(GUILD))
@@ -311,11 +315,23 @@ async def test_delegate_github_connect_button_refuses_at_adapter(
     await db_session.commit()
     click = interaction(db_session_factory)
     assert await is_guild_admin(click, action=DelegatedAction.AGENT_SETTINGS)
+    monkeypatch.setattr(
+        button_module, "connect_intent_agent", AsyncMock(return_value=("helper", "ag_helper"))
+    )
+    monkeypatch.setattr(
+        button_module,
+        "find_agent_by_derived_uuid",
+        AsyncMock(return_value=SimpleNamespace(name="helper", metadata={})),
+    )
+    bind = AsyncMock()
+    monkeypatch.setattr(button_module, "bind_discord_connect_click", bind)
+    click.response.defer = AsyncMock()
+    click.guild.fetch_member = AsyncMock(return_value=click.user)
     button = GitHubConnectButton(requester_id=str(USER), intent_id=uuid.uuid4())
     await button._reveal(click)
-    click.response.send_message.assert_awaited_once()
-    assert "platform admin" in click.response.send_message.call_args.args[0]
-    click.response.defer.assert_not_called()
+    bind.assert_not_awaited()
+    assert click.followup.send.await_args.args == ("Ask whoever manages helper to add repos.",)
+    assert "view" not in click.followup.send.await_args.kwargs
 
 
 async def test_delegate_cannot_open_operator_token_panel(

@@ -7,14 +7,12 @@ these models before returning (`Row.model_validate(orm, from_attributes=True)`).
 from __future__ import annotations
 
 import enum
-import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-import structlog
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope
@@ -27,15 +25,7 @@ from mux.contracts.resources import (
     ResourceBinding,
     WorkspaceSource,
 )
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    JsonValue,
-    TypeAdapter,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, field_validator
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -60,7 +50,6 @@ ContinuationReason = Literal[
     "private_input_applied",
     "timer",
     "github_access_ready",
-    "worker_finished",
     "watch_fired",
     "job_finished",
     "watch_report",
@@ -645,6 +634,15 @@ class PendingPaymentClawbackRow(BaseModel):
     received_at: datetime
 
 
+LedgerEstimate = Literal["cache_writes_unreported"]
+"""How a debit priced from incomplete provider counts was reached (`tenant_ledger.estimate`).
+
+`cache_writes_unreported`: the tariff bills cache writes but the meter has no
+write count (OpenAI Agents API turns), so the turn is priced as writing none.
+Column is Text + CHECK; keep this literal closed with it.
+"""
+
+
 class TenantLedgerRow(BaseModel):
     """Append-only ledger row. Balance = SUM(delta_usd). TOPUP-01."""
 
@@ -659,6 +657,7 @@ class TenantLedgerRow(BaseModel):
     payment_intent: str | None
     occurred_at: datetime
     channel_id: str | None = None
+    estimate: LedgerEstimate | None = None
 
 
 # `credit` codes add credit that never expires; `timed` codes add credit that
@@ -1062,6 +1061,10 @@ class WizardSessionRow(BaseModel):
 McpTokenKind = Literal["agent", "operator", "cli"]
 #: What a registered credential runs on, when not an ordinary chat/CLI/operator token.
 McpTokenSurface = Literal["provider_turn"]
+#: What an agent-kind credential was made for: a key a person made from an agent's
+#: "coding tools" button, a published report's seam token, or a short-lived internal
+#: credential (an in-session chat credential, a provider turn's).
+McpTokenPurpose = Literal["coding", "report", "internal"]
 """An agent-scoped key, a scoped operator token, or a CLI token."""
 
 
@@ -1092,6 +1095,8 @@ class McpTokenRow(BaseModel):
     channel_id: str | None = None
     # `provider_turn`: minted for an OpenAI/Gemini turn, which has no confirmation card.
     surface: McpTokenSurface | None = None
+    # What the credential was made for (see `McpToken.purpose`); None for operator and CLI tokens.
+    purpose: McpTokenPurpose | None = None
 
 
 class FileUploadRow(BaseModel):
@@ -1152,7 +1157,7 @@ class ThreadAgentBindingRow(BaseModel):
     platform: str
     parent_channel_id: str
     thread_id: str
-    kind: Literal["setup", "handoff"] = "setup"
+    kind: Literal["setup", "handoff", "owner"] = "setup"
     responder_ma_agent_id: str
     responder_name: str
     configuration_target_ma_agent_id: str | None
@@ -1188,6 +1193,8 @@ class TurnOriginRow(BaseModel):
     expires_at: datetime
     sender_foreign: bool = False
     shared_channel: bool = False
+    platform_channel_id: str | None = None
+    platform_message_id: str | None = None
 
 
 class _Facts(BaseModel):
@@ -1276,11 +1283,6 @@ class _BackendConsentFacts(_Facts):
         return self.drop_consent.declared_drops if self.drop_consent is not None else ()
 
 
-#: Stored in `fleet_grant` when an owner or admin turned fleet off. Without it a
-#: revision with no grant reads as the deployment's default fleet (on).
-FLEET_OFF: dict[str, JsonValue] = {"disabled": True}
-
-
 class AgentBackendRevision(_BackendConsentFacts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
@@ -1296,34 +1298,6 @@ class AgentBackendRevision(_BackendConsentFacts):
     digest: str
     previous_local: int | None
     created_at: datetime
-    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
-    fleet_grant_invalid: bool = Field(default=False, exclude=True, repr=False)
-
-    @model_validator(mode="after")
-    def _read_fleet_grant(self) -> AgentBackendRevision:
-        if self.fleet_grant is None or self.fleet_off:
-            return self
-        from daimon.core.neutral_resources import AgentFleetGrant
-
-        try:
-            grant = AgentFleetGrant.model_validate_json(json.dumps(self.fleet_grant))
-            if not 0 < grant.epoch <= self.local:
-                raise ValueError("invalid grant epoch")
-        except ValueError:
-            object.__setattr__(self, "fleet_grant", None)
-            object.__setattr__(self, "fleet_grant_invalid", True)
-            structlog.get_logger(__name__).warning(
-                "fleet.grant_invalid",
-                tenant_id=self.tenant_id,
-                agent_id=self.agent_id,
-                revision=self.local,
-            )
-        return self
-
-    @property
-    def fleet_off(self) -> bool:
-        """Fleet was turned off explicitly; the default never applies to it."""
-        return self.fleet_grant == FLEET_OFF
 
 
 class CompatibilityPreview(_BackendConsentFacts):
@@ -1345,7 +1319,6 @@ class CompatibilityPreview(_BackendConsentFacts):
     target_settings: dict[str, JsonValue] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class WatchRow(BaseModel):

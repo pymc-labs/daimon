@@ -44,9 +44,10 @@ from daimon.core.authz import (
 )
 from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
+from daimon.core.mcp_identity import RELAY_CLAIM, RelayBinding
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
-from daimon.core.stores.domain import McpTokenRow, McpTokenSurface
+from daimon.core.stores.domain import McpTokenPurpose, McpTokenRow, McpTokenSurface
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -201,6 +202,7 @@ def mint_jwt(
     execution_id: uuid.UUID | None = None,
     chat_session_id: str | None = None,
     hold: TurnHold | None = None,
+    relay: RelayBinding | None = None,
     anthropic_disabled: bool = False,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
@@ -225,6 +227,8 @@ def mint_jwt(
       DM session credentials. Readers require the matching live tenant/account row.
     - ``hold`` signs the channel a held turn is kept to (`daimon.core.mcp_hold`).
       The MCP server honours it only when the registry row names the same channel.
+    - ``relay`` binds a signed-identity relay credential to its session
+      (`daimon.core.mcp_identity.RelayBinding`); only the relay reads it.
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
       Omitted when ``False`` to keep non-admin tokens minimal. Note: the MCP
       admin gate only trusts ``is_admin`` when the token also carries ``internal=True``
@@ -232,7 +236,7 @@ def mint_jwt(
       Discord vault token's baked
       ``is_admin`` claim alone never elevates a non-admin caller.
     """
-    claims: dict[str, str | int | bool | dict[str, str | bool]] = {
+    claims: dict[str, str | int | bool | dict[str, str | bool] | dict[str, str]] = {
         "sub": str(account_id),
         "iat": int(now.timestamp()),
     }
@@ -257,6 +261,8 @@ def mint_jwt(
 
     if hold is not None:
         claims[HOLD_CLAIM] = hold_claim(hold)
+    if relay is not None:
+        claims[RELAY_CLAIM] = relay.claim()
     if anthropic_disabled:
         claims["anthropic_disabled"] = True
     if is_admin:
@@ -301,6 +307,7 @@ async def mint_chat_mcp_token(
     chat_session_id: str | None = None,
     routine_execution: tuple[uuid.UUID, uuid.UUID] | None = None,
     hold: TurnHold | None = None,
+    relay: RelayBinding | None = None,
     ttl: dt.timedelta = CHAT_TOKEN_TTL,
     anthropic_disabled: bool = False,
 ) -> tuple[str, uuid.UUID, dt.datetime]:
@@ -336,6 +343,7 @@ async def mint_chat_mcp_token(
         tenant_id=identity.tenant_id,
         agent_id=str(agent_id),
         label=chat_token_label(jti, held=hold is not None),
+        purpose="internal",
         created_at=now,
         expires_at=expires_at,
         platform=None if hold is None else hold.platform,
@@ -353,6 +361,7 @@ async def mint_chat_mcp_token(
         slack_turn_context_id=slack_turn_context_id,
         chat_session_id=chat_session_id,
         hold=hold,
+        relay=relay,
         jti=jti,
         expires_at=expires_at,
     )
@@ -373,6 +382,7 @@ async def mint_agent_mcp_token(
     channel_id: str | None = None,
     chat_execution: bool = False,
     surface: McpTokenSurface | None = None,
+    purpose: McpTokenPurpose | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -401,6 +411,12 @@ async def mint_agent_mcp_token(
     OpenAI or Gemini turn, which has no confirmation card: the server refuses
     every confirmation-gated or publishing tool for it. Registry-only, never a
     claim, so the token's exact claim shape is unchanged.
+
+    ``purpose`` says what the key is for (row only, never a claim). A ``coding``
+    key (the default) is held by the verifier to its holder's current role or
+    ownership on every request, and the key list shows it. Other mints say what
+    they are: a ``report`` seam token, or an ``internal`` short-lived credential
+    (a chat-execution or provider-turn credential is always ``internal``).
     """
     # Registered chat execution retains the ordinary chat surface. External
     # agent keys keep their existing restricted agent-chat surface. The signed
@@ -411,6 +427,11 @@ async def mint_agent_mcp_token(
         raise ValueError("registered chat execution requires a TTL of at most 900 seconds")
     if surface is not None and not chat_execution:
         raise ValueError("a provider-turn surface is a chat-execution credential")
+    internal = chat_execution or surface is not None
+    if purpose is None:
+        purpose = "internal" if internal else "coding"
+    if internal and purpose != "internal":
+        raise ValueError("a chat-execution or provider-turn credential is internal")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
     jti = uuid.uuid4()
     expires_at = now + dt.timedelta(days=ttl_days)
@@ -426,6 +447,7 @@ async def mint_agent_mcp_token(
         platform=platform,
         channel_id=channel_id,
         surface=surface,
+        purpose=purpose,
     )
     return pyjwt.encode(
         {
@@ -707,13 +729,33 @@ def coding_token_channel(
     return None
 
 
+#: How long a coding key lasts: an admin's keep the 90 days they always had, an
+#: owner's last 30 (the owner's standing is re-read on every request, but a
+#: shorter key bounds a forgotten one).
+ADMIN_CODING_KEY_TTL_DAYS = 90
+OWNER_CODING_KEY_TTL_DAYS = 30
+
+
+def coding_key_ttl_days(subject: Subject) -> int:
+    """Days a coding key made by `subject` lasts: admins 90, owners 30."""
+    return ADMIN_CODING_KEY_TTL_DAYS if subject.is_admin else OWNER_CODING_KEY_TTL_DAYS
+
+
 def authorize_coding_token(
-    policy: TenantAccessPolicy, *, subject: Subject, agent: AgentRef, channel_id: str | None
+    policy: TenantAccessPolicy,
+    *,
+    subject: Subject,
+    agent: AgentRef,
+    channel_id: str | None,
+    owned_by_caller: bool = False,
 ) -> tuple[Decision, str | None]:
     """Whether `subject` may mint a coding-tool token pressed in `channel_id`, and its binding.
 
     The binding is `coding_token_channel`'s; `authorize(MINT_CODING_TOKEN)`
-    then decides the mint at that place. A server admin may mint the token.
+    then decides the mint at that place. A server admin may mint the token, and
+    so may the agent's owner for that agent: ``owned_by_caller`` is the live
+    ownership fact the caller read (`daimon.core.agent_ownership.owns_agent`),
+    never a claim from the panel's open-time snapshot.
     """
     bound_channel_id = coding_token_channel(policy, agent=agent, channel_id=channel_id)
     decision = authorize(
@@ -725,6 +767,7 @@ def authorize_coding_token(
         place=Place()
         if bound_channel_id is None
         else build_turn_place(channel_id=bound_channel_id, thread_id=None),
+        owned_by_caller=owned_by_caller,
     )
     return decision, bound_channel_id
 

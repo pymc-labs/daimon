@@ -202,7 +202,6 @@ async def test_partial_create_restart_warning_delete_retry_and_orphans(db_engine
             tenant_id=owner.tenant_id,
             platform="discord",
             thread_id="thread",
-            include_future=True,
         )
     assert len(wakes) == 1
     assert str(session.id) in wakes[0].requested_work
@@ -446,7 +445,6 @@ async def wakes_for(sm, owner):
             tenant_id=owner.tenant_id,
             platform="discord",
             thread_id="thread",
-            include_future=True,
         )
 
 

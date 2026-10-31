@@ -19,6 +19,7 @@ from daimon.core.pricing import (
     provider_cost_of,
     provider_usage_tokens,
     uncached_input_tokens,
+    unreported_cache_writes,
     usage_tokens,
 )
 from daimon.core.stores import accounting_outbox, mux_state, tenant_ledger, usage_events
@@ -193,6 +194,11 @@ async def apply_usage_outbox(
             idempotency_key=key,
             channel_id=channel_id,
             occurred_at=revisions.occurred_at,
+            estimate="cache_writes_unreported"
+            if exact_amount is not None
+            and provider_price is not None
+            and unreported_cache_writes(observation, provider_price)
+            else None,
         )
     return True
 

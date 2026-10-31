@@ -82,6 +82,8 @@ class FullWire(Wire):
         self.posts = []
         self.vault = None
         self.vault_credential = None
+        # Each later turn replaces the session credential's secret in place.
+        self.rotations = []
         config = RECORDED_ENVIRONMENT["config"]
         self.template = {
             "id": "native-template",
@@ -119,6 +121,12 @@ class FullWire(Wire):
         if path == "/vaults/caller-session-vault":
             self.requests.append(request)
             return httpx.Response(200, json=self.vault)
+        if path == "/vaults/caller-session-vault/credentials/caller-mcp-credential":
+            self.requests.append(request)
+            body = json.loads(request.content)
+            self.rotations.append(body)
+            self.vault_credential = {**self.vault_credential, "auth": body["auth"]}
+            return httpx.Response(200, json=self.vault_credential)
         if path == "/vaults/caller-session-vault/credentials":
             self.requests.append(request)
             self.vault_credential = {
@@ -784,9 +792,9 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
     from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
     from daimon.core.stores.domain import AccountRow, Role, TenantRow
     from daimon.core.stores.task_continuations import list_pending_continuations
-    from daimon.core.stores.turn_origins import create_origin, delete_origin, get_active_origin
+    from daimon.core.stores.turn_origins import get_active_origin
     from daimon.core.turn.prepare import ProviderPreparationRequest
-    from daimon.core.turn_origin import execution_origin, turn_origin
+    from daimon.core.turn_origin import turn_origin
     from daimon.testing.asgi import call_mcp_tool
     from daimon.testing.factories import make_platform_principal
     from daimon.testing.ma_models import ma_agent
@@ -851,13 +859,8 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
     from .test_run_prepared_turn import with_invocation
 
     previous_grant = None
-    for index, kind in enumerate(("human", "human", "timer", "worker")):
-        worker = kind == "worker"
-        if worker:
-            wire.session_id = "source-child-session"
-            wire.turns.clear()
-            wire.items.clear()
-        thread_id = "child-thread" if worker else request.thread_id
+    for index, kind in enumerate(("human", "human", "timer")):
+        thread_id = request.thread_id
         admitted = with_invocation(
             request.admission,
             request.tenant_id,
@@ -880,41 +883,17 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             sender_foreign=False,
             shared_channel=False,
         ) as origin:
-            # Simulate an inherited parent execution during child construction.
-            # Construction must install a fresh slot grant, never this origin's.
-            parent = None
-            if worker:
-                async with sessions.begin() as db:
-                    parent = await create_origin(
-                        db,
-                        tenant_id=request.tenant_id,
-                        account_id=account_id,
-                        platform=request.platform,
-                        parent_channel_id="channel",
-                        thread_id=request.thread_id,
-                        responder_ma_agent_id=request.admission.agent.id,
-                        responder_name="test-agent",
-                        configuration_target_ma_agent_id=None,
-                        configuration_target_name=None,
-                        role=Role.USER,
-                        now=datetime.now(UTC),
-                        expires_at=datetime.now(UTC) + timedelta(hours=1),
-                        attended=True,
-                        chat_session_id=previous_grant,
-                        sender_foreign=False,
-                        shared_channel=False,
-                    )
-            with execution_origin(parent.id if parent is not None else None):
-                prepared = await bind_session_impl(
-                    request.deps,
-                    admitted,
-                    tenant_id=request.tenant_id,
-                    platform=request.platform,
-                    external_user_id="caller",
-                    thread_id=thread_id,
-                    session_account_id=account_id,
-                    reuse_existing=index in (1, 2),
-                )
+            # Construction installs the slot grant, never this origin's.
+            prepared = await bind_session_impl(
+                request.deps,
+                admitted,
+                tenant_id=request.tenant_id,
+                platform=request.platform,
+                external_user_id="caller",
+                thread_id=thread_id,
+                session_account_id=account_id,
+                reuse_existing=index in (1, 2),
+            )
             mcp = wire.posts[-1]["agent"]["tools"][0]
             assert "authorization" not in mcp["transport"]
             installed = wire.vault_credential["auth"]["token"]
@@ -923,8 +902,6 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             assert grant == prepared.native_chat_session_id and grant != str(origin.id)
             if index in (1, 2):
                 assert grant == previous_grant and prepared.reused
-            elif worker:
-                assert grant != previous_grant
             previous_grant = grant
 
             async def live_origin():
@@ -957,13 +934,11 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
                     },
                 )
 
-            async def before_send(
-                worker=worker, grant=grant, thread_id=thread_id, index=index, kind=kind
-            ):
+            async def before_send(grant=grant, thread_id=thread_id, index=index, kind=kind):
                 bound = await live_origin()
-                assert bound.chat_session_id == (None if worker else grant)
+                assert bound.chat_session_id == grant
                 result = await handoff()
-                assert bool(result.get("result", result).get("isError", False)) is worker, result
+                assert not result.get("result", result).get("isError", False), result
                 async with sessions() as db:
                     rows = await list_pending_continuations(
                         db,
@@ -971,31 +946,29 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
                         platform=request.platform,
                         thread_id=thread_id,
                     )
-                assert len(rows) == (0 if worker else index + 1), result
-                if rows:
-                    assert rows[-1].attended is (kind == "human")
+                assert len(rows) == index + 1, result
+                assert rows[-1].attended is (kind == "human")
 
             async def no_recovery():
                 pytest.fail("native session must not recover into another backend")
 
             # Main's signed-grant assertions above still run at before_send.
             # Preview's default refuses this source's automatic sandbox tools
-            # before a provider message, including timer and child execution.
+            # before a provider message, including timer execution.
             refused = kind != "human"
             if refused:
                 # Exercise the same signed-grant/handoff assertions independently:
                 # a denied profile never opens its stream or reaches before_send.
                 from daimon.core.stores.turn_origins import bind_origin_session
 
-                if not worker:
-                    async with sessions.begin() as db:
-                        await bind_origin_session(
-                            db,
-                            origin_id=origin.id,
-                            chat_session_id=grant,
-                            attended=False,
-                            human_invocation=False,
-                        )
+                async with sessions.begin() as db:
+                    await bind_origin_session(
+                        db,
+                        origin_id=origin.id,
+                        chat_session_id=grant,
+                        attended=False,
+                        human_invocation=False,
+                    )
                 await before_send()
                 async with sessions.begin() as db:
                     await bind_origin_session(db, origin_id=origin.id, chat_session_id=None)
@@ -1023,7 +996,7 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
                     recovery_lifecycle=lambda _: RecordingLifecycle(),
                     before_send=before_send,
                     attended=kind == "human",
-                    origin="worker" if worker else "chat",
+                    origin="chat",
                     operation_key=f"origin-lifecycle:{index}",
                 )
                 assert outcome.state.error is None, (index, kind, outcome.state.error)
@@ -1037,22 +1010,8 @@ async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(f
             assert "isError" in str(await handoff()), (
                 "an ended execution cannot reuse its installed bearer"
             )
-            if parent is not None:
-                async with sessions.begin() as db:
-                    retained = await get_active_origin(
-                        db,
-                        origin_id=parent.id,
-                        tenant_id=request.tenant_id,
-                        account_id=account_id,
-                        platform=request.platform,
-                        now=datetime.now(UTC),
-                    )
-                    assert retained.attended and retained.chat_session_id == parent.chat_session_id
-                    await delete_origin(db, origin_id=parent.id)
 
-    assert len(wire.posts) == 2, (
-        "human reuse retains one provider session; child gets a separate one"
-    )
+    assert len(wire.posts) == 1, "every turn reuses the one provider session"
     assert (
         jwt.decode(source_token, options={"verify_signature": False}).get("chat_session_id") is None
     )

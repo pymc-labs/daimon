@@ -126,13 +126,18 @@ async def check_confirmation_admin(
     prompt: ConfirmationPrompt,
     clicker: str | None,
     check: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None,
+    answer: ConfirmationAnswer | None = None,
 ) -> str | None:
     """Extra opt-in evidence before the existing single-use settlement.
 
     Requester, expiry and token claiming remain owned by settle_confirmation.
-    Existing prompts skip the callback and perform no additional I/O.
+    Existing prompts skip the callback and perform no additional I/O. A Deny
+    needs no evidence (nothing changes), so the callback only ever sees a
+    Confirm, which it may record (a re-previewed switch card's approval, J5).
     """
     if not prompt.admin or clicker is None or clicker != prompt.requester_platform_user_id:
+        return None
+    if answer is not None and answer != "approved":
         return None
     refusal = "This change needs a current admin."
     if check is None:

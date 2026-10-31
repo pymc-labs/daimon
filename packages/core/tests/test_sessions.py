@@ -4,7 +4,6 @@ import json
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, localcontext
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -28,7 +27,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_CHANNEL,
 )
-from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.errors import UserFacingError
 from daimon.core.github_app_auth import BotIdentity
 from daimon.core.github_app_session import AppSessionAccess, AppToken
 from daimon.core.github_credentials import build_multifernet
@@ -41,11 +40,7 @@ from daimon.core.memory_resource import (
     READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS,
     SHARED_ONLY_MEMORY_INSTRUCTIONS,
 )
-from daimon.core.sessions import (
-    create_isolated_session,
-    create_session,
-    native_session_budget_cents,
-)
+from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
@@ -76,413 +71,6 @@ def empty_app_vault(monkeypatch: pytest.MonkeyPatch) -> None:
         AsyncMock(return_value="vlt_app_test"),
     )
     monkeypatch.setattr("daimon.core.sessions.add_app_credentials", AsyncMock())
-
-
-@pytest.mark.parametrize("budget", [None, Decimal("0.20"), Decimal("0.70")])
-async def test_root_budget_is_compiled_before_allocation_and_read_back(budget):
-
-    tenant, account = uuid.uuid4(), uuid.uuid4()
-    retained, calls = [], []
-    budget_body = (
-        {
-            "type": "limit",
-            "max_list_cost": {"amount": str(int(budget * 100)), "currency": "USD"},
-        }
-        if budget is not None
-        else None
-    )
-    session = _session_body(session_id="sess_root", agent_id="ag_1", environment_id="env_1")
-    session["metadata"] = {"daimon_tenant": str(tenant), "daimon_account": str(account)}
-    if budget_body is not None:
-        session["budget"] = budget_body
-
-    def handle(request):
-        calls.append((request.method, request.url.path))
-        assert request.url.path == "/v1/sessions" or request.url.path == "/v1/sessions/sess_root"
-        if request.method == "POST":
-            body = json.loads(request.content)
-            assert body.get("budget") == budget_body
-        else:
-            assert retained and retained[0]["id"] == "sess_root"
-        return httpx.Response(200, json=session)
-
-    async def guard():
-        pass
-
-    async def allocate(call, wire):
-        assert wire.model_dump(mode="json", exclude_none=True).get("budget") == budget_body
-        acknowledged = await call()
-        retained.append(acknowledged.model_dump(mode="json"))
-        return acknowledged
-
-    async with build_fake_anthropic_http(handle) as client:
-        result = await create_session(
-            client,
-            agent=_make_agent(),
-            environment=_make_env(),
-            tenant_id=tenant,
-            account_id=account,
-            native_budget_usd=budget,
-            before_create=guard,
-            allocation=allocate,
-            tool_safety=OPEN_TOOL_SAFETY,
-        )
-        assert result.id == "sess_root"
-    assert calls == [("POST", "/v1/sessions")] + (
-        [("GET", "/v1/sessions/sess_root")] if budget is not None else []
-    )
-    assert retained and not any(path.endswith("/events") for _, path in calls)
-
-
-@pytest.mark.parametrize("fault", ["ack", "readback", "foreign"])
-async def test_root_budget_mismatch_retains_ack_and_cleans_only_owned_session(fault):
-    from mux.errors import ScopeViolation
-
-    tenant, account = uuid.uuid4(), uuid.uuid4()
-    calls, retained = [], []
-    expected = {"type": "limit", "max_list_cost": {"amount": "20", "currency": "USD"}}
-    session = _session_body(session_id="sess_root", agent_id="ag_1", environment_id="env_1")
-    session.update(
-        metadata={"daimon_tenant": str(tenant), "daimon_account": str(account)}, budget=expected
-    )
-
-    def handle(request):
-        calls.append((request.method, request.url.path))
-        if request.method == "POST" and request.url.path == "/v1/sessions":
-            return httpx.Response(200, json=session | ({"budget": None} if fault == "ack" else {}))
-        if request.method == "GET" and request.url.path == "/v1/sessions/sess_root":
-            assert retained[0]["id"] == "sess_root"
-            return httpx.Response(
-                200,
-                json=session
-                | (
-                    {"metadata": {}}
-                    if fault == "foreign"
-                    else {"budget": None}
-                    if fault == "readback"
-                    else {}
-                ),
-            )
-        assert request.method == "POST" and request.url.path == "/v1/sessions/sess_root/archive"
-        return httpx.Response(200, json=session | {"archived_at": "2026-10-14T00:00:00Z"})
-
-    async def guard():
-        pass
-
-    async def allocate(call, wire):
-        acknowledged = await call()
-        retained.append(acknowledged.model_dump(mode="json"))
-        return acknowledged
-
-    async with build_fake_anthropic_http(handle) as client:
-        with pytest.raises(ScopeViolation):
-            await create_session(
-                client,
-                agent=_make_agent(),
-                environment=_make_env(),
-                tenant_id=tenant,
-                account_id=account,
-                native_budget_usd=Decimal("0.20"),
-                before_create=guard,
-                allocation=allocate,
-                tool_safety=OPEN_TOOL_SAFETY,
-            )
-    assert retained and calls[:2] == [("POST", "/v1/sessions"), ("GET", "/v1/sessions/sess_root")]
-    assert len(calls) == (2 if fault == "foreign" else 3)
-
-
-@pytest.mark.parametrize(
-    ("budgeted", "fault", "archive_count"),
-    [
-        (True, "foreign_session", 0),
-        (True, "foreign_agent", 0),
-        (True, "foreign_environment", 0),
-        (True, "foreign_tenant", 0),
-        (True, "foreign_account", 0),
-        (True, "missing_metadata", 0),
-        (True, "missing_agent", 0),
-        (True, "missing_environment", 0),
-        (True, "ack_budget", 1),
-        (True, "get_budget", 1),
-        (True, "guard", 1),
-        (True, "archive_refused", 1),
-        (True, "cancel", 1),
-        (True, "allocation_unknown", 0),
-        (False, "registration_conflict", 1),
-        (False, "cancel", 1),
-    ],
-)
-async def test_app_cleanup_respects_native_ownership_and_retains_allocation_ack(
-    db_session, db_session_factory, monkeypatch, budgeted, fault, archive_count
-):
-    import asyncio
-
-    from daimon.core import sessions as session_module
-    from mux.errors import ScopeViolation
-    from sqlalchemy.exc import IntegrityError
-
-    class GuardChanged(Exception):
-        pass
-
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    agent_id = uuid.uuid4()
-    if fault == "registration_conflict":
-        db_session.add(
-            GitHubAppSessionVault(
-                session_id="sess_root_app",
-                tenant_id=tenant.id,
-                vault_id="vlt_prior_app",
-                is_unmapped=False,
-                is_mcp=False,
-            )
-        )
-    await db_session.commit()
-    calls, retained = [], []
-    expected_budget = {"type": "limit", "max_list_cost": {"amount": "20", "currency": "USD"}}
-    native = _session_body(session_id="sess_root_app", agent_id="ag_1", environment_id="env_1")
-    native["metadata"] = {"daimon_tenant": str(tenant.id), "daimon_account": str(account.id)}
-    if budgeted:
-        native["budget"] = expected_budget
-    vault = {
-        "id": "vlt_root_app",
-        "type": "vault",
-        "display_name": "owned-root-app",
-        "metadata": None,
-        "created_at": "2026-10-14T00:00:00Z",
-        "archived_at": None,
-    }
-
-    def handle(request):
-        path, method = request.url.path, request.method
-        calls.append((method, path))
-        if method == "POST" and path == "/v1/vaults":
-            return httpx.Response(200, json=vault)
-        if method == "GET" and path == "/v1/vaults/vlt_root_app/credentials":
-            return httpx.Response(200, json={"data": [], "has_more": False})
-        if method == "POST" and path == "/v1/vaults/vlt_root_app/archive":
-            return httpx.Response(200, json=vault | {"archived_at": "2026-10-14T00:01:00Z"})
-        if method == "POST" and path == "/v1/sessions":
-            body = json_body(request)
-            assert body.get("budget") == (expected_budget if budgeted else None)
-            assert body["vault_ids"] == ["vlt_root_app"]
-            return httpx.Response(
-                200, json=native | ({"budget": None} if fault == "ack_budget" else {})
-            )
-        if method == "GET" and path == "/v1/sessions/sess_root_app":
-            assert retained and retained[0]["id"] == "sess_root_app"
-            result = json.loads(json.dumps(native))
-            if fault == "foreign_session":
-                result["id"] = "sess_foreign"
-            elif fault == "foreign_agent":
-                result["agent"]["id"] = "ag_foreign"
-            elif fault == "foreign_environment":
-                result["environment_id"] = "env_foreign"
-            elif fault == "foreign_tenant":
-                result["metadata"]["daimon_tenant"] = str(uuid.uuid4())
-            elif fault == "foreign_account":
-                result["metadata"]["daimon_account"] = str(uuid.uuid4())
-            elif fault == "missing_metadata":
-                result["metadata"] = {}
-            elif fault == "missing_agent":
-                result["agent"] = None
-            elif fault == "missing_environment":
-                result["environment_id"] = None
-            elif fault == "get_budget":
-                result["budget"] = None
-            return httpx.Response(200, json=result)
-        assert method == "POST" and path == "/v1/sessions/sess_root_app/archive"
-        if budgeted:
-            assert request.headers.get("x-stainless-retry-count") == "0"
-        if fault == "archive_refused":
-            return httpx.Response(
-                500,
-                json={
-                    "type": "error",
-                    "error": {"type": "api_error", "message": "offline refusal"},
-                },
-            )
-        return httpx.Response(200, json=native | {"archived_at": "2026-10-14T00:01:00Z"})
-
-    guards = 0
-
-    async def guard():
-        nonlocal guards
-        guards += 1
-        if guards == 2 and fault in ("guard", "archive_refused"):
-            raise GuardChanged
-        if guards == 2 and fault == "cancel":
-            asyncio.current_task().cancel()
-            await asyncio.sleep(0)
-
-    async def allocate(call, wire):
-        acknowledged = await call()
-        retained.append(acknowledged.model_dump(mode="json"))
-        if fault == "allocation_unknown":
-            raise GuardChanged
-        if not budgeted and fault == "cancel":
-            asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
-        return acknowledged
-
-    revoke = AsyncMock(wraps=session_module.revoke_app_access)
-    monkeypatch.setattr(session_module, "revoke_app_access", revoke)
-    grant_view = AsyncMock(
-        return_value=(((None, SimpleNamespace(installation_id=1), "write"),), None, None)
-    )
-    monkeypatch.setattr(  # pyright: ignore[reportUnknownMemberType]
-        session_module, "effective_app_grant_view", grant_view
-    )
-    monkeypatch.setattr(
-        session_module, "prepare_app_access", AsyncMock(return_value=AppSessionAccess((), (), None))
-    )
-    async with build_fake_anthropic_http(
-        combine_handlers(make_fake_memory_store_handler(), handle)
-    ) as client:
-        task = asyncio.create_task(
-            create_session(
-                client,
-                agent=_make_agent(),
-                environment=_make_env(),
-                tenant_id=tenant.id,
-                account_id=account.id,
-                agent_uuid=agent_id,
-                session_factory=db_session_factory,
-                native_budget_usd=Decimal("0.20") if budgeted else None,
-                before_create=guard,
-                allocation=allocate,
-                tool_safety=OPEN_TOOL_SAFETY,
-            )
-        )
-        error = (
-            asyncio.CancelledError
-            if fault == "cancel"
-            else GuardChanged
-            if fault in ("guard", "archive_refused", "allocation_unknown")
-            else IntegrityError
-            if fault == "registration_conflict"
-            else ScopeViolation
-        )
-        with pytest.raises(error):
-            await task
-    assert len(retained) == 1 and retained[0]["id"] == "sess_root_app"
-    grant_view.assert_awaited_once()
-    assert retained[0]["metadata"] == native["metadata"]
-    assert retained[0].get("budget") == (
-        None if fault == "ack_budget" or not budgeted else expected_budget
-    )
-    assert calls.count(("POST", "/v1/sessions")) == 1
-    assert calls.count(("POST", "/v1/sessions/sess_root_app/archive")) == archive_count
-    assert not any(path.endswith("/events") for _, path in calls)
-    assert calls.count(("POST", "/v1/vaults/vlt_root_app/archive")) == 1
-    revoke.assert_awaited_once()
-    assert revoke.await_args.args[2].tokens == ()
-    async with db_session_factory() as db:
-        registered = await db.get(GitHubAppSessionVault, "sess_root_app")
-        if fault == "registration_conflict":
-            assert registered is not None and registered.vault_id == "vlt_prior_app"
-        else:
-            assert registered is None
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        Decimal("0"),
-        Decimal("-0.2"),
-        Decimal("NaN"),
-        Decimal("Infinity"),
-        Decimal("0.201"),
-        Decimal("0." + "1" * 90),
-        True,
-        0.2,
-    ],
-)
-def test_native_budget_refuses_nonfinite_nonpositive_or_fractional_cents(value):
-    with pytest.raises(ValueError, match="positive exact USD cents"):
-        native_session_budget_cents(value)
-
-
-def test_native_budget_does_not_depend_on_callers_decimal_precision():
-    with localcontext() as context:
-        context.prec = 2
-        assert native_session_budget_cents(Decimal("123.45")) == 12345
-        assert native_session_budget_cents(None) is None
-
-
-async def test_controlled_root_requires_owned_preallocation_hooks_before_http():
-    from mux.errors import ScopeViolation
-
-    def forbidden(request):
-        raise AssertionError("unowned controlled root reached allocation")
-
-    async with build_fake_anthropic_http(forbidden) as client:
-        with pytest.raises(ScopeViolation, match="owned funding and allocation required"):
-            await create_session(
-                client,
-                agent=_make_agent(),
-                environment=_make_env(),
-                tenant_id=uuid.uuid4(),
-                account_id=uuid.uuid4(),
-                native_budget_usd=Decimal("0.20"),
-                tool_safety=OPEN_TOOL_SAFETY,
-            )
-
-
-def _session_body(
-    *,
-    session_id: str,
-    agent_id: str,
-    environment_id: str,
-    agent_name: str = "daimon",
-    model_id: str = "claude-opus-4-7",
-) -> dict[str, Any]:
-    """Build a BetaManagedAgentsSession JSON body via validated SDK models."""
-    return ma_session(
-        id=session_id,
-        agent=ma_session_agent(id=agent_id, name=agent_name, model=model_id),
-        environment_id=environment_id,
-    ).model_dump(mode="json")
-
-
-def _session_create_handler(
-    session_id: str = "sess_new",
-) -> Callable[[httpx.Request], httpx.Response]:
-    """Mint a handler that responds to POST /v1/sessions with a valid body."""
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path.endswith("/v1/sessions")
-        body = json.loads(request.content)
-        assert "agent" in body
-        assert "environment_id" in body
-        return httpx.Response(
-            200,
-            json=_session_body(
-                session_id=session_id,
-                agent_id=body["agent"],
-                environment_id=body["environment_id"],
-            ),
-        )
-
-    return _handler
-
-
-def _make_agent(
-    *,
-    anthropic_id: str = "ag_1",
-    name: str = "a",
-) -> BetaManagedAgentsAgent:
-    """An agent with this file's defaults — no DB needed."""
-    return ma_agent(id=anthropic_id, name=name, model="claude-opus-4-7")
-
-
-def _make_env(
-    *,
-    anthropic_id: str = "env_1",
-    name: str = "e",
-) -> BetaEnvironment:
-    """An environment with this file's defaults — no DB needed."""
-    return ma_environment(id=anthropic_id, name=name)
 
 
 async def test_create_session_calls_ma_api_and_returns_sdk_type() -> None:
@@ -2253,47 +1841,6 @@ async def test_a_channel_store_outage_leaves_a_held_session_without_memory_not_w
     assert _memory_mounts(bodies[0]) == [], "nothing agent-wide or personal fills in for it"
 
 
-async def test_a_held_turn_never_reaches_a_fleet_worker_capture(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A fleet worker captures exactly one memory resource, the agent-wide store.
-    A held admission is refused before that source is read, the session a worker
-    would create refuses a held place, and the source projection refuses a hold."""
-    from daimon.core.sessions import project_session_resources
-    from daimon.core.turn.runtime_manifest import capture_preparation_source
-    from mux.errors import ScopeViolation
-
-    held_request = SimpleNamespace(admission=SimpleNamespace(hold=_HELD_PLACE))
-    with pytest.raises(ScopeViolation, match="held turn never captures"):
-        await capture_preparation_source(held_request)  # type: ignore[arg-type]
-
-    with pytest.raises(ScopeViolation, match="held turn never captures"):
-        await project_session_resources(
-            None,  # type: ignore[arg-type]
-            agent=None,  # type: ignore[arg-type]
-            environment=None,  # type: ignore[arg-type]
-            session_factory=db_session_factory,
-            tenant_id=uuid.uuid4(),
-            agent_uuid=uuid.uuid4(),
-            account_id=None,
-            resource_scope=None,  # type: ignore[arg-type]
-            memory_read_only=False,
-            hold=_HELD_PLACE,
-            tool_safety=OPEN_TOOL_SAFETY,
-        )
-
-    with pytest.raises(ScopeViolation, match="held turn has no fleet worker"):
-        await create_session(
-            None,  # type: ignore[arg-type]
-            agent=None,  # type: ignore[arg-type]
-            environment=None,  # type: ignore[arg-type]
-            resource_source=SimpleNamespace(),  # type: ignore[arg-type]
-            memory_hold=_HELD_PLACE,
-            tool_safety=OPEN_TOOL_SAFETY,
-        )
-
-
 # --- Agent-scoped external MCP credentials mirror into the caller's vault ----
 
 
@@ -3071,408 +2618,6 @@ async def test_shared_projection_lists_agent_tokens_but_no_caller_vault(
     assert not transport.requests and not transport.violations
 
 
-async def worker_source_context(
-    db_committing_engine,
-    *,
-    original_tools=(),
-    granted_tools=(),
-    original_mcp_servers=(),
-    original_skills=(),
-    granted_skills=(),
-    environment_config=None,
-    warm=False,
-    native_budget=None,
-):
-    from dataclasses import replace
-
-    from daimon.core.channel_backend import load_backend_agent
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.mux_backend import managed_agents, resource_ref
-    from daimon.core.neutral_resources import resolve_worker_spec
-    from daimon.core.sessions import project_session_resources
-    from daimon.testing.db import require_owned_sessionmaker
-    from mux.contracts.extensions import ExtensionConfig
-    from mux.contracts.ids import ChannelRef, Scope, ThreadRef
-    from mux.contracts.resources import AgentSpec, ResourceBinding
-    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
-
-    from .test_fleet_permissions import POLICY, parent
-
-    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
-    require_owned_sessionmaker(sessions)
-    async with sessions.begin() as db:
-        tenant = await make_tenant(db)
-        account = await make_account(db, tenant=tenant)
-    original = ma_agent(
-        id="original-source",
-        tenant_id=str(tenant.id),
-        name="source",
-        system="Protected root instruction",
-        tools=original_tools,
-        mcp_servers=original_mcp_servers,
-        skills=original_skills,
-    )
-    environment = ma_environment(tenant_id=str(tenant.id))
-    if environment_config is not None:
-        environment = BetaEnvironment.model_validate(
-            {**environment.model_dump(mode="json"), "config": environment_config}
-        )
-    root = parent()
-    root = replace(
-        root,
-        spec=AgentSpec(
-            name="worker",
-            model=root.spec.model,
-            system=root.base_system,
-            metadata={"daimon_tenant": str(tenant.id)},
-            tools=granted_tools or None,
-            skills=granted_skills or None,
-        ),
-        fleet=replace(
-            root.fleet,
-            scope=Scope(
-                tenant_id=str(tenant.id),
-                account_id=str(account.id),
-                principal_id="caller",
-                authorization_id="root",
-            ),
-            account_id=account.id,
-            root=ThreadRef(
-                channel=ChannelRef(
-                    tenant_id=str(tenant.id), platform="discord", channel_id="channel"
-                ),
-                thread_id="thread",
-            ),
-        ),
-    )
-    if native_budget is not None:
-        root = replace(
-            root,
-            limits=type(root.limits).model_validate(
-                root.limits.model_dump()
-                | {
-                    "native_budget_usd": native_budget,
-                    "max_turns": 1,
-                    "deadline": datetime(2026, 10, 12, 18, tzinfo=UTC) + timedelta(seconds=120),
-                }
-            ),
-        )
-    worker = resolve_worker_spec(
-        root, root.spec, policy=POLICY, now=datetime(2026, 10, 12, 18, tzinfo=UTC)
-    )
-    from daimon.core.memory_resource import ensure_memory_store_and_mount
-    from mux.testing.drivers.anthropic.ma import MARouter
-
-    router = MARouter()
-    memory_handler = make_fake_memory_store_handler(FakeMemoryStoreState())
-    router.add("POST", r"/v1/memory_stores", lambda request, match: memory_handler(request))
-    trace = ScriptedTransport(router=router)
-    async with trace.client() as client:
-        captured = await load_backend_agent(
-            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=original
-        )
-        if warm:
-            mount = await ensure_memory_store_and_mount(
-                client,
-                sessions,
-                tenant_id=tenant.id,
-                agent_id=captured.agent_id,
-                agent_name="source",
-                read_only=True,
-            )
-            backend = managed_agents(client, scope=root.fleet.scope)
-            binding = ResourceBinding(
-                id=mount["memory_store_id"],
-                kind="native",
-                resource=resource_ref(
-                    backend, "memory_store", mount["memory_store_id"], scope=root.fleet.scope
-                ),
-                native=ExtensionConfig(
-                    namespace="anthropic.session_resource_create",
-                    version=1,
-                    value={"resource": mount},
-                ),
-            )
-            root = replace(root, resources=(binding,))
-            worker = resolve_worker_spec(
-                root,
-                root.spec,
-                resources=root.resources,
-                policy=POLICY,
-                now=datetime(2026, 10, 12, 18, tzinfo=UTC),
-            )
-        projected = await project_session_resources(
-            captured,
-            agent=original,
-            environment=environment,
-            session_factory=sessions,
-            tenant_id=tenant.id,
-            agent_uuid=captured.agent_id,
-            account_id=account.id,
-            memory_read_only=True,
-            resource_scope=worker.permissions.fleet.scope,
-            tool_safety=OPEN_TOOL_SAFETY,
-        )
-    assert captured.agent_id == derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=original.id)
-    return sessions, tenant.id, account.id, original, environment, worker, projected
-
-
-@pytest.mark.parametrize(
-    "changed",
-    [
-        "source_uuid",
-        "tenant",
-        "account",
-        "snapshot",
-        "environment",
-        "environment_policy",
-        "missing_environment",
-        "environment_ref_kind",
-        "environment_ref_provider",
-        "environment_ref_tenant",
-        "environment_ref_account",
-        "environment_ref_space",
-        "guard",
-        "drops",
-    ],
-)
-async def test_worker_source_context_refuses_before_resources_or_native_io(
-    db_preflight, db_committing_engine, changed
-):
-    from dataclasses import replace
-
-    from mux.errors import ScopeViolation, UnsupportedCapability
-    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
-
-    (
-        sessions,
-        tenant_id,
-        account_id,
-        original,
-        environment,
-        worker,
-        source,
-    ) = await worker_source_context(db_committing_engine)
-    executing = ma_agent(id="actual-worker", tenant_id=str(tenant_id), name="worker")
-    source_uuid = source.agent_id
-
-    async def fence():
-        raise DaimonError("fresh source authority refused")
-
-    if changed != "guard":
-
-        async def fence():
-            pass
-
-    if changed == "source_uuid":
-        source_uuid = uuid.uuid4()
-    elif changed == "tenant":
-        tenant_id = uuid.uuid4()
-    elif changed == "account":
-        account_id = uuid.uuid4()
-    elif changed == "snapshot":
-        source = source.model_copy(
-            update={"source": source.source.model_copy(update={"native": None})}
-        )
-    elif changed == "environment":
-        environment = ma_environment(id="neighbour-environment", tenant_id=str(tenant_id))
-    elif changed == "environment_policy":
-        environment = environment.model_copy(update={"description": "changed policy revision"})
-    elif changed == "missing_environment":
-        source = source.model_copy(update={"environment": None})
-    elif changed.startswith("environment_ref_"):
-        field = {
-            "kind": "kind",
-            "provider": "provider",
-            "tenant": "tenant_id",
-            "account": "account_id",
-            "space": "account_scope_id",
-        }[changed.removeprefix("environment_ref_")]
-        source = source.model_copy(
-            update={
-                "environment": source.environment.model_copy(
-                    update={"ref": source.environment.ref.model_copy(update={field: "foreign"})}
-                )
-            }
-        )
-    elif changed == "drops":
-        from mux.contracts.resources import ResourceBinding
-
-        # A worker that declared memory dropped may not still carry a mount.
-        worker = replace(
-            worker,
-            spec=worker.spec.model_copy(update={"declared_drops": ("memory",)}),
-            resources=(ResourceBinding(id="memory", kind="native"),),
-        )
-    trace = ScriptedTransport()
-    async with trace.client() as client:
-        with pytest.raises((ScopeViolation, UnsupportedCapability, DaimonError)):
-            await create_session(
-                client,
-                agent=executing,
-                environment=environment,
-                tenant_id=tenant_id,
-                account_id=account_id,
-                agent_uuid=source_uuid,
-                session_factory=sessions,
-                resource_source=source,
-                worker=worker,
-                before_create=fence,
-                memory_read_only=True,
-                tool_safety=OPEN_TOOL_SAFETY,
-            )
-    assert trace.requests == []
-
-
-@pytest.mark.parametrize(
-    "fault",
-    [
-        "cold",
-        "missing_grant",
-        "duplicate",
-        "tenant",
-        "account",
-        "provider",
-        "memory",
-        "access",
-        "instructions",
-        "version",
-        "schema",
-    ],
-)
-async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
-    db_preflight, db_committing_engine, fault
-):
-    from dataclasses import replace
-
-    from mux.errors import ScopeViolation, UnsupportedCapability
-    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
-
-    sessions, tenant, account, _, environment, worker, source = await worker_source_context(
-        db_committing_engine, warm=fault != "cold"
-    )
-    if fault != "cold":
-        binding = worker.resources[0]
-        if fault == "missing_grant":
-            resources = ()
-        elif fault == "duplicate":
-            resources = (binding, binding)
-        else:
-            if fault in {"tenant", "account", "provider", "memory"}:
-                key = {
-                    "tenant": "tenant_id",
-                    "account": "account_id",
-                    "provider": "provider",
-                    "memory": "id",
-                }[fault]
-                binding = binding.model_copy(
-                    update={"resource": binding.resource.model_copy(update={key: "foreign"})}
-                )
-            else:
-                value = json.loads(json.dumps(dict(binding.native.value)))
-                if fault == "access":
-                    value["resource"]["access"] = "read_write"
-                elif fault == "instructions":
-                    value["resource"]["instructions"] = "changed"
-                elif fault == "schema":
-                    value["resource"]["unknown"] = "unrepresented"
-                binding = binding.model_copy(
-                    update={
-                        "native": binding.native.model_copy(
-                            update={"value": value, "version": 2 if fault == "version" else 1}
-                        )
-                    }
-                )
-            resources = (binding,)
-        worker = replace(worker, resources=resources)
-    trace = ScriptedTransport()
-
-    async def guard():
-        pass
-
-    async with trace.client() as client:
-        with pytest.raises((ScopeViolation, UnsupportedCapability)):
-            await create_session(
-                client,
-                agent=ma_agent(id="actual-worker", tenant_id=str(tenant)),
-                environment=environment,
-                tenant_id=tenant,
-                account_id=account,
-                agent_uuid=source.agent_id,
-                session_factory=sessions,
-                worker=worker,
-                resource_source=source,
-                before_create=guard,
-                memory_read_only=True,
-                tool_safety=OPEN_TOOL_SAFETY,
-            )
-    assert trace.requests == []
-
-
-@pytest.mark.parametrize(
-    "failure", ["namespace", "model_option", "version", "tools", "memory", "sandbox"]
-)
-async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
-    db_preflight, db_committing_engine, failure
-):
-    from dataclasses import replace
-
-    from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
-    from mux.contracts.extensions import ExtensionConfig
-    from mux.contracts.resources import ToolSpec
-    from mux.drivers.anthropic.resources.agents import tool_payload
-
-    from .test_fleet_permissions import NOW, POLICY
-
-    tool = ToolSpec(
-        name="owned-helper",
-        kind="custom",
-        description="Owned helper",
-        input_schema={"type": "object"},
-    )
-    _, _, _, _, _, worker, captured = await worker_source_context(
-        db_committing_engine, original_tools=(tool_payload(tool),), granted_tools=(tool,)
-    )
-    root = replace(
-        worker.permissions,
-        fleet=replace(worker.permissions.fleet, depth=0),
-        agent_id=captured.agent_id,
-    )
-    requested = worker.spec.model_copy(update={"declared_drops": ("memory", "sandbox")})
-    if failure in ("namespace", "model_option", "version"):
-        extensions = captured.effective_spec.extensions
-        if failure == "namespace":
-            extensions += (ExtensionConfig(namespace="anthropic.opaque", version=1, value={}),)
-        elif failure == "model_option":
-            extensions = tuple(
-                item.model_copy(update={"value": {"model": {"id": "other", "speed": "fast"}}})
-                if item.namespace == "anthropic.model_config"
-                else item
-                for item in extensions
-            )
-        else:
-            extensions = tuple(item.model_copy(update={"version": 2}) for item in extensions)
-        captured = captured.model_copy(
-            update={
-                "effective_spec": captured.effective_spec.model_copy(
-                    update={"extensions": extensions}
-                )
-            }
-        )
-    elif failure == "tools":
-        requested = requested.model_copy(update={"tools": ()})
-    else:
-        requested = requested.model_copy(
-            update={
-                "declared_drops": tuple(
-                    item for item in requested.declared_drops if item != failure
-                )
-            }
-        )
-    with pytest.raises(WorkerSpecRefused):
-        resolve_worker_spec(root, requested, policy=POLICY, now=NOW, captured_source=captured)
-
-
 @pytest.mark.parametrize(
     "failure",
     [
@@ -3849,3 +2994,115 @@ async def test_create_session_mounts_the_vault_of_the_turns_hold(
     )
     assert (HOLD_CLAIM in claims) is held
     assert session_bodies[0]["vault_ids"] == ["vlt_new"]
+
+
+def _session_body(
+    *,
+    session_id: str,
+    agent_id: str,
+    environment_id: str,
+    agent_name: str = "daimon",
+    model_id: str = "claude-opus-4-7",
+) -> dict[str, Any]:
+    """Build a BetaManagedAgentsSession JSON body via validated SDK models."""
+    return ma_session(
+        id=session_id,
+        agent=ma_session_agent(id=agent_id, name=agent_name, model=model_id),
+        environment_id=environment_id,
+    ).model_dump(mode="json")
+
+
+def _session_create_handler(
+    session_id: str = "sess_new",
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Mint a handler that responds to POST /v1/sessions with a valid body."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path.endswith("/v1/sessions")
+        body = json.loads(request.content)
+        assert "agent" in body
+        assert "environment_id" in body
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id=session_id,
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    return _handler
+
+
+def _make_agent(
+    *,
+    anthropic_id: str = "ag_1",
+    name: str = "a",
+) -> BetaManagedAgentsAgent:
+    """An agent with this file's defaults — no DB needed."""
+    return ma_agent(id=anthropic_id, name=name, model="claude-opus-4-7")
+
+
+def _make_env(
+    *,
+    anthropic_id: str = "env_1",
+    name: str = "e",
+) -> BetaEnvironment:
+    """An environment with this file's defaults — no DB needed."""
+    return ma_environment(id=anthropic_id, name=name)
+
+
+async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_first(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The relay credential never shares the caller's vault, so it can name the session."""
+    relay = "https://mcp.example.com/mcp-identity/tools"
+    agent = ma_agent(
+        id="ag_relay",
+        name="Helper",
+        model="claude-opus-4-7",
+        mcp_servers=[{"name": "tools", "type": "url", "url": relay}],
+    )
+    created_relay = AsyncMock(return_value="vlt_relay")
+    monkeypatch.setattr(
+        "daimon.core.sessions.ensure_agent_mcp_vault", AsyncMock(return_value="vlt_caller")
+    )
+    monkeypatch.setattr("daimon.core.sessions.create_relay_vault", created_relay)
+    bodies: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_relay",
+                agent_id=body["agent"],
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    key = uuid.uuid4()
+    await create_session(
+        build_fake_anthropic_http(_handler),
+        agent=agent,
+        environment=_make_env(),
+        account_id=uuid.uuid4(),
+        agent_uuid=uuid.uuid4(),
+        mcp_settings=McpSettings(
+            jwt_secret=SecretStr("x" * 32), public_url=HttpUrl("https://mcp.example.com/mcp")
+        ),
+        session_factory=db_session_factory,
+        relay_session_key=key,
+        tool_safety=OPEN_TOOL_SAFETY,
+    )
+
+    assert bodies[0]["vault_ids"] == ["vlt_relay", "vlt_caller"], (
+        "the relay vault goes first; the snapshot records the last, the caller's"
+    )
+    call = created_relay.await_args
+    assert call is not None and call.kwargs["relay_urls"] == (relay,), "the attached relay URL"
+    assert call.kwargs["relay"].session_key == key, "the credential names the mapping row"
+    assert call.kwargs["relay"].agent_name == "Helper", "and the agent"

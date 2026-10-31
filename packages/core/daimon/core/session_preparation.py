@@ -312,7 +312,7 @@ async def _handoff_authorizes(deps: TurnDeps, admission: Admission) -> bool:
         binding = await get_binding_by_id(session, id=binding_id)
     return (
         binding is not None
-        and binding.kind == "handoff"
+        and binding.kind in ("handoff", "owner")
         and binding.responder_ma_agent_id == admission.agent.id
     )
 

@@ -14,28 +14,42 @@ strict: true
 nav:
   - Lead intake: lead-intake.md
   - Home: README.md
-  - Architecture: architecture.md
-  - Self-hosting: self-hosting.md
-  - Configuration: configuration.md
-  - MCP tools: mcp-tools.md
-  - Permissions: permissions.md
-  - Isolation: isolation.md
-  - Routines: routines.md
-  - Long jobs: long-jobs.md
-  - Billing: billing.md
-  - Defaults: defaults.md
-  - GitHub push resync: github-push-resync.md
-  - Slack: slack.md
-  - Agent identity: agent-identity.md
-  - Teams: teams.md
-  - Claude Code plugin: plugin.md
-  - Mux: mux.md
+  - Get started:
+      - Quickstart: quickstart.md
+  - Self-host:
+      - Self-hosting: self-hosting.md
+      - Model providers: providers.md
+      - Operations: operations.md
+  - Connect:
+      - Slack: slack.md
+      - Microsoft Teams: teams.md
+      - GitHub: github.md
+      - MCP servers: mcp-servers.md
+      - Claude Code plugin: plugin.md
+  - Customise:
+      - Defaults: defaults.md
+      - Routines: routines.md
+      - Long jobs: long-jobs.md
+      - Lead intake: lead-intake.md
+  - Concepts:
+      - Architecture: architecture.md
+      - Isolation: isolation.md
+      - Permissions: permissions.md
+      - Billing: billing.md
+      - Agent identity: agent-identity.md
+      - Managed agents (mux): mux.md
+  - Reference:
+      - Configuration: configuration.md
+      - MCP tools: mcp-tools.md
+  - Contributing: https://github.com/pymc-labs/daimon/blob/main/CONTRIBUTING.md
 
 # Every page in docs/ is published, listed or not, so a page left out of the
 # nav fails the strict build instead of shipping unreachable.
 validation:
   nav:
     omitted_files: warn
+  # A link to a heading that was renamed or cut fails the build too.
+  anchors: warn
 
 theme:
   name: material

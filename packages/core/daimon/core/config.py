@@ -10,6 +10,7 @@ import base64
 import binascii
 import json
 import os
+import ssl
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -110,8 +111,8 @@ class AnthropicSettings(BaseModel):
         default=None,
         description=(
             "Anthropic API key used to authenticate all Managed Agents SDK calls. "
-            "Required unless this deployment is OpenAI-only (see docs/self-hosting.md's "
-            "'Self-host on OpenAI'), in which case leave it unset."
+            "Required unless this deployment is OpenAI-only (see docs/providers.md's "
+            "'Run on OpenAI'), in which case leave it unset."
         ),
     )
     base_url: HttpUrl = Field(
@@ -197,6 +198,14 @@ class McpSettings(BaseModel):
         default=None,
         description=(
             "Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter."
+        ),
+    )
+    member_copy_limit: int = Field(
+        default=5,
+        ge=0,
+        description=(
+            "How many live copies one member may own of agents they copied while talking to "
+            "them (fork_agent without admin). Admins are not limited. 0 turns member copies off."
         ),
     )
     legacy_token_cutoff: AwareDatetime | None = Field(
@@ -440,8 +449,8 @@ class HubSettings(BaseModel):
         default=None,
         description=(
             "Slack OAuth app client ID for the /slack/mcp login mount. Register "
-            "<DAIMON_MCP__PUBLIC_URL origin>/slack/auth/callback as a redirect "
-            "URL on the Slack app."
+            "<hub origin>/slack/auth/callback as a redirect URL on the Slack app "
+            "(see public_url)."
         ),
     )
     slack_client_secret: SecretStr | None = Field(
@@ -452,13 +461,24 @@ class HubSettings(BaseModel):
         default=None,
         description=(
             "Discord OAuth app client ID for the /discord/mcp login mount. "
-            "Register <DAIMON_MCP__PUBLIC_URL origin>/discord/auth/callback as a "
-            "redirect URI on the Discord app."
+            "Register <hub origin>/discord/auth/callback as a redirect URI on the "
+            "Discord app (see public_url)."
         ),
     )
     discord_client_secret: SecretStr | None = Field(
         default=None,
         description="Discord OAuth app client secret for the /discord/mcp login mount.",
+    )
+    public_url: HttpUrl | None = Field(
+        default=None,
+        description=(
+            "Origin the login mounts are served from, e.g. https://mcp.example.com. "
+            "It becomes the OAuth issuer and callback base, so it must be the "
+            "address coding agents connect to. Unset, the mounts use the origin "
+            "of DAIMON_MCP__PUBLIC_URL. Set it to give the mounts a public "
+            "hostname without moving the agents' /mcp endpoint, whose URL is "
+            "stored in every agent's credential vault."
+        ),
     )
     allowed_client_redirect_uris: list[str] = Field(
         default=[
@@ -532,6 +552,56 @@ class ProgressPlansSettings(BaseModel):
             "next. off: shown only where a workspace, channel or thread is turned on. "
             "disabled: never shown, and cannot be turned on. on: shown everywhere unless "
             "turned off below."
+        ),
+    )
+
+
+class McpContextSettings(BaseModel):
+    """Per-turn context: each chat message is first shown to the agent's MCP servers
+    that offer a context tool, and what they answer goes in front of it."""
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Before each chat turn, send the person's message to every MCP server the "
+            "agent was connected to with a shared token that offers the context tool, "
+            "and put each non-empty answer in front of the message as quoted data. A "
+            "server without the tool is unaffected: it is looked up once in the "
+            "background, never waited on, then left alone for six hours (one whose "
+            "lookup fails is tried again after ten minutes, then ever less often). The servers "
+            "receive the message text, without mentions, and an opaque id for the "
+            "thread (rotating the first crypto key changes it). The call follows the "
+            "agent's toolset and tool safety: with tool safety on, mark the tool a read "
+            "in DAIMON_TOOL_SAFETY__EFFECTS (`<server>/context`). Unprompted replies, "
+            "held turns, channels shared with another organisation and sealed channels "
+            "ask nothing."
+        ),
+    )
+    tenants: list[uuid.UUID] = Field(
+        default_factory=list[uuid.UUID],
+        description=(
+            "Limit per-turn context to these tenants, by tenant UUID. Empty: every "
+            "tenant. Configure DAIMON_MCP_CONTEXT__TENANTS as a JSON array."
+        ),
+    )
+    tool: str = Field(
+        default="context",
+        min_length=1,
+        description=(
+            "Name of the tool to call. A server offers it when the tool's input takes a "
+            "string `prompt` and a string `session` (the thread's id) and requires "
+            "nothing else."
+        ),
+    )
+    timeout_s: float = Field(
+        default=2.0,
+        gt=0,
+        le=10,
+        description=(
+            "Seconds a turn waits for each server's answer. A server that fails or is slower "
+            "adds nothing, and one that failed is not asked again for a minute. A "
+            "server's MCP session is reused for ten minutes, so most turns cost one "
+            "request per server that offers the tool."
         ),
     )
 
@@ -1597,9 +1667,9 @@ class BillingSettings(BaseModel):
         ge=0,
         description=(
             "Most a tenant may spend each UTC day on any one Gemini model, in provider "
-            "USD at list price, counted across every agent turn and fleet worker. A "
+            "USD at list price, counted across every agent turn. A "
             "Gemini agent turn has no token envelope and its usage reaches no ledger "
-            "debit, so this is the guard. Checked as each turn or worker starts, for "
+            "debit, so this is the guard. Checked as each turn starts, for "
             "its first request's model and any Flash fallback of it, never mid-turn; "
             "a model with no current tariff is refused, and an unpriced fallback never "
             "runs. It resets at midnight UTC. 0 allows no Gemini turns."
@@ -1610,9 +1680,9 @@ class BillingSettings(BaseModel):
         ge=0,
         description=(
             "Most a tenant may spend each UTC day on any one OpenAI model, in provider "
-            "USD at list price, counted across every agent turn and fleet worker. "
+            "USD at list price, counted across every agent turn. "
             "OpenAI sessions carry no native spend limit on this project, so this is "
-            "the guard. Checked as each turn or worker starts, never mid-turn; a model "
+            "the guard. Checked as each turn starts, never mid-turn; a model "
             "with no current tariff is refused. It resets at midnight UTC. 0 allows no "
             "OpenAI turns."
         ),
@@ -1986,6 +2056,106 @@ class DirectMessagePolicy(BaseModel):
         )
 
 
+class SignedIdentityServer(BaseModel):
+    """One remote MCP server that receives a signed caller identity on every request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
+    url: str
+    issuer: str = Field(min_length=1)
+    audience: str = Field(min_length=1)
+    # Servers are deployment-wide: without a list any workspace's agents may use one.
+    workspaces: frozenset[str] | None = None
+    ca_certificate: str | None = None
+
+    @field_validator("url")
+    @classmethod
+    def _https(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("a signed-identity server needs an https URL without credentials")
+        return value
+
+    @field_validator("ca_certificate")
+    @classmethod
+    def _valid_ca(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if "PRIVATE KEY" in value:
+            raise ValueError("ca_certificate must contain only public certificates")
+        try:
+            ssl.create_default_context().load_verify_locations(cadata=value)
+        except (ssl.SSLError, ValueError) as err:
+            raise ValueError("ca_certificate is not a valid PEM certificate") from err
+        return value
+
+
+class McpIdentitySettings(BaseModel):
+    # The key is a secret: a validation error must not echo it.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    signing_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Ed25519 private key that signs caller identities for the servers in "
+            "DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte "
+            "seed. Generate one with `daimon mcp identity-keygen`, which also prints the "
+            "public key to register with each server. Read only by the mcp service."
+        ),
+    )
+    servers: Annotated[list[SignedIdentityServer], NoDecode] = Field(
+        default_factory=list[SignedIdentityServer],
+        description=(
+            "Remote MCP servers that opt in to signed identity. A JSON array; each entry has "
+            "name (lowercase letters, digits and dashes), url (the server's https MCP "
+            "endpoint), issuer (the issuer id the server gave you), audience (the "
+            "server's base URL) and optionally workspaces, the only workspaces whose agents "
+            'may use it, each "<platform>:<workspace id>" (for example "discord:<guild id>"; '
+            "default: every workspace). "
+            "Optional ca_certificate is a public PEM CA certificate for a private HTTPS server. "
+            "Attach such a server to an agent at "
+            "<app root>/mcp-identity/<name> instead of its own URL: Daimon forwards each "
+            "request with a short-lived EdDSA token naming the agent, the workspace and, "
+            "for a person's turn, who asked, the channel and the message. Daimon names the "
+            "asker only while that person's turn is live in the calling session's thread. "
+            "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY; chat workers use the "
+            "same server policy without the signing key. Default: [] (off)."
+        ),
+    )
+
+    @field_validator("servers", mode="before")
+    @classmethod
+    def _parse_json(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return []
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"DAIMON_MCP_IDENTITY__SERVERS is not valid JSON "
+                f"(line {err.lineno}, column {err.colno})"
+            ) from None
+
+    @field_validator("servers")
+    @classmethod
+    def _unique_names(cls, value: list[SignedIdentityServer]) -> list[SignedIdentityServer]:
+        if len({server.name for server in value}) != len(value):
+            raise ValueError("signed-identity server names must be unique")
+        return value
+
+    @field_validator("signing_key")
+    @classmethod
+    def _readable_key(cls, value: SecretStr | None) -> SecretStr | None:
+        from daimon.core.mcp_identity import load_signing_key
+
+        if value is not None:
+            load_signing_key(value.get_secret_value())
+        return value
+
+
 class AgentIdentitySettings(BaseModel):
     enabled: bool = Field(
         default=False,
@@ -2065,53 +2235,6 @@ class TurnQueueSettings(BaseModel):
         description=(
             "Seconds a queued turn may wait for a slot. A safeguard only: the turn then "
             "leaves the queue and its card ends with the ordinary error."
-        ),
-    )
-
-
-class FleetSettings(BaseModel):
-    """Orchestrated worker fleets (``DAIMON_FLEET__*``). On by default.
-
-    An orchestrator turn fans out to worker turns on any enabled backend. Their
-    concurrency is a pool of its own, counted from the durable worker rows, so a
-    fan-out never takes the chat turns' slots. Each agent still needs its own fleet
-    grant and stays inside the tenant's budgets.
-    """
-
-    enabled: bool = Field(
-        default=True,
-        description=(
-            "Allow orchestrator turns to start worker fleets. On by default. Emergency "
-            "stop only: false refuses new fleets and new workers before they are funded, "
-            "and holds finished-worker wakes until it is on again; the run's deadline "
-            "sweep ends what is left. Fleets also stop when the turn path or either "
-            "backend flag is off."
-        ),
-    )
-    max_workers_per_run: int = Field(
-        default=8,
-        ge=1,
-        description="Most workers one fleet run may start.",
-    )
-    max_concurrent_workers_per_tenant: int = Field(
-        default=3,
-        ge=1,
-        description=(
-            "Most worker turns one tenant may have starting or running at once, across "
-            "all its fleet runs and processes. Separate from the chat turn cap."
-        ),
-    )
-    max_concurrent_workers: int = Field(
-        default=6,
-        ge=1,
-        description="Most worker turns one process runs at once, across all tenants.",
-    )
-    max_attempts: int = Field(
-        default=2,
-        ge=1,
-        description=(
-            "Most times in total a worker is started when it keeps being lost before "
-            "its turn is sent. A worker whose turn was sent is reconciled, never resent."
         ),
     )
 
@@ -2521,6 +2644,7 @@ class Settings(BaseSettings):
     ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     mcp_oauth: McpOAuthSettings = Field(default_factory=McpOAuthSettings)
+    mcp_identity: McpIdentitySettings = Field(default_factory=McpIdentitySettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
@@ -2532,6 +2656,10 @@ class Settings(BaseSettings):
     progress_plans: ProgressPlansSettings = Field(
         default_factory=ProgressPlansSettings,
         description="The agent's plan on the working card. See ProgressPlansSettings.",
+    )
+    mcp_context: McpContextSettings = Field(
+        default_factory=McpContextSettings,
+        description="Context from connected MCP servers on each chat turn. See McpContextSettings.",
     )
     slack: SlackSettings | None = None
     teams: TeamsSettings | None = None
@@ -2551,7 +2679,6 @@ class Settings(BaseSettings):
     turn: TurnSettings = Field(default_factory=TurnSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
-    fleet: FleetSettings = Field(default_factory=FleetSettings)
     watches: WatchesSettings = Field(default_factory=WatchesSettings)
     private_channel_messages: PrivateChannelMessagesSettings = Field(
         default_factory=PrivateChannelMessagesSettings

@@ -694,6 +694,7 @@ class DirectMessageCog(commands.Cog):
                         role=role,
                         role_ids=subject.role_ids,
                         verified_membership=subject.verified_membership,
+                        platform_channel_id=str(message.channel.id),
                     )
             finally:
                 ticket.release()

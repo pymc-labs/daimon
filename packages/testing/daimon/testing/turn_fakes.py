@@ -76,6 +76,13 @@ class RaiseStreamDrop:
 
 
 @dataclass
+class RaiseReadError:
+    """Stream step: raise the raw `httpx.ReadError` a socket broken mid-body produces."""
+
+    message: str = "connection reset by peer"
+
+
+@dataclass
 class RaiseStatus:
     """Stream step: raise APIStatusError (non-429) mid-iteration."""
 
@@ -134,6 +141,7 @@ StreamAction = (
     YieldEvent
     | RaiseConnection
     | RaiseStreamDrop
+    | RaiseReadError
     | RaiseStatus
     | RaiseRateLimit
     | BlockForever
@@ -149,6 +157,8 @@ class FakeEventsResource:
     - `stream_scripts` is a queue: each call to `stream(...)` consumes one
       script. When exhausted, further `stream()` calls raise AssertionError.
     - `replay_events` is the full event history returned by `list(...)`.
+    - `list_raises` is a queue: each `list(...)` call pops one entry and
+      raises it when it is an exception (None lets that call through).
     - `sent_events` records every `events.send(...)` payload (for
       interrupt assertions).
     - `stream_timeouts` records the per-call `timeout` kwarg the driver
@@ -161,6 +171,7 @@ class FakeEventsResource:
 
     stream_scripts: list[list[StreamAction]] = field(default_factory=list[list[StreamAction]])
     replay_events: list[Any] = field(default_factory=list[Any])
+    list_raises: list[Exception | None] = field(default_factory=list[Exception | None])
     sent_events: list[tuple[str, list[dict[str, Any]]]] = field(
         default_factory=list[tuple[str, list[dict[str, Any]]]]
     )
@@ -201,6 +212,8 @@ class FakeEventsResource:
     ) -> _FakeEventList:
         # `limit` is the SDK's page size; iterating the list walks every page.
         del limit
+        if self.list_raises and (error := self.list_raises.pop(0)) is not None:
+            raise error
         events = [e for e in self.replay_events if types is None or e.type in types]
         if order == "desc":
             events.reverse()
@@ -237,6 +250,8 @@ class _FakeEventStream:
                 raise anthropic.APIConnectionError(request=_make_request())  # type: ignore[call-arg]
             elif isinstance(step, RaiseStreamDrop):
                 raise httpx.RemoteProtocolError(step.message, request=_make_request())
+            elif isinstance(step, RaiseReadError):
+                raise httpx.ReadError(step.message, request=_make_request())
             elif isinstance(step, RaiseStatus):
                 raise _make_status_error(step.status_code, step.message)
             elif isinstance(step, BlockForever):
@@ -306,10 +321,12 @@ class FakeSessionsBeta:
     - `retrieve_calls` records the session ids the driver checked, in order.
     - `retrieve_raises`, when set, makes `retrieve` raise it instead of
       returning -- drives the "status check itself errors" path.
+    - An exception in `retrieve_statuses` is raised by that one call, so a
+      test can fail one status check and answer the next.
     """
 
     events: FakeEventsResource = field(default_factory=FakeEventsResource)
-    retrieve_statuses: list[str] = field(default_factory=list[str])
+    retrieve_statuses: list[str | Exception] = field(default_factory=list[str | Exception])
     retrieve_calls: list[str] = field(default_factory=list[str])
     retrieve_raises: Exception | None = None
 
@@ -323,6 +340,8 @@ class FakeSessionsBeta:
                 f"(unexpected extra status check for session_id={session_id!r})"
             )
         status = self.retrieve_statuses.pop(0)
+        if isinstance(status, Exception):
+            raise status
         return _make_session(session_id=session_id, status=status)
 
 

@@ -284,47 +284,6 @@ async def test_non_list_tools_are_refused_before_native_io(tools: JsonValue) -> 
         await client.aio.aclose()
 
 
-async def test_sdk_submits_the_cheap_named_worker_with_low_agent_budget() -> None:
-    from contextlib import AsyncExitStack
-
-    from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
-    from mux.testing.isolated_sdk import build_gemini_client
-
-    captured: list[httpx.Request] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(200, json={"id": "worker", "status": "completed", "steps": []})
-
-    async with AsyncExitStack() as stack:
-        client = build_gemini_client(transport=httpx.MockTransport(handle), api_key="offline")
-        stack.callback(client.close)
-        stack.push_async_callback(client.aio.aclose)
-        await SDKTransport(client).create(
-            {
-                "agent": "owned-cheap-agent",
-                "agent_config": {
-                    "type": "antigravity",
-                    "model": WORKER_MODEL,
-                    "max_total_tokens": WORKER_MAX_TOTAL_TOKENS,
-                },
-                "input": [{"type": "text", "text": "one worker input"}],
-                "tools": [],
-                "background": True,
-                "store": True,
-            }
-        )
-    assert len(captured) == 1
-    body = json.loads(captured[0].content)
-    assert body["agent"] == "owned-cheap-agent"
-    assert body["agent_config"] == {
-        "type": "antigravity",
-        "model": WORKER_MODEL,
-        "max_total_tokens": WORKER_MAX_TOTAL_TOKENS,
-    }
-    assert "model" not in body and "generation_config" not in body and body["tools"] == []
-
-
 @pytest.mark.parametrize("defect", (None, "missing", "null", "bool", "mixed_agent", "tools"))
 async def test_sdk_model_output_cap_is_verified_in_actual_request_bytes(defect: str | None) -> None:
     from contextlib import AsyncExitStack
@@ -416,45 +375,6 @@ async def test_sdk_output_cap_never_downgrades_on_refusal_or_fallback(failure: i
         sent = json.loads(call.content)
         assert sent["generation_config"] == {"max_output_tokens": 4096}
         assert sent["tools"] == [] and not {"agent", "agent_config", "environment"} & sent.keys()
-
-
-@pytest.mark.parametrize("count", (262144, None, 0))
-async def test_sdk_counts_full_worker_prompt_including_system_and_cache(count):
-    from contextlib import AsyncExitStack
-
-    from mux.testing.isolated_sdk import build_gemini_client
-
-    captured = []
-
-    def handler(request):
-        captured.append(request)
-        assert request.url.path.endswith("/models/gemini-3.8-flash:countTokens")
-        return httpx.Response(200, json={"totalTokens": count, "cachedContentTokenCount": 200000})
-
-    async with AsyncExitStack() as stack:
-        client = build_gemini_client(transport=httpx.MockTransport(handler), api_key="offline")
-        stack.callback(client.close)
-        stack.push_async_callback(client.aio.aclose)
-        transport = SDKTransport(client)
-        request = {
-            "model": "gemini-3.8-flash",
-            "tools": [],
-            "generation_config": {"max_output_tokens": 65536},
-            "system_instruction": "Protected source instructions",
-            "input": [{"type": "text", "text": "Complete this task"}],
-        }
-        if count is None or count == 0:
-            with pytest.raises(ProviderError, match="unknown_input_tokens"):
-                await transport.count_input_tokens(request)
-        else:
-            assert await transport.count_input_tokens(request) == 262144
-    body = json.loads(captured[0].content)
-    assert body["generateContentRequest"]["systemInstruction"]["parts"] == [
-        {"text": "Protected source instructions"}
-    ]
-    assert body["generateContentRequest"]["contents"] == [
-        {"role": "user", "parts": [{"text": "Complete this task"}]}
-    ]
 
 
 HIGH_DEMAND = {

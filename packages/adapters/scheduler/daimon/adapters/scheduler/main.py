@@ -26,6 +26,7 @@ import contextlib
 import functools
 import signal
 import sys
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -75,14 +76,12 @@ from daimon.core.github_app_session import (
     rotate_live_app_tokens,
 )
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.github_installation_reconcile import (
-    drain_github_installation_reconciliations,
-)
+from daimon.core.github_installation_reconcile import drain_github_installation_reconciliations
 from daimon.core.github_issued_token_sweep import sweep_closed_github_issued_tokens
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
-from daimon.core.logging_setup import configure_logging
+from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.long_jobs import LongJobExecutor
 from daimon.core.long_jobs_ma import ManagedLongJobPort
 from daimon.core.ma_identity import derive_agent_uuid
@@ -92,6 +91,7 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
+from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
@@ -132,7 +132,7 @@ from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
-from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.stores.domain import Role, RoutineRow, ThreadSessionRow
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
     LiveMcpAppSession,
@@ -178,12 +178,7 @@ from mux.errors import ScopeViolation
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import (
-    AsyncConnection,
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-)
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
@@ -877,14 +872,15 @@ async def _build_fire(
     return _fire
 
 
-async def _sweep_fleet_deadlines(sm: async_sessionmaker[AsyncSession]) -> None:
-    """Release expired fleet slots; failures retry on the next scheduler tick."""
-    from daimon.core.stores.fleet import sweep_expired
+async def _drain_pending_usage(sm: async_sessionmaker[AsyncSession], *, markup: Decimal) -> None:
+    """Settle pending usage of profiles with no infrastructure charge; failures retry on
+    the next scheduler tick (an applied row is never applied twice)."""
+    from daimon.core.usage_outbox_drain import drain_pending_usage
 
     try:
-        await sweep_expired(sm)
+        await drain_pending_usage(sm, markup=markup)
     except Exception:
-        log.exception("scheduler.fleet_deadline_sweep.failed")
+        log.exception("scheduler.pending_usage_drain.failed")
 
 
 async def _sweep_pending_files(
@@ -1044,6 +1040,28 @@ async def _sweep_github_issued_tokens(
         log.exception("scheduler.github_issued_token_sweep.failed")
 
 
+# Each run lists every vault, and live sessions once a relay vault is old enough.
+_RELAY_VAULT_ARCHIVE_INTERVAL = timedelta(minutes=10)
+_last_relay_vault_archive: dict[str, datetime] = {}
+
+
+async def _archive_idle_relay_vaults(
+    client: AsyncAnthropic, *, now: datetime | None = None
+) -> None:
+    """Archive relay vaults no live session mounts, at most once per interval.
+    Boundary catch: a failure must not kill the scheduler loop; the next run retries.
+    """
+    current = now or datetime.now(UTC)
+    last = _last_relay_vault_archive.get("started")
+    if last is not None and current - last < _RELAY_VAULT_ARCHIVE_INTERVAL:
+        return
+    _last_relay_vault_archive["started"] = current
+    try:
+        await archive_idle_relay_vaults(client, now=current)
+    except (anthropic.APIError, ValueError):
+        log.exception("scheduler.relay_vault_archive.failed")
+
+
 async def _sweep_github_app_tokens(
     sm: async_sessionmaker[AsyncSession], *, fernet: MultiFernet | None
 ) -> None:
@@ -1102,6 +1120,10 @@ _last_app_access_checks: dict[str, datetime] = {}
 # Session id -> (consecutive failures, earliest next attempt). A failing refresh
 # mints fresh tokens each attempt, so retries back off from 1 to 30 minutes.
 _app_refresh_failures: dict[str, tuple[int, datetime]] = {}
+# MA session id -> why its refresh stopped. A session MA reports archived or gone is
+# never refreshed again; the turn path replaces it on the next message. In memory
+# only, so a restart gives each one more attempt before it is retired again.
+_app_refresh_retired: dict[str, str] = {}
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
 # A turn running continuously for longer than this is treated as abandoned and
@@ -1120,6 +1142,41 @@ def _record_refresh_failure(session_id: str, now: datetime) -> None:
     count = _app_refresh_failures.get(session_id, (0, now))[0] + 1
     delay = min(_REFRESH_BACKOFF_START * 2 ** min(count - 1, 5), _REFRESH_BACKOFF_MAX)
     _app_refresh_failures[session_id] = (count, now + delay)
+
+
+def _dead_session_refresh_reason(error: BaseException) -> str | None:
+    """Name the failure when MA says the session is archived or gone, else None.
+
+    Only these two messages count. Any other 400 or 404 (a vault or resource not
+    found, say), auth, rate limit, server and network errors stay retryable.
+    """
+    message = str(error).lower()
+    if isinstance(error, anthropic.BadRequestError) and "archived session" in message:
+        return "session_archived"
+    if isinstance(error, anthropic.NotFoundError) and "session not found" in message:
+        return "session_not_found"
+    return None
+
+
+async def _ma_session_confirmed_gone(
+    anthropic_client: AsyncAnthropic, mapping: ThreadSessionRow, session_id: str
+) -> bool:
+    """True only when MA itself shows the session archived, terminated or missing."""
+    try:
+        record = await retrieve_session_record(
+            anthropic_client,
+            session_id,
+            scope=session_scope(
+                tenant_id=mapping.tenant_id,
+                account_id=mapping.account_id,
+                call_site="scheduler:refresh_github_app_sessions",
+            ),
+        )
+    except anthropic.NotFoundError:
+        return True
+    except Exception:
+        return False
+    return record.archived_at is not None or record.status == "terminated"
 
 
 async def _retire_mcp_app_session(
@@ -1158,6 +1215,8 @@ async def _refresh_github_app_sessions(
         live = await list_live_app_sessions(session)
     for candidate in live:
         session_id = candidate.mapping.ma_session_id
+        if session_id in _app_refresh_retired:
+            continue
         due_for_expiry = candidate.expires_at is None or candidate.expires_at <= now + timedelta(
             minutes=15
         )
@@ -1262,8 +1321,20 @@ async def _refresh_github_app_sessions(
                     )
             _last_app_access_checks[session_id] = now
             _app_refresh_failures.pop(session_id, None)
-        except Exception:
+        except Exception as error:
             _last_app_access_checks[session_id] = now
+            reason = _dead_session_refresh_reason(error)
+            if reason is not None and await _ma_session_confirmed_gone(
+                anthropic_client, candidate.mapping, session_id
+            ):
+                _app_refresh_retired[session_id] = reason
+                _app_refresh_failures.pop(session_id, None)
+                log.info(
+                    "scheduler.github_app_session_refresh.retired",
+                    session_id=session_id,
+                    reason=reason,
+                )
+                continue
             _record_refresh_failure(session_id, now)
             log.exception("scheduler.github_app_session_refresh.failed", session_id=session_id)
     async with sm() as session:
@@ -1393,7 +1464,12 @@ async def _refresh_github_app_sessions(
             item.session_id
             for item in await list_live_mcp_app_sessions(session, now=now, include_expired=True)
         )
-    for state in (_last_app_access_checks, _app_refresh_failures, _mcp_running_since):
+    for state in (
+        _last_app_access_checks,
+        _app_refresh_failures,
+        _app_refresh_retired,
+        _mcp_running_since,
+    ):
         for session_id in set(state) - tracked:
             del state[session_id]
 
@@ -1499,6 +1575,28 @@ async def _repeat_until_stopped(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
 
 
+_TICK_LOG_INTERVAL_S = 60.0
+
+
+def _tick_progress(
+    tick: Callable[[], Awaitable[None]], *, clock: Callable[[], float] = time.monotonic
+) -> Callable[[], Awaitable[None]]:
+    """`tick` that logs `scheduler.tick_completed` after a tick that finished,
+    at most once per minute (the first always). A tick that raises logs nothing."""
+    last_logged: float | None = None
+
+    async def step() -> None:
+        nonlocal last_logged
+        started = clock()
+        await tick()
+        now = clock()
+        if last_logged is None or now - last_logged >= _TICK_LOG_INTERVAL_S:
+            last_logged = now
+            log.info("scheduler.tick_completed", duration_ms=int((now - started) * 1000))
+
+    return step
+
+
 async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None]]) -> None:
     """One usage pass for `--once`, honouring the same switch as the loop."""
     if not enabled:
@@ -1551,7 +1649,9 @@ async def _run_loops(
                     _repeat_until_stopped(usage_sweep, interval_s=interval_s, stop_event=stop_event)
                 )
             )
-        await _repeat_until_stopped(tick, interval_s=interval_s, stop_event=stop_event)
+        await _repeat_until_stopped(
+            _tick_progress(tick), interval_s=interval_s, stop_event=stop_event
+        )
         for task in background:
             task.cancel()
 
@@ -1665,9 +1765,14 @@ async def run(
     long_jobs = LongJobExecutor(sm, ManagedLongJobPort(client, sm, settings), settings.long_jobs)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+
+    def on_signal() -> None:
+        mark_shutting_down()
+        stop_event.set()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, on_signal)
         except NotImplementedError:
             # Signal handlers aren't available on every platform (e.g. Windows
             # ProactorEventLoop). Tests / non-Unix runs proceed without them.
@@ -1690,7 +1795,7 @@ async def run(
             await long_jobs.sweep()
             await _sweep_compute(compute)
             await _poll_compute_tasks(compute)
-            await _sweep_fleet_deadlines(sm)
+            await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_privacy_deletes(client, sm)
             await _usage_sweep_once(
@@ -1705,6 +1810,7 @@ async def run(
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
                 client, sm, settings=settings, fernet=push_resync_fernet
@@ -1733,7 +1839,7 @@ async def run(
                 dispatcher=dispatcher,
             )
             await long_jobs.sweep()
-            await _sweep_fleet_deadlines(sm)
+            await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
@@ -1743,6 +1849,7 @@ async def run(
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
                 client, sm, settings=settings, fernet=push_resync_fernet

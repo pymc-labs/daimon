@@ -357,3 +357,24 @@ async def test_on_submit_mismatch_does_not_emit_completion_log(
     assert len(info_calls) == 0, (
         "Mismatch branch must NOT emit privacy.delete.completed — the user did not delete anything"
     )
+
+
+async def test_a_purge_that_rolled_back_tells_the_person_nothing_was_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.purge import AccountPurgeFailed
+
+    modal = _make_modal(user_name="carlos")
+    modal.runtime.settings.privacy.delete_enabled = True
+    _set_typed(modal, "carlos")
+    purge = AsyncMock(
+        side_effect=AccountPurgeFailed(
+            "Deleting your account didn't finish, so nothing was deleted."
+        )
+    )
+    monkeypatch.setattr("daimon.adapters.discord.privacy_panel.modal.purge_account", purge)
+    interaction = _make_interaction_with_response()
+    await modal.on_submit(interaction)
+    sent = interaction.followup.send.await_args.args[0]
+    assert "nothing was deleted" in sent
+    interaction.edit_original_response.assert_not_awaited()

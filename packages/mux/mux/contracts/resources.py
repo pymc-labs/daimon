@@ -48,8 +48,11 @@ CapabilityDrop = Literal[
 MCPToolDrop = Annotated[
     str, StringConstraints(pattern=r"^mcp_tool:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
 ]
-BuiltinToolDrop = Literal["builtin_tool:web_fetch"]
-DeclaredDrop = CapabilityDrop | MCPToolDrop | BuiltinToolDrop
+# A built-in web tool the target won't carry (no native tool, or unpriced/off there).
+BuiltinToolDrop = Literal["builtin_tool:web_fetch", "builtin_tool:web_search"]
+# One whole MCP server (a user's connector) the target can't reach; the rest stay.
+MCPServerDrop = Annotated[str, StringConstraints(pattern=r"^mcp_server:[A-Za-z0-9_.-]+$")]
+DeclaredDrop = CapabilityDrop | MCPToolDrop | BuiltinToolDrop | MCPServerDrop
 _DeclaredDrops = Annotated[tuple[DeclaredDrop, ...], AfterValidator(_unique_declared_drops)]
 
 
@@ -106,7 +109,7 @@ class AgentSpec(Contract):
     extensions: tuple[ExtensionConfig, ...] | None = None
     metadata: FrozenMap[str, str] | None = None
     declared_drops: _DeclaredDrops = Field(default=(), exclude_if=lambda value: not value)
-    """Explicit worker-only reductions; omission preserves existing source requirements."""
+    """Explicit source capability reductions accepted during backend conversion."""
 
 
 class AgentPatch(Contract):

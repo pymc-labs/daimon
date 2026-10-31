@@ -25,7 +25,6 @@ from daimon.core.turn.prepare import PreparedTurn
         ("hold", False, True),
         ("shared_channel", False, True),
         ("source_shared", False, True),
-        ("worker", False, True),
         ("unresolved", False, True),
         ("routine", True, False),
         ("disabled", False, False),

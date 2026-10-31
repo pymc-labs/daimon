@@ -58,7 +58,6 @@ from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
-    TextBlock,
     ToolUseBlock,
     TurnState,
     extract_sealed_responses,
@@ -76,7 +75,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import discord
 
 if TYPE_CHECKING:
-    from daimon.adapters.discord.posted_controls.fleet import DiscordFleetCard
+    pass
 
 log = structlog.get_logger()
 
@@ -400,13 +399,10 @@ class DiscordTurnLifecycle(OutputGate):
         alert_webhook_url: SecretStr | None = None,
         waiting_for_tenant_slot: Callable[[], bool] | None = None,
         thread_stopped: Callable[[], bool] | None = None,
-        fleet_card: DiscordFleetCard | None = None,
     ) -> None:
         # Once the turn's thread is gone or closed, nothing more is written:
         # no progress edit, no terminal card, no replacement for a missing card.
         self._thread_stopped = thread_stopped or (lambda: False)
-        self._fleet_card = fleet_card
-        self._fleet_notice: str | None = None
         self._requester_id = requester_id
         # Only an admin sees the request ref on a stop or failure notice.
         self._requester_is_admin = requester_is_admin
@@ -1147,10 +1143,6 @@ class DiscordTurnLifecycle(OutputGate):
         as permanent messages, once each. Without this, an answer composed
         before a trailing tool call (e.g. a memory-repo write) is discarded by
         the final-response extraction and only the post-tool recap survives."""
-        # Fleet turns disclose one collected, reviewed terminal summary.
-        # Intermediate sealed text is not that summary, even on failure.
-        if self._fleet_card is not None and not await self._fleet_card.allow_sealed_responses():
-            return
         async with self._sealed_lock:
             for index, text in extract_sealed_responses(
                 state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
@@ -1255,25 +1247,6 @@ class DiscordTurnLifecycle(OutputGate):
             if self._thread_stopped():
                 self._skip_terminal()
                 return
-            if self._fleet_card is not None:
-                from daimon.adapters.discord.posted_controls.fleet import fleet_result_seen
-
-                allowed, notice = await self._fleet_card.summary_gate(
-                    seen=fleet_result_seen(state),
-                    tool_free=not any(isinstance(block, ToolUseBlock) for block in state.content),
-                )
-                if not allowed:
-                    if notice is None:
-                        self._terminal = True
-                        return
-                    # Never deliver the root's unreviewed final or sealed text.
-                    self._state = update_activity(self._state, state)
-                    state = dataclasses.replace(
-                        state, content=[TextBlock(kind="text", text=notice)]
-                    )
-                else:
-                    # A partial result names its missing workers above the answer.
-                    self._fleet_notice = notice
             await self._deliver_success(state)
         finally:
             self._mark_ended()
@@ -1285,8 +1258,6 @@ class DiscordTurnLifecycle(OutputGate):
         response_text = self._final_response(state)
         if self._deferred_sealed_text:
             response_text = "\n\n".join([*self._deferred_sealed_text, response_text])
-        if self._fleet_notice:
-            response_text = "\n\n".join(filter(None, [self._fleet_notice, response_text]))
         if self._unprompted and not response_text:
             # No final answer on a turn nobody asked for: leave the thread as
             # it was. A tool trail with nothing to say is noise here, not a
@@ -1616,12 +1587,6 @@ class DiscordTurnLifecycle(OutputGate):
                 self._skip_terminal()
                 return
             await self._deliver_failure(state, err)
-            if self._fleet_card is not None:
-                # The error card is up; the fleet card must not stay "running".
-                try:
-                    await self._fleet_card.end_after_error()
-                except Exception:
-                    log.warning("turn.fleet_card_error_end_failed", exc_info=True)
         finally:
             self._mark_ended()
             self._card_writes.queue_repair()
@@ -1693,8 +1658,6 @@ class DiscordTurnLifecycle(OutputGate):
         # flush -- matches on_terminal_success's existing order, so a sealed
         # answer never trails behind an embed that already moved past it.
         if self._terminal or self._thread_stopped():
-            return
-        if self._fleet_card is not None and await self._fleet_card.refresh():
             return
         self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)

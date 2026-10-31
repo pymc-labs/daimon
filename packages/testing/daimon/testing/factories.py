@@ -23,12 +23,14 @@ from daimon.core._models import (
     Account,
     AgentMemoryStore,
     CliPrincipal,
+    GitHubAppInstallation,
     GitHubRemovalNotice,
     PlatformPrincipal,
     PrincipalLink,
     SecurityAuditEvent,
     TaskContinuation,
     Tenant,
+    TenantGitHubRepo,
     TenantLedger,
     UsageEvent,
 )
@@ -61,6 +63,7 @@ from daimon.core.stores.domain import (
     ChannelBudgetRow,
     CliPrincipalRow,
     ContinuationReason,
+    GitHubAppInstallationRow,
     McpTokenRow,
     Platform,
     PlatformPrincipalRow,
@@ -79,7 +82,7 @@ from daimon.core.stores.security_audit import SecurityAuditRow
 from daimon.core.stores.tenant_ledger import insert_entry
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.core.wizard.state import new_short_id
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -204,6 +207,83 @@ async def make_platform_principal(
     session.add(orm)
     await session.flush()
     return PlatformPrincipalRow.model_validate(orm)
+
+
+async def mark_principal_foreign(
+    session: AsyncSession, *, account_id: uuid.UUID, home_id: str = "other-org"
+) -> None:
+    """Mark every platform principal of the account as belonging to another organisation."""
+    await session.execute(
+        update(PlatformPrincipal)
+        .where(PlatformPrincipal.account_id == account_id)
+        .values(foreign_home_id=home_id)
+    )
+    await session.flush()
+
+
+async def make_github_app_installation(
+    session: AsyncSession,
+    *,
+    installation_id: int,
+    account_login: str,
+    repo_full_names: list[str],
+    github_repo_full_names: list[str] | None,
+    github_refreshed_at: datetime | None = None,
+) -> GitHubAppInstallationRow:
+    """Seed an App installation with a known reconciliation snapshot."""
+    row = GitHubAppInstallation(
+        installation_id=installation_id,
+        account_login=account_login,
+        repo_full_names=repo_full_names,
+        github_repo_full_names=github_repo_full_names,
+        github_refreshed_at=github_refreshed_at,
+        app="github_app",
+    )
+    session.add(row)
+    await session.flush()
+    return GitHubAppInstallationRow.model_validate(row)
+
+
+async def set_github_installation_snapshot(
+    session: AsyncSession,
+    *,
+    installation_id: int,
+    repo_full_names: list[str],
+    refreshed_at: datetime,
+) -> None:
+    """Inject a completed refresh between an adapter's network call and save."""
+    row = await session.get(GitHubAppInstallation, installation_id)
+    assert row is not None
+    row.github_repo_full_names = repo_full_names
+    row.github_refreshed_at = refreshed_at
+    await session.flush()
+
+
+async def make_tenant_github_repo(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    repo_id: int,
+    full_name: str,
+    installation_id: int,
+    scope_agent_id: uuid.UUID | None = None,
+    authorized_by_account_id: uuid.UUID | None = None,
+) -> None:
+    """A connected repo, for one agent when `scope_agent_id` is given and server-wide otherwise."""
+    session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=repo_id,
+            scope_agent_id=scope_agent_id,
+            owner_id=55,
+            installation_id=installation_id,
+            repo_full_name=full_name,
+            max_access="write",
+            authorized_by_github_user_id=17,
+            authorized_by_account_id=authorized_by_account_id,
+        )
+    )
+    await session.flush()
 
 
 async def link_principals(

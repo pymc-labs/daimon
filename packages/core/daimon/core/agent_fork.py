@@ -42,6 +42,7 @@ from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_defau
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_SETUP_HIDDEN,
     build_metadata,
     strip_tenant_prefix,
 )
@@ -49,16 +50,17 @@ from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import AgentNameCollision, DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import create_agent, retrieve_agent
+from daimon.core.mux_compat import archive_agent, create_agent, retrieve_agent
 from daimon.core.neutral_resources import HostAgentCopy, NeutralResourceHost
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import bundle_from_upload
 from daimon.core.skills.ownership import AttachedSkillOwnership, partition_copy_skills
 from daimon.core.specs import merge_default_agent_toolset
-from daimon.core.stores import agent_owners
+from daimon.core.stores import agent_owners, agent_tool_rules
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import UserSkillRow
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.resources import Agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -243,6 +245,9 @@ async def copy_agent(
     default_agent_name: str | None,
     extra_metadata: Mapping[str, str] | None = None,
     owner: uuid.UUID | Literal["source"] | None = None,
+    answering: bool = False,
+    hold: TurnHold | None = None,
+    hide_setup: bool = False,
 ) -> AgentCopy:
     """Create `new_name` as a copy of `source`; raise `DaimonError` if `subject` may not.
 
@@ -250,6 +255,11 @@ async def copy_agent(
     `default_agent_name` is the deployment default, which gets no face.
     `owner` is who owns the copy: the person who made it, or `"source"` to keep
     the source agent's owner (a channel's copy); None leaves it admin-only.
+    `answering`: `source` is the agent answering the subject's own chat turn
+    (host-verified), which any person may copy; any other agent needs an admin.
+    `hold` is the calling turn's hold, if any. `hide_setup` marks a copy whose
+    inherited setup its non-admin owner may not read (`MA_METADATA_KEY_SETUP_HIDDEN`).
+    The copy gets every tool rule its source has, so it runs no looser.
     """
     async with sessionmaker() as session:
         try:
@@ -264,6 +274,8 @@ async def copy_agent(
         subject=subject,
         action=Action.FORK,
         agent=build_agent_ref(source.name, source.metadata),
+        answering=answering,
+        hold=hold,
     )
     if decision.reason == "agent_has_rule":
         # The copy would run anywhere with the prompt and skills of one that may not.
@@ -281,6 +293,10 @@ async def copy_agent(
     fork_params["metadata"] = build_metadata(
         tenant_id=tenant_id, name=new_name, account_id=derive_guild_account_uuid(tenant_id)
     ) | dict(extra_metadata or {})
+    # A copy of a copy whose setup is hidden keeps it hidden (a channel's copy of a
+    # member's private copy is still the member's).
+    if hide_setup or source_ma.metadata.get(MA_METADATA_KEY_SETUP_HIDDEN) == "true":
+        fork_params["metadata"][MA_METADATA_KEY_SETUP_HIDDEN] = "true"
     fork_params["mcp_servers"] = merge_default_mcp_server(
         cast("list[BetaManagedAgentsURLMCPServerParams] | None", fork_params.get("mcp_servers")),
         public_url,
@@ -313,6 +329,40 @@ async def copy_agent(
     created = await create_agent(
         anthropic, fork_params, scope=resource_scope(tenant_id=str(tenant_id))
     )
+    # Rules first, owner after: a copy that couldn't take its source's rules is removed,
+    # never left running looser than its source (rules are copied once, at the fork).
+    try:
+        async with sessionmaker.begin() as session:
+            await agent_tool_rules.copy_rules(
+                session,
+                tenant_id=tenant_id,
+                source_agent_id=str(source.id),
+                agent_id=created.id,
+                agent_name=new_name,
+                set_by=f"copy-of:{source.id}",
+            )
+    except Exception as exc:
+        _log.warning(
+            "agent_fork.rule_copy_failed",
+            tenant_id=str(tenant_id),
+            agent_id=created.id,
+            error=type(exc).__name__,
+        )
+        try:
+            await archive_agent(
+                anthropic, created.id, scope=resource_scope(tenant_id=str(tenant_id))
+            )
+        except Exception as archive_exc:  # best effort: the copy has no owner either way
+            _log.error(
+                "agent_fork.rule_copy_archive_failed",
+                tenant_id=str(tenant_id),
+                agent_id=created.id,
+                error=type(archive_exc).__name__,
+            )
+        raise UserFacingError(
+            "The copy couldn't take its source's tool rules, so it wasn't kept. "
+            "Try again in a moment."
+        ) from exc
     await _record_copy_owner(
         sessionmaker, tenant_id=tenant_id, source_id=str(source.id), copy_id=created.id, owner=owner
     )
@@ -395,11 +445,19 @@ async def fork_host_agent(
     public_url: str | None = None,
     extra_metadata: Mapping[str, str] | None = None,
 ) -> HostAgentCopy:
-    """The same fork policy, with explicit neutral catalog/native resources."""
+    """The same fork policy, with explicit neutral catalog/native resources.
+
+    Admin-only (no `answering` path) and ownerless, unlike `copy_agent`: a member's
+    copy is never made here. It doesn't copy tool rules (they are keyed by the
+    provider agent id this neutral copy doesn't have yet); a hidden-setup source
+    keeps the copy hidden.
+    """
     tenant_id = uuid.UUID(host.scope.tenant_id)
     source = await host.find(source_name)
     if source is None:
         raise UserFacingError("The agent you want to copy is missing. Choose another agent.")
+    if (source.revision.agent.spec.metadata or {}).get(MA_METADATA_KEY_SETUP_HIDDEN) == "true":
+        extra_metadata = {**(extra_metadata or {}), MA_METADATA_KEY_SETUP_HIDDEN: "true"}
 
     async def recheck(agent: Agent) -> None:
         async with sessionmaker() as session:

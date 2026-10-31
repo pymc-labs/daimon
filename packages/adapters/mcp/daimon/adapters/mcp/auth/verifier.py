@@ -14,6 +14,17 @@ token row is also written to `security_audit_events`. An operator token's
 admin check reads the account's stored role, which the account's next
 platform turn refreshes, so a demoted admin's token keeps working until then
 or until it expires; `daimon mcp revoke-token` stops it on its next request.
+
+A coding key (an agent key made from the agent's "coding tools" button or the CLI;
+``purpose="coding"`` on its row) is held to its holder's standing on every request,
+bound to a channel or not: the account must still be a server admin by stored role,
+or own the key's agent. Removing the owner, or an admin's stored-role demotion, stops
+the key on its next request. Report seam tokens, provider-turn credentials and the
+in-session chat credentials are not coding keys and are not held to this; they keep
+the older rule that a channel-bound agent key needs an admin by stored role. A
+registered agent key's `is_admin` and `internal` claims are dropped, so a hand-made
+token never borrows an admin's tool surface from them: admin comes only from the
+account's stored role.
 """
 
 from __future__ import annotations
@@ -24,6 +35,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import structlog
+from daimon.core.agent_ownership import account_owns_agent
 from daimon.core.config import McpSettings
 from daimon.core.mcp_auth import (
     CHAT_TOKEN_TTL,
@@ -33,6 +45,7 @@ from daimon.core.mcp_auth import (
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
+from daimon.core.stores.identity import list_cli_principals_for_account
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.security_audit import append_event
 from fastmcp.server.auth import AccessToken
@@ -50,6 +63,21 @@ FOREIGN_HOME_CLAIM = "daimon_foreign_home"
 
 REFUSAL_AUDIT_TOOL = "auth/verify"
 """The audit row's tool name for a refusal: the verifier never sees the tool."""
+
+
+def is_coding_key(row: McpTokenRow) -> bool:
+    """Whether the row is a coding key: an agent key a person made to drive an agent.
+
+    The row's purpose says so. A purpose-less agent row (written by a process older
+    than the column) counts as one unless it is plainly internal: a provider-turn
+    surface or a chat credential's own label. Operator and CLI tokens never are.
+    """
+    if row.kind != "agent":
+        return False
+    if row.purpose is not None:
+        return row.purpose == "coding"
+    chat_labels = (chat_token_label(row.jti), chat_token_label(row.jti, held=True))
+    return row.surface is None and row.label not in chat_labels
 
 
 def _hold_refusal(
@@ -83,12 +111,16 @@ def token_row_refusal(
     identity: AccountIdentityRow,
     now: datetime,
     hold_claim: object = None,
+    coding_key_standing: bool = False,
 ) -> str | None:
     """Why a registry row does not admit this token, or None when it does.
 
     ``hold_claim`` is the signed hold claim the token carried, if any. A held
-    chat token is admitted only when it matches the row's channel binding; it is
-    exempt from the ``admin_required`` rule below, which stays for agent keys.
+    chat token is admitted only when it matches the row's channel binding.
+
+    ``coding_key_standing`` is `would_coding_key_pass`'s answer, read by the caller:
+    the account is an admin by stored role or owns the row's agent. A coding key
+    needs it (see the module docstring); no other token reads it.
 
     An operator token acts for a server admin, so the account must still be
     one by stored role, and must have the platform user id every billing and
@@ -132,7 +164,10 @@ def token_row_refusal(
                 return "chat_binding_mismatch"
         elif claims.get("agent_id") != row.agent_id:
             return "agent_mismatch"
-        if row.channel_id is not None and not vault_chat and identity.role is not Role.ADMIN:
+        if is_coding_key(row):
+            if not coding_key_standing:
+                return "not_admin_or_owner"
+        elif row.channel_id is not None and not vault_chat and identity.role is not Role.ADMIN:
             return "admin_required"
         return None
     if claims.get("kind") != row.kind:
@@ -148,6 +183,41 @@ def token_row_refusal(
     if not row.scopes:
         return "no_scopes"
     return None
+
+
+async def would_coding_key_pass(
+    session: AsyncSession, row: McpTokenRow, *, identity: AccountIdentityRow | None = None
+) -> bool:
+    """Whether the row would pass the coding-key rule right now. Read-only.
+
+    True for any row that is not a coding key. A coding key passes while its account
+    is a server admin by stored role, is the CLI operator's own account (keys from
+    `daimon mcp mint-agent-token`), or owns the key's agent. The verifier asks this
+    on every request; run it over existing rows to see which keys a deploy would stop.
+    Expiry, revocation and the other checks are `token_row_refusal`'s, not this.
+    """
+    if not is_coding_key(row):
+        return True
+    if identity is None:
+        identity = await get_account_with_tenant(session, account_id=row.account_id)
+    if (
+        identity is None
+        or identity.account_id != row.account_id
+        or identity.tenant_id != row.tenant_id
+        or row.agent_id is None
+    ):
+        return False
+    if identity.role is Role.ADMIN:
+        return True
+    if await list_cli_principals_for_account(session, account_id=identity.account_id):
+        return True
+    try:
+        agent_id = uuid.UUID(row.agent_id)
+    except ValueError:
+        return False
+    return await account_owns_agent(
+        session, tenant_id=identity.tenant_id, agent_id=agent_id, account_id=identity.account_id
+    )
 
 
 def _token_diagnostics(claims: Mapping[str, object]) -> dict[str, object]:
@@ -257,6 +327,7 @@ class DaimonJWTVerifier(JWTVerifier):
             if identity_row is None:
                 return _reject_token("unknown_account", access.claims)
             row: McpTokenRow | None = None
+            coding_key_standing = False
             jti = access.claims.get("jti")
             legacy_window = (
                 self._allow_legacy_tokens
@@ -275,6 +346,9 @@ class DaimonJWTVerifier(JWTVerifier):
                 row = await get_mcp_token(session, jti=jti_uuid)
                 if row is None:
                     return _reject_token("unknown_jti", access.claims)
+                coding_key_standing = await would_coding_key_pass(
+                    session, row, identity=identity_row
+                )
             elif "jti" in access.claims or access.claims.get("kind") is not None:
                 return _reject_token(
                     "malformed_registry_claims", access.claims
@@ -303,10 +377,16 @@ class DaimonJWTVerifier(JWTVerifier):
                 identity=identity_row,
                 now=datetime.now(UTC),
                 hold_claim=hold_claim,
+                coding_key_standing=coding_key_standing,
             )
             if refusal is not None:
                 await self._audit_refusal(row, identity=identity_row, reason=refusal)
                 return _reject_token(refusal, access.claims)
+        if row is not None and row.kind == "agent" and "agent_id" in access.claims:
+            # A registered external agent key never carries its own authority: admin
+            # comes from the stored role only, whatever the signed claims say.
+            for key in ("is_admin", "internal"):
+                access.claims.pop(key, None)
         access.claims["tenant_id"] = str(identity_row.tenant_id)
         access.claims["role"] = identity_row.role.value
         # Server-set from the registry row's surface, never from the token or a label.

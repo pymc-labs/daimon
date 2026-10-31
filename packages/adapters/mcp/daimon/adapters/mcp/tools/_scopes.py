@@ -10,7 +10,7 @@ whatever the tool checks next.
 To open another ``channels:write`` tool to operator tokens: tag it
 ``{"admin", *scope_tags("channels:write")}``, call
 ``require_scope(auth, "channels:write")`` first, and list it under the scope
-in docs/architecture.md. The verifier, the middleware filter and the audit
+in docs/operations.md. The verifier, the middleware filter and the audit
 row need no change.
 
 ``promo:create`` tools are operator-only: they carry no ``admin`` tag, a
