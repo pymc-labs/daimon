@@ -15,7 +15,8 @@ asks the metadata server):
 2. `qa-auto-approve.json`, beside the provider runtime file (the confirm-click
    control directory), says exactly ``{"enabled": true}``, is not a symlink
    and is not writable from inside this container;
-3. the GCE metadata server names a project ending in `-staging`.
+3. the GCE metadata server names a project ending in `-staging`, or one ending
+   in `-dev` whose deployment name is `lane-preview` (the QA dev lane).
 
 Publish cards (`lasting_public_link`: a report, any notebook upload, a file in
 a notebook) always stay manual, so a prompt-injected QA turn can't publish
@@ -36,9 +37,9 @@ from typing import TYPE_CHECKING, Literal
 
 import structlog
 from daimon.adapters.discord.confirm_click import (
-    STAGING_PROJECT_SUFFIX,
     control_file_path,
     gcp_project_id,
+    qa_host,
 )
 from daimon.core.stores.security_audit import append_event
 
@@ -81,11 +82,11 @@ def load_control(path: Path | None) -> bool:
     return data == {"enabled": True}
 
 
-async def _staging() -> bool:
+async def _qa_host(environment_name: str) -> bool:
     global _project_id
     if _project_id is None:
         _project_id = await gcp_project_id()
-    return _project_id is not None and _project_id.endswith(STAGING_PROJECT_SUFFIX)
+    return qa_host(_project_id, environment_name)
 
 
 async def enabled_for(settings: Settings | None, requester: str) -> bool:
@@ -96,7 +97,8 @@ async def enabled_for(settings: Settings | None, requester: str) -> bool:
         return False
     if not load_control(control_path()):
         return False
-    return await _staging()
+    environment: object = getattr(settings, "environment", None)
+    return await _qa_host(getattr(environment, "name", "") or "")
 
 
 def card_kind(prompt: ConfirmationPrompt) -> str:
