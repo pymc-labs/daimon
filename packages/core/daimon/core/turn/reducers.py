@@ -17,6 +17,7 @@ by folding over the live SSE stream.
 from __future__ import annotations
 
 import dataclasses
+from typing import cast
 
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent as SessionEvent
 from anthropic.types.beta.sessions.beta_managed_agents_agent_custom_tool_use_event import (
@@ -65,7 +66,9 @@ from daimon.core.errors import TurnError
 from daimon.core.pricing import LONG_CONTEXT_PROMPT_TOKENS
 from daimon.core.turn.state import (
     ContentBlock,
+    HelperStatus,
     McpServerFailure,
+    Task,
     TextBlock,
     ToolUseBlock,
     TurnState,
@@ -143,6 +146,16 @@ def apply(
                     termination=TerminationReason.REFUSED,
                     seen_event_ids=seen,
                 )
+            if cast(str, event.stop_reason.type) == "budget_reached":
+                # The pinned SDK has no budget stop type and parses it as an end
+                # turn; the session paused at its spending limit with work unfinished.
+                return dataclasses.replace(
+                    state,
+                    stop_reason=event.stop_reason,
+                    error=TurnError(kind="upstream", message="the session reached its budget"),
+                    termination=TerminationReason.BUDGET_REACHED,
+                    seen_event_ids=seen,
+                )
             return dataclasses.replace(state, stop_reason=event.stop_reason, seen_event_ids=seen)
         case "session.error":
             assert isinstance(event, BetaManagedAgentsSessionErrorEvent)
@@ -193,8 +206,43 @@ def apply(
                 long_prompt_usage_totals=long_totals,
                 seen_event_ids=seen,
             )
+        case "session.thread_created":
+            thread_id = getattr(event, "session_thread_id", None)
+            if not isinstance(thread_id, str) or any(t.thread_id == thread_id for t in state.tasks):
+                return dataclasses.replace(state, seen_event_ids=seen)
+            name = getattr(event, "agent_name", None)
+            helper = Task(thread_id=thread_id, agent_name=name if isinstance(name, str) else "")
+            return dataclasses.replace(state, tasks=[*state.tasks, helper], seen_event_ids=seen)
+        case "session.thread_status_running":
+            return _helper_status(state, event, "working", seen)
+        case "session.thread_status_idle":
+            stop = getattr(getattr(event, "stop_reason", None), "type", None)
+            # A helper paused at the session's spending limit did not finish.
+            status: HelperStatus = "stopped" if stop == "budget_reached" else "done"
+            return _helper_status(state, event, status, seen)
+        case "session.thread_status_terminated":
+            return _helper_status(state, event, "stopped", seen)
         case _:
             return dataclasses.replace(state, seen_event_ids=seen)
+
+
+def _helper_status(
+    state: TurnState, event: SessionEvent, status: HelperStatus, seen: frozenset[str]
+) -> TurnState:
+    """Move a helper this turn started; the primary thread and older helpers are not tracked.
+
+    A helper that idled stays `done` when an archive later terminates it.
+    """
+    thread_id = getattr(event, "session_thread_id", None)
+    tasks = [
+        dataclasses.replace(t, status=status)
+        if t.thread_id == thread_id and not (status == "stopped" and t.status == "done")
+        else t
+        for t in state.tasks
+    ]
+    if tasks == state.tasks:
+        return dataclasses.replace(state, seen_event_ids=seen)
+    return dataclasses.replace(state, tasks=tasks, seen_event_ids=seen)
 
 
 def _apply_agent_message(

@@ -39,7 +39,7 @@ from daimon.core.handoff_context import (
     render_previous_session,
     select_recent_turns,
 )
-from daimon.core.ma import replay_events
+from daimon.core.ma import interrupt_orphaned_session, replay_events
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.session_fence_retry import retry_fences
@@ -56,6 +56,8 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
     transfer_active_turn,
 )
+from daimon.core.subagent_budget import BudgetExhausted, raise_turn_budget
+from daimon.core.subagents import is_coordinator
 from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.agent_notices import (
@@ -106,7 +108,7 @@ from daimon.core.turn.provider_actions import (
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
-from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
+from daimon.core.usage_sweep import SETTLE_BUDGET_S, request_helper_settle, settle_session
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
@@ -243,7 +245,18 @@ def _finalizer_done(task: asyncio.Future[None]) -> None:
         log.warning("turn.finalize_failed", error=type(error).__name__)
 
 
-async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: UsageRecorder) -> None:
+#: A coordinator's settle also reads and archives each helper thread.
+_HELPER_SETTLE_BUDGET_S = 4 * SETTLE_BUDGET_S
+
+
+async def _settle(
+    deps: TurnDeps,
+    *,
+    session_id: str,
+    scope: Scope,
+    record: UsageRecorder,
+    helpers: bool = False,
+) -> None:
     """Debit model calls on `session_id` that no live stream metered.
 
     Runs once the turn is over -- after its answer or failure was rendered --
@@ -255,14 +268,19 @@ async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: Usag
     could not write.
     """
     try:
-        await settle_session(
+        result = await settle_session(
             deps.anthropic,
             deps.sessionmaker,
             session_id,
             scope=scope,
             record=record,
-            deadline=time.monotonic() + SETTLE_BUDGET_S,
+            deadline=time.monotonic() + (_HELPER_SETTLE_BUDGET_S if helpers else SETTLE_BUDGET_S),
+            helpers=helpers,
         )
+        if helpers and not result.complete:
+            # A helper still working, or a read cut short: the scheduler's drain
+            # finishes the billing once the session idles.
+            await request_helper_settle(deps.anthropic, deps.sessionmaker, session_id, scope=scope)
     except _anthropic.NotFoundError:
         # A deleted session: its events can no longer be listed.
         log.info("billing.settle_skipped", managed_session_id=session_id)
@@ -974,6 +992,49 @@ async def _queue_agent_notices(
         log.warning("turn.agent_notices_queue_failed", error=type(error).__name__)
 
 
+def _with_turn_budget(
+    deps: TurnDeps,
+    admission: Admission,
+    gate: Callable[[], Awaitable[None]],
+    *,
+    session_id: str,
+    tenant_id: uuid.UUID,
+) -> Callable[[], Awaitable[None]]:
+    """`gate`, then, for an agent with helpers, this request's spending limit.
+
+    The last step before the message is sent, after every access decision
+    (`daimon.core.subagent_budget`): a raise that fails refuses the turn.
+    """
+    if not _runs_helpers(admission):
+        return gate
+
+    async def budgeted() -> None:
+        await gate()
+        # `BudgetExhausted` (already paused at its limit) refuses the send; the turn
+        # then retires the session (`_run`), so the next message starts fresh.
+        await raise_turn_budget(
+            deps.anthropic,
+            session_id,
+            scope=admitted_session_scope(admission, tenant_id=tenant_id, session_id=session_id),
+        )
+
+    return budgeted
+
+
+def _runs_helpers(admission: Admission) -> bool:
+    """An Anthropic Managed Agents turn whose agent lists helpers (`daimon.core.subagents`)."""
+    revision = admission.backend_revision
+    anthropic = revision is None or revision.profile == MANAGED_AGENTS.profile_id
+    return anthropic and is_coordinator(getattr(admission.agent, "multiagent", None))
+
+
+async def _retire_at_budget(deps: TurnDeps, mapping_id: uuid.UUID, session_id: str) -> None:
+    async with deps.sessionmaker() as session:
+        await mark_dead(session, id=mapping_id)
+        await session.commit()
+    log.info("subagents.session_retired_at_budget", session_id=session_id)
+
+
 async def run_prepared_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -1457,16 +1518,30 @@ async def run_prepared_turn_impl(
                     **action_kwargs,
                     image_blocks=image_blocks,
                     system_blocks=prepared.continuity.system_blocks,
-                    before_send=checked_send
-                    if before_send is not None
-                    else decide_before_send(deps, prepared.admission),
+                    before_send=_with_turn_budget(
+                        deps,
+                        prepared.admission,
+                        checked_send
+                        if before_send is not None
+                        else decide_before_send(deps, prepared.admission),
+                        session_id=ma_session_id,
+                        tenant_id=tenant_id,
+                    ),
                     send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
                 )
+                if state.termination is TerminationReason.BUDGET_REACHED and mapping_id:
+                    # Still holding the lease: raising the limit later would resume
+                    # the paused helpers, so the next message gets a fresh session.
+                    await _retire_at_budget(deps, mapping_id, ma_session_id)
         except BindingSuperseded as error:
             # The holder replaced this turn's session while it queued: the recovery
             # below adopts that replacement instead of running on the stale one.
             superseded = error
             state = TurnState(error=TurnError(kind="upstream", message=str(error)))
+        if isinstance(state.error, BudgetExhausted) and mapping_id is not None:
+            # Paused at its limit before this turn (cut off before it was retired):
+            # never resumed; the next message in the thread starts a fresh session.
+            await _retire_at_budget(deps, mapping_id, ma_session_id)
 
         if not (
             (superseded is not None or _is_dead_session(state))
@@ -1685,6 +1760,20 @@ async def run_prepared_turn_impl(
 
             persistence = active_persistence_cell[0]
             queued = persistence is not None and not persistence.lease_acquired
+            ceiling_admission = active_admission_cell[0]
+            if not queued and _runs_helpers(ceiling_admission):
+                # Helpers keep spending on a session the ceiling abandons: stop
+                # every thread (best-effort, bounded) before it is retired and settled.
+                try:
+                    await interrupt_orphaned_session(
+                        deps.anthropic,
+                        session_id=active_session_id,
+                        scope=admitted_session_scope(
+                            ceiling_admission, tenant_id=tenant_id, session_id=active_session_id
+                        ),
+                    )
+                except Exception:  # best-effort: the session is retired below regardless
+                    log.warning("subagents.ceiling_interrupt_failed", session_id=active_session_id)
             if active_mapping_id is not None and not queued:
                 # A turn still queued behind another never ran on this mapping,
                 # and its holder is using it: only a turn that ran retires it.
@@ -1717,6 +1806,7 @@ async def run_prepared_turn_impl(
         outcome = await _run_within_ceiling()
     finally:
         current_turn_deadline.reset(deadline_token)
+
     # Turn end: anything this session billed nowhere -- calls MA made while no
     # worker was streaming it (an earlier turn whose worker died), while no
     # stream generation was attached, or before a ceiling cut the turn off.
@@ -1735,5 +1825,6 @@ async def run_prepared_turn_impl(
                 active_admission, tenant_id=tenant_id, session_id=active_session_id_cell[0]
             ),
             record=cast(UsageRecorder, active_record_cell[0]),
+            helpers=is_coordinator(getattr(active_admission.agent, "multiagent", None)),
         )
     return outcome

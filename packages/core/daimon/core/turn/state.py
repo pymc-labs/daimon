@@ -158,11 +158,22 @@ class McpServerFailure:
     retry_status: Literal["retrying", "exhausted"]
 
 
+HelperStatus = Literal["working", "done", "stopped"]
+
+
 @dataclass(frozen=True, slots=True)
 class Task:
-    """Placeholder for subagent-task tracking. Managed Agents emits no
-    `agent.task_*` events currently; this type exists so `TurnState.tasks`
-    is typed and forward-compatible."""
+    """One helper (a native Managed Agents child thread) this turn started.
+
+    `daimon.core.subagents`. `working` from its creation until it idles (`done`)
+    or the provider terminates it without idling first (`stopped`: an error, an
+    archive, a stop). Only threads created in this turn are tracked, so the
+    `terminated` events an archive of an earlier turn's helpers emits never count.
+    """
+
+    thread_id: str
+    agent_name: str
+    status: HelperStatus = "working"
 
 
 @dataclass(frozen=True, slots=True)

@@ -85,9 +85,10 @@ def test_turn_state_accepts_turn_error_on_error_field_when_upstream_fails() -> N
     assert state.error is err
 
 
-def test_task_is_empty_placeholder_kept_for_forward_compat_when_referenced() -> None:
-    task = Task()
-    assert isinstance(task, Task), "Task is a placeholder; Managed Agents emits no task events yet"
+def test_a_task_is_a_helper_this_turn_started() -> None:
+    """`TurnState.tasks` holds the helpers (`daimon.core.subagents`), working until they end."""
+    task = Task(thread_id="sthr_1", agent_name="coder")
+    assert (task.status, TurnState().tasks) == ("working", [])
 
 
 def _tool(tool_id: str) -> ToolUseBlock:

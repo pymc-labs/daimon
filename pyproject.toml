@@ -323,6 +323,8 @@ source_modules = [
     "daimon.core.slack_customize_scope",
     "daimon.core.smoke",
     "daimon.core.specs",
+    "daimon.core.subagent_budget",
+    "daimon.core.subagents",
     "daimon.core.support_escalation",
     "daimon.core.support_routing",
     "daimon.core.switch_cards",

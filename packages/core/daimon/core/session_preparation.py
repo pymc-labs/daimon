@@ -118,6 +118,7 @@ from daimon.core.stores.thread_sessions import (
     set_budget_channel_stamp,
     update_mutable_fingerprint,
 )
+from daimon.core.subagents import coordinator_system
 from daimon.core.thread_handoff import destination_may_read
 from daimon.core.turn.admission import (
     Admission,
@@ -946,7 +947,11 @@ async def _prepare_session_for_turn_locked(
             confirmed_tools=confirmed_tools_for_turn(deps),
             daimon_rule_tools=admission.daimon_rule_tools,
             channel_skills=admission.channel_skills,
-            system_override=system_for_platform(admission.agent.system, platform),
+            system_override=coordinator_system(
+                system_for_platform(admission.agent.system, platform),
+                admission.agent.system,
+                admission.agent.multiagent,
+            ),
             # A shared thread's session mounts no caller credential, so no hold.
             mcp_hold=hold_key(admission.hold) if admission.shared_owner is None else None,
             # A held place's memory is its channel's, shared thread or not.

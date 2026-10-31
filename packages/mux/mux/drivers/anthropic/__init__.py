@@ -48,6 +48,11 @@ from mux.drivers.anthropic.resources.environments import (
 from mux.drivers.anthropic.resources.memory_stores import AnthropicMemoryStores, StoreCreate
 from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
+from mux.drivers.anthropic.resources.session_threads import (
+    AnthropicSessionThreads,
+    SessionThreads,
+    session_threads,
+)
 from mux.drivers.anthropic.resources.session_tools import (
     AnthropicSessionTools,
     EventPage,
@@ -68,6 +73,7 @@ from mux.drivers.anthropic.resources.vaults import AnthropicVaults, Vaults
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
 from mux.drivers.anthropic.schemas import (
     AGENT_TOOLS_NAMESPACE,
+    MULTIAGENT_NAMESPACE,
     AgentModelConfig,
     AgentToolsConfig,
     EnvironmentConfig,
@@ -157,6 +163,9 @@ class AnthropicManagedAgents:
             (SessionReads, "anthropic.session_reads", 1): native_sessions,
             (SessionWalk, "anthropic.session_walk", 1): native_sessions,
             (SessionTools, "anthropic.session_tools", 1): AnthropicSessionTools(
+                client, self.account_scope_id, authorization
+            ),
+            (SessionThreads, "anthropic.session_threads", 1): AnthropicSessionThreads(
                 client, self.account_scope_id, authorization
             ),
             (WorkspaceTransfer, "anthropic.workspace_transfer", 1): AnthropicWorkspaceTransfer(
@@ -252,6 +261,7 @@ class AnthropicManagedAgents:
 
 __all__ = [
     "AGENT_TOOLS_NAMESPACE",
+    "MULTIAGENT_NAMESPACE",
     "AgentModelConfig",
     "AgentToolsConfig",
     "AnthropicAgents",
@@ -266,6 +276,7 @@ __all__ = [
     "AnthropicPlatformExport",
     "AnthropicResourceWalk",
     "AnthropicSessionAdmin",
+    "AnthropicSessionThreads",
     "AnthropicSessionTools",
     "AnthropicSessions",
     "AnthropicSkillVersions",
@@ -299,7 +310,9 @@ __all__ = [
     "SessionReads",
     "SessionResourceConfig",
     "SessionSend",
+    "SessionThreads",
     "SessionTools",
+    "session_threads",
     "SessionWalk",
     "StoreCreate",
     "UNCLASSIFIED_SOURCE_NAMESPACE",

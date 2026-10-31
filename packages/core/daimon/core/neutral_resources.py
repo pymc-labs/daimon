@@ -33,6 +33,7 @@ from daimon.core.stores.neutral_catalog import (
     PostgresNeutralCatalog,
     SkillVersion,
 )
+from daimon.core.subagents import check_spec_multiagent
 from mux.contracts.ids import Scope, SkillRef
 from mux.contracts.ports import Agents, ManagedAgents
 from mux.contracts.profile import SUPPORTED
@@ -271,6 +272,7 @@ class NeutralResourceHost:
         current = await self.catalog.get_agent(self.scope, catalog_id)
         if (current.local_revision if current is not None else 0) != expected_revision:
             raise CatalogConflict("agent changed before native creation")
+        check_spec_multiagent(spec)
         created = await self.backend.agents.create(self.scope, spec, key=key)
         self.check(created)
         # Keep authored intent, rather than losing compiled tool declarations on edits.
