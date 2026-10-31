@@ -89,6 +89,9 @@ class AuthIdentity:
     anthropic_disabled: bool = False
     # A provider turn with no confirmation card: confirmation-gated tools refuse.
     no_confirmation_surface: bool = False
+    # The daimon tools a chat agent enables by name (`stores.agent_daimon_tools`);
+    # None when its toolset enables every tool.
+    daimon_tools: frozenset[str] | None = None
 
     def admin_for(self, action: DelegatedAction | None = None) -> bool:
         return (
