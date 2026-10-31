@@ -598,7 +598,8 @@ Discord bot token. Required to run the Discord adapter.
 `list[int]` · optional · default unset
 
 Guilds allowed to receive commands and events when the environment name is set. An empty
-list disables all Discord ingress, including DMs, in non-production.
+list disables all guild ingress in non-production. DMs are not filtered by guild; the
+bot answers one only for a verified member of one of its tenants.
 
 ### `DAIMON_DISCORD__STARTUP_REPLAY_MINUTES`
 

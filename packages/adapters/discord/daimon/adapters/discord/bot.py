@@ -2236,13 +2236,16 @@ class DaimonBot(commands.Bot):
         return isinstance(name, str) and bool(name)  # pyright: ignore[reportUnnecessaryIsInstance]
 
     def _allows_guild(self, guild_id: int | None) -> bool:
-        """Non-production accepts only configured guilds; DMs have no guild to allow."""
-        if not self._non_production:
+        """Non-production accepts only configured guilds.
+
+        DMs and their buttons carry no guild and pass as in production: the
+        direct-message cog admits a person only through a tenant they are a
+        verified member of, so a lane bot still answers no one outside its guilds.
+        """
+        if not self._non_production or guild_id is None:
             return True
         settings = self.runtime.settings.discord
-        return (
-            guild_id is not None and settings is not None and guild_id in settings.command_guild_ids
-        )
+        return settings is not None and guild_id in settings.command_guild_ids
 
     def dispatch(self, event: str, /, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         """Stop guild events before any registered cog listener sees them."""

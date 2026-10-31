@@ -615,7 +615,8 @@ class DiscordSettings(BaseModel):
         default_factory=list[int],
         description=(
             "Guilds allowed to receive commands and events when the environment name is set. "
-            "An empty list disables all Discord ingress, including DMs, in non-production."
+            "An empty list disables all guild ingress in non-production. DMs are not filtered "
+            "by guild; the bot answers one only for a verified member of one of its tenants."
         ),
     )
     startup_replay_minutes: int = Field(
