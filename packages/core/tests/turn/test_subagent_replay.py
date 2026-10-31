@@ -86,6 +86,7 @@ async def test_a_fan_out_stopped_by_its_spending_limit_is_not_a_reply() -> None:
     assert len(lifecycle.terminal_failures) == 1
     assert final.termination is TerminationReason.BUDGET_REACHED
     assert TerminationReason.BUDGET_REACHED.is_failure
+    assert [t.status for t in final.tasks] == ["stopped", "stopped"], "paused, not done"
 
 
 def test_the_card_shows_the_helpers_while_they_work() -> None:

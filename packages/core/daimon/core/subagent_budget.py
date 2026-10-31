@@ -25,7 +25,14 @@ from mux.drivers.anthropic import session_threads
 
 log = structlog.get_logger(__name__)
 
-__all__ = ["raise_turn_budget"]
+__all__ = ["BudgetExhausted", "raise_turn_budget"]
+
+
+class BudgetExhausted(TurnError):
+    """The session is already at its limit: raising it would resume paused work."""
+
+    def __init__(self) -> None:
+        super().__init__(kind="upstream", message="the session is already at its spending limit")
 
 
 async def raise_turn_budget(anthropic: AsyncAnthropic, session_id: str, *, scope: Scope) -> None:
@@ -38,9 +45,12 @@ async def raise_turn_budget(anthropic: AsyncAnthropic, session_id: str, *, scope
     ref = resource_ref(backend, "session", session_id, scope=scope)
     port = session_threads(backend)
     try:
-        spent = await legacy_call(port.spent_cents(scope, ref))
-        if spent is None:
+        state = await legacy_call(port.budget_state(scope, ref))
+        if state is None:
             raise TurnError(kind="upstream", message="the helpers' session has no spending limit")
+        spent, current = state
+        if spent >= current:
+            raise BudgetExhausted()
         limit = turn_limit_cents(spent)
         await legacy_call(port.set_budget(scope, ref, max_cents=limit))
     except TurnError:

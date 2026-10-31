@@ -28,6 +28,14 @@ from mux.drivers.anthropic.resources._authorization import (
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.resources._native import NativeSnapshot, native_snapshot
 
+#: Events per thread page (the session event list's page size, known accepted).
+_EVENT_PAGE = 100
+
+
+def _cents(cost: object) -> int:
+    amount = cast(dict[str, object], cost).get("amount") if isinstance(cost, dict) else None
+    return int(amount) if isinstance(amount, str) and amount.isdigit() else 0
+
 
 class SessionThreads(Protocol):
     def threads(self, scope: Scope, session: ResourceRef) -> AsyncIterator[NativeSnapshot]: ...
@@ -35,7 +43,7 @@ class SessionThreads(Protocol):
         self, scope: Scope, session: ResourceRef, thread_id: str
     ) -> AsyncIterator[NativeSnapshot]: ...
     async def archive_thread(self, scope: Scope, session: ResourceRef, thread_id: str) -> None: ...
-    async def spent_cents(self, scope: Scope, session: ResourceRef) -> int | None: ...
+    async def budget_state(self, scope: Scope, session: ResourceRef) -> tuple[int, int] | None: ...
     async def set_budget(self, scope: Scope, session: ResourceRef, *, max_cents: int) -> None: ...
 
 
@@ -75,7 +83,9 @@ class AnthropicSessionThreads:
         """One thread's events, oldest first (the endpoint takes no type filter)."""
         self._check(scope, session)
         async for item in provider_iter(
-            self._client.beta.sessions.threads.events.list(thread_id, session_id=session.id)
+            self._client.beta.sessions.threads.events.list(
+                thread_id, session_id=session.id, limit=_EVENT_PAGE
+            )
         ):
             yield native_snapshot(item)
 
@@ -85,20 +95,20 @@ class AnthropicSessionThreads:
             self._client.beta.sessions.threads.archive(thread_id, session_id=session.id)
         )
 
-    async def spent_cents(self, scope: Scope, session: ResourceRef) -> int | None:
-        """The session's reported list cost in whole cents; None when it has no budget."""
+    async def budget_state(self, scope: Scope, session: ResourceRef) -> tuple[int, int] | None:
+        """(spent, limit) in whole cents from the session's report; None with no budget."""
         self._check(scope, session)
         item = await provider_call(self._client.beta.sessions.retrieve(session.id))
         check_record(scope, session.id, item.metadata)
         native = native_snapshot(item).native
-        if not isinstance(native.get("budget"), dict):
+        budget = native.get("budget")
+        if not isinstance(budget, dict):
             return None
         usage = native.get("usage")
-        cost = usage.get("list_cost") if isinstance(usage, dict) else None
-        amount = cost.get("amount") if isinstance(cost, dict) else None
-        if not isinstance(amount, str) or not amount.isdigit():
-            return 0
-        return int(amount)
+        return (
+            _cents(usage.get("list_cost") if isinstance(usage, dict) else None),
+            _cents(budget.get("max_list_cost")),
+        )
 
     async def set_budget(self, scope: Scope, session: ResourceRef, *, max_cents: int) -> None:
         """Raise or lower an existing limit to `max_cents` (whole cents, at least 1)."""

@@ -48,7 +48,7 @@ import functools
 import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, cast
@@ -80,6 +80,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import record_turn_usage
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import EventPage, EventQuery, SessionTools, session_threads
+from mux.errors import ProviderError
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -202,13 +203,46 @@ def _record_for_model(record: UsageRecorder, model_id: str | None) -> UsageRecor
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class _ChildSettle:
-    scanned: int
-    unbilled: tuple[BetaManagedAgentsSpanModelRequestEndEvent, ...]
-    debited: int
-    debit_usd: Decimal
-    archived: int
+    scanned: int = 0
+    unbilled: list[BetaManagedAgentsSpanModelRequestEndEvent] = field(
+        default_factory=list[BetaManagedAgentsSpanModelRequestEndEvent]
+    )
+    debited: int = 0
+    debit_usd: Decimal = Decimal(0)
+    archived: int = 0
+    pending: bool = False
+    """A helper still runs, or a thread could not be read, billed or archived."""
+
+
+#: Helper calls recorded per batch, so a long thread's calls are billed as read.
+_THREAD_BATCH = 100
+
+
+async def _record_helper_calls(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session_id: str,
+    batch: list[BetaManagedAgentsSpanModelRequestEndEvent],
+    record: UsageRecorder | None,
+    out: _ChildSettle,
+) -> None:
+    """Record one batch of a helper thread's calls that have no usage row yet."""
+    if not batch:
+        return
+    out.scanned += len(batch)
+    async with sessionmaker() as s:
+        recorded = await usage_events.recorded_among(
+            s, managed_session_id=session_id, event_ids=[e.id for e in batch]
+        )
+    fresh = [e for e in batch if e.id not in recorded]
+    out.unbilled.extend(fresh)
+    if record is None:
+        return
+    for event in fresh:
+        if (debit := await record(event=event)) is not None:
+            out.debited += 1
+            out.debit_usd += debit
 
 
 async def _settle_child_threads(
@@ -223,21 +257,19 @@ async def _settle_child_threads(
 
     A helper's model calls are listed under its own thread, never in the
     session's event list, so the session settle above cannot see them. Each
-    open child thread's calls are recorded through `record` re-bound to the
-    thread's own model; the idempotency key is the session's and the event's,
-    so a repeat settle writes nothing twice. A thread read to its end with
-    every call recorded, and idle, is archived: archived means billed, and the
-    next settle skips it. Read-only (`record=None`) archives nothing.
-    A session with no child threads costs one list call.
+    open child thread's calls are recorded, a batch at a time as they are read,
+    through `record` re-bound to the thread's own model; the idempotency key is
+    the session's and the event's, so a repeat settle writes nothing twice. A
+    thread read to its end with every call recorded, and idle or terminated, is
+    archived: archived means billed, and the next settle skips it. A thread
+    still running, or one whose read, debit or archive failed, leaves the
+    result `pending` for a later settle; one bad thread never stops the others.
+    Read-only (`record=None`) archives nothing. With no helpers: one list call.
     """
     backend = managed_agents(anthropic, scope=scope, resources=frozenset({("session", session_id)}))
     port = session_threads(backend)
     ref = resource_ref(backend, "session", session_id, scope=scope)
-    scanned = 0
-    unbilled: list[BetaManagedAgentsSpanModelRequestEndEvent] = []
-    debited = 0
-    debit_usd = Decimal(0)
-    archived = 0
+    out = _ChildSettle()
     threads = [snapshot.native async for snapshot in legacy_iter(port.threads(scope, ref))]
     for thread in threads:
         thread_id = thread.get("id")
@@ -247,38 +279,40 @@ async def _settle_child_threads(
             or thread.get("archived_at") is not None
         ):
             continue
-        calls = [
-            cast(
-                BetaManagedAgentsSpanModelRequestEndEvent,
-                construct_type(value=item.native, type_=BetaManagedAgentsSessionEvent),
+        thread_record = (
+            None
+            if record is None
+            else _record_for_model(record, _thread_tariff(thread.get("agent")))
+        )
+        try:
+            batch: list[BetaManagedAgentsSpanModelRequestEndEvent] = []
+            async for item in legacy_iter(port.thread_events(scope, ref, thread_id)):
+                if item.native.get("type") != "span.model_request_end":
+                    continue
+                batch.append(
+                    cast(
+                        BetaManagedAgentsSpanModelRequestEndEvent,
+                        construct_type(value=item.native, type_=BetaManagedAgentsSessionEvent),
+                    )
+                )
+                if len(batch) >= _THREAD_BATCH:
+                    await _record_helper_calls(sessionmaker, session_id, batch, thread_record, out)
+                    batch = []
+            await _record_helper_calls(sessionmaker, session_id, batch, thread_record, out)
+            if thread.get("status") not in ("idle", "terminated"):
+                out.pending = True  # still working: its next calls are not listed yet
+            elif record is not None:
+                await legacy_call(port.archive_thread(scope, ref, thread_id))
+                out.archived += 1
+        except (_anthropic.APIError, ProviderError, SQLAlchemyError) as error:
+            out.pending = True
+            log.warning(
+                "billing.helper_thread_unsettled",
+                managed_session_id=session_id,
+                thread_id=thread_id,
+                error=type(error).__name__,
             )
-            async for item in legacy_iter(port.thread_events(scope, ref, thread_id))
-            if item.native.get("type") == "span.model_request_end"
-        ]
-        scanned += len(calls)
-        async with sessionmaker() as s:
-            recorded = await usage_events.recorded_among(
-                s, managed_session_id=session_id, event_ids=[e.id for e in calls]
-            )
-        fresh = [e for e in calls if e.id not in recorded]
-        unbilled.extend(fresh)
-        if record is None:
-            continue
-        thread_record = _record_for_model(record, _thread_tariff(thread.get("agent")))
-        for event in fresh:
-            if (debit := await thread_record(event=event)) is not None:
-                debited += 1
-                debit_usd += debit
-        if thread.get("status") == "idle":
-            await legacy_call(port.archive_thread(scope, ref, thread_id))
-            archived += 1
-    return _ChildSettle(
-        scanned=scanned,
-        unbilled=tuple(unbilled),
-        debited=debited,
-        debit_usd=debit_usd,
-        archived=archived,
-    )
+    return out
 
 
 @dataclass(frozen=True)
@@ -385,6 +419,8 @@ async def settle_session(
                 unbilled.extend(children.unbilled)
                 debited += children.debited
                 debit_usd += children.debit_usd
+                # A helper still working, or one left unsettled, keeps the settle open.
+                complete = complete and not children.pending
                 if children.archived:
                     log.info(
                         "billing.helper_threads_settled",
@@ -412,6 +448,44 @@ async def settle_session(
         debit_usd=debit_usd,
         complete=complete,
     )
+
+
+async def request_helper_settle(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session_id: str,
+    *,
+    scope: Scope,
+) -> bool:
+    """Hand a chat session's unfinished helper billing to the scheduler's drain.
+
+    A chat turn's end is the only other settle of a chat session, and a helper
+    can still be working after it (a ceiling, a stop not yet confirmed, a lost
+    stream). The request names the session's latest message as its turn, so
+    `settle_finished_turn` settles it once that turn is listed as ended (the
+    session idles only when no helper runs) and keeps it while a settle stays
+    incomplete. False when the session has no message to name.
+    """
+    page = await _list_events(
+        anthropic,
+        session_id,
+        scope=scope,
+        query=EventQuery(order="desc", limit=1, types=["user.message"]),
+    )
+    if not page.data:
+        return False
+    async with sessionmaker() as s, s.begin():
+        _previous, requested_at = await session_settle_state.request_settle(
+            s, managed_session_id=session_id
+        )
+        await session_settle_state.name_settle_turn(
+            s,
+            managed_session_id=session_id,
+            requested_at=requested_at,
+            turn_event_id=page.data[0].id,
+        )
+    log.info("billing.helper_settle_requested", managed_session_id=session_id)
+    return True
 
 
 def price(

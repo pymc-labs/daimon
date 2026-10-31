@@ -266,3 +266,22 @@ async def test_a_chat_coordinator_session_is_created_with_its_spending_limit() -
         "max_list_cost": {"amount": "300", "currency": "USD"},
     }
     assert "budget" not in bodies[1]
+
+
+def test_off_a_coordinator_session_is_sent_no_framing() -> None:
+    """The prompt hash changes, so the drift check replaces a live session and the
+    session gate then refuses the replacement until the roster is removed."""
+    with subagents_override(SubagentsSettings(enabled=False)):
+        assert coordinator_system(None, "You code.", SELF_ROSTER) is None
+        assert coordinator_system("Variant.", "You code.", SELF_ROSTER) == "Variant."
+
+
+def test_a_report_reader_never_inherits_helpers() -> None:
+    """Reader sessions are isolated, never a chat turn: the roster would refuse them."""
+    from daimon.core.reader_agent import derive_reader_spec
+    from daimon.core.specs import AgentSpec
+
+    source = AgentSpec.model_validate(
+        {"name": "coder", "model": "claude-sonnet-5-5", "multiagent": SELF_ROSTER}
+    )
+    assert derive_reader_spec(source).multiagent is None

@@ -62,6 +62,7 @@ class _CoordinatorMA:
         self.thread_events = _thread_events()
         self.archived: list[str] = []
         self.thread_reads: list[str] = []
+        self.fail_archive: set[str] = set()
         router = MARouter()
         router.add(
             "POST",
@@ -92,6 +93,10 @@ class _CoordinatorMA:
         )
 
     def _archive(self, _request: httpx.Request, match: Any) -> httpx.Response:
+        if match["tid"] in self.fail_archive:
+            return httpx.Response(
+                500, json={"type": "error", "error": {"type": "api_error", "message": "boom"}}
+            )
         self.archived.append(match["tid"])
         thread = next(t for t in self.threads if t["id"] == match["tid"])
         thread.update(archived_at=datetime.now(UTC).isoformat(), status="terminated")
@@ -196,3 +201,33 @@ async def test_a_read_only_settle_reports_helper_calls_and_archives_nothing(
 
     assert (len(result.unbilled), result.debited) == (12, 0)
     assert ma.archived == []
+
+
+async def test_a_helper_still_working_keeps_the_settle_open_and_one_bad_thread_stops_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    ma = _CoordinatorMA()
+    first, second = ma.threads[1]["id"], ma.threads[2]["id"]
+    ma.threads[1]["status"] = "running"  # a ceiling interrupt not yet taken effect
+    ma.threads[2]["status"] = "terminated"  # an errored helper: billed, then archived
+    record = _recorder(db_session_factory, tenant.id, ma)
+
+    result = await settle_session(
+        ma.client, db_session_factory, SESSION, record=record, helpers=True
+    )
+
+    assert result.complete is False, "the drain finishes it once the helper stops"
+    assert result.debited == 12, "every listed call is billed, running thread included"
+    assert ma.archived == [second]
+    assert first not in ma.archived
+
+    # A failed archive leaves the thread for the next settle and stops no other.
+    ma.threads[1]["status"] = "idle"
+    ma.fail_archive.add(first)
+    again = await settle_session(
+        ma.client, db_session_factory, SESSION, record=record, helpers=True
+    )
+    assert (again.complete, again.debited) == (False, 0)

@@ -43,6 +43,8 @@ UNREACHABLE_REASONS = frozenset(
     {
         TerminationReason.REDUCER_BUG,
         TerminationReason.REFUSED,
+        # A native Managed Agents session budget; only Anthropic agents run helpers.
+        TerminationReason.BUDGET_REACHED,
         TerminationReason.MCP_DEGRADED_EMPTY,
         TerminationReason.RETRYING_UNSETTLED,
         TerminationReason.RECOVERY_CANCELLED,

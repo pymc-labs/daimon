@@ -216,7 +216,10 @@ def apply(
         case "session.thread_status_running":
             return _helper_status(state, event, "working", seen)
         case "session.thread_status_idle":
-            return _helper_status(state, event, "done", seen)
+            stop = getattr(getattr(event, "stop_reason", None), "type", None)
+            # A helper paused at the session's spending limit did not finish.
+            status: HelperStatus = "stopped" if stop == "budget_reached" else "done"
+            return _helper_status(state, event, status, seen)
         case "session.thread_status_terminated":
             return _helper_status(state, event, "stopped", seen)
         case _:

@@ -82,8 +82,9 @@ def derive_reader_spec(source: AgentSpec) -> AgentSpec:
       already-derived spec must not duplicate it.
     - `system` gains `READER_BLOCK`, appended only when not already present,
       for the same idempotence reason.
-    - `model`, `description`, `multiagent` and `skill_repos` carry through
-      unchanged.
+    - `multiagent` is dropped: a reader session is isolated, never a chat
+      turn, so it never starts helpers (`daimon.core.subagents`).
+    - `model`, `description` and `skill_repos` carry through unchanged.
 
     `source` is never mutated — `model_copy` returns a new instance.
     """
@@ -99,6 +100,7 @@ def derive_reader_spec(source: AgentSpec) -> AgentSpec:
             "name": f"{source.name}-reader",
             "isolated": True,
             "mcp_servers": None,
+            "multiagent": None,
             "tools": non_mcp_tools or None,
             "skills": skills,
             "system": system,

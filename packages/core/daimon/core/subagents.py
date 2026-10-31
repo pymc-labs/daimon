@@ -196,7 +196,10 @@ def coordinator_system(
     fragments, which must stay the prompt's last line. Every place that sends or
     hashes a session's prompt calls this, so the drift check sees what was sent.
     """
-    if not is_coordinator(multiagent):
+    if not is_coordinator(multiagent) or not subagents_settings().enabled:
+        # Off, a coordinator's sessions are sent no framing: the prompt hash
+        # changes, the drift check replaces a live session at its next turn,
+        # and the session gate refuses the replacement until the roster goes.
         return system_override
     from daimon.core.context_prompt import FRAGMENT_MARKER
 

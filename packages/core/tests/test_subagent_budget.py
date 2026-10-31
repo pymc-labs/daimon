@@ -10,7 +10,7 @@ import httpx
 import pytest
 from daimon.core.config import SubagentsSettings
 from daimon.core.errors import TurnError
-from daimon.core.subagent_budget import raise_turn_budget
+from daimon.core.subagent_budget import BudgetExhausted, raise_turn_budget
 from daimon.core.subagents import subagents_override
 from daimon.testing.turn_leg import LEG_SCOPE
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
@@ -76,3 +76,13 @@ async def test_a_limit_the_provider_refuses_refuses_the_turn() -> None:
             scope=LEG_SCOPE,
         )
     assert raised.value.kind == "upstream"
+
+
+async def test_a_session_already_at_its_limit_is_never_raised() -> None:
+    """A raise would resume the helpers its limit paused."""
+    updates: list[dict[str, Any]] = []
+    with pytest.raises(BudgetExhausted):
+        await raise_turn_budget(
+            _client(_session_body(spent="1000"), updates), SESSION, scope=LEG_SCOPE
+        )
+    assert updates == []
