@@ -51,8 +51,8 @@ SEED_BYTES = 524288
 #: new thread) otherwise wrote grep and write calls as plain text and never
 #: reported the events.
 WATCH_TURN_TOOLS = (
-    "This turn has no file, shell or memory tools, so /mnt/memory cannot be read or "
-    "written here. Use only the tools this turn lists, never write a tool call as "
+    "This report has no file, shell or memory tools, so /mnt/memory cannot be read "
+    "or written here. Use only the tools listed for it, never write a tool call as "
     "text, and report from the events below."
 )
 
