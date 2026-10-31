@@ -124,6 +124,7 @@ from daimon.core.stores import (
     agent_memory_stores,
 )
 from daimon.core.stores import agent_mcp_credentials as credential_store
+from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
@@ -360,6 +361,12 @@ async def project_session_resources(
         public_url=public_url,
         asks_before_publishing=asks_before_publishing,
         legacy_memory_servers=legacy_memory_servers,
+    )
+    await record_enabled_daimon_tools(
+        session_factory,
+        tenant_id=tenant_id,
+        agent_id=agent_uuid,
+        tools=[tool.model_dump(mode="json") for tool in tools],
     )
     servers = session_mcp_servers(agent, hidden, tool_safety=tool_safety, public_url=public_url)
     payload = agent.model_dump(
@@ -1135,6 +1142,13 @@ async def create_session(
             confirmed_tools=confirmed_tools,
             daimon_rule_tools=daimon_rule_tools,
         )
+        if session_factory is not None and tenant_id is not None and agent_uuid is not None:
+            await record_enabled_daimon_tools(
+                session_factory,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                tools=[tool.model_dump(mode="json") for tool in tools],
+            )
         servers = session_mcp_servers(
             agent,
             hidden,

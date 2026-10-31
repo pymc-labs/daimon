@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- An agent that enables Daimon tools by name now sees all of them. Before, it saw only the tools that wait for a person's Approve: the rest were listed only behind `search_tools` and `call_tool`, which its list did not enable. Daimon records each agent's list when a session for it is created or updated and lists those tools directly for that agent (migration `0165_agent_daimon_tools`).
+
 - QA confirm clicks and QA auto-approve also run on the `lane-preview` dev lane, not only on staging: the host's project must end in `-dev` and its deployment name must be `lane-preview`. The QA bot allow-list, the read-only control files and the audit log apply as on staging, and publish cards stay manual.
 
 - A permanent watch paused for 30 days cannot be resumed or edited, even while watches are switched off. Editing a paused watch to permanent starts its 30 paused days from the edit. An edit and a create approved at the same moment cannot pass the 5 permanent watches an owner may have.

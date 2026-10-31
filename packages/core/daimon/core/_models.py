@@ -4989,3 +4989,25 @@ class ComputeTaskRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
+class AgentDaimonToolAllowlist(Base):
+    """The daimon tools an agent enables by name, when it lists them explicitly.
+
+    Written each time a session for the agent is created or has its tools
+    replaced; no row means the agent's daimon toolset enables every tool. The
+    MCP server reads it to list those tools directly for the agent's chat
+    credential, since tools reached only through `call_tool` are never enabled
+    by an explicit list.
+    """
+
+    __tablename__ = "agent_daimon_tool_allowlists"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # derive_agent_uuid(tenant, MA agent id): the chat credential's chat_agent_id.
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tool_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)

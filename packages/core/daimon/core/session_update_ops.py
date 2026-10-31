@@ -78,6 +78,7 @@ from daimon.core.session_snapshot import (
     session_mcp_servers,
     session_tools,
 )
+from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.tool_safety import ToolSafetyPolicy
 from mux.contracts.ids import Revision, Scope
@@ -318,6 +319,12 @@ async def apply_update_ops(
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
                     legacy_memory_servers=legacy_memory_servers,
+                )
+                await record_enabled_daimon_tools(
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    tools=[tool.model_dump(mode="json") for tool in tools],
                 )
                 servers = session_mcp_servers(
                     agent,

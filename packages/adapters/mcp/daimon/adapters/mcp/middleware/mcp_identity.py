@@ -48,6 +48,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
 from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.agent_daimon_tools import get_enabled_daimon_tools
 from daimon.core.stores.domain import McpTokenKind, Role
 from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -60,6 +61,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionm
 
 #: Audit reason for a call a held credential made to a tool off the allowlist.
 HELD_DENIAL_REASON = "held_tool_not_allowed"
+
+#: Requests whose answer depends on which tools a chat agent may see.
+_TOOL_METHODS = frozenset({"tools/list", "tools/call"})
 
 ClaimResolver = Callable[[MiddlewareContext], Awaitable[str | None]]
 SubjectResolver = ClaimResolver
@@ -403,6 +407,12 @@ class IdentityMiddleware(Middleware):
             None if internal_claim or agent_id is not None else signed_uuid("slack_turn_context_id")
         )
         raw_bound_channel = _token.claims.get("bound_channel_id") if _token else None
+        daimon_tools: frozenset[str] | None = None
+        if chat_agent_id is not None and agent_id is None and context.method in _TOOL_METHODS:
+            async with self._sessionmaker() as session:
+                daimon_tools = await get_enabled_daimon_tools(
+                    session, tenant_id=tenant_id, agent_id=chat_agent_id
+                )
 
         identity = AuthIdentity(
             routine_id=signed_uuid("routine_id"),
@@ -441,6 +451,7 @@ class IdentityMiddleware(Middleware):
                 if isinstance(raw_bound_channel, str) and agent_id is not None
                 else None
             ),
+            daimon_tools=daimon_tools,
             **_token_fields(_token.claims if _token else {}),
         )
         await fastmcp_ctx.set_state("auth", identity, serializable=False)

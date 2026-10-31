@@ -107,7 +107,10 @@ CREDENTIALS_HEAD = "0162_watch_credentials"
 DELIVERY_HEAD = "0163_watch_delivery"
 
 
-HEAD = "0164_watch_lifetime_caps"
+LIFETIME_CAPS_HEAD = "0164_watch_lifetime_caps"
+
+
+HEAD = "0165_agent_daimon_tools"
 
 
 CHAIN = [
@@ -141,6 +144,7 @@ CHAIN = [
     ROUTINE_SOURCE_HEAD,
     CREDENTIALS_HEAD,
     DELIVERY_HEAD,
+    LIFETIME_CAPS_HEAD,
     HEAD,
 ]
 
@@ -157,6 +161,7 @@ SANDBOX_COLUMNS = {
 
 
 TABLES = {
+    "agent_daimon_tool_allowlists",
     "compute_sessions",
     "repo_memory",
     "repo_memory_sessions",
@@ -235,6 +240,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
     if expected != HEAD:
         compared_tables = compared_tables - {
+            "agent_daimon_tool_allowlists",
             "context_provider_bindings",
             "compute_sessions",
             "repo_memory",

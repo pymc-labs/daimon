@@ -239,6 +239,14 @@ wherever tool safety applies, so a rule on them adds nothing.) A tool that waits
 for a person's Approve is called by its own name; sent through `call_tool` it is
 refused at once and the model is told to call it directly.
 
+An agent whose Daimon toolset turns its default off and enables tools by name
+sees exactly those tools, each listed under its own name. Managed Agents only
+exposes the names a toolset enables, and Daimon otherwise lists most of its
+tools only behind `search_tools` and `call_tool`, so the server reads the
+agent's list (recorded whenever a session for it is created or has its tools
+replaced) and lists those tools directly for that agent's chat credential. The
+two proxies appear only when the list names them.
+
 Gemini and OpenAI cannot pause for a card. A turn for an agent on one of them is
 refused when the agent has an `ask` rule or a channel-scoped `deny` on a Daimon
 tool, the rules only the driver applies. An agent-wide `deny`, a tool's own or
