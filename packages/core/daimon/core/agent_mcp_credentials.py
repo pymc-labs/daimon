@@ -21,6 +21,9 @@ A rotated token reaches every caller too: each credential this module writes
 carries a version stamp, and a vault whose stamp is stale (or missing) gets an
 in-place update on the next turn.
 
+Detaching a server deletes its copies from every vault of the agent
+(``forget_mirrored_mcp_token``), since the mirror itself never deletes.
+
 A shared thread has no caller to mirror into, so its session mounts a vault of
 the thread's own (``sync_shared_mcp_credentials``) that holds these tokens and
 nothing else.
@@ -53,10 +56,11 @@ from daimon.core.mcp_vault import (
     hold_agent_vault_lock,
     shared_vault_name,
 )
-from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_backend import platform_scope, resource_scope
 from daimon.core.mux_compat import (
     delete_credential,
     list_credentials,
+    list_vaults,
     retrieve_vault,
     store_credential,
     update_credential,
@@ -616,6 +620,101 @@ async def _fill_shared_vault(
         await mirror_credentials_into_vault(
             client, vault_id=vault_id, credentials=credentials, scope=scope
         )
+
+
+async def forget_mirrored_mcp_token(
+    client: AsyncAnthropic,
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    mcp_server_url: str,
+) -> tuple[str, ...]:
+    """Delete every vault copy of the agent's token for ``mcp_server_url``.
+
+    Run after the stored token is deleted: the mirror only ever creates or
+    updates, so the copy in each caller's vault (``daimon-mcp:<account>:<agent>``
+    and its Slack-turn and held-turn variants, the submitter's included) would
+    otherwise outlive the detach and authenticate a later re-attach at the
+    same URL. A shared thread's vault is pruned on its next use anyway, and is
+    cleared here too so nothing waits on that.
+
+    Only this agent's vaults are read, so another agent's token for the same
+    server is never touched. Only ``static_bearer`` credentials go: a person's
+    own ``mcp_oauth`` sign-in at that URL is theirs, not a copy.
+
+    Each vault is cleared under its (account, agent) vault lock, so a mirror
+    already holding it finishes first. A mirror that read the stored tokens
+    before the delete but takes the lock after this pass can still write a
+    copy back; that window is not closed here.
+
+    Best effort per vault: returns the ids of vaults whose copy could not be
+    deleted, after trying all of them.
+    """
+    # Enumerating vaults needs the platform scope, as the janitor's walk does:
+    # a tenant scope only sees vaults it was granted by id. The agent id is
+    # derived from the tenant, so the name match keeps this to one tenant.
+    listing = platform_scope("daimon.core.agent_mcp_credentials:forget_mirrored_mcp_token")
+    agent_vaults: list[tuple[str, uuid.UUID]] = []
+    async for vault in list_vaults(client, scope=listing):
+        if vault.archived_at is not None:
+            continue
+        owner = _agent_vault_owner(vault.display_name, agent_id=agent_id)
+        if owner is not None:
+            agent_vaults.append((vault.id, owner))
+    failed: list[str] = []
+    deleted = 0
+    for vault_id, owner in agent_vaults:
+        owner_scope = resource_scope(tenant_id=str(tenant_id), account_id=str(owner))
+        try:
+            async with hold_agent_vault_lock(sessionmaker, account_id=owner, agent_id=agent_id):
+                # Collect first: deleting while the list paginates can skip an entry.
+                copies = [
+                    existing.id
+                    async for existing in list_credentials(client, vault_id, scope=owner_scope)
+                    if existing.auth.type == "static_bearer"
+                    and same_mcp_url(existing.auth.mcp_server_url, mcp_server_url)
+                ]
+                for credential_id in copies:
+                    try:
+                        await delete_credential(client, vault_id, credential_id, scope=owner_scope)
+                    except anthropic.NotFoundError:
+                        continue
+                    deleted += 1
+        except anthropic.APIError as err:
+            log.warning(
+                "mcp_credentials.copy_delete_failed",
+                vault_id=vault_id,
+                error=type(err).__name__,
+            )
+            failed.append(vault_id)
+    log.info(
+        "mcp_credentials.copies_deleted",
+        agent_id=str(agent_id),
+        deleted=deleted,
+        failed=len(failed),
+    )
+    return tuple(failed)
+
+
+def _agent_vault_owner(display_name: str, *, agent_id: uuid.UUID) -> uuid.UUID | None:
+    """The account or shared owner of one of ``agent_id``'s vaults, else ``None``.
+
+    Matches ``daimon-mcp:<account>:<agent>[:...]`` and
+    ``daimon-shared:<owner>:<agent>``; the legacy per-account
+    ``daimon-mcp:<account>`` vault has no agent and never matches.
+    """
+    for prefix in ("daimon-mcp:", SHARED_VAULT_PREFIX):
+        if not display_name.startswith(prefix):
+            continue
+        parts = display_name[len(prefix) :].split(":")
+        if len(parts) < 2 or parts[1] != str(agent_id):
+            return None
+        try:
+            return uuid.UUID(parts[0])
+        except ValueError:
+            return None
+    return None
 
 
 async def _vault_is_live(client: AsyncAnthropic, vault_id: str, *, scope: Scope) -> bool:

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Detaching an MCP server with `detach_mcp_server` also removes the copies of its key from the vaults of everyone who used the agent, a shared thread's vault included, not only the key the agent stores. Before, those copies stayed until someone deleted them by hand, and a later attach at the same URL could quietly use them. Only that agent's copies of that server's key go: another agent's own key for the same server and a person's own sign-in stay. If some copies cannot be removed, the reply says so and asks for an operator.
+
 - A watch that reports in a new thread or the owner's DM reports its events again. Those reports start a fresh session that mounts the agent's memory but has no file tools, and the model wrote file and memory tool calls as plain text instead of the report. Every watch turn now says it has no file, shell or memory tools.
 
 - Admins can hide the line under each finished answer that names the agent, the time taken, the cost and the money left. On Discord, `/cost-footer hide` (or `show`) changes it for the whole server, and `/cost-footer` alone says which is set; on Slack and Teams, ask the agent, which calls the admin-only `set_cost_footer` (`get_cost_footer` reads it). It is shown by default, so nothing changes until an admin hides it. Hidden, answers end with no summary, Slack's card reads "Done." and Teams keeps only the vote buttons; billing and `/billing` are unchanged (migration `0167_cost_footer`).
