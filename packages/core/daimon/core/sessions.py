@@ -118,6 +118,7 @@ from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
+from daimon.core.subagents import is_coordinator, require_session_allowed, session_budget
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
@@ -512,6 +513,7 @@ async def create_session(
     model_override: str | None = None,
     system_override: str | None = None,
     relay_session_key: uuid.UUID | None = None,
+    subagents: bool = False,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -636,8 +638,18 @@ async def create_session(
     sweep never debits the session to the tenant. ``None`` (every billed
     caller) leaves the session sweepable.
 
+    ``subagents`` is True only for a chat turn (`turn.prepare`). An agent whose
+    spec lists helpers (`multiagent`) gets a session only then, and only with
+    `DAIMON_SUBAGENTS__ENABLED` on (`daimon.core.subagents`); that session is
+    created with a native spending limit; its caller sends the helper framing
+    in ``system_override`` (`subagents.coordinator_system`). Every other caller
+    (a routine, an agent key, the smoke turn) is refused with `SubagentsError`
+    before anything is provisioned.
+
     On MA failure: ``anthropic.APIError`` propagates uncaught.
     """
+    require_session_allowed(agent.multiagent, chat=subagents)
+    coordinator = is_coordinator(agent.multiagent)
     scope = session_scope(
         tenant_id=tenant_id, account_id=account_id, call_site="sessions:create_session"
     )
@@ -1082,6 +1094,9 @@ async def create_session(
                 ]
                 or None,
                 resources=resources if resources else None,
+                # A coordinator's helpers spend inside this one session: the
+                # provider stops new model calls at this limit (raised per turn).
+                budget=session_budget() if coordinator else None,
             )
             try:
                 created = await create()
@@ -1209,7 +1224,11 @@ async def create_isolated_session(
     On MA failure: `anthropic.APIError` propagates, except a skill the agent
     pins that no longer exists, which raises `SkillUnavailable` telling the
     reader to have the report re-published.
+
+    An agent with helpers (`multiagent`) is refused: an isolated session is
+    never a chat turn (`daimon.core.subagents.require_session_allowed`).
     """
+    require_session_allowed(agent.multiagent, chat=False)
     metadata = _session_metadata(
         account_id=account_id,
         tenant_id=tenant_id,

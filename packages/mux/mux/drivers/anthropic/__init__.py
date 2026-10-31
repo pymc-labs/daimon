@@ -48,6 +48,10 @@ from mux.drivers.anthropic.resources.environments import (
 from mux.drivers.anthropic.resources.memory_stores import AnthropicMemoryStores, StoreCreate
 from mux.drivers.anthropic.resources.memory_stores import MemoryStores as NativeMemoryStores
 from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExport, PlatformExport
+from mux.drivers.anthropic.resources.session_threads import (
+    AnthropicSessionThreads,
+    SessionThreads,
+)
 from mux.drivers.anthropic.resources.session_tools import (
     AnthropicSessionTools,
     EventPage,
@@ -159,6 +163,9 @@ class AnthropicManagedAgents:
             (SessionTools, "anthropic.session_tools", 1): AnthropicSessionTools(
                 client, self.account_scope_id, authorization
             ),
+            (SessionThreads, "anthropic.session_threads", 1): AnthropicSessionThreads(
+                client, self.account_scope_id, authorization
+            ),
             (WorkspaceTransfer, "anthropic.workspace_transfer", 1): AnthropicWorkspaceTransfer(
                 self.account_scope_id, authorization
             ),
@@ -266,6 +273,7 @@ __all__ = [
     "AnthropicPlatformExport",
     "AnthropicResourceWalk",
     "AnthropicSessionAdmin",
+    "AnthropicSessionThreads",
     "AnthropicSessionTools",
     "AnthropicSessions",
     "AnthropicSkillVersions",
@@ -299,6 +307,7 @@ __all__ = [
     "SessionReads",
     "SessionResourceConfig",
     "SessionSend",
+    "SessionThreads",
     "SessionTools",
     "SessionWalk",
     "StoreCreate",

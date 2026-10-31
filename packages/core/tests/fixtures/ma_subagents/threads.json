@@ -1,0 +1,202 @@
+{
+ "data": [
+  {
+   "agent": {
+    "description": null,
+    "execution_identity": {
+     "type": "service_account"
+    },
+    "id": "agent_01XWcB4UAfMdvHPMjbXvr75r",
+    "mcp_servers": [],
+    "model": {
+     "effort": {
+      "type": "high"
+     },
+     "id": "claude-sonnet-5-5",
+     "speed": "standard"
+    },
+    "name": "subagents-spike-lead",
+    "skills": [],
+    "system": "You coordinate helpers. When asked to do things in parallel, delegate each piece to a separate helper at the same time, wait for all reports, then answer.",
+    "tools": [
+     {
+      "configs": [],
+      "default_config": {
+       "enabled": true,
+       "permission_policy": {
+        "type": "always_allow"
+       }
+      },
+      "type": "agent_toolset_20260401"
+     }
+    ],
+    "type": "agent",
+    "version": 1
+   },
+   "archived_at": null,
+   "created_at": "2026-10-31T12:33:58.729794Z",
+   "id": "sthr_01NhL32nc9XV4y7fmbNytLN9",
+   "parent_thread_id": null,
+   "session_id": "sesn_01QZ6tcns4Sajq25PiciqxTg",
+   "stats": {
+    "active_seconds": 14.568000000000001,
+    "duration_seconds": 20.738032524,
+    "startup_seconds": 0
+   },
+   "status": "idle",
+   "type": "session_thread",
+   "updated_at": "2026-10-31T12:34:18.655977Z",
+   "usage": {
+    "active_seconds": 14.568000000000001,
+    "cache_creation": {
+     "ephemeral_1h_input_tokens": 0,
+     "ephemeral_5m_input_tokens": 11963
+    },
+    "cache_read_input_tokens": 55833,
+    "input_tokens": 18,
+    "list_cost": {
+     "amount": "5",
+     "currency": "USD"
+    },
+    "output_tokens": 1093,
+    "server_tool_use": {
+     "web_fetch_requests": 0,
+     "web_search_requests": 0
+    }
+   },
+   "workflow_run_id": null
+  },
+  {
+   "agent": {
+    "description": null,
+    "execution_identity": {
+     "type": "service_account"
+    },
+    "id": "agent_01BNJXZT8kcZrTqBVuLYAqvp",
+    "mcp_servers": [],
+    "model": {
+     "effort": {
+      "type": "medium"
+     },
+     "id": "claude-haiku-5-5",
+     "speed": "standard"
+    },
+    "name": "subagents-spike-helper",
+    "skills": [],
+    "system": "You are a helper. Do exactly the task you are given, in your own git worktree when asked, then report briefly.",
+    "tools": [
+     {
+      "configs": [],
+      "default_config": {
+       "enabled": true,
+       "permission_policy": {
+        "type": "always_allow"
+       }
+      },
+      "type": "agent_toolset_20260401"
+     }
+    ],
+    "type": "agent",
+    "version": 1
+   },
+   "archived_at": null,
+   "created_at": "2026-10-31T12:34:08.529037Z",
+   "id": "sthr_018gXYbU9Qtg33oThot6H2eC",
+   "parent_thread_id": "sthr_01NhL32nc9XV4y7fmbNytLN9",
+   "session_id": "sesn_01QZ6tcns4Sajq25PiciqxTg",
+   "stats": {
+    "active_seconds": 5.785,
+    "duration_seconds": 10.938830644,
+    "startup_seconds": 0
+   },
+   "status": "idle",
+   "type": "session_thread",
+   "updated_at": "2026-10-31T12:34:14.742636Z",
+   "usage": {
+    "active_seconds": 5.785,
+    "cache_creation": {
+     "ephemeral_1h_input_tokens": 0,
+     "ephemeral_5m_input_tokens": 8028
+    },
+    "cache_read_input_tokens": 15124,
+    "input_tokens": 8,
+    "list_cost": {
+     "amount": "0",
+     "currency": "USD"
+    },
+    "output_tokens": 653,
+    "server_tool_use": {
+     "web_fetch_requests": 0,
+     "web_search_requests": 0
+    }
+   },
+   "workflow_run_id": null
+  },
+  {
+   "agent": {
+    "description": null,
+    "execution_identity": {
+     "type": "service_account"
+    },
+    "id": "agent_01BNJXZT8kcZrTqBVuLYAqvp",
+    "mcp_servers": [],
+    "model": {
+     "effort": {
+      "type": "medium"
+     },
+     "id": "claude-haiku-5-5",
+     "speed": "standard"
+    },
+    "name": "subagents-spike-helper",
+    "skills": [],
+    "system": "You are a helper. Do exactly the task you are given, in your own git worktree when asked, then report briefly.",
+    "tools": [
+     {
+      "configs": [],
+      "default_config": {
+       "enabled": true,
+       "permission_policy": {
+        "type": "always_allow"
+       }
+      },
+      "type": "agent_toolset_20260401"
+     }
+    ],
+    "type": "agent",
+    "version": 1
+   },
+   "archived_at": null,
+   "created_at": "2026-10-31T12:34:08.733838Z",
+   "id": "sthr_01R5Thb4p93Bk69njqAiPAJf",
+   "parent_thread_id": "sthr_01NhL32nc9XV4y7fmbNytLN9",
+   "session_id": "sesn_01QZ6tcns4Sajq25PiciqxTg",
+   "stats": {
+    "active_seconds": 3.9010000000000002,
+    "duration_seconds": 10.734062158,
+    "startup_seconds": 0
+   },
+   "status": "idle",
+   "type": "session_thread",
+   "updated_at": "2026-10-31T12:34:13.021487Z",
+   "usage": {
+    "active_seconds": 3.9010000000000002,
+    "cache_creation": {
+     "ephemeral_1h_input_tokens": 0,
+     "ephemeral_5m_input_tokens": 7883
+    },
+    "cache_read_input_tokens": 15126,
+    "input_tokens": 8,
+    "list_cost": {
+     "amount": "0",
+     "currency": "USD"
+    },
+    "output_tokens": 470,
+    "server_tool_use": {
+     "web_fetch_requests": 0,
+     "web_search_requests": 0
+    }
+   },
+   "workflow_run_id": null
+  }
+ ]
+}

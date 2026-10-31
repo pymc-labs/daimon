@@ -56,6 +56,7 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
     transfer_active_turn,
 )
+from daimon.core.subagents import is_coordinator
 from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.agent_notices import (
@@ -243,7 +244,18 @@ def _finalizer_done(task: asyncio.Future[None]) -> None:
         log.warning("turn.finalize_failed", error=type(error).__name__)
 
 
-async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: UsageRecorder) -> None:
+#: A coordinator's settle also reads and archives each helper thread.
+_HELPER_SETTLE_BUDGET_S = 4 * SETTLE_BUDGET_S
+
+
+async def _settle(
+    deps: TurnDeps,
+    *,
+    session_id: str,
+    scope: Scope,
+    record: UsageRecorder,
+    helpers: bool = False,
+) -> None:
     """Debit model calls on `session_id` that no live stream metered.
 
     Runs once the turn is over -- after its answer or failure was rendered --
@@ -261,7 +273,8 @@ async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: Usag
             session_id,
             scope=scope,
             record=record,
-            deadline=time.monotonic() + SETTLE_BUDGET_S,
+            deadline=time.monotonic() + (_HELPER_SETTLE_BUDGET_S if helpers else SETTLE_BUDGET_S),
+            helpers=helpers,
         )
     except _anthropic.NotFoundError:
         # A deleted session: its events can no longer be listed.
@@ -1735,5 +1748,6 @@ async def run_prepared_turn_impl(
                 active_admission, tenant_id=tenant_id, session_id=active_session_id_cell[0]
             ),
             record=cast(UsageRecorder, active_record_cell[0]),
+            helpers=is_coordinator(getattr(active_admission.agent, "multiagent", None)),
         )
     return outcome

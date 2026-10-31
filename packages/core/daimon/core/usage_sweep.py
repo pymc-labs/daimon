@@ -68,9 +68,9 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
-from daimon.core.model_presets import model_choice_id
+from daimon.core.model_presets import OPUS, OPUS_FAST, model_choice_id
 from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref, resource_scope
-from daimon.core.mux_compat import legacy_call
+from daimon.core.mux_compat import legacy_call, legacy_iter
 from daimon.core.pricing import MODEL_PRICING, ModelRates, cost_of
 from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores import session_settle_state, turn_outcomes, usage_events
@@ -79,7 +79,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import record_turn_usage
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic import EventPage, EventQuery, SessionTools
+from mux.drivers.anthropic import EventPage, EventQuery, SessionThreads, SessionTools
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -164,6 +164,123 @@ async def _list_events(
     )
 
 
+def _thread_tariff(native_agent: object) -> str | None:
+    """The tariff of a child thread's agent snapshot: its model, fast mode named."""
+    if not isinstance(native_agent, dict):
+        return None
+    model = cast(dict[str, object], native_agent).get("model")
+    if not isinstance(model, dict):
+        return None
+    model_id = cast(dict[str, object], model).get("id")
+    if not isinstance(model_id, str):
+        return None
+    speed = cast(dict[str, object], model).get("speed")
+    return OPUS_FAST if model_id == OPUS and speed == "fast" else model_id
+
+
+def _record_for_model(record: UsageRecorder, model_id: str | None) -> UsageRecorder:
+    """`record`, priced at `model_id` instead of the session's own model.
+
+    Every recorder a settle is given is `record_turn_usage` bound with
+    `functools.partial` (`bind_recorder`, `SessionBilling.recorder`); one that is
+    not, or a thread whose model is unknown, keeps the session's tariff.
+    """
+    if model_id is None or not isinstance(record, functools.partial):
+        return record
+    bound = cast("functools.partial[object]", record)
+    if bound.keywords.get("model_id") in (None, model_id):
+        return cast("UsageRecorder", bound)
+    if MODEL_PRICING.get(model_id) is None:
+        log.warning("billing.unpriced_model", model_id=model_id)
+    return cast(
+        "UsageRecorder",
+        functools.partial(
+            bound.func,
+            *bound.args,
+            **{**bound.keywords, "model_id": model_id, "pricing": MODEL_PRICING.get(model_id)},
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _ChildSettle:
+    scanned: int
+    unbilled: tuple[BetaManagedAgentsSpanModelRequestEndEvent, ...]
+    debited: int
+    debit_usd: Decimal
+    archived: int
+
+
+async def _settle_child_threads(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session_id: str,
+    *,
+    scope: Scope,
+    record: UsageRecorder | None,
+) -> _ChildSettle:
+    """Bill a coordinator session's helper threads, then archive the finished ones.
+
+    A helper's model calls are listed under its own thread, never in the
+    session's event list, so the session settle above cannot see them. Each
+    open child thread's calls are recorded through `record` re-bound to the
+    thread's own model; the idempotency key is the session's and the event's,
+    so a repeat settle writes nothing twice. A thread read to its end with
+    every call recorded, and idle, is archived: archived means billed, and the
+    next settle skips it. Read-only (`record=None`) archives nothing.
+    A session with no child threads costs one list call.
+    """
+    backend = managed_agents(anthropic, scope=scope, resources=frozenset({("session", session_id)}))
+    port = backend.extension(SessionThreads, namespace="anthropic.session_threads", version=1)
+    ref = resource_ref(backend, "session", session_id, scope=scope)
+    scanned = 0
+    unbilled: list[BetaManagedAgentsSpanModelRequestEndEvent] = []
+    debited = 0
+    debit_usd = Decimal(0)
+    archived = 0
+    threads = [snapshot.native async for snapshot in legacy_iter(port.threads(scope, ref))]
+    for thread in threads:
+        thread_id = thread.get("id")
+        if (
+            not isinstance(thread_id, str)
+            or thread.get("parent_thread_id") is None
+            or thread.get("archived_at") is not None
+        ):
+            continue
+        calls = [
+            cast(
+                BetaManagedAgentsSpanModelRequestEndEvent,
+                construct_type(value=item.native, type_=BetaManagedAgentsSessionEvent),
+            )
+            async for item in legacy_iter(port.thread_events(scope, ref, thread_id))
+            if item.native.get("type") == "span.model_request_end"
+        ]
+        scanned += len(calls)
+        async with sessionmaker() as s:
+            recorded = await usage_events.recorded_among(
+                s, managed_session_id=session_id, event_ids=[e.id for e in calls]
+            )
+        fresh = [e for e in calls if e.id not in recorded]
+        unbilled.extend(fresh)
+        if record is None:
+            continue
+        thread_record = _record_for_model(record, _thread_tariff(thread.get("agent")))
+        for event in fresh:
+            if (debit := await thread_record(event=event)) is not None:
+                debited += 1
+                debit_usd += debit
+        if thread.get("status") == "idle":
+            await legacy_call(port.archive_thread(scope, ref, thread_id))
+            archived += 1
+    return _ChildSettle(
+        scanned=scanned,
+        unbilled=tuple(unbilled),
+        debited=debited,
+        debit_usd=debit_usd,
+        archived=archived,
+    )
+
+
 @dataclass(frozen=True)
 class SettleResult:
     """What one settle read and wrote.
@@ -191,8 +308,14 @@ async def settle_session(
     max_pages: int | None = SETTLE_MAX_PAGES,
     deadline: float | None = None,
     backlog: bool = False,
+    helpers: bool = False,
 ) -> SettleResult:
     """Debit the session's model calls that have no ledger row yet, newest first.
+
+    `helpers` names a coordinator session (`daimon.core.subagents`): its helper
+    threads' calls, which its own event list never shows, are billed too, each
+    at its thread's model, and finished helper threads are archived
+    (`_settle_child_threads`). Within the same deadline.
 
     `record` must be the recorder bound to this session (`turn.prepare.
     bind_recorder` or `SessionBilling.recorder`), so the calls are priced at
@@ -254,6 +377,21 @@ async def settle_session(
                     break
                 page = await page.get_next_page()
                 pages += 1
+            if helpers and not backlog:
+                children = await _settle_child_threads(
+                    anthropic, sessionmaker, session_id, scope=scope, record=record
+                )
+                scanned += children.scanned
+                unbilled.extend(children.unbilled)
+                debited += children.debited
+                debit_usd += children.debit_usd
+                if children.archived:
+                    log.info(
+                        "billing.helper_threads_settled",
+                        managed_session_id=session_id,
+                        archived=children.archived,
+                        debited=children.debited,
+                    )
     except TimeoutError:
         complete = False  # every debit written so far stands
     if unbilled or not complete:
@@ -424,6 +562,8 @@ async def settle_stamped_session(
     if billing is None:
         return None
     scope = billing.scope
+    # The session's own snapshot says whether it runs helpers, whatever its agent says now.
+    helpers = getattr(session.agent, "multiagent", None) is not None
     if billing.exempt_reason is None:
         return await settle_session(
             anthropic,
@@ -433,6 +573,7 @@ async def settle_stamped_session(
             scope=scope,
             max_pages=max_pages,
             deadline=deadline,
+            helpers=helpers,
         )
     result = await settle_session(
         anthropic,
@@ -442,6 +583,7 @@ async def settle_stamped_session(
         scope=scope,
         max_pages=max_pages,
         deadline=deadline,
+        helpers=helpers,
     )
     cost, debit = price(result.unbilled, pricing=billing.pricing, markup=markup)
     log.info(

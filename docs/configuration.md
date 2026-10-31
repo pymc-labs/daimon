@@ -48,6 +48,7 @@ typo is silent — check the spelling here.
 - [Billing Policy](#billing-policy)
 - [Support](#support)
 - [Turn](#turn)
+- [Subagents](#subagents)
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
 - [Private Channel Messages](#private-channel-messages)
@@ -1470,6 +1471,39 @@ messages from the agent are joined into one block of text. On: an answer made of
 messages keeps every one, set apart by a blank line instead of being run together.
 Either way the "Working on it…" card shows the last three messages the agent wrote,
 oldest first, one line each (cut at 120 characters).
+
+## Subagents
+
+Read from `daimon.core.config.SubagentsSettings`. Prefix `DAIMON_SUBAGENTS__`.
+
+Parallel helpers: an agent hands pieces of one request to copies of itself.
+
+Native Managed Agents subagents (`daimon.core.subagents`). Off, an agent spec with
+`multiagent` is refused when written and no session starts with helpers.
+
+### `DAIMON_SUBAGENTS__ENABLED`
+
+`bool` · optional · default `False`
+
+Let Anthropic agents whose spec lists `multiagent: {type: coordinator, agents: [{type:
+self}]}` hand pieces of a chat request to parallel copies of themselves. Off (the
+default), such a spec is refused and no session starts with helpers. Chat turns only:
+routines and agent keys never start helpers.
+
+### `DAIMON_SUBAGENTS__TURN_BUDGET_USD`
+
+`Decimal` · optional · default `10`
+
+Hard spending limit, in US dollars at list price, for one chat request on an agent with
+helpers, the agent and all its helpers together. Managed Agents stops new model calls at
+the limit and the request ends with a notice.
+
+### `DAIMON_SUBAGENTS__MAX_CONCURRENT`
+
+`int` · optional · default `5`
+
+Helpers the agent is told it may run at once for one request. Advisory: the provider
+caps a session at 25 helpers and the spending limit caps the cost.
 
 ## Thread Naming
 

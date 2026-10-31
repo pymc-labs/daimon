@@ -85,6 +85,7 @@ from daimon.core.stores.thread_sessions import (
     read_session_seals,
     record_session_seals,
 )
+from daimon.core.subagents import coordinator_system
 from daimon.core.turn.admission import Admission, reauthorize, restrict_inherited_memory
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -471,8 +472,14 @@ async def create_ma_session(
             before_create=fence,
             on_app_access=capture_app_access,
             channel_skills=skills,
-            system_override=system_for_platform(admission.agent.system, platform),
+            system_override=coordinator_system(
+                system_for_platform(admission.agent.system, platform),
+                admission.agent.system,
+                admission.agent.multiagent,
+            ),
             relay_session_key=mapping_id,
+            # A chat turn: the one caller an agent with helpers may start them for.
+            subagents=True,
         )
 
     while True:
@@ -540,7 +547,11 @@ async def create_ma_session(
                 else next(iter(ma_session.vault_ids), None)
             ),
             sent_skills=session_skills(admission.agent, admission.channel_skills),
-            sent_system=system_for_platform(admission.agent.system, platform),
+            sent_system=coordinator_system(
+                system_for_platform(admission.agent.system, platform),
+                admission.agent.system,
+                admission.agent.multiagent,
+            ),
             github_mode=github_mode,
             personal_memory_store_ids=(
                 () if personal_memory_store_id is None else (personal_memory_store_id,)

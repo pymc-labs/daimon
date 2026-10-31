@@ -27,6 +27,7 @@ from anthropic.types.beta.memory_stores.beta_managed_agents_memory_list_item imp
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.mux_backend import managed_agents, resource_ref
+from daimon.core.subagents import check_multiagent_value
 from mux.contracts.ids import Revision, Scope, SkillRef
 from mux.contracts.ports import SkillVersions
 from mux.contracts.resources import (
@@ -125,6 +126,9 @@ def _agent_values(payload: Mapping[str, object]) -> dict[str, object]:
         }
     if "multiagent" in result:
         value = result.pop("multiagent")
+        # Every agent create and update passes here: a roster is refused while
+        # helpers are off, and any roster but copies of the agent itself always.
+        check_multiagent_value(value)
         extensions["anthropic.multiagent"] = {
             "namespace": "anthropic.multiagent",
             "version": 1,
