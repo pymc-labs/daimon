@@ -84,6 +84,10 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Rephrase it and @mention Daimon again.",
         "Rephrase it and send it again.",
     ),
+    TerminationReason.BUDGET_REACHED: _Copy(
+        "Daimon stopped at this request's spending limit. Work already done stays done.",
+        "Ask for a smaller piece, or ask an admin to raise the limit.",
+    ),
     TerminationReason.RATE_LIMITED: _Copy("Daimon's AI service is busy.", "Try again in a minute."),
     TerminationReason.SESSION_TERMINATED: _Copy(
         "Daimon stopped mid-reply. Its working files may be gone.",

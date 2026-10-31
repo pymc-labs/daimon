@@ -22,7 +22,7 @@ from typing import Literal, cast
 from urllib.parse import urlsplit
 
 from daimon.core.turn.outcomes import current_outcome
-from daimon.core.turn.state import ContentBlock, ToolUseBlock, daimon_tool_input
+from daimon.core.turn.state import ContentBlock, Task, ToolUseBlock, daimon_tool_input
 from mux.profiles import get_profile
 
 MAX_TOOL_LINES = 6
@@ -209,6 +209,24 @@ def roll_draft(earlier: Sequence[str], latest: str | None, new: str) -> tuple[tu
 def draft_log(earlier: Sequence[str], latest: str | None) -> tuple[str, ...]:
     """The lines a card shows first under its headline, oldest first."""
     return (*earlier, latest) if latest else tuple(earlier)
+
+
+def format_helper_line(helpers: Sequence[Task]) -> str | None:
+    """One line for the helpers this turn started (`daimon.core.subagents`), or None.
+
+    Counts only: a helper's own words never reach the card, the lead's answer does.
+    """
+    if not helpers:
+        return None
+    working = sum(1 for h in helpers if h.status == "working")
+    done = sum(1 for h in helpers if h.status == "done")
+    stopped = len(helpers) - working - done
+    parts = [f"{n} {word}" for n, word in ((working, "working"), (done, "done")) if n]
+    if stopped:
+        parts.append(f"{stopped} stopped")
+    icon = _WRITE_ICON if working else (_DONE_ICON if not stopped else _FAILED_ICON)
+    noun = "helper" if len(helpers) == 1 else "helpers"
+    return f"{icon} {len(helpers)} {noun}: {', '.join(parts)}"
 
 
 def has_running_tool(content: Sequence[ContentBlock]) -> bool:

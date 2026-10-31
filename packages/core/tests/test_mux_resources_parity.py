@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from daimon.core.config import SubagentsSettings
 from daimon.core.mux_backend import platform_scope
 from daimon.core.mux_compat import (
     archive_agent,
@@ -17,6 +18,7 @@ from daimon.core.mux_compat import (
     update_agent,
     update_environment,
 )
+from daimon.core.subagents import subagents_override
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
@@ -181,9 +183,13 @@ async def test_full_list_walk_makes_identical_requests(resource, include_archive
 async def test_agent_create_has_no_extra_or_missing_fields(payload):
     old = ResourceTransport()
     new = ResourceTransport()
-    async with fake_client(old) as before, fake_client(new) as after:
-        expected = await before.beta.agents.create(**payload)
-        actual = await create_agent(after, payload, scope=platform_scope("test request fidelity"))
+    # The self roster is only written while helpers are on (`daimon.core.subagents`).
+    with subagents_override(SubagentsSettings(enabled=True)):
+        async with fake_client(old) as before, fake_client(new) as after:
+            expected = await before.beta.agents.create(**payload)
+            actual = await create_agent(
+                after, payload, scope=platform_scope("test request fidelity")
+            )
     assert_transport_equal(old, new)
     assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
 

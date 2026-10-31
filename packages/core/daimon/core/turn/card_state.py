@@ -12,6 +12,7 @@ from daimon.core.turn.progress_plans import progress_plans_shown
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
     format_draft,
+    format_helper_line,
     format_plan_lines,
     format_tool_lines,
     has_running_tool,
@@ -116,11 +117,20 @@ def update_activity(state: CardState, turn: TurnState) -> CardState:
     """
     if state.phase in _TERMINAL_PHASES:
         return state
-    phase = TurnPhase.TOOL_RUNNING if has_running_tool(turn.content) else TurnPhase.THINKING
+    helpers_working = any(t.status == "working" for t in turn.tasks)
+    phase = (
+        TurnPhase.TOOL_RUNNING
+        if has_running_tool(turn.content) or helpers_working
+        else TurnPhase.THINKING
+    )
     plan_shown = progress_plans_shown()
     lines = format_tool_lines(
         turn.content, finished_ids=turn.finished_tool_ids, plan_shown=plan_shown
     )
+    helper_line = format_helper_line(turn.tasks)
+    if helper_line is not None:
+        # Above the tool lines: the helpers are what this turn is waiting on.
+        lines = (helper_line, *lines)
     plan = format_plan_lines(turn.content) if plan_shown else ()
     return dataclasses.replace(
         state,

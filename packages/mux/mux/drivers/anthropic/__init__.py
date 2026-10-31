@@ -51,6 +51,7 @@ from mux.drivers.anthropic.resources.platform_export import AnthropicPlatformExp
 from mux.drivers.anthropic.resources.session_threads import (
     AnthropicSessionThreads,
     SessionThreads,
+    session_threads,
 )
 from mux.drivers.anthropic.resources.session_tools import (
     AnthropicSessionTools,
@@ -72,6 +73,7 @@ from mux.drivers.anthropic.resources.vaults import AnthropicVaults, Vaults
 from mux.drivers.anthropic.resources.walk import AnthropicResourceWalk, ResourceWalk
 from mux.drivers.anthropic.schemas import (
     AGENT_TOOLS_NAMESPACE,
+    MULTIAGENT_NAMESPACE,
     AgentModelConfig,
     AgentToolsConfig,
     EnvironmentConfig,
@@ -259,6 +261,7 @@ class AnthropicManagedAgents:
 
 __all__ = [
     "AGENT_TOOLS_NAMESPACE",
+    "MULTIAGENT_NAMESPACE",
     "AgentModelConfig",
     "AgentToolsConfig",
     "AnthropicAgents",
@@ -309,6 +312,7 @@ __all__ = [
     "SessionSend",
     "SessionThreads",
     "SessionTools",
+    "session_threads",
     "SessionWalk",
     "StoreCreate",
     "UNCLASSIFIED_SOURCE_NAMESPACE",

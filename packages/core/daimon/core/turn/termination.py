@@ -64,6 +64,9 @@ class TerminationReason(StrEnum):
     """MA or the API returned an error the turn could not continue past."""
     REFUSED = "refused"
     """The model declined the request: an idle carrying refusal `stop_details`."""
+    BUDGET_REACHED = "budget_reached"
+    """The session's native spending limit stopped new model calls (an agent with
+    helpers, `daimon.core.subagents`): an idle with `budget_reached`."""
     RATE_LIMITED = "rate_limited"
     """The API refused the turn with a 429."""
     SESSION_TERMINATED = "session_terminated"
@@ -144,6 +147,8 @@ NOT_USER_FAILURES = frozenset(
         TerminationReason.INTERRUPTED,
         TerminationReason.RECOVERY_CANCELLED,
         TerminationReason.REFUSED,
+        # The request's own spending limit, set by the deployment: not a fault.
+        TerminationReason.BUDGET_REACHED,
         TerminationReason.REQUIRES_ACTION,
         TerminationReason.SESSION_BUSY,
         # The user asked to stop; MA only failed to confirm in time.
@@ -268,6 +273,8 @@ def normalized_termination_reason(event: Event) -> TerminationReason | None:
     payload = TurnEndedPayload.model_validate(event.payload)
     if payload.outcome == "errored" and payload.native_reason == "refusal":
         return TerminationReason.REFUSED
+    if payload.outcome == "errored" and payload.native_reason == "budget_reached":
+        return TerminationReason.BUDGET_REACHED
     return {
         "completed": TerminationReason.COMPLETED,
         "interrupted": TerminationReason.INTERRUPTED,

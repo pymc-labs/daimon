@@ -27,7 +27,7 @@ from anthropic.types.beta.memory_stores.beta_managed_agents_memory_list_item imp
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.mux_backend import managed_agents, resource_ref
-from daimon.core.subagents import check_multiagent_value
+from daimon.core.subagents import check_spec_multiagent
 from mux.contracts.ids import Revision, Scope, SkillRef
 from mux.contracts.ports import SkillVersions
 from mux.contracts.resources import (
@@ -126,9 +126,6 @@ def _agent_values(payload: Mapping[str, object]) -> dict[str, object]:
         }
     if "multiagent" in result:
         value = result.pop("multiagent")
-        # Every agent create and update passes here: a roster is refused while
-        # helpers are off, and any roster but copies of the agent itself always.
-        check_multiagent_value(value)
         extensions["anthropic.multiagent"] = {
             "namespace": "anthropic.multiagent",
             "version": 1,
@@ -334,12 +331,16 @@ async def create_agent(
     scope: Scope,
     key: str | None = None,
 ) -> BetaManagedAgentsAgent:
+    spec = payload if isinstance(payload, AgentSpec) else agent_spec(payload)
+    # Every agent write passes one of these: a roster is refused while helpers are
+    # off, and any roster but copies of the agent itself always (`subagents`).
+    check_spec_multiagent(spec)
     backend = managed_agents(client, scope=scope)
     return sdk_agent(
         await legacy_call(
             backend.agents.create(
                 scope,
-                payload if isinstance(payload, AgentSpec) else agent_spec(payload),
+                spec,
                 key=key if key is not None else str(uuid4()),
             )
         )
@@ -354,13 +355,15 @@ async def update_agent(
     payload: Mapping[str, object],
     scope: Scope,
 ) -> BetaManagedAgentsAgent:
+    patch = agent_patch(payload)
+    check_spec_multiagent(patch)
     backend = managed_agents(client, scope=scope, resources=frozenset({("agent", agent_id)}))
     return sdk_agent(
         await legacy_call(
             backend.agents.update(
                 scope,
                 resource_ref(backend, "agent", agent_id, scope=scope),
-                agent_patch(payload),
+                patch,
                 expected=Revision(local=version, native=str(version)),
                 key=str(uuid4()),
             )
@@ -377,12 +380,14 @@ async def update_agent_ignored(
     scope: Scope,
 ) -> None:
     """Preserve SDK leniency when the old mutation caller ignored its reply."""
+    patch = agent_patch(payload)
+    check_spec_multiagent(patch)
     await legacy_call(
         native_update_agent_ignored(
             client,
             scope,
             agent_id,
-            agent_patch(payload),
+            patch,
             expected=Revision(local=version, native=str(version)),
             authorization=ResourceAuthorization(scope, frozenset({("agent", agent_id)})),
         )

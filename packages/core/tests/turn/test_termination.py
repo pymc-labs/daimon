@@ -462,5 +462,6 @@ def test_the_value_set_is_pinned() -> None:
         "session_preparation_failed",
         "session_busy",
         "session_agent_mismatch",
+        "budget_reached",
         "unknown",
     }

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Helpers: an agent can hand pieces of one request to copies of itself.** Off unless
+  `DAIMON_SUBAGENTS__ENABLED` is set. An Anthropic agent whose spec sets `multiagent` to
+  `{type: coordinator, agents: [{type: self}]}` runs up to a few helpers in parallel in its own
+  session, each in its own git worktree, and answers once they all report. The working card
+  shows how many helpers are working and done. Chat only: routines and agent keys never start
+  helpers. Each request has a hard spending limit, `DAIMON_SUBAGENTS__TURN_BUDGET_USD` (default
+  $10 at list price); a request stopped at it says so, and the next message starts a fresh
+  session. Helpers' model calls are billed at their own model. Any other roster, or any roster
+  while helpers are off, is refused. Migration 0148 adds the `budget_reached` turn outcome.
 - **Failures are the agent's to explain, or a card.** While a turn runs, Daimon no longer
   writes its own lines into or beside the reply: an MCP server that dropped out, a lost or
   replaced workspace, a GitHub key restart and skipped images reach the agent as a short note

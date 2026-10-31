@@ -17,16 +17,24 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.config import SubagentsSettings, load_subagents_settings
 from daimon.core.context_prompt import FRAGMENT_MARKER
-from daimon.core.mux_compat import agent_patch, agent_spec
+from daimon.core.mux_backend import platform_scope
+from daimon.core.mux_compat import (
+    agent_patch,
+    agent_spec,
+    create_agent,
+    update_agent,
+    update_agent_ignored,
+)
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.subagents import (
     SubagentsError,
     check_multiagent_value,
+    check_spec_multiagent,
     coordinator_system,
     require_session_allowed,
     session_budget,
     subagents_override,
-    turn_budget,
+    turn_limit_cents,
 )
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import (
@@ -95,18 +103,43 @@ def test_the_self_roster_passes_when_on() -> None:
     check_multiagent_value(SELF_ROSTER)
 
 
+def _no_calls(calls: list[httpx.Request]) -> AsyncAnthropic:
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(500)
+
+    return build_fake_anthropic(handler)
+
+
 @pytest.mark.usefixtures("off")
-def test_every_agent_write_passes_the_gate() -> None:
+async def test_every_agent_write_passes_the_gate() -> None:
+    calls: list[httpx.Request] = []
+    client = _no_calls(calls)
+    scope = platform_scope("test helpers gate")
     payload = {"name": "coder", "model": "claude-sonnet-5-5", "multiagent": SELF_ROSTER}
     with pytest.raises(SubagentsError):
-        agent_spec(payload)
+        await create_agent(client, payload, scope=scope)
     with pytest.raises(SubagentsError):
-        agent_patch({"multiagent": SELF_ROSTER})
-    # Clearing a roster, and every agent without one, is untouched.
+        await create_agent(client, agent_spec(payload), scope=scope)
+    with pytest.raises(SubagentsError):
+        await update_agent(
+            client, "ag_1", version=1, payload={"multiagent": SELF_ROSTER}, scope=scope
+        )
+    with pytest.raises(SubagentsError):
+        await update_agent_ignored(
+            client, "ag_1", version=1, payload={"multiagent": SELF_ROSTER}, scope=scope
+        )
+    assert calls == [], "refused before anything reached the provider"
+
+
+@pytest.mark.usefixtures("off")
+def test_reading_an_agent_with_a_roster_is_never_refused() -> None:
+    """`agent_spec` also projects existing agents (`sessions.project_session_resources`)."""
+    spec = agent_spec({"name": "coder", "model": "claude-sonnet-5-5", "multiagent": SELF_ROSTER})
+    assert [e.namespace for e in spec.extensions or ()] == ["anthropic.multiagent"]
     cleared = agent_patch({"multiagent": None}).extensions or {}
     assert cleared["anthropic.multiagent"].value == {"clear": True}
-    plain = agent_spec({"name": "coder", "model": "claude-sonnet-5-5"}).extensions or ()
-    assert "anthropic.multiagent" not in [e.namespace for e in plain]
+    check_spec_multiagent(agent_patch({"multiagent": None}))
 
 
 @pytest.mark.usefixtures("on")
@@ -138,8 +171,8 @@ def test_budgets_are_whole_cents_rounded_up() -> None:
             "max_list_cost": {"amount": "251", "currency": "USD"},
         }
         # A later turn: what the session has spent, plus one turn's worth.
-        assert turn_budget(1234)["max_list_cost"] == {"amount": "1485", "currency": "USD"}
-        assert turn_budget(-5)["max_list_cost"] == {"amount": "251", "currency": "USD"}
+        assert turn_limit_cents(1234) == 1485
+        assert turn_limit_cents(-5) == 251
 
 
 def test_the_framing_goes_before_the_tenant_context_line() -> None:

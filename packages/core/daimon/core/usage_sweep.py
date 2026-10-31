@@ -79,7 +79,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import record_turn_usage
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic import EventPage, EventQuery, SessionThreads, SessionTools
+from mux.drivers.anthropic import EventPage, EventQuery, SessionTools, session_threads
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -231,7 +231,7 @@ async def _settle_child_threads(
     A session with no child threads costs one list call.
     """
     backend = managed_agents(anthropic, scope=scope, resources=frozenset({("session", session_id)}))
-    port = backend.extension(SessionThreads, namespace="anthropic.session_threads", version=1)
+    port = session_threads(backend)
     ref = resource_ref(backend, "session", session_id, scope=scope)
     scanned = 0
     unbilled: list[BetaManagedAgentsSpanModelRequestEndEvent] = []

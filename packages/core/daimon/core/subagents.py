@@ -12,16 +12,17 @@ only on `session.status_idle`, which the provider emits when no thread runs.
 This module owns the host's guardrails, all of them off unless
 `DAIMON_SUBAGENTS__ENABLED` is set:
 
-- **write gate** (`check_multiagent_value`): every agent create or update
-  passes through `mux_compat`, which refuses a roster while the switch is off
-  and any roster but `[self]` always (a foreign agent id brings its own tools
-  and MCP servers into a vault it shares with the lead);
+- **write gate** (`check_spec_multiagent`): every agent create or update
+  (`mux_compat.create_agent`/`update_agent`, a catalog publish) refuses a
+  roster while the switch is off and any roster but `[self]` always (a
+  foreign agent id brings its own tools and MCP servers into a vault it
+  shares with the lead);
 - **session gate** (`require_session_allowed`): a coordinator session starts
   only for a chat turn with the switch on, never for a routine, a smoke run or
   an agent key, so nothing unattended answers a helper's request;
-- **budget** (`session_budget`, `turn_budget`): a native session budget is
+- **budget** (`session_budget`, `turn_limit_cents`): a native session budget is
   attached at creation and raised before each turn to what the session has
-  spent plus `turn_budget_usd`; Managed Agents stops new model calls past it;
+  spent plus `turn_budget_usd` (`turn_limit_cents`); Managed Agents stops new model calls past it;
 - **framing** (`coordinator_framing`): the lead is told the helper limit and
   that each helper works in its own git worktree.
 
@@ -39,6 +40,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Final, cast
 
 from daimon.core.errors import UserFacingError
+from mux.drivers.anthropic import MULTIAGENT_NAMESPACE
 from pydantic import JsonValue
 
 if TYPE_CHECKING:
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
 __all__ = [
     "SubagentsError",
     "check_multiagent_value",
+    "check_spec_multiagent",
     "coordinator_framing",
     "coordinator_system",
     "is_coordinator",
@@ -54,7 +57,7 @@ __all__ = [
     "session_budget",
     "subagents_override",
     "subagents_settings",
-    "turn_budget",
+    "turn_limit_cents",
 ]
 
 _OVERRIDE: ContextVar[SubagentsSettings | None] = ContextVar("subagents_settings", default=None)
@@ -121,6 +124,25 @@ def check_multiagent_value(value: object) -> None:
         raise SubagentsError(_ROSTER)
 
 
+def check_spec_multiagent(spec: object) -> None:
+    """`check_multiagent_value` for a neutral agent spec or patch about to be written.
+
+    The roster travels as the `anthropic.multiagent` extension: a tuple of
+    extensions on a spec, a mapping by namespace on a patch.
+    """
+    extensions = getattr(spec, "extensions", None)
+    if not extensions:
+        return
+    entries = (
+        cast(Mapping[str, object], extensions).values()
+        if isinstance(extensions, Mapping)
+        else cast(tuple[object, ...], extensions)
+    )
+    for entry in entries:
+        if getattr(entry, "namespace", None) == MULTIAGENT_NAMESPACE:
+            check_multiagent_value(getattr(entry, "value", None))
+
+
 def is_coordinator(multiagent: object) -> bool:
     """Whether an agent (or its session snapshot) can start helpers."""
     return multiagent is not None
@@ -156,12 +178,12 @@ def session_budget() -> dict[str, JsonValue]:
     return _budget(_cents(subagents_settings().turn_budget_usd))
 
 
-def turn_budget(spent_cents: int) -> dict[str, JsonValue]:
-    """The budget before a turn: what the session has spent, plus one turn's worth.
+def turn_limit_cents(spent_cents: int) -> int:
+    """The limit before a turn: what the session has spent, plus one turn's worth.
 
     `spent_cents` is the session's reported `usage.list_cost` (whole cents).
     """
-    return _budget(max(0, spent_cents) + _cents(subagents_settings().turn_budget_usd))
+    return max(0, spent_cents) + _cents(subagents_settings().turn_budget_usd)
 
 
 def coordinator_system(

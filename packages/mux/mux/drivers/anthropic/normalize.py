@@ -203,8 +203,9 @@ class EventNormalizer:
                 refused = isinstance(details, dict) and details.get("type") == "refusal"
                 payload = {
                     "root_turn_id": self.root_turn_id or event_id,
+                    # A spending limit pauses the session mid-work: never a completion.
                     "outcome": "errored"
-                    if refused or reason == "retries_exhausted"
+                    if refused or reason in {"retries_exhausted", "budget_reached"}
                     else "completed",
                     "native_reason": "refusal" if refused else reason,
                 }

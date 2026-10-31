@@ -2836,7 +2836,7 @@ class TurnOutcome(Base):
             "'admission_denied', "
             "'admission_concurrency_shed', 'missing_config', 'resolver_miss', "
             "'session_preparation_failed', 'session_busy', 'session_agent_mismatch', "
-            "'unknown')",
+            "'unknown', 'budget_reached')",
             name="ck_turn_outcomes_reason",
         ),
         CheckConstraint("duration_ms >= 0", name="ck_turn_outcomes_duration"),

@@ -124,9 +124,6 @@ class SessionUpdateConfig(NativeConfig):
 
     agent: SessionAgentUpdate | None = None
     metadata: dict[str, str] | None = None
-    # Raise or lower an existing budget. Managed Agents refuses to attach one to a
-    # session created without it, and a raise resumes work the budget paused.
-    budget: SessionBudget | None = None
 
 
 class FileMount(NativeConfig):
@@ -529,14 +526,9 @@ class AnthropicSessions:
             checked = _config(extension, "anthropic.session_update", SessionUpdateConfig)
             check_record(scope, plan.session.id, checked.metadata)
             # Keep the closed-schema-checked original key order at the SDK.
-            arguments = dict(extension.value)
-            budget = arguments.pop("budget", None)
-            if budget is not None:
-                # The pinned SDK has no typed budget field; the API takes it in the body.
-                arguments["extra_body"] = {"budget": budget}
             await provider_call(
                 self._client.beta.sessions.update(
-                    plan.session.id, **cast(SessionUpdateParams, arguments)
+                    plan.session.id, **cast(SessionUpdateParams, dict(extension.value))
                 )
             )
         elif plan.operations or plan.extensions:

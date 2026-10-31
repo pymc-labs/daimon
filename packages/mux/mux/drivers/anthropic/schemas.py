@@ -13,6 +13,7 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.resources import NetworkPolicy, ToolSpec
 
 AGENT_TOOLS_NAMESPACE = "anthropic.agent_tools"
+MULTIAGENT_NAMESPACE = "anthropic.multiagent"
 
 
 class NativeConfig(BaseModel):
@@ -257,7 +258,7 @@ def agent_tools(extension: ExtensionConfig) -> AgentToolsConfig:
 
 
 def multiagent(extension: ExtensionConfig) -> MultiagentConfig:
-    if extension.namespace != "anthropic.multiagent" or extension.version != 1:
+    if extension.namespace != MULTIAGENT_NAMESPACE or extension.version != 1:
         raise ValueError("expected anthropic.multiagent@1")
     return MultiagentConfig.model_validate(dict(extension.value))
 
