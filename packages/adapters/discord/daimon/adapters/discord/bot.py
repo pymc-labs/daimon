@@ -211,7 +211,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_recovery_failure,
 )
 from daimon.core.stores.turn_origins import get_active_origin, thread_archive_requested
-from daimon.core.stores.watches import NoticeAttempt, SentNotice, Unclear
+from daimon.core.stores.watches import NoticeAttempt, Refused, SentNotice, Unclear
 from daimon.core.thread_naming import (
     THREAD_NAME_MAX_CHARS,
     fallback_thread_name,
@@ -4119,7 +4119,7 @@ class DaimonBot(commands.Bot):
 
         async def deliver(
             watch: WatchRow, workspace_id: str, text: str, /, *, attempt: NoticeAttempt
-        ) -> SentNotice | Unclear | bool:
+        ) -> SentNotice | Unclear | Refused | bool:
             sent = await send_watch_notice(
                 self.runtime,
                 self.open_member_dm,

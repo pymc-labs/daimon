@@ -110,7 +110,10 @@ DELIVERY_HEAD = "0163_watch_delivery"
 LIFETIME_CAPS_HEAD = "0164_watch_lifetime_caps"
 
 
-HEAD = "0165_agent_daimon_tools"
+AGENT_TOOLS_HEAD = "0165_agent_daimon_tools"
+
+
+HEAD = "0166_watch_notice_refused"
 
 
 CHAIN = [
@@ -145,6 +148,7 @@ CHAIN = [
     CREDENTIALS_HEAD,
     DELIVERY_HEAD,
     LIFETIME_CAPS_HEAD,
+    AGENT_TOOLS_HEAD,
     HEAD,
 ]
 

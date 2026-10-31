@@ -1886,7 +1886,13 @@ messages per kind, so one expiry DM shows `expired=1`.
 Receipts are kept 30 days, even after the watch is deleted. Every retry first
 checks the owner's DM for the earlier message, so a send cut off by a restart or
 timeout is not sent twice. If that check cannot read the DM, nothing is sent and the
-notice retries five minutes later.
+notice retries later.
+
+A notice that did not go out retries 5 minutes later, then 10, 20 and 40, then
+every hour. A day after its first attempt it is dropped and the last receipt stays
+`failed`. When Discord will never deliver it, because the owner closed their DMs,
+blocked the bot, left the server or is a bot account, the attempt is recorded as
+`refused` and the notice is not retried. Every notice kind follows these rules.
 
 #### Importing watches from a JSON manifest
 
@@ -1958,8 +1964,8 @@ queue this owner DM through the existing Discord notice path:
 `this watch is paused: its source can't be polled here`. Archived workspaces
 are excluded from notice batches. Watches whose expiry is older than 24 hours
 stay silent so historical rows are not back-notified. Failed deliveries retry
-every five minutes until that cutoff, allowing for sidecar outages, deploys and
-Discord delivery failures. Sending the notice never resumes the watch.
+as described in [Checking owner notices](#checking-owner-notices), stopping at
+that cutoff if it comes first. Sending the notice never resumes the watch.
 
 Unsupported callback projections import with `projection_unmapped` and cannot be
 confirmed. Rewrite them into the supported subset before importing a reviewed

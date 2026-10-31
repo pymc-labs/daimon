@@ -18,8 +18,10 @@ from typing import Protocol
 from daimon.core.continuity.watch_imports import UNMAPPED_NOTICE
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.watches import (
+    REFUSED,
     UNCLEAR,
     NoticeAttempt,
+    Refused,
     SentNotice,
     Unclear,
     claim_import_notice,
@@ -33,14 +35,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 class DeliverNotice(Protocol):
     """Send `text` to the watch owner.
 
-    True or a `SentNotice` when it landed, False when it surely did not, and
+    True or a `SentNotice` when it landed, False when it surely did not,
     `UNCLEAR` when the platform may have stored it (a timeout or server error
-    after the request went out).
+    after the request went out), and `REFUSED` when it can never reach the owner.
     """
 
     def __call__(
         self, watch: WatchRow, workspace_id: str, text: str, /, *, attempt: NoticeAttempt
-    ) -> Awaitable[bool | SentNotice | Unclear]: ...
+    ) -> Awaitable[bool | SentNotice | Unclear | Refused]: ...
 
 
 async def poll_watch_notices(
@@ -77,6 +79,7 @@ async def poll_watch_notices(
                 attempt,
                 sent=sent,
                 unclear=delivered == UNCLEAR,
+                refused=delivered == REFUSED,
                 now=datetime.now(UTC),
             )
 

@@ -1601,8 +1601,8 @@ async def claim_import_notice(
         select(Watch)
         .where(
             Watch.platform == "discord",
-            # Keep expiries older than 24 hours silent; failed deliveries retry every
-            # five minutes within this window, allowing for outages and deploys.
+            # Keep expiries older than 24 hours silent; failed deliveries retry within
+            # this window (`notice_retry_in`), allowing for outages and deploys.
             or_(
                 Watch.status != "expired",
                 # A permanent watch expired 30 days after it was paused.
@@ -1671,8 +1671,9 @@ async def settle_import_notice(
     session: AsyncSession,
     notice: WatchRow,
     *,
-    delivered: bool,
+    retry_in: timedelta | None,
 ) -> None:
+    """Release the claim. With `retry_in` None the notice is done, sent or given up."""
     row = await session.scalar(select(Watch).where(Watch.id == notice.id).with_for_update())
     if (
         row is None
@@ -1680,20 +1681,33 @@ async def settle_import_notice(
         or row.source_state.get("notice_lease") != notice.source_state.get("notice_lease")
     ):
         return
+    done = retry_in is None
     row.source_state = {
         **row.source_state,
-        "notice_pending": not delivered,
-        "notice_open": None if delivered else row.source_state.get("notice_open"),
+        "notice_pending": not done,
+        "notice_open": None if done else row.source_state.get("notice_open"),
         "notice_lease": None,
         "notice_lease_until": None
-        if delivered
-        else (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+        if retry_in is None
+        else (datetime.now(UTC) + retry_in).isoformat(),
     }
     # Notice settlement never changes watch status, source mapping, or confirmation.
     await session.flush()
 
 
 NOTICE_RECEIPT_RETENTION = timedelta(days=30)
+# A notice that has not landed within a day of its first attempt is dropped; the
+# delay between attempts doubles from five minutes up to an hour.
+NOTICE_RETRY_WINDOW = timedelta(hours=24)
+NOTICE_RETRY_FIRST = timedelta(minutes=5)
+NOTICE_RETRY_LONGEST = timedelta(hours=1)
+
+
+def notice_retry_in(attempt: int, *, first: datetime, now: datetime) -> timedelta | None:
+    """When to try again after failed attempt number `attempt`, or None to give up."""
+    if now - first >= NOTICE_RETRY_WINDOW:
+        return None
+    return min(NOTICE_RETRY_FIRST * 2 ** min(attempt - 1, 10), NOTICE_RETRY_LONGEST)
 
 
 def notice_kind(status: str, state: dict[str, object]) -> str:
@@ -1741,6 +1755,11 @@ Unclear = Literal["unclear"]
 # Delivery's answer when the send may have reached the platform without confirming it.
 UNCLEAR: Unclear = "unclear"
 
+Refused = Literal["refused"]
+# Delivery's answer when the platform will never deliver to this owner: they closed
+# their DMs, left, or are a bot. The notice is dropped after this one attempt.
+REFUSED: Refused = "refused"
+
 
 @dataclass(frozen=True)
 class SentNotice:
@@ -1755,7 +1774,8 @@ async def open_notice_attempt(
 ) -> NoticeAttempt | None:
     """Record the intent to send `notice`, in the claim's transaction.
 
-    Returns None, settling the claim, when an earlier attempt already sent it.
+    Returns None, settling the claim, when an earlier attempt already sent it or
+    the first attempt is older than `NOTICE_RETRY_WINDOW`.
     """
     kind = str(notice.source_state["notice_open"])
     generation = int(str(notice.source_state["notice_generation"]))
@@ -1772,11 +1792,15 @@ async def open_notice_attempt(
         )
     )
     if any(row.outcome == "sent" for row in earlier):
-        await settle_import_notice(session, notice, delivered=True)
+        await settle_import_notice(session, notice, retry_in=None)
         return None
     for row in earlier:
         if row.outcome == "pending":
             row.outcome = "interrupted"
+    # A send that keeps dying before it settles never reaches the check in close.
+    if earlier and now - earlier[0].attempted_at >= NOTICE_RETRY_WINDOW:
+        await settle_import_notice(session, notice, retry_in=None)
+        return None
     receipt = WatchNoticeReceipt(
         id=uuid.uuid4(),
         tenant_id=notice.tenant_id,
@@ -1813,10 +1837,12 @@ async def close_notice_attempt(
     sent: SentNotice | None,
     now: datetime,
     unclear: bool = False,
+    refused: bool = False,
 ) -> None:
     """Record what the attempt did, then settle the claim when it still holds it.
 
-    An `unclear` send is recorded as interrupted: it may have landed.
+    An `unclear` send is recorded as interrupted: it may have landed. A `refused`
+    one ends the notice; any other failure retries per `notice_retry_in`.
     """
     receipt = await session.get(WatchNoticeReceipt, attempt.receipt_id, with_for_update=True)
     # A later claim may have marked this attempt interrupted; what it really did still counts.
@@ -1826,9 +1852,14 @@ async def close_notice_attempt(
             receipt.channel_id = sent.channel_id
             receipt.message_id = sent.message_id
         elif receipt.outcome == "pending":
-            receipt.outcome = "interrupted" if unclear else "failed"
+            receipt.outcome = "refused" if refused else "interrupted" if unclear else "failed"
         receipt.settled_at = now
-    await settle_import_notice(session, notice, delivered=sent is not None)
+    if sent is not None or refused:
+        retry_in = None
+    else:
+        first = attempt.since or (receipt.attempted_at if receipt is not None else now)
+        retry_in = notice_retry_in(attempt.attempt, first=first, now=now)
+    await settle_import_notice(session, notice, retry_in=retry_in)
 
 
 async def prune_notice_receipts(session: AsyncSession, *, now: datetime) -> None:
