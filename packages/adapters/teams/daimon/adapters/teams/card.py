@@ -241,6 +241,8 @@ def notice_card(
 
 
 ANSWERED_BELOW = "Done."
+# What a notification shows for buttons with no summary line above them.
+CONTROLS_FALLBACK = "Rate this answer"
 
 
 def ask_human_action() -> SubmitAction:
@@ -256,14 +258,18 @@ def vote_actions() -> list[Action]:
     ]
 
 
-def controls_card(summary: str, *, ask_human: bool) -> MessageActivityInput:
+def controls_card(summary: str | None, *, ask_human: bool) -> MessageActivityInput:
     """Posted just below the answer: its summary line, 👍/👎 and Ask a human.
 
     A click names this message (`replyToId`), so a vote or request links to
     it, the answer's next message, and a request is made once per answer.
+    With the footer hidden (`summary` None) only the buttons are left.
     """
     actions = [*vote_actions(), *([ask_human_action()] if ask_human else [])]
-    return _card([_summary_line(summary), ActionSet(actions=actions)], fallback=summary)
+    elements: list[CardElement] = [ActionSet(actions=actions)]
+    if summary:
+        elements.insert(0, _summary_line(summary))
+    return _card(elements, fallback=summary or CONTROLS_FALLBACK)
 
 
 # Alt text that could end the image's brackets or start markup.

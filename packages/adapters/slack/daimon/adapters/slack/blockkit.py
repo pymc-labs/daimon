@@ -167,6 +167,8 @@ def to_blocks(
     Terminal (DONE / ERROR):
         - context  : one line with name, time, cost and money left
                      ERROR adds a separate notice section when available
+                     With the footer hidden (``footer_hidden``) DONE is a "Done."
+                     section and ERROR its notice, with no summary line
         No actions block (cancel button removed on terminal).
     """
     if state.phase in _TERMINAL_PHASES:
@@ -209,8 +211,11 @@ def to_blocks(
                         "text": {"type": "mrkdwn", "text": "@mention Daimon to try again."},
                     }
                 )
-        elif not answer_visible and state.text_preview is None:
+        elif state.footer_hidden or (not answer_visible and state.text_preview is None):
+            # With no footer the card still needs a body to replace its progress.
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "Done."}})
+        if state.footer_hidden:
+            return blocks
         if blocks:
             blocks.append({"type": "divider"})
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": summary}]})

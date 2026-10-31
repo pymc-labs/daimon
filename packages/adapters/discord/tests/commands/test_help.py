@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.commands.billing import BillingCog
+from daimon.adapters.discord.commands.cost_footer import CostFooterCog
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.commands.github import GitHubCog
 from daimon.adapters.discord.commands.help import (
@@ -98,7 +99,7 @@ class TestBuildHelpView:
             for text in _collect_text_display_content(build_help_view())
             if text.startswith("/here")
         )
-        assert len(commands.splitlines()) == 11
+        assert len(commands.splitlines()) == 12
         assert all(line.startswith("/") for line in commands.splitlines())
         assert "/dm-me" in content
         assert "/model" in content
@@ -156,6 +157,7 @@ class TestSharedDescriptions:
         cogs = [
             AgentSetupCog,
             BillingCog,
+            CostFooterCog,
             DirectMessageCog,
             GitHubCog,
             HelpCog,

@@ -136,7 +136,7 @@ def to_embed_data(state: EmbedState, *, now: float | None = None) -> EmbedData:
             title=title,
             description=description,
             color=color,
-            footer=footer,
+            footer=None if state.footer_hidden else footer,
             details=None,
             notice=notice_text,
         )

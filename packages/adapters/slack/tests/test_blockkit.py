@@ -307,6 +307,25 @@ class TestToBlocks:
         assert [block["type"] for block in customized] == ["context"]
         assert customized[0]["elements"][0]["text"] == "12s"
 
+    def test_hidden_footer_leaves_done_and_its_notice_with_no_summary(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.DONE, agent_name="Atlas", cost_str="$0.04"),
+            balance_str="$12.50 left",
+            footer_hidden=True,
+        )
+        for answer_visible in (True, False):
+            blocks = to_blocks(state, now=12.0, answer_visible=answer_visible)
+            assert blocks == [{"type": "section", "text": {"type": "mrkdwn", "text": "Done."}}], (
+                "with the footer hidden the card says Done. and nothing more"
+            )
+
+        error = replace(
+            _make_state(phase=TurnPhase.ERROR), notice="Add credit.", footer_hidden=True
+        )
+        blocks = to_blocks(error, now=5.0)
+        assert not _find_blocks_by_type(blocks, "context"), "no summary line under the notice"
+        assert blocks[-1]["text"]["text"] == "Add credit."
+
     def test_error_state_summary_context_has_cross_emoji_and_reason(self) -> None:
         """ERROR state's summary context block carries the cross emoji + the reason."""
         state = update(

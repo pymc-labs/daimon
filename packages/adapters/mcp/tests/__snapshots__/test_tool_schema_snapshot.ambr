@@ -5816,6 +5816,20 @@
         'type': 'object',
       }),
     }),
+    'get_cost_footer': dict({
+      'description': '''
+        Report whether finished answers here end with the cost footer.
+        <blank line>
+        Reading needs no admin; changing it does (``set_cost_footer``, an
+        admin). Read the returned ``note`` back to the user.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'get_environment': dict({
       'description': 'Return one environment by name.',
       'parameters': dict({
@@ -10408,6 +10422,28 @@
         }),
         'required': list([
           'channel_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_cost_footer': dict({
+      'description': '''
+        Show or hide the footer under each finished answer. Admin-only.
+        <blank line>
+        For the whole workspace. The footer is one line naming the agent, the
+        time taken, what the turn cost and the money left. With ``shown``
+        false, answers end without it; the answer itself and the billing
+        panel are unchanged. On by default. Read the returned ``note`` back to the user.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'shown': dict({
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'shown',
         ]),
         'type': 'object',
       }),

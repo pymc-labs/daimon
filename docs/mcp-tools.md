@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 180 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 182 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -176,6 +176,15 @@ get_cli_token MCP tool.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `get_cli_token` | all callers | Mint a short-lived CLI access token for the named service. |
+
+## `cost_footer`
+
+Cost footer tools: show or hide the line under each finished answer, workspace-wide.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_cost_footer` | all callers | Report whether finished answers here end with the cost footer. |
+| `set_cost_footer` | admin only | Show or hide the footer under each finished answer. |
 
 ## `credential_requests`
 

@@ -300,6 +300,7 @@ PERMISSION_SETTER_TOOLS: Final[frozenset[str]] = frozenset(
         "clear_agent_default",
         "set_thread_participation",
         "set_plain_text_mentions",
+        "set_cost_footer",
         "grant_admin",
         "revoke_admin",
         "set_access_policy",

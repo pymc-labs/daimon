@@ -34,6 +34,7 @@ Action = Literal[
     "routines",
     "dm_me",
     "billing",
+    "cost_footer",
     "privacy",
     "new",
     "support",
@@ -59,6 +60,7 @@ DESCRIPTIONS: Mapping[Action, str] = MappingProxyType(
         "routines": "Scheduled jobs",
         "dm_me": "Continue privately (an admin turns it on)",
         "billing": "Your usage and credit",
+        "cost_footer": "Show or hide the cost line under answers (admins)",
         "privacy": "See, export or delete your data",
         "new": "Start a fresh conversation",
         "support": "Ask a person",
@@ -175,6 +177,7 @@ _DISCORD: Mapping[Action, Command] = MappingProxyType(
         "routines": Command("/routines", "space"),
         "dm_me": Command("/dm-me", "space"),
         "billing": Command("/billing", "space"),
+        "cost_footer": Command("/cost-footer", "space"),
         "privacy": Command("/privacy"),
         "help": Command("/help", "space"),
     }

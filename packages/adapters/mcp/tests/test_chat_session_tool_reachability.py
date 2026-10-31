@@ -103,6 +103,9 @@ CHAT_TURN_TOOL_REACHABILITY: dict[str, ExpectedOutcome] = {
     # read stays open so a member hears whether it is on and who can change it.
     "set_plain_text_mentions": ExpectedOutcome(discoverable=False),
     "get_plain_text_mentions": ExpectedOutcome(discoverable=True),
+    # cost_footer.py — the same split: an admin hides it, anyone may ask.
+    "set_cost_footer": ExpectedOutcome(discoverable=False),
+    "get_cost_footer": ExpectedOutcome(discoverable=True),
 }
 """Source of truth for what the seeded prompt may claim a chat turn can do.
 The four chat-removal tools land in a later plan and are covered by the
@@ -145,6 +148,7 @@ _CALL_ARGS: dict[str, dict[str, object]] = {
     },
     "get_thread_participation": {"thread_id": "thread-1", "channel_id": "channel-1"},
     "get_plain_text_mentions": {},
+    "get_cost_footer": {},
 }
 
 

@@ -47,6 +47,7 @@ from daimon.adapters.discord.thread_gone import ThreadStopped
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
@@ -1111,26 +1112,33 @@ class DiscordTurnLifecycle(OutputGate):
         with the summary would show it twice until then, or for good if the delete fails.
         """
         if self._sessionmaker is not None and self._tenant_id is not None:
-            try:
-                async with self._sessionmaker() as session:
-                    footer = await balance_footer(
-                        session,
-                        tenant_id=self._tenant_id,
-                        platform="discord",
-                        budget_channel_id=self._budget_channel_id,
-                        now=datetime.now(UTC),
-                    )
-                if footer is not None:
-                    self._state = dataclasses.replace(self._state, balance_str=footer)
-            except Exception:
-                log.warning("turn.balance_footer_failed", exc_info=True)
+            if not await cost_footer_shown(self._sessionmaker, tenant_id=self._tenant_id):
+                self._state = dataclasses.replace(self._state, footer_hidden=True)
+            else:
+                try:
+                    async with self._sessionmaker() as session:
+                        footer = await balance_footer(
+                            session,
+                            tenant_id=self._tenant_id,
+                            platform="discord",
+                            budget_channel_id=self._budget_channel_id,
+                            now=datetime.now(UTC),
+                        )
+                    if footer is not None:
+                        self._state = dataclasses.replace(self._state, balance_str=footer)
+                except Exception:
+                    log.warning("turn.balance_footer_failed", exc_info=True)
         self._terminal = True
         now = self._clock()
         data = to_embed_data(self._state, now=now)
-        self._terminal_embed = build_discord_embed(data)
+        # A finished turn with its footer hidden has no summary to carry: the
+        # answer goes up bare, as an empty embed would be refused.
+        self._terminal_embed = (
+            build_discord_embed(data) if data.footer or data.title or data.description else None
+        )
         embed = (
             self._terminal_embed
-            if summary_on_card
+            if summary_on_card and self._terminal_embed is not None
             else build_discord_embed(dataclasses.replace(data, footer=None, description="Done."))
         )
         if self._message_ref is None:

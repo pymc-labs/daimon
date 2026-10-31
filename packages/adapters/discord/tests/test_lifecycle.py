@@ -41,7 +41,7 @@ from daimon.core.errors import TurnError, UserFacingError
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import tenant_ledger
-from daimon.core.stores.tenants import set_funding_mode
+from daimon.core.stores.tenants import set_cost_footer, set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
@@ -2014,6 +2014,29 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     await lc.on_render(TurnState())
     await lc.on_terminal_success(_make_success_state())
     assert "left" not in _terminal_footer(edits)
+
+
+@pytest.mark.asyncio
+async def test_hidden_cost_footer_leaves_the_answer_bare(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    async with db_session_factory() as s, s.begin():
+        await set_cost_footer(s, tenant_id=tenant.id, shown=False)
+    lc, _sends, edits = _make_lifecycle(sessionmaker=db_session_factory, tenant_id=tenant.id)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_render(TurnState())
+    await lc.on_terminal_success(_make_success_state())
+
+    terminal_embeds = [kw["embeds"] for _ref, kw in edits if "embeds" in kw]
+    assert all(embed.footer.text is None for embeds in terminal_embeds for embed in embeds), (
+        "no card the turn leaves behind may carry the footer"
+    )
+    _ref, answer = edits[-1]
+    assert answer["content"] == "Hello response"
+    assert answer["embeds"] == [], "the answer replaces the card with no summary embed"
 
 
 def _window_fixture(

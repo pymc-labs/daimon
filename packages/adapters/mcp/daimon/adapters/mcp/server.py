@@ -69,6 +69,7 @@ from daimon.adapters.mcp.tools.channel_rules import register_channel_rule_tools
 from daimon.adapters.mcp.tools.channel_skills import register_channel_skill_tools
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
+from daimon.adapters.mcp.tools.cost_footer import register_cost_footer_tools
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
@@ -594,6 +595,7 @@ def create_mcp_app(
     register_thread_participation_tools(mcp, runtime)  # follow/unfollow threads
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
+    register_cost_footer_tools(mcp, runtime)  # the line under each finished answer
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_agent_tool_rule_tools(mcp, runtime)

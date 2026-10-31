@@ -105,6 +105,9 @@ class Tenant(Base):
     plain_text_mentions: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # The finished-turn line (agent, time, cost, money left) under each answer.
+    # On until an admin hides it.
+    cost_footer: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     registered_at: Mapped[datetime] = mapped_column(
