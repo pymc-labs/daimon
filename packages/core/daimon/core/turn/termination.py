@@ -39,7 +39,13 @@ from mux.contracts.events import Event, TurnEndedPayload
 from mux.contracts.receipts import StopObservation
 from mux.errors import ProviderError
 
-__all__ = ["TerminationReason", "denial_termination_reason", "termination_reason"]
+__all__ = [
+    "NOT_USER_FAILURES",
+    "USER_VISIBLE_FAILURES",
+    "TerminationReason",
+    "denial_termination_reason",
+    "termination_reason",
+]
 
 
 class TerminationReason(StrEnum):
@@ -109,6 +115,54 @@ class TerminationReason(StrEnum):
 
 
 _NOT_FAILURES = frozenset({TerminationReason.COMPLETED, TerminationReason.INTERRUPTED})
+
+
+USER_VISIBLE_FAILURES = frozenset(
+    {
+        TerminationReason.UPSTREAM,
+        TerminationReason.CONNECTION_LOST,
+        TerminationReason.SESSION_TERMINATED,
+        TerminationReason.MCP_DEGRADED_EMPTY,
+        TerminationReason.RETRYING_UNSETTLED,
+        TerminationReason.RATE_LIMITED,
+        TerminationReason.CEILING,
+        TerminationReason.RESOLVER_MISS,
+        TerminationReason.RECOVERY_FAILED,
+        TerminationReason.REDUCER_BUG,
+        TerminationReason.SESSION_PREPARATION_FAILED,
+        TerminationReason.ADMISSION_CONCURRENCY_SHED,
+        TerminationReason.UNKNOWN,
+    }
+)
+"""Ends where the user was left without the answer they asked for and the
+fault is ours or upstream's. Each is logged once as `turn.user_failure`, except
+for a turn nobody asked for, a command-line run, or a boundary's catch-all."""
+
+NOT_USER_FAILURES = frozenset(
+    {
+        TerminationReason.COMPLETED,
+        TerminationReason.INTERRUPTED,
+        TerminationReason.RECOVERY_CANCELLED,
+        TerminationReason.REFUSED,
+        TerminationReason.REQUIRES_ACTION,
+        TerminationReason.SESSION_BUSY,
+        # The user asked to stop; MA only failed to confirm in time.
+        TerminationReason.INTERRUPT_TIMEOUT,
+        # A setup state: the user gets the "not set up" notice and an admin fixes it.
+        TerminationReason.MISSING_CONFIG,
+        # The expected hand-over flow (like SESSION_BUSY), not a fault.
+        TerminationReason.SESSION_AGENT_MISMATCH,
+        TerminationReason.ADMISSION_BALANCE_DEPLETED,
+        TerminationReason.ADMISSION_CAP_EXCEEDED,
+        TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+        TerminationReason.ADMISSION_CHANNEL_PROTECTED,
+        TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE,
+        TerminationReason.ADMISSION_CHANNEL_ISOLATED,
+        TerminationReason.ADMISSION_DENIED,
+    }
+)
+"""Ends the user chose, a refusal, or an expected stop: never alerted on. A new
+`TerminationReason` member must land in exactly one of the two sets."""
 
 
 class ProviderTerminalFailure(ProviderError):

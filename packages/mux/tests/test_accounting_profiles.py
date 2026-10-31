@@ -8,7 +8,7 @@ import pytest
 from mux.contracts.ids import Provider
 from mux.contracts.profile import AccountingMode, Profile
 from mux.errors import InvalidConfig
-from mux.profiles import PROFILES, accounting_mode_for, get_profile
+from mux.profiles import PROFILES, accounting_mode_for, get_profile, meters_cache_writes_for
 from pydantic import ValidationError
 
 
@@ -78,3 +78,20 @@ def test_custom_profile_default_and_closed_serialized_modes():
     assert Profile.model_validate(base).accounting_mode is AccountingMode.REQUEST_SPANS
     with pytest.raises(ValidationError, match="accounting_mode"):
         Profile.model_validate({**base, "accounting_mode": "unreviewed"})
+
+
+def test_only_openai_declares_a_meter_without_cache_write_counts():
+    """OpenAI bills cache writes but its Agents API usage has no write count."""
+    assert not meters_cache_writes_for("openai")
+    for provider in ("anthropic", "gemini", "selfhosted"):
+        assert meters_cache_writes_for(cast(Provider, provider))
+    assert meters_cache_writes_for(cast(Provider, "missing"))  # declares nothing
+
+
+def test_conflicting_cache_write_meters_refuse_instead_of_selecting_first(monkeypatch):
+    declaration = get_profile("openai.conversation_only").model_copy(
+        update={"meters_cache_writes": True}
+    )
+    monkeypatch.setattr("mux.profiles.PROFILES", {**PROFILES, declaration.profile_id: declaration})
+    with pytest.raises(InvalidConfig, match="unambiguous"):
+        meters_cache_writes_for("openai")

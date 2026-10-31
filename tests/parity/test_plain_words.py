@@ -3,7 +3,8 @@
 A member of a team is not a developer: "no turn was started", "this backend is not
 enabled" and "your tenant's session" mean nothing to them. This scans the source for
 string literals in the places people and the model read (cards, buttons, refusals,
-notices, tool results and shown errors) and fails on a handful of internal terms.
+notices, tool results and shown errors) and fails on a handful of internal terms,
+and on a " · " separator: say it as a short sentence or put it on its own line.
 
 What is not scanned: docstrings, comments, log calls, `assert` and the message of any
 exception that is not marked for people (unmarked errors stay private, see
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from .test_no_foreign_platform_names import (
@@ -63,7 +65,6 @@ _SHOWN_ERRORS = frozenset(
 _ALLOWED_FILES: dict[str, str] = {
     "packages/core/daimon/core/agent_guidance.py": "the agent's instructions; the model reads them",
     "packages/core/daimon/core/checkpoint_prompt.py": "an instruction to the model; never shown",
-    "packages/core/daimon/core/context_prompt.py": "an instruction to the model; never shown",
     "packages/core/daimon/core/handoff_context.py": "an instruction to the model; never shown",
     "packages/core/daimon/core/platform_system.py": "the system prompt; the model reads it",
     "packages/core/daimon/core/platform_words.py": "the per-platform table: Slack's own words",
@@ -102,6 +103,9 @@ _ALLOWED_TEXT: dict[tuple[str, str], str] = {
     ),
     ("packages/core/daimon/core/anthropic_spend.py", "You have reached your specified"): (
         "the provider's own error text, matched as it is"
+    ),
+    ("packages/core/daimon/core/_erasure_guards.py", "mux_account_erased(NEW.applied"): (
+        "SQL naming a JSON key of a stored usage record; never shown"
     ),
     ("packages/core/daimon/core/ma.py", "Refusing to empty"): (
         "an operator's refusal about a Managed Agents workspace"
@@ -203,12 +207,11 @@ def _internal_terms(text: str, *, slack: bool = False) -> list[str]:
     return found
 
 
-def _offences(path: Path) -> list[tuple[int, str, list[str]]]:
+def _person_facing_text(path: Path) -> Iterator[tuple[int, str]]:
+    """Each string literal in `path` that a person or the model may read."""
     tree = ast.parse(path.read_text())
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     skip = _docstring_ids(tree)
-    found: list[tuple[int, str, list[str]]] = []
-    slack_code = "slack" in path.name or "/slack/" in path.as_posix()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
             continue
@@ -221,9 +224,16 @@ def _offences(path: Path) -> list[tuple[int, str, list[str]]]:
             or _is_private(node, parents)
         ):
             continue
-        terms = _internal_terms(node.value, slack=slack_code or "Slack" in node.value)
+        yield node.lineno, node.value
+
+
+def _offences(path: Path) -> list[tuple[int, str, list[str]]]:
+    slack_code = "slack" in path.name or "/slack/" in path.as_posix()
+    found: list[tuple[int, str, list[str]]] = []
+    for line, text in _person_facing_text(path):
+        terms = _internal_terms(text, slack=slack_code or "Slack" in text)
         if terms:
-            found.append((node.lineno, node.value, terms))
+            found.append((line, text, terms))
     return found
 
 
@@ -247,6 +257,20 @@ def test_person_facing_text_uses_everyday_words() -> None:
         "text a person reads uses an internal term; say it in everyday words "
         "(reply or message, conversation, team or workspace, model provider, connection):\n"
         + "\n".join(offences)
+    )
+
+
+def test_person_facing_text_has_no_dot_separators() -> None:
+    offences = [
+        f"{path.relative_to(_REPO).as_posix()}:{line}: {text[:90]!r}"
+        for path in _scanned_files()
+        for line, text in _person_facing_text(path)
+        if " · " in text or text.startswith("· ") or text.endswith(" ·")
+    ]
+
+    assert offences == [], (
+        'text a person reads uses a " · " separator; write a short sentence '
+        "or put each part on its own line:\n" + "\n".join(offences)
     )
 
 

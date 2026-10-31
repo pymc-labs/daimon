@@ -11,7 +11,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from importlib.metadata import version
 
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
@@ -24,11 +23,17 @@ from daimon.core.pricing import (
     provider_cost_of,
     provider_uncached_input_tokens,
     uncached_input_tokens,
+    unreported_cache_writes,
 )
+from daimon.core.release import current_release
 from daimon.core.runtime_health import track_turn
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn.termination import (
+    USER_VISIBLE_FAILURES,
+    TerminationReason,
+    termination_reason,
+)
 from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from daimon.core.usage_compat import event_observation
 from mux.contracts.usage import UsageObservation
@@ -41,7 +46,6 @@ _MAX_PENDING = 256
 # The writer is detached from the turn, so a short checkout burst can be
 # tolerated without delaying the user. Keep a bound for a wedged database.
 _WRITE_TIMEOUT_S = 10.0
-_RELEASE = version("daimon-core")
 current_outcome: ContextVar[TurnObservation | None] = ContextVar("turn_outcome", default=None)
 
 
@@ -90,8 +94,15 @@ class TurnObservation:
     session_id: str | None = None
     backend_profile: str | None = field(default=None, kw_only=True)
     """Admitted profile displayed only for explicitly configured neutral turns."""
+    backend: str | None = field(default=None, kw_only=True)
+    """The backend and profile the turn ran on (`gemini/gemini.inline_reuse`),
+    for logs only; unlike `backend_profile` it is set for every turn that ran,
+    and logged as `unknown` where none was selected."""
     progress_plans: bool = field(default=False, kw_only=True)
     """Progress plans resolved on for this turn: its card draws the agent's plan."""
+    alertable: bool = field(default=True, kw_only=True)
+    """False for a turn nobody asked for (an unprompted reply): its failure is
+    recorded in the outcome row but never logged as `turn.user_failure`."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     _started: float = field(default_factory=time.monotonic)
@@ -223,8 +234,13 @@ class TurnObservation:
         error: BaseException | None = None,
         reason: TerminationReason | None = None,
         recovered: bool = False,
+        fallback: bool = False,
     ) -> None:
-        """Schedule once, without DB I/O or awaiting network/pool availability."""
+        """Schedule once, without DB I/O or awaiting network/pool availability.
+
+        `fallback` marks the catch-all finish of a boundary whose body returned
+        without ending the turn itself (an MCP dispatch, a skipped routine fire):
+        the `unknown` outcome is recorded, but it is not a failed answer."""
         if self._finished:
             return
         self._finished = True
@@ -234,6 +250,23 @@ class TurnObservation:
             or termination_reason(error or (state.error if state else None))
         )
         terminal_error = error or (state.error if state else None)
+        if (
+            resolved in USER_VISIBLE_FAILURES
+            and self.alertable
+            and not fallback
+            and self.platform != "cli"
+        ):
+            log.warning(
+                "turn.user_failure",
+                platform=self.platform,
+                reason=resolved.value,
+                error_class=type(terminal_error).__name__ if terminal_error else None,
+                origin=self.origin,
+                backend=self.backend or "unknown",
+                release=current_release(),
+                turn_id=str(self.id),
+                tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
+            )
         samples = list(self._samples.values())
         if any(
             accounting_mode_for(sample.usage.session.provider).settles_natively
@@ -280,7 +313,7 @@ class TurnObservation:
             duration_ms=max(0, int((time.monotonic() - self._started) * 1000)),
             recovered=recovered,
             error_class=type(terminal_error).__name__ if terminal_error else None,
-            release=_RELEASE,
+            release=current_release(),
             usage_refs=[
                 self._usage[(sample.usage.session.id, sample.usage.id)] for sample in samples
             ],
@@ -297,7 +330,10 @@ class TurnObservation:
                 lambda sample: (
                     0
                     if sample.provider_price is not None
-                    and sample.provider_price.cache_write is None
+                    and (
+                        sample.provider_price.cache_write is None
+                        or unreported_cache_writes(sample.usage, sample.provider_price)
+                    )
                     else sample.usage.input_cache_write_tokens
                 )
             ),
@@ -342,9 +378,12 @@ def observe_turn(
     channel_id: str | None = None,
     thread_id: str | None = None,
     origin: TurnContext = "chat",
+    alertable: bool = True,
 ) -> Iterator[TurnObservation]:
     """Whole-turn boundary, including failures between core pipeline stages."""
-    observation = TurnObservation(sm, tenant_id, platform, channel_id, thread_id, origin)
+    observation = TurnObservation(
+        sm, tenant_id, platform, channel_id, thread_id, origin, alertable=alertable
+    )
     with observation.activate():
         try:
             yield observation
@@ -353,7 +392,16 @@ def observe_turn(
             raise
         finally:
             # Normal driver paths already provided their exact terminal reason.
-            observation.finish(reason=TerminationReason.UNKNOWN)
+            observation.finish(reason=TerminationReason.UNKNOWN, fallback=True)
+
+
+def finish_with_error(exc: BaseException) -> None:
+    """End the active turn with `exc` when an adapter shows the failure itself and
+    returns instead of raising, so the boundary's catch-all finish does not treat
+    a failed answer as a quiet return. A turn that already ended is unchanged."""
+    observation = current_outcome.get()
+    if observation is not None:
+        observation.finish(error=exc)
 
 
 def record_refusal(
@@ -364,8 +412,9 @@ def record_refusal(
     channel_id: str,
     thread_id: str | None = None,
     reason: TerminationReason = TerminationReason.ADMISSION_CONCURRENCY_SHED,
+    alertable: bool = True,
 ) -> None:
     observation = current_outcome.get() or TurnObservation(
-        sm, tenant_id, platform, channel_id, thread_id
+        sm, tenant_id, platform, channel_id, thread_id, alertable=alertable
     )
     observation.finish(reason=reason)

@@ -217,6 +217,9 @@ github_installation	InstallationUpdates	InstallationUpdatesSafe	clean	93	-	atomi
 github_installation	InstallationDeliveryOrder	InstallationDeliveryOrderCreated	violates:FinalSetMatchesGitHub	5	-	delayed creation snapshot overwrites a repository delta delivered first
 github_installation	InstallationDeliveryOrder	InstallationDeliveryOrderDeltas	violates:FinalSetMatchesGitHub	11	-	opposite repository deltas delivered out of occurrence order leave stale membership
 github_installation	InstallationReconciliation	InstallationReconciliation	clean	27	-	current-generation fence prevents stale snapshots after notification; bounded to three generations
+github_installation	ConnectPositiveCache	ConnectPositiveCacheSafe	clean	12	-	Connect only merges user-verified names when the captured complete-snapshot revision still matches
+github_installation	ConnectPositiveCache	ConnectPositiveCacheNoFence	violates:FreshRemovalNotReintroduced	10	-	without the revision fence an older user listing restores a repo removed by a newer complete refresh
+github_installation	ConnectPositiveCache	ConnectPositiveCacheUnknown	clean	12	-	Connect preserves an unknown NULL cache until reconciliation supplies a complete snapshot
 # ---- slack dedupe ----
 slack_cancel	CancelRegistration	CancelRegistrationSafe	clean	6	-	register the per-turn action key before Slack can expose the card
 slack_cancel	CancelRegistration	CancelRegistrationUnsafe	violates:VisibleAuthorClickCancels	4	-	pre-fix: a click can arrive after card visibility and before ts registration

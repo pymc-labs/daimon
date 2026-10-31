@@ -137,7 +137,7 @@ async def test_turn_tail_drains_other_callers_timer_with_its_own_provider_contex
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
             _env_file=None,  # type: ignore[call-arg]
         ),
-        turn_deps=SimpleNamespace(fleet_enabled=False),
+        turn_deps=SimpleNamespace(),
     )
     app = MagicMock()
     app.runtime = runtime

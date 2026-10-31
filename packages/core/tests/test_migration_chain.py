@@ -107,7 +107,14 @@ CREDENTIALS_HEAD = "0162_watch_credentials"
 DELIVERY_HEAD = "0163_watch_delivery"
 
 
-HEAD = "0164_watch_lifetime_caps"
+PREVIEW_HEAD = "0164_watch_lifetime_caps"
+
+
+# Joins this chain with main's revisions since 0131, Fleet removal included.
+MAIN_BRANCH_HEAD = "0146_isolated_fresh_start"
+
+
+HEAD = "0165_merge_main_fleet_removal"
 
 
 CHAIN = [
@@ -141,7 +148,7 @@ CHAIN = [
     ROUTINE_SOURCE_HEAD,
     CREDENTIALS_HEAD,
     DELIVERY_HEAD,
-    HEAD,
+    PREVIEW_HEAD,
 ]
 
 
@@ -199,6 +206,26 @@ TABLES = {
     "long_job_policy_history",
     "long_job_cancel_audit",
 }
+
+
+# Schema main's revisions since 0131 change, reached only through the merge: their
+# columns, Fleet's grant column (0141_remove_fleet) and the usage binding key
+# (0142_mux_account_erasure) they drop.
+MAIN_BRANCH_COLUMNS = {
+    ("mcp_tokens", "purpose"),
+    ("mcp_tokens", "skill_bytes_read"),
+    ("mcp_tokens", "skill_calls"),
+    ("turn_origins", "platform_channel_id"),
+    ("turn_origins", "platform_message_id"),
+    ("agent_backend_revision", "fleet_grant"),
+}
+
+
+MAIN_BRANCH_FOREIGN_KEYS = {"usage_observation_binding_id_fkey"}
+
+
+def _table_name(obj: object) -> str | None:
+    return getattr(getattr(obj, "table", None), "name", None)
 
 
 def _config(scripts: Path, connection: Connection) -> Config:
@@ -288,6 +315,12 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and expected != HEAD
         ):
             return False
+        # A preview head below the merge has none of main's revisions since 0131.
+        if expected != HEAD and (
+            (kind == "column" and (_table_name(obj), name) in MAIN_BRANCH_COLUMNS)
+            or (kind == "foreign_key_constraint" and name in MAIN_BRANCH_FOREIGN_KEYS)
+        ):
+            return False
         # Historical main retains these two objects for older readers, while
         # its ORM intentionally omits them. These retained objects
         # are outside the ORM metadata comparison.
@@ -354,6 +387,9 @@ def test_authoritative_chain() -> None:
         assert node is not None and node.down_revision == parent
         assert Path(node.path).stem == revision
         parent = revision
+    merge = script.get_revision(HEAD)
+    assert merge is not None
+    assert set(merge.down_revision or ()) == {PREVIEW_HEAD, MAIN_BRANCH_HEAD}
 
 
 @pytest.fixture

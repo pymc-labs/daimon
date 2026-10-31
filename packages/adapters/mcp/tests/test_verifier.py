@@ -23,13 +23,22 @@ from daimon.adapters.mcp.auth.verifier import (
     TOKEN_JTI_CLAIM,
     TOKEN_KIND_CLAIM,
     DaimonJWTVerifier,
+    would_coding_key_pass,
 )
-from daimon.core.mcp_auth import mint_agent_mcp_token, mint_cli_mcp_token, mint_operator_mcp_token
+from daimon.core.mcp_auth import (
+    mint_agent_mcp_token,
+    mint_chat_mcp_token,
+    mint_cli_mcp_token,
+    mint_operator_mcp_token,
+)
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.agent_owners import clear_owner, set_owner
 from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from daimon.core.stores.security_audit import list_events
+from daimon.core.turn_hold import TurnHold
+from daimon.testing.factories import make_account, make_cli_principal, make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -183,7 +192,7 @@ async def test_verifier_accepts_unrevoked_agent_token(
     # Use a future now so the exp claim (now + 90d) is not yet expired.
     now = dt.datetime(2099, 1, 1, tzinfo=dt.UTC)
     async with sessionmaker() as s, s.begin():
-        tenant_id, account_id = await seed_tenant_and_account(s)
+        tenant_id, account_id = await seed_server_admin(s)
         agent_id = uuid.uuid4()
         token = await mint_agent_mcp_token(
             s,
@@ -557,10 +566,14 @@ async def test_verifier_audits_each_refusal_of_a_registered_token(
 
 
 async def _agent_token(
-    sessionmaker: async_sessionmaker[AsyncSession], *, platform: str | None, channel_id: str | None
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    platform: str | None,
+    channel_id: str | None,
+    admin: bool = False,
 ) -> str:
     async with sessionmaker() as s, s.begin():
-        tenant_id, account_id = await seed_tenant_and_account(s)
+        tenant_id, account_id = await (seed_server_admin if admin else seed_tenant_and_account)(s)
         return await mint_agent_mcp_token(
             s,
             account_id=account_id,
@@ -591,7 +604,7 @@ async def test_verifier_drops_a_bound_channel_claimed_in_the_jwt(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     """Only the registry row binds a token; a signed claim of its own does not."""
-    unbound = await _agent_token(sessionmaker, platform=None, channel_id=None)
+    unbound = await _agent_token(sessionmaker, platform=None, channel_id=None, admin=True)
     claims = pyjwt.decode(unbound, SECRET, algorithms=["HS256"])
     forged = pyjwt.encode({**claims, "bound_channel_id": "c-1"}, SECRET, algorithm="HS256")
     async with sessionmaker() as s, s.begin():
@@ -693,7 +706,7 @@ async def test_external_agent_key_label_does_not_select_chat_authentication(sess
     now = dt.datetime.now(dt.UTC)
     agent_id = uuid.uuid4()
     async with sessionmaker() as db, db.begin():
-        tenant_id, account_id = await seed_tenant_and_account(db)
+        tenant_id, account_id = await seed_server_admin(db)
         token = await mint_agent_mcp_token(
             db,
             account_id=account_id,
@@ -994,3 +1007,233 @@ async def test_registered_remote_chat_credential_reaches_real_verifier(sessionma
         assert "agent_id" not in result.claims
         assert result.claims[TOKEN_JTI_CLAIM] == str(jti)
         assert result.claims["role"] == "user"
+
+
+# ---- coding keys: held to the holder's admin role or ownership of the key's agent ----
+
+
+class _KeyWorld:
+    """A tenant with an agent, its owner, a plain member and an admin, all on Discord."""
+
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+        self.sessionmaker = sessionmaker
+        self.verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+
+    async def build(self) -> None:
+        async with self.sessionmaker.begin() as s:
+            tenant = await make_tenant(s, platform="discord")
+            self.tenant_id = tenant.id
+            self.agent_id = uuid.uuid4()
+            self.owner = (await make_account(s, tenant=tenant)).id
+            self.member = (await make_account(s, tenant=tenant)).id
+            self.admin = (await make_account(s, tenant=tenant)).id
+            await set_role(s, self.admin, Role.ADMIN)
+            operator = await make_account(s, tenant=tenant)
+            await make_cli_principal(s, tenant=tenant, account=operator)
+            self.cli_operator = operator.id
+            await set_owner(
+                s,
+                tenant_id=tenant.id,
+                agent_id=self.agent_id,
+                owner_account_id=self.owner,
+                source="admin_assigned",
+            )
+
+    async def mint(self, account_id: uuid.UUID, *, bound: bool = False, **kwargs: object) -> str:
+        async with self.sessionmaker.begin() as s:
+            return await mint_agent_mcp_token(
+                s,
+                account_id=account_id,
+                tenant_id=self.tenant_id,
+                agent_id=self.agent_id,
+                label="k",
+                secret=SECRET,
+                now=dt.datetime.now(dt.UTC),
+                platform="discord" if bound else None,
+                channel_id="c-1" if bound else None,
+                **kwargs,  # pyright: ignore[reportArgumentType]
+            )
+
+    async def verifies(self, token: str) -> bool:
+        return await self.verifier.verify_token(token) is not None
+
+    async def reasons(self) -> list[str | None]:
+        async with self.sessionmaker() as s:
+            return [e.reason for e in await list_events(s, tenant_id=self.tenant_id)]
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+async def test_an_owners_coding_key_works_and_stops_when_ownership_is_removed(
+    sessionmaker: async_sessionmaker[AsyncSession], bound: bool
+) -> None:
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    token = await world.mint(world.owner, bound=bound)
+
+    assert await world.verifies(token), "an owner's key, bound or not, works"
+
+    async with sessionmaker.begin() as s:
+        await clear_owner(s, tenant_id=world.tenant_id, agent_id=world.agent_id)
+    assert not await world.verifies(token), "removing ownership stops the key on the next request"
+    assert await world.reasons() == ["not_admin_or_owner"], "the refusal is audited"
+
+
+async def test_a_coding_key_for_a_member_who_owns_nothing_is_refused(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+
+    assert not await world.verifies(await world.mint(world.member))
+    assert not await world.verifies(await world.mint(world.member, bound=True))
+
+
+async def test_an_owner_of_another_agent_cannot_use_a_key_for_this_one(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    async with sessionmaker.begin() as s:
+        await set_owner(
+            s,
+            tenant_id=world.tenant_id,
+            agent_id=uuid.uuid4(),
+            owner_account_id=world.member,
+            source="admin_assigned",
+        )
+
+    assert not await world.verifies(await world.mint(world.member))
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+async def test_an_admins_coding_key_stops_when_their_stored_role_is_demoted(
+    sessionmaker: async_sessionmaker[AsyncSession], bound: bool
+) -> None:
+    """The unbound-key gap: a demoted admin's key used to keep working until it expired."""
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    token = await world.mint(world.admin, bound=bound)
+    assert await world.verifies(token)
+
+    async with sessionmaker.begin() as s:
+        await set_role(s, world.admin, Role.USER)
+
+    assert not await world.verifies(token)
+
+
+async def test_an_admin_who_owns_nothing_keeps_a_working_key(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    assert await world.verifies(await world.mint(world.admin))
+
+
+async def test_a_members_published_report_token_still_verifies(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A report's seam token is minted for its publisher, often a plain member."""
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    assert await world.verifies(await world.mint(world.member, purpose="report"))
+    assert (
+        await world.verifies(await world.mint(world.member, purpose="report", bound=True)) is False
+    ), "a report token that is channel-bound keeps the older admin rule"
+
+
+async def test_short_internal_credentials_for_a_member_still_verify(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    chat_execution = await world.mint(world.member, chat_execution=True, ttl_days=600 / 86400)
+    provider_turn = await world.mint(
+        world.member, chat_execution=True, surface="provider_turn", ttl_days=600 / 86400
+    )
+    assert await world.verifies(chat_execution)
+    assert await world.verifies(provider_turn)
+
+
+async def test_in_session_chat_credentials_are_not_held_to_the_coding_key_rule(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An ordinary member's turn credential, held or not, verifies exactly as before."""
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    now = dt.datetime.now(dt.UTC)
+    async with sessionmaker.begin() as s:
+        plain, _, _ = await mint_chat_mcp_token(
+            s, account_id=world.member, agent_id=world.agent_id, secret=SECRET, now=now
+        )
+        held, _, _ = await mint_chat_mcp_token(
+            s,
+            account_id=world.member,
+            agent_id=world.agent_id,
+            secret=SECRET,
+            now=now,
+            hold=TurnHold(platform="discord", channel_id="c-held", client=False),
+        )
+
+    assert await world.verifies(plain)
+    result = await world.verifier.verify_token(held)
+    assert result is not None and result.claims["role"] == "user"
+
+
+async def test_a_registered_agent_keys_own_admin_claims_are_ignored(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Admin comes only from the stored role, never from claims a hand-made key signs."""
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    token = await world.mint(world.owner)
+    claims = pyjwt.decode(token, SECRET, algorithms=["HS256"])
+    forged = pyjwt.encode({**claims, "is_admin": True, "internal": True}, SECRET, algorithm="HS256")
+
+    result = await world.verifier.verify_token(forged)
+
+    assert result is not None, "the key keeps working, as a non-admin"
+    assert "is_admin" not in result.claims and "internal" not in result.claims
+    assert result.claims["role"] == "user"
+
+
+async def test_would_coding_key_pass_reads_the_same_rule_without_writing(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    tokens = {
+        "owner": await world.mint(world.owner),
+        "admin": await world.mint(world.admin),
+        "member": await world.mint(world.member),
+        "report": await world.mint(world.member, purpose="report"),
+        "cli": await world.mint(world.cli_operator),
+    }
+    async with sessionmaker() as s:
+        passes = {
+            name: await would_coding_key_pass(
+                s,
+                (
+                    await get_mcp_token(
+                        s, jti=uuid.UUID(pyjwt.decode(t, SECRET, algorithms=["HS256"])["jti"])
+                    )
+                ),  # pyright: ignore[reportArgumentType]
+            )
+            for name, t in tokens.items()
+        }
+    assert passes == {
+        "owner": True,
+        "admin": True,
+        "member": False,
+        "report": True,
+        "cli": True,
+    }
+
+
+async def test_a_coding_key_minted_from_the_cli_keeps_working(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """`daimon mcp mint-agent-token` mints for the CLI operator's own account, which
+    is neither an admin by role nor an owner: the operator still counts."""
+    world = _KeyWorld(sessionmaker)
+    await world.build()
+    assert await world.verifies(await world.mint(world.cli_operator))

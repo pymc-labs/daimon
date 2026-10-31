@@ -447,7 +447,7 @@ class TeamsConfirmationCards:
         if posted is None or answer is None:
             return toast(self._controls.missing_message(token))
         clicker = canonical_uuid(activity.from_.aad_object_id)
-        refusal = await check_confirmation_admin(posted.prompt, clicker, posted.check_admin)
+        refusal = await check_confirmation_admin(posted.prompt, clicker, posted.check_admin, answer)
         if refusal is not None:
             return toast(refusal)
         if refusal := self._controls.claim(token, clicker, answer):

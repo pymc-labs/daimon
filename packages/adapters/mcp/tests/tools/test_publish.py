@@ -36,6 +36,7 @@ from daimon.core.reports.publish import (
     PublishResult,
 )
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.agent_owners import set_owner
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
@@ -430,14 +431,22 @@ async def test_agent_scoped_token_does_not_discover_publish_or_delete_report_too
     async with sessionmaker() as s, s.begin():
         tenant = await make_tenant(s, platform="discord", workspace_id="publish-reachability-agent")
         account = await make_account(s, tenant=tenant)
+    agent_id = uuid.uuid4()
     async with sessionmaker.begin() as session:
+        await set_owner(
+            session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            owner_account_id=account.id,
+            source="admin_assigned",
+        )
         token = await mint_agent_mcp_token(
             session,
             account_id=account.id,
             tenant_id=tenant.id,
             secret=SECRET.encode(),
             now=datetime.now(UTC),
-            agent_id=uuid.uuid4(),
+            agent_id=agent_id,
             label=None,
         )
     app = _make_app(sessionmaker)

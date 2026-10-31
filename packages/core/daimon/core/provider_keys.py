@@ -18,11 +18,11 @@ import os
 from typing import get_args
 
 from mux.contracts.ids import Provider
-from mux.profiles import CONVERSATION_ONLY, INLINE_REUSE, MANAGED_AGENTS
+from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 
 # The deployment-wide key each provider's code runtime defaults use.
 DEFAULT_KEY_ENV: dict[Provider, str] = {
-    CONVERSATION_ONLY.provider: "DAIMON_CHANNEL_OPENAI_KEY",
+    PERSISTENT_WORKSPACE.provider: "DAIMON_CHANNEL_OPENAI_KEY",
     INLINE_REUSE.provider: "DAIMON_CHANNEL_GEMINI_KEY",
 }
 # The order a default allowlist lists its providers in.

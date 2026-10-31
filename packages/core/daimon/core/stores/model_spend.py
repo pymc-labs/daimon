@@ -1,10 +1,4 @@
-"""What a tenant spent today on one native model (OpenAI, Gemini), for the daily cap.
-
-Native OpenAI and Gemini turns write no ledger debit (their infrastructure cost is
-unknown), so today's spend is priced from the observed token usage at list price,
-plus the reservations of fleet workers on that model that are still running.
-Counted in provider dollars (no markup), from midnight UTC.
-"""
+"""Read observed daily model spend for ordinary turn admission."""
 
 from __future__ import annotations
 
@@ -13,14 +7,13 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import structlog
-from daimon.core._models import FleetWorker, UsageObservation
+from daimon.core._models import UsageObservation
 from daimon.core.pricing import ProviderPrice, minimum_cost_of, provider_cost_of
 from mux.state.usage_ledger import AppliedUsage
 from pydantic import ValidationError
-from sqlalchemy import DateTime, cast, func, select
+from sqlalchemy import DateTime, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-_ACTIVE = ("pending", "starting", "running")
 log = structlog.get_logger(__name__)
 
 
@@ -41,9 +34,8 @@ async def model_spend_today(
     model: str,
     now: datetime,
     rates: ProviderPrice | None,
-    markup: Decimal,
 ) -> Decimal:
-    """Observed usage today on `model` at list price, plus its running workers' holds.
+    """Observed usage today on `model` at list price.
 
     Each observation is priced at its upper bound (`provider_cost_of`, so long-context
     rates count) and falls back to its token floor while it is still partial. Without
@@ -83,14 +75,4 @@ async def model_spend_today(
             log.warning("model_spend.usage_row_skipped", tenant_id=str(tenant_id), model=model)
             continue
         spent += cost or Decimal(0)
-    # A running worker's reservation is customer dollars (with markup). Counted in
-    # full, even where some of its usage is already observed: never under-counts.
-    held = await session.scalar(
-        select(func.coalesce(func.sum(FleetWorker.reserved_usd), 0)).where(
-            FleetWorker.tenant_id == tenant_id,
-            FleetWorker.backend == provider,
-            FleetWorker.model == model,
-            FleetWorker.status.in_(_ACTIVE),
-        )
-    )
-    return spent + Decimal(held or 0) / (markup if markup > 0 else Decimal(1))
+    return spent

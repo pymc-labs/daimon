@@ -6,10 +6,6 @@ work without those optional host modules, including the standalone script path.
 `test_catalog_optional_providers.py` checks both import paths and actual
 Anthropic replay with those modules unavailable, in normal and optimized Python.
 
-The [fleet staging QA packet](SECTION-I-STAGING-QA.md) prepares section I7's
-three-backend task, cross-review and Discord summary. It is offline inventory
-only; execution needs a separate staging GO and signed budget envelopes.
-
 This is a manual quality check, reported separately from C01–C18 conformance.
 `tasks.json` pins 12 task prompts, expected goals and critical dimensions;
 `rubric.json` pins five 0–2 score dimensions. Grades must cite existing recorded

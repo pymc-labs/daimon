@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -46,9 +48,19 @@ def restoring_structlog_config() -> Iterator[None]:
     was_configured = structlog.is_configured()
     saved = structlog.get_config()
     saved["processors"] = list(saved["processors"])
+    saved_hooks = (sys.excepthook, threading.excepthook)
     try:
         yield
     finally:
+        # `configure_logging` also installs the uncaught-exception hooks, and a
+        # service's shutdown marks every later line; none of that outlives the test.
+        sys.excepthook, threading.excepthook = saved_hooks
+        logging_setup = sys.modules.get("daimon.core.logging_setup")
+        if logging_setup is not None:
+            logging_setup.clear_shutting_down()
+        observability = sys.modules.get("daimon.core.observability")
+        if observability is not None:
+            observability.set_unraisable_logger(None)
         if not was_configured:
             structlog.reset_defaults()
         elif structlog.get_config() != saved:

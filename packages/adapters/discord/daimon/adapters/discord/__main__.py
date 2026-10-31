@@ -15,7 +15,7 @@ from daimon.adapters.discord.confirm_click import start_confirm_click_server
 from daimon.adapters.discord.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.health import start_liveness_responder
-from daimon.core.logging_setup import configure_logging
+from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.observability import init_sentry
 from daimon.core.runtime_health import runtime_health
 from daimon.core.stores.worker_ownership import OWNER_HARD_EXIT_S
@@ -129,6 +129,7 @@ async def main() -> None:
         stop, started = asyncio.Event(), asyncio.Event()
 
         def on_signal() -> None:
+            mark_shutting_down()
             stop.set()
             # Before the gateway connection there is nothing to drain.
             if started.is_set():

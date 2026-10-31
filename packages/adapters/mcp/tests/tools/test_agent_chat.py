@@ -126,6 +126,23 @@ _ACCOUNT_ID = uuid.uuid4()
 
 
 @pytest.fixture(autouse=True)
+def _claude_agents_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests built on a MagicMock session factory have no backend revisions: their
+    agents are on Claude. The provider guard's own read is tested with a real
+    database (test_j4_create_on_any_provider_e2e)."""
+    from daimon.adapters.mcp.tools import agent_chat
+
+    real = agent_chat._refuse_another_provider  # pyright: ignore[reportPrivateUsage]
+
+    async def guard(runtime: Any, auth: Any, **kwargs: Any) -> None:
+        if isinstance(runtime.session_factory, MagicMock):
+            return None
+        return await real(runtime, auth, **kwargs)
+
+    monkeypatch.setattr(agent_chat, "_refuse_another_provider", guard)
+
+
+@pytest.fixture(autouse=True)
 def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests built on a MagicMock session factory have no policy to load: they
     read as an open tenant. Tests with a real database go through the real

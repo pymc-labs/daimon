@@ -17,6 +17,7 @@ from daimon.core.session_snapshot import (
     fingerprint_mutable,
     snapshot_from_created_session,
 )
+from daimon.core.stores.agent_owners import set_owner
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import record_snapshot
 from daimon.core.stores.turn_origins import get_active_origin
@@ -79,11 +80,21 @@ async def test_external_key_cannot_drive_human_session_during_stream_open(
         mutable_fingerprint=fingerprint_mutable(snapshot),
     )
     secret = "headless-execution-test-secret-32"
+    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    # A coding key verifies only for an admin or an owner of its agent; the point
+    # here is that even a valid one cannot drive the human session.
+    await set_owner(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_uuid,
+        owner_account_id=account.id,
+        source="admin_assigned",
+    )
     token = await mint_agent_mcp_token(
         db_session,
         account_id=account.id,
         tenant_id=tenant.id,
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id),
+        agent_id=agent_uuid,
         label="external",
         secret=secret.encode(),
         now=datetime.now(UTC),

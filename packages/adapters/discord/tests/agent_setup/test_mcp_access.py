@@ -785,7 +785,7 @@ async def test_on_coding_tools_binds_a_token_minted_in_a_sealed_channel(
 
     if not platform_admin:
         refusal = interaction.response.send_message.call_args.args[0]
-        assert "Only platform admins" in refusal
+        assert "Only an admin or this agent's owner" in refusal
         assert await count_tokens_for_account(db_session, account_id=account_id) == 0
         return
     content: str = interaction.response.send_message.call_args.kwargs["content"]
@@ -809,7 +809,7 @@ def test_render_mcp_config_puts_a_blank_line_between_lines(channel_id: str | Non
     paragraphs = content.split("\n\n")
     head = [
         "**Use expert-bot from your coding tools**",
-        "Copy the setup below now. The token is shown only once.",
+        "Copy this now: the key is shown only once. It acts as you.",
     ]
     if channel_id is not None:
         head.append("It runs in <#555>, with that channel's rules and budget.")

@@ -54,7 +54,16 @@ BackendRefusalCause = Literal[
     "provider_not_allowed",
     "agent_backend",
     "provider_not_configured",
+    # A switch's stored consent no longer matches its source: ask for a fresh
+    # preview instead of claiming the provider is not set up (J6g).
+    "re_confirm",
     "no_credit_yet",
+    # Getting the agent ready failed for a reason a retry can clear (a timeout, a
+    # busy database): "busy, try again", never "not set up".
+    "preparation_busy",
+    # Getting the agent ready failed for a reason nobody proved is missing setup:
+    # "couldn't get it ready", with the reference, never "not set up".
+    "preparation_failed",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 
@@ -68,7 +77,7 @@ class AdmissionDenied(DaimonError):
     and the `provider` involved, so the copy can name the fix.
 
     A `backend_unsupported` refusal also records its `site`, the code location
-    that raised it ("turn.runtime_manifest.select_worker_row:812"): about 150
+    that raised it ("turn.runtime_manifest.select_runtime_row:812"): about 150
     places raise it, and logs need to say which one. It is derived from our own
     module, function and line, so it never carries request data.
     """

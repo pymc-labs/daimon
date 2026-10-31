@@ -44,6 +44,7 @@ from daimon.core.handoff_context import (
 )
 from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_auth import native_mcp_session
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
@@ -92,7 +93,7 @@ from daimon.core.turn.ceiling import (
     turn_deadline,
 )
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.driver import run_turn, unattended_sends
+from daimon.core.turn.driver import SEND_ATTEMPTED, run_turn, unattended_sends
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
@@ -102,6 +103,7 @@ from daimon.core.turn.lifecycle import (
     TurnLifecycle,
     acknowledge,
 )
+from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
 from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.output import OutputAuthorization, output_authorization
@@ -726,10 +728,6 @@ async def _replace_dead_session_locked(
     recovery finds the first one's replacement live and adopts it, and a bind
     sees either the old row or the replacement, never neither.
     """
-    if prepared._preparation is not None and prepared._preparation.native_budget_usd is not None:  # pyright: ignore[reportPrivateUsage]
-        from daimon.core.neutral_resources import WorkerSpecRefused
-
-        raise WorkerSpecRefused("native_budget_usd", "unsupported")
     # A recovery can run long after admission: decide the turn again on the
     # current policy before its successor is created or adopted, and stamp any
     # seal added since (`reauthorize`).
@@ -913,6 +911,79 @@ async def _replace_dead_session_locked(
     )
 
 
+async def _with_handoff_summary(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    user_message: str,
+) -> tuple[str, tuple[str, str] | None]:
+    """The person's message, after the summary a cross-provider hand-off left here.
+
+    Taken once, for the agent the thread was handed to and the person who
+    handed it: quoted and escaped in the user message (never system text),
+    since another model wrote it. Also returns what was taken, so a turn that
+    fails can put it back (`_restore_handoff_summary`).
+    """
+    from daimon.core.handoff_context import render_handoff_summary
+    from daimon.core.stores.thread_agent_bindings import take_handoff_summary
+
+    parent = getattr(prepared.admission, "origin_channel_id", None)
+    if parent is None:
+        return user_message, None
+    async with deps.sessionmaker.begin() as db:
+        taken = await take_handoff_summary(
+            db,
+            tenant_id=tenant_id,
+            platform=platform,
+            parent_channel_id=parent,
+            thread_id=thread_id,
+            responder_ma_agent_id=prepared.admission.agent.id,
+            account_id=prepared.admission.account_id,
+        )
+    if taken is None:
+        return user_message, None
+    from_name, summary = taken
+    log.info("turn.handoff_summary_seeded", thread_id=thread_id, chars=len(summary))
+    seeded = f"{render_handoff_summary(summary, from_agent_name=from_name)}\n\n{user_message}"
+    return seeded, taken
+
+
+async def _restore_handoff_summary(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    taken: tuple[str, str],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> None:
+    """Put a taken summary back after its turn failed, so the next one still has it."""
+    from daimon.core.stores.thread_agent_bindings import set_handoff_summary
+
+    parent = getattr(prepared.admission, "origin_channel_id", None)
+    if parent is None:
+        return
+    from_name, summary = taken
+    try:
+        async with deps.sessionmaker.begin() as db:
+            await set_handoff_summary(
+                db,
+                tenant_id=tenant_id,
+                platform=platform,
+                parent_channel_id=parent,
+                thread_id=thread_id,
+                responder_ma_agent_id=prepared.admission.agent.id,
+                account_id=prepared.admission.account_id,
+                from_name=from_name,
+                summary=summary,
+            )
+    except Exception as error:  # a lost summary must never mask the turn's own outcome
+        log.warning("turn.handoff_summary_restore_failed", error=type(error).__name__)
+
+
 async def run_prepared_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -940,11 +1011,11 @@ async def run_prepared_turn(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
-    worker_finished: TaskContinuationRow | None = None,
     watch_row: TaskContinuationRow | None = None,
     job_row: TaskContinuationRow | None = None,
+    request_text: str | None = None,
 ) -> RunOutcome:
-    """Drive an admitted turn, including fleet workers and unattended wakes.
+    """Drive an admitted turn, including unattended wakes.
 
     Unattended Managed Agents sends re-gate the current session before each
     message and confirmation batch. Runtimes without a session read refuse
@@ -955,6 +1026,19 @@ async def run_prepared_turn(
         or current_outcome.get()
         or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
     )
+    seeded: tuple[str, str] | None = None
+    # Marked by the driver once the message is handed to the provider: a summary
+    # goes back only if this turn never sent it (`_restore_handoff_summary`).
+    sent: list[bool] = []
+    if origin in _CHAT_RENDERED_ORIGINS:
+        user_message, seeded = await _with_handoff_summary(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            user_message=user_message,
+        )
     observation.thread_id = thread_id
     observation.account_id = prepared.admission.account_id
     observation.agent_id = prepared.admission.agent.id
@@ -964,6 +1048,21 @@ async def run_prepared_turn(
         prepared.admission.backend_footer_profile
         if prepared.admission.backend_footer_profile is not None and deps.backend_selection_enabled
         else None
+    )
+    marking = SEND_ATTEMPTED.set(sent)
+    revision = prepared.admission.backend_revision
+    backend = revision.backend if revision is not None else MANAGED_AGENTS.provider
+    profile = revision.profile if revision is not None else MANAGED_AGENTS.profile_id
+    observation.backend = f"{backend}/{profile}"
+    # Every log line of the turn names the backend it ran on, so failures, lost
+    # connections and ceilings can be counted per backend. Bound until the end of
+    # the `finally`, so the credential finalizer's lines carry it too.
+    bound = structlog.contextvars.bind_contextvars(
+        backend=backend,
+        profile=profile,
+        model=revision.model
+        if revision is not None
+        else observation.model_by_session.get(prepared.ma_session_id),
     )
     try:
         with observation.activate(), deps.running_turns.track():
@@ -993,27 +1092,41 @@ async def run_prepared_turn(
                 active_turn_message_id=active_turn_message_id,
                 before_send=before_send,
                 turn_card_intent_id=turn_card_intent_id,
-                worker_finished=worker_finished,
                 watch_row=watch_row,
                 job_row=job_row,
+                request_text=request_text,
             )
     except BaseException as exc:
         observation.finish(error=exc)
+        if seeded is not None and not sent:
+            await _restore_handoff_summary(
+                deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+            )
         raise
     finally:
-        finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
-        if finalize is not None:
-            # Credential revocation must survive a second cancel of this task:
-            # the shielded call keeps running even if this wait is cancelled.
-            pending = asyncio.ensure_future(finalize())
-            _PENDING_FINALIZERS.add(pending)
-            pending.add_done_callback(_finalizer_done)
-            try:
-                await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
-            except TimeoutError:
-                log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
+        try:
+            SEND_ATTEMPTED.reset(marking)
+            finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
+            if finalize is not None:
+                # Credential revocation must survive a second cancel of this task:
+                # the shielded call keeps running even if this wait is cancelled.
+                pending = asyncio.ensure_future(finalize())
+                _PENDING_FINALIZERS.add(pending)
+                pending.add_done_callback(_finalizer_done)
+                try:
+                    await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
+                except TimeoutError:
+                    log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
+        finally:
+            # Even when a second cancel or the finalizer itself raises: a caller
+            # that carries on in this task must not inherit this turn's fields.
+            structlog.contextvars.reset_contextvars(**bound)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
+    if seeded is not None and not sent and result.state.error is not None:
+        await _restore_handoff_summary(
+            deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+        )
     return result
 
 
@@ -1047,7 +1160,6 @@ async def _repo_memory_state(
         ),
         allowed=(
             (current_origin_id.get() is not None or origin == "routine")
-            and origin != "worker"
             and prepared.admission.hold is None
             and not prepared.admission.shared_channel
             and not prepared.admission.source_shared
@@ -1082,9 +1194,9 @@ async def run_prepared_turn_impl(
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     turn_card_intent_id: uuid.UUID | None = None,
-    worker_finished: TaskContinuationRow | None = None,
     watch_row: TaskContinuationRow | None = None,
     job_row: TaskContinuationRow | None = None,
+    request_text: str | None = None,
 ) -> RunOutcome:
     """Run one turn against `prepared`'s session; on a dead-session (404)
     signature, recover exactly once: mark the stale mapping dead, create a
@@ -1124,6 +1236,10 @@ async def run_prepared_turn_impl(
     replacement mapping before the re-run is sent, so a restart mid-recovery
     leaves the marker on the session that is actually running.
 
+    `request_text` is the person's own words, without the origin block or thread
+    history the adapter puts around them. Only a chat turn that passes it can get
+    context from the agent's MCP servers (`daimon.core.turn.mcp_context`).
+
     `deadline`/`now` bound the WHOLE body -- first attempt, recovery setup,
     and the recovery re-run -- against the per-turn ceiling.
     `deadline=None` is fail-safe, not off: it computes
@@ -1141,6 +1257,8 @@ async def run_prepared_turn_impl(
     breach can never loop into a second wall-clock-priced attempt.
     """
     if origin in _CHAT_RENDERED_ORIGINS:
+        # `confirm_write` is deliberately not wrapped: an approval card shows exactly what
+        # will be sent or run, so a scrubbed card over the original call would misstate it.
         lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)
 
     if job_row is not None and (job_row.reason != "job_finished" or attended is not False):
@@ -1278,6 +1396,49 @@ async def run_prepared_turn_impl(
         if before_send is not None:
             await before_send()
 
+    briefing_cell: list[tuple[Admission, str]] = []
+
+    async def briefing(admission: Admission, attempt_cancel: asyncio.Event) -> str:
+        # Asked just before a send, past its lease wait and under the ceiling; a
+        # recovery on the same admission re-sends the same answer.
+        if briefing_cell and briefing_cell[0][0] is admission:
+            return briefing_cell[0][1]
+        text = await mcp_context_prefix(
+            deps.turn_context,
+            admission,
+            origin=origin,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            request_text=request_text,
+            permitted=tool_permission(
+                admission.agent,
+                policy=deps.tool_safety,
+                trusted_servers=trusted_servers_for(deps.public_url),
+                rules=(
+                    agent_rule_lookup(
+                        deps.sessionmaker,
+                        tenant_id=tenant_id,
+                        agent_id=str(admission.agent.id),
+                        server_urls={s.name: s.url for s in admission.agent.mcp_servers},
+                        also_urls=daimon_endpoint(deps.public_url),
+                        channel_id=channel_for_tool_rules(
+                            platform=platform,
+                            channel_id=admission.origin_channel_id,
+                            private_dm_id=admission.private_dm_id,
+                        ),
+                    )
+                    if getattr(deps.tool_safety, "enabled", False)
+                    and getattr(deps.tool_safety, "agent_rules", False)
+                    else None
+                ),
+                recheck=lambda: decide_before_send(deps, admission)(),
+            ),
+            cancel=attempt_cancel,
+        )
+        briefing_cell[:] = [(admission, text)]
+        return text
+
     @contextlib.asynccontextmanager
     async def persisted(
         admission: Admission,
@@ -1290,11 +1451,34 @@ async def run_prepared_turn_impl(
         backend: ManagedAgents | None = None,
         scope: Scope | None = None,
     ) -> AsyncIterator[ToolConfirmation]:
-        origin_id = current_origin_id.get() if origin != "worker" else None
+        origin_id = current_origin_id.get()
+        # The provider session's own stable grant (OpenAI), when this is that session.
+        native_grant = (
+            prepared.native_chat_session_id
+            if mapping_id is None
+            and session_id == prepared.ma_session_id
+            and admission == prepared.admission
+            and prepared.session_ref is not None
+            and prepared.session_ref.tenant_id == str(tenant_id)
+            and prepared.session_ref.account_id == str(admission.account_id)
+            else None
+        )
 
         @contextlib.asynccontextmanager
         async def origin_grant(lease: Lease | None = None) -> AsyncIterator[None]:
-            with execution_origin(origin_id):
+            # A send-time MCP bearer rotation keeps the session's creation grant, the
+            # one bound to this origin below, instead of deriving an origin grant.
+            native_send = (
+                native_mcp_session(
+                    admitted_session_scope(
+                        admission, tenant_id=tenant_id, session_id=session_id, prepared=scope
+                    ),
+                    native_grant,
+                )
+                if native_grant is not None
+                else contextlib.nullcontext()
+            )
+            with execution_origin(origin_id), native_send:
                 if origin_id is None:
                     yield
                     return
@@ -1314,15 +1498,8 @@ async def run_prepared_turn_impl(
                             and mapping.effective_config is not None
                             else None
                         )
-                        if (
-                            mapping_id is None
-                            and session_id == prepared.ma_session_id
-                            and admission == prepared.admission
-                            and prepared.session_ref is not None
-                            and prepared.session_ref.tenant_id == str(tenant_id)
-                            and prepared.session_ref.account_id == str(admission.account_id)
-                        ):
-                            grant = prepared.native_chat_session_id
+                        if native_grant is not None:
+                            grant = native_grant
                         await bind_origin_session(
                             db,
                             origin_id=origin_id,
@@ -1520,7 +1697,6 @@ async def run_prepared_turn_impl(
                     operation_key=operation_key,
                     session_ref=session_ref,
                     scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
-                    fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
                     execution_context=origin_grant,
                     lease_wait=LeaseWait(
                         timeout_s=remaining_s(effective_deadline, now=now()),
@@ -1531,23 +1707,8 @@ async def run_prepared_turn_impl(
                 with persistence.activate():
                     yield posture
 
-    root_intent = turn_card_intent_id if deps.fleet_enabled and origin != "worker" else None
-
     async def checked_send() -> None:
         await decide_before_send(deps, prepared.admission, attended=not unattended)()
-        if worker_finished is not None:
-            from daimon.core.neutral_resources import WorkerSpecRefused
-            from daimon.core.turn.runtime_manifest import resume_prepared_root
-
-            if root_intent is None:
-                raise WorkerSpecRefused("origin", "unbound")
-            await resume_prepared_root(
-                deps, prepared, worker_finished, intent_id=root_intent, now=now
-            )
-        elif root_intent is not None:
-            from daimon.core.turn.runtime_manifest import freeze_prepared_root
-
-            await freeze_prepared_root(deps, prepared, intent_id=root_intent, now=now)
         if before_send is not None:
             await before_send()
 
@@ -1571,7 +1732,6 @@ async def run_prepared_turn_impl(
             )
         }
         trusted_servers = trusted_servers_for(deps.public_url, server_urls)
-        prepared_source = prepared._source  # pyright: ignore[reportPrivateUsage]
         annotations_for = (
             mcp_annotation_lookup(
                 server_urls={
@@ -1583,12 +1743,8 @@ async def run_prepared_turn_impl(
                     deps.sessionmaker,
                     fernet=deps.fernet,
                     tenant_id=tenant_id,
-                    agent_id=(
-                        prepared_source.agent_id
-                        if prepared_source is not None
-                        else derive_agent_uuid(
-                            tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
-                        )
+                    agent_id=derive_agent_uuid(
+                        tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
                     ),
                 ),
             )
@@ -1611,7 +1767,7 @@ async def run_prepared_turn_impl(
             channel_id=rules_channel,
         )
         if unattended:
-            # A fleet worker or a wake nobody asked for just now: the one
+            # A wake nobody asked for just now: the one
             # unattended decider, policy on or off, with Daimon's card-only actions
             # refused, never the chat posture's safety-off shortcuts.
             tool_confirmation = PolicyApproval(
@@ -1745,6 +1901,7 @@ async def run_prepared_turn_impl(
                 backend=prepared.backend,
                 scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
             ) as attempt_confirmation:
+                briefing_text = await briefing(prepared.admission, cancel)
                 with output_authorization(delivery):
                     try:
                         state = await run_turn(
@@ -1761,7 +1918,8 @@ async def run_prepared_turn_impl(
                             anthropic=deps.anthropic,
                             session_id=ma_session_id,
                             user_message=_with_prefix(
-                                prefix, with_memory_prefix(user_message, repo_memory)
+                                prefix + briefing_text,
+                                with_memory_prefix(user_message, repo_memory),
                             ),
                             lifecycle=first_attempt,
                             cancel=cancel,
@@ -1776,8 +1934,6 @@ async def run_prepared_turn_impl(
                             ),
                             before_send=checked_send
                             if before_send is not None
-                            or root_intent is not None
-                            or worker_finished is not None
                             else decide_before_send(
                                 deps, prepared.admission, attended=not unattended
                             ),
@@ -1807,7 +1963,6 @@ async def run_prepared_turn_impl(
         if not (
             (superseded is not None or _is_dead_session(state))
             and before_send is None
-            and worker_finished is None
             and watch_row is None
             and mapping_id is not None
             and (
@@ -1910,6 +2065,9 @@ async def run_prepared_turn_impl(
 
             active_record_cell[0] = new_record
             active_admission_cell[0] = recovery.admission or prepared.admission
+            # The replacement's lines name its own model; `run_prepared_turn`'s
+            # reset still restores the caller's values afterwards.
+            structlog.contextvars.bind_contextvars(model=recovery.model_id)
 
             log.info(
                 "turn.session_recovered",
@@ -1960,6 +2118,9 @@ async def run_prepared_turn_impl(
                     attempt_cancel=fresh_cancel,
                     confirmation=tool_confirmation,
                 ) as recovery_confirmation:
+                    recovery_briefing = await briefing(
+                        recovery.admission or prepared.admission, fresh_cancel
+                    )
                     recovered_state = await run_turn(
                         **_turn_port_kwargs(
                             deps,
@@ -1971,7 +2132,7 @@ async def run_prepared_turn_impl(
                         session_id=new_session_id,
                         user_message=context
                         + _with_prefix(
-                            plans + loss_user_prefix,
+                            plans + loss_user_prefix + recovery_briefing,
                             with_memory_prefix(reseeded_message, recovery_memory),
                         ),
                         lifecycle=new_lifecycle,

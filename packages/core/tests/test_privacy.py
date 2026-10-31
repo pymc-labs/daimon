@@ -828,6 +828,13 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "platform_user_names": "platform_user_names",
         "teams_messages": "teams_messages",
         "microsoft_user_tokens": "microsoft_user_tokens",
+        "mux_slots": "mux_slots",
+        "mux_binding_generations": "mux_binding_generations",
+        "mux_journal_sessions": "mux_journal_sessions",
+        "mux_journal_events": "mux_journal_events",
+        "mux_leases": "mux_leases",
+        "mux_release_requests": "mux_release_requests",
+        "mux_operations": "mux_operations",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -884,6 +891,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",
         "channel_admins": "user_ids + updated_by_account_id FK -> accounts.id",
+        # Text account_id / principal_id with no FK: erased by `stores.mux_erasure`,
+        # except operations against a shared slot, which are counted as retained.
+        "operation": "text account_id and principal_id (mux erasure)",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(
@@ -916,6 +926,11 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Who may edit an agent: no content, and ON DELETE CASCADE with
             # accounts.id, after which the agent is admin-only again.
             "agent_owner",
+            # Same shape for co-owners: the person's own row is ON DELETE CASCADE with
+            # accounts.id, and the admin who added them is ON DELETE SET NULL, so erasing
+            # either account never leaves an identifier behind. Covered by
+            # test_agent_co_owners.py.
+            "agent_co_owners",
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",
@@ -976,11 +991,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # FK; the scheduler then retires the orphaned session and vault
             # instead of renewing its tokens as a headless requester.
             "github_app_session_vaults",
-            # The provider-neutral operation log (`stores.mux_state`). Nothing
-            # writes it until the mux turn path lands; a row holds an
-            # operation key, request digest and status, no content. The lane
-            # that first writes it wires the purge.
-            "operation",
+            # The erasure fence's tombstone of a principal: a bare id with no content,
+            # kept on purpose so a stale writer naming an erased principal is refused.
+            "erased_principal",
             # A pending chat grant lives 15 minutes and both account references
             # are ON DELETE CASCADE, so erasing the account removes it.
             "github_grant_proposals",
@@ -1006,6 +1019,65 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         f"into purge.py (+ PurgeReport/PurgePreview) or add the table to the allowlist "
         f"in this test with a justification. In-scope because: {uncovered}"
     )
+
+
+async def test_every_mux_table_and_text_account_column_has_a_disposition() -> None:
+    """Each provider-neutral table says what account erasure does with it.
+
+    The account FK / principal_id drift guard above cannot see these tables' ownership:
+    their account is plain text with no foreign key. The reflected schema finds every
+    table that hangs off a slot, binding or journal head, or carries a text account or
+    principal column, and each must have an explicit disposition in `stores.mux_erasure`
+    (or be one of the tables another test covers).
+    """
+    from daimon.core.stores.mux_erasure import JSON_OWNERSHIP_FIELDS, TABLE_DISPOSITIONS
+    from sqlalchemy import Text
+
+    parents = {"provider_binding_slot", "provider_binding", "journal_session"}
+    hanging_off_a_slot = {
+        name
+        for name, table in Base.metadata.tables.items()
+        if any(fk.column.table.name in parents for fk in table.foreign_keys)
+    }
+    text_account_columns = {
+        name
+        for name, table in Base.metadata.tables.items()
+        if any(
+            column.name in {"account_id", "principal_id", "legacy_account_id"}
+            and isinstance(column.type, Text)
+            for column in table.columns
+        )
+    }
+    # Text principal columns that also carry an accounts.id FK, or an account-keyed
+    # receipt table; each is deleted by the purge and listed in the test above.
+    purged_elsewhere = {
+        "neutral_agent_revisions",
+        "neutral_skill_versions",
+        "selfhosted_resource_operations",
+    }
+    undisposed = (
+        (parents | hanging_off_a_slot | text_account_columns)
+        - set(TABLE_DISPOSITIONS)
+        - purged_elsewhere
+    )
+    assert not undisposed, f"mux table(s) {sorted(undisposed)} have no erasure disposition"
+    assert set(TABLE_DISPOSITIONS) <= set(Base.metadata.tables), "disposition for a removed table"
+    assert all(TABLE_DISPOSITIONS.values()), "every disposition must say what happens"
+    for path, why in JSON_OWNERSHIP_FIELDS.items():
+        table = path.split(".")[0].split(" ")[0]
+        assert table in TABLE_DISPOSITIONS and why, f"{path} names a table with no disposition"
+    assert {
+        "provider_binding_slot",
+        "provider_binding",
+        "thread_lease",
+        "thread_provider_release",
+        "operation",
+        "journal_session",
+        "journal",
+        "usage_observation",
+        "accounting_outbox",
+        "channel_config_revision",
+    } <= set(TABLE_DISPOSITIONS), "a mux table lost its disposition"
 
 
 async def test_account_purge_removes_selfhosted_receipts_and_keeps_shared_resources(

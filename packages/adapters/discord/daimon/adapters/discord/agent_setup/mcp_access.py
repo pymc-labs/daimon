@@ -35,12 +35,17 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import authorize_coding_token, mint_agent_mcp_token
+from daimon.core.mcp_auth import (
+    authorize_coding_token,
+    coding_key_ttl_days,
+    mint_agent_mcp_token,
+)
 from daimon.core.native_admins import load_live_subject
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.roster import RosterAgent
@@ -53,10 +58,10 @@ import discord
 log = structlog.get_logger()
 
 
-#: What a member sees instead of a token. Minting needs Manage Server.
+#: What a member sees instead of a token. Minting needs Manage Server or owning the agent.
 CODING_TOOLS_REFUSAL = (
-    "Only platform admins can create coding-tool keys, including channel-bound keys.\n\n"
-    'Ask a platform admin to open this agent\'s Details and press "Use from your coding tools".'
+    "Only an admin or this agent's owner can make a coding key.\n\n"
+    'Ask one of them to open this agent\'s Details and press "Use from your coding tools".'
 )
 
 
@@ -86,8 +91,10 @@ async def send_coding_tools_access(
 
     Who may mint is `authorize(MINT_CODING_TOKEN)`'s call, on the caller's
     live permissions and roles read at click time (the panel's ``is_admin`` is
-    a snapshot from panel-open): a server admin. Anyone else is refused
-    before any token material exists.
+    a snapshot from panel-open): a server admin, or the owner of this agent. The
+    token's account is the person who pressed the button, so an owner's key
+    acts as that owner and never as an admin. Anyone else is refused before any
+    token material exists.
     """
     card_agent = agent or state.selected_agent
     selected = card_agent or state.selected
@@ -146,6 +153,12 @@ async def send_coding_tools_access(
                 caller=caller,
                 action=None,
             )
+            owned = not subject.is_admin and await owns_agent(
+                session,
+                tenant_id=tenant_id,
+                ma_agent_id=str(ma_agent.id),
+                account_id=state.account_id,
+            )
     except AccessPolicyUnreadable:
         await interaction.response.send_message(POLICY_UNREADABLE_REFUSAL, ephemeral=True)
         return
@@ -156,6 +169,7 @@ async def send_coding_tools_access(
         subject=subject,
         agent=build_agent_ref(ma_agent.name, ma_agent.metadata, selected.name),
         channel_id=str(parent_id) if parent_id is not None else None,
+        owned_by_caller=owned,
     )
     if not decision:
         log.info(
@@ -181,8 +195,10 @@ async def send_coding_tools_access(
             label=selected.name,
             secret=jwt_secret.get_secret_value().encode(),
             now=dt.datetime.now(dt.UTC),
+            ttl_days=coding_key_ttl_days(subject),
             platform="discord" if bound_channel_id is not None else None,
             channel_id=bound_channel_id,
+            purpose="coding",
         )
 
     # Decode jti from the token without verifying signature (we just minted it).
@@ -207,6 +223,7 @@ async def send_coding_tools_access(
         jti=str(jti),
         bound_channel_id=bound_channel_id,
         is_server_admin=subject.is_admin,
+        as_owner=owned,
         # Never log the token itself.
     )
 
@@ -290,7 +307,7 @@ def render_mcp_config(
     )
     lines = [
         f"**Use {agent_name} from your coding tools**",
-        "Copy the setup below now. The token is shown only once.",
+        "Copy this now: the key is shown only once. It acts as you.",
     ]
     if channel_id is not None:
         lines.append(f"It runs in <#{channel_id}>, with that channel's rules and budget.")
@@ -378,15 +395,13 @@ class _McpAccessView(ExpiringView, discord.ui.View):
             )
         if row is None:
             log.info("agent_setup.mcp_access.revoke.already_revoked", jti=str(self._jti))
-            await interaction.response.send_message(
-                "Token was already revoked (or not found).", ephemeral=True
-            )
+            await interaction.response.send_message("That key was already revoked.", ephemeral=True)
             await self._audit_revoke(interaction, outcome="error", reason="already_revoked")
             return
         log.info("agent_setup.mcp_access.revoke.done", jti=str(self._jti))
         await self._audit_revoke(interaction, outcome="allowed", reason="completed")
         await interaction.response.edit_message(
-            content="Token revoked. Agents using this token will get 401 on next request.",
+            content="Key revoked. It stops working now.",
             view=None,
         )
         # That edit deliberately drops the view; a still-running timer would

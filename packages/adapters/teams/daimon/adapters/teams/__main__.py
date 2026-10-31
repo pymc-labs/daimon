@@ -15,6 +15,7 @@ from daimon.adapters.teams.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.logging_setup import configure_logging
 from daimon.core.observability import init_sentry
+from daimon.core.runtime_health import log_runtime_started
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 
 log = structlog.get_logger()
@@ -48,6 +49,7 @@ async def main() -> None:
                 log_config=None,  # JSON chain already configured; uvicorn uses structlog.
             )
         )
+        log_runtime_started("teams")  # Teams has no health heartbeat to log it
         log.info("starting_teams_adapter", port=settings.teams.port)
         await server.serve()
 

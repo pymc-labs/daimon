@@ -54,6 +54,7 @@ from daimon.core.membership import Membership
 from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_operator_tokens import mint_panel_operator_token
 from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.agent_owners import set_owner
 from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.domain import Role
 from daimon.testing.asgi import call_mcp_tool
@@ -189,11 +190,20 @@ async def test_external_key_cannot_forge_chat_or_drop_its_binding(
     principal = await make_platform_principal(
         db_session, tenant=tenant, platform="discord", external_id="member"
     )
+    agent_id = uuid.uuid4()
+    # A coding key stands only for an admin or the agent's owner.
+    await set_owner(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        owner_account_id=principal.account_id,
+        source="admin_assigned",
+    )
     token = await mint_agent_mcp_token(
         db_session,
         account_id=principal.account_id,
         tenant_id=tenant.id,
-        agent_id=uuid.uuid4(),
+        agent_id=agent_id,
         label="external",
         secret=SECRET,
         now=datetime.now(UTC),

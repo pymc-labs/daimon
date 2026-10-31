@@ -125,6 +125,9 @@ class Profile(Contract):
     catalog_readback: Literal["retrieve", "verify"] = "retrieve"
     emits_legacy_events: bool = False
     """The host receives SDK events alongside normalized events for rendering."""
+    meters_cache_writes: bool = True
+    """The usage meter counts cache-write input. False where the provider bills cache
+    writes but its usage has no such count: the host then prices none, an estimate."""
 
     @model_validator(mode="after")
     def _check(self) -> Profile:

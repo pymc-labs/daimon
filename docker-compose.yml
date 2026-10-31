@@ -49,7 +49,7 @@ services:
     volumes:
       - ./defaults:/app/defaults:ro
       # Shared with the serving services below so `daimon openai init` (run
-      # here, see docs/self-hosting.md's "Self-host on OpenAI") can write a
+      # here, see docs/providers.md's "Run on OpenAI") can write a
       # provider runtime file they can all read. Empty/unused otherwise.
       - ./runtime:/app/runtime
     entrypoint: ["sh", "-c"]

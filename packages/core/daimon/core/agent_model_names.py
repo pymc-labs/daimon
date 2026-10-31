@@ -57,8 +57,6 @@ def agent_catalog() -> tuple[AgentModel, ...]:
             f"~${rates.input:g} input / ${rates.output:g} output per million tokens",
         )
         for name, rates in AGENT_MODEL_PRICING.items()
-        # A "-fast" id is a local preset (model_presets), not a provider model id:
-        # only the legacy path expands it, so it is never a catalog/fleet choice.
         if not name.endswith("-fast")
     ]
     for provider in PROVIDERS:
@@ -98,12 +96,39 @@ def _aliases(model: ModelRef) -> set[str]:
     }
 
 
+#: A request for the cheapest Claude by price, not by a family name. "Claude"
+#: must be present: bare "cheapest" could mean another provider.
+_CHEAPEST_CLAUDE = {"cheapest claude", "cheap claude", "cheapest anthropic", "cheap anthropic"}
+
+
 def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) -> ModelRef:
     """Resolve names, preserving ambiguity; never silently choose a different provider."""
     models = (
         tuple(entry.model for entry in agent_catalog()) if available is None else tuple(available)
     )
     key = _key(value)
+    if key in _CHEAPEST_CLAUDE:
+        # Price, then generation: "cheapest Claude" must be the current Haiku,
+        # never the older, pricier 4.5 row the model used to guess (SMOKE J5).
+        claude = [
+            model
+            for model in models
+            if model.provider == MANAGED_AGENTS.provider and "fast" not in _key(model.id).split()
+        ]
+        priced = [
+            (AGENT_MODEL_PRICING[model.id], model)
+            for model in claude
+            if model.id in AGENT_MODEL_PRICING
+        ]
+        if priced:
+            return min(
+                priced,
+                key=lambda pair: (
+                    pair[0].input,
+                    pair[0].output,
+                    tuple(-int(part) for part in re.findall(r"\d+", pair[1].id)),
+                ),
+            )[1]
     exact = [model for model in models if key in _aliases(model)]
     if len(exact) == 1:
         return exact[0]
@@ -158,20 +183,6 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
         else "isn't a known available agent model"
     )
     raise ValueError(f'"{value}" {explanation}. Ask which models are available for this agent.')
-
-
-def resolve_models(value: str) -> tuple[ModelRef, ...]:
-    """Accept a list or common requests such as '3 workers: sonnet, luna, flash'."""
-    value = re.sub(r"^\s*(?:use|compare with)\s+|^\s*\d+\s+workers?\s*:\s*", "", value, flags=re.I)
-    parts = re.split(r"\s*,\s*|\s+and\s+", value, flags=re.I)
-    return tuple(
-        {
-            (model.provider, model.id): model
-            for part in parts
-            if part.strip()
-            for model in (resolve_model(part.strip()),)
-        }.values()
-    )
 
 
 def _provider_words() -> dict[str, Provider]:

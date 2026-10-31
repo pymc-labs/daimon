@@ -1,7 +1,7 @@
 """Real catalog names resolve for agent config without granting runtime access."""
 
 import pytest
-from daimon.core.agent_model_names import resolve_model, resolve_models
+from daimon.core.agent_model_names import resolve_model
 from mux.contracts.ids import ModelRef
 
 
@@ -13,6 +13,9 @@ from mux.contracts.ids import ModelRef
         ("opus", "claude-opus-5-5"),
         ("sonnet", "claude-sonnet-5-5"),
         ("haiku", "claude-haiku-5-5"),
+        ("cheapest claude", "claude-haiku-5-5"),
+        ("cheap claude", "claude-haiku-5-5"),
+        ("cheapest anthropic", "claude-haiku-5-5"),
         ("luna", "gpt-6-luna"),
         ("flash", "gemini-3.8-flash"),
         ("gemini 4", "gemini-4-argon"),
@@ -24,25 +27,14 @@ def test_natural_names_use_the_priced_runtime_catalog(name, model):
     assert resolve_model(name).id == model
 
 
-def test_real_phrasings_and_b2_availability():
-    assert [m.id for m in resolve_models("compare with claude opus and luna")] == [
-        "claude-opus-5-5",
-        "gpt-6-luna",
-    ]
-    # With Astra selectable, a bare "gpt" names two OpenAI models: never guess.
-    with pytest.raises(ValueError, match="could mean") as error:
-        resolve_models("compare with claude opus and gpt")
-    assert "luna" in str(error.value).lower() and "astra" in str(error.value).lower()
-    assert [m.id for m in resolve_models("3 workers: sonnet, luna, flash")] == [
-        "claude-sonnet-5-5",
-        "gpt-6-luna",
-        "gemini-3.8-flash",
-    ]
-    assert [m.id for m in resolve_models("use astra, opus 5.5 and gemini 4 argon")] == [
-        "gpt-6-astra",
-        "claude-opus-5-5",
-        "gemini-4-argon",
-    ]
+def test_cheapest_claude_is_the_current_haiku_not_the_older_row():
+    """SMOKE 42591c55 J5: "cheapest Claude" must not pick claude-haiku-4-5."""
+    chosen = resolve_model("cheapest Claude")
+    assert chosen.id == "claude-haiku-5-5"
+    assert chosen.id != "claude-haiku-4-5"
+    # Bare "cheapest" could mean another provider: never guess.
+    with pytest.raises(ValueError, match="isn't a known"):
+        resolve_model("cheapest")
 
 
 def test_ambiguous_provider_and_unknown_names_never_pick_a_model():

@@ -54,10 +54,7 @@ from typing import Literal
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import (
-    BetaManagedAgentsSystemContentBlockParam,
-    FileMetadata,
-)
+from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam, FileMetadata
 from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )

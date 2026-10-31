@@ -54,7 +54,7 @@ class LeadsCog(commands.Cog):
                 record = await store.get(UUID(intake_id))
                 await reads.check(read_target(record))
                 title = record.submission.thread_title if record.submission else "Expired lead"
-                content = f"{record.id} · {record.status}\n{title}\n{record.error_code or ''}"
+                content = f"{record.id}: {record.status}\n{title}\n{record.error_code or ''}"
                 if record.progress.discord_thread_id:
                     content += f"\nhttps://discord.com/channels/{config.guild_id}/{record.progress.discord_thread_id}"
                 content += (
@@ -70,7 +70,10 @@ class LeadsCog(commands.Cog):
                     destination_channel_id=config.channel_id,
                     authorize_read=reads.check,
                 )
-                content = "\n".join(f"{r.id} · {r.status} · {r.error_code or ''}" for r in records)
+                content = "\n".join(
+                    f"{r.id}: {r.status}" + (f", {r.error_code}" if r.error_code else "")
+                    for r in records
+                )
                 content = content or "No pending leads."
             await interaction.followup.send(
                 content[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none()

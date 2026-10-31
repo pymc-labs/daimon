@@ -10,17 +10,20 @@ Per `guideline:architecture` "Functional core, imperative shell".
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import Protocol
 
-from mux.contracts.config import ResolvedBackend
-from mux.contracts.ids import ModelRef
 from mux.contracts.usage import UsageObservation
-from mux.profiles import CONVERSATION_ONLY, INLINE_REUSE, PERSISTENT_WORKSPACE, get_profile
+from mux.profiles import (
+    CONVERSATION_ONLY,
+    INLINE_REUSE,
+    PERSISTENT_WORKSPACE,
+    meters_cache_writes_for,
+)
 
 
 class LegacyUsage(Protocol):
@@ -320,6 +323,20 @@ class ProviderPrice:
                 raise ValueError("provider rates must be finite nonnegative Decimals")
 
 
+def unreported_cache_writes(usage: UsageObservation, price: ProviderPrice) -> bool:
+    """True when the tariff bills cache writes the meter never counts.
+
+    Such a turn is priced as if it wrote nothing to the cache (ROOT D2=B): its
+    non-cached input at the uncached rate, never above what its counts prove. The
+    debit is an estimate, marked `cache_writes_unreported` on its ledger row.
+    """
+    return (
+        price.cache_write is not None
+        and usage.input_cache_write_tokens is None
+        and not meters_cache_writes_for(usage.session.provider)
+    )
+
+
 def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice) -> int | None:
     """Validate attribution and project the input stage independently."""
     if usage.model is None or (usage.session.provider, usage.model.provider, usage.model.id) != (
@@ -332,6 +349,8 @@ def provider_uncached_input_tokens(usage: UsageObservation, price: ProviderPrice
     if price.cache_write is None:
         if written not in (None, 0):
             raise ValueError("provider reported an inapplicable cache-write stage")
+        written = 0
+    elif unreported_cache_writes(usage, price):
         written = 0
     if usage.input_tokens is None or usage.input_cached_tokens is None or written is None:
         return None
@@ -546,31 +565,6 @@ def _list_rate_text(rates: ModelRates | ProviderPrice) -> str:
     )
 
 
-def resolved_worker_prices(
-    choices: Sequence[tuple[ResolvedBackend, ModelRef]],
-    *,
-    native_prices: Mapping[tuple[str, str], ProviderPrice],
-) -> Mapping[tuple[str, str], ModelRates | ProviderPrice]:
-    """Resolve host-owned tariffs; missing prices stay missing for admission.
-
-    This context grants no model authority and proves no final provider bill.
-    Native rates come from the registered preparation owners, never tool input.
-    Financial validation remains in the shared admission producer.
-    """
-    prices: dict[tuple[str, str], ModelRates | ProviderPrice] = {}
-    for selection, model in choices:
-        profile = get_profile(selection.profile)
-        key = (model.provider, model.id)
-        rate = (
-            native_prices.get(key)
-            if profile.accounting_mode.settles_natively
-            else MODEL_PRICING.get(model.id)
-        )
-        if rate is not None:
-            prices[key] = rate
-    return MappingProxyType(prices)
-
-
 # Paid Standard direct-API text rates, verified against these official sources.
 # Agents inference follows the underlying model rates; tool/storage/container
 # charges remain separate. Luna's base row is a floor at either context tier;
@@ -633,7 +627,7 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
             # price is unpublished here, so from 2026-12-01 Argon is unpriced and
             # refused at admission until a dated row is added. Cached input: 95% off.
             # FOLLOW-UP before 2026-12-01: add the post-intro row, or the daily model
-            # cap also refuses every Argon turn and worker (provider_price_unavailable).
+            # cap also refuses every Argon turn (provider_price_unavailable).
             ProviderPrice(
                 INLINE_REUSE.provider,
                 "gemini-4-argon",

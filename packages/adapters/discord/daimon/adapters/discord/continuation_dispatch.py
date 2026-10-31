@@ -12,14 +12,8 @@ from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
 from daimon.core.continuity.continuation import ContinuationDecision
-from daimon.core.continuity.dispatch import (
-    ContinuationContextUnavailable,
-    WorkerFinishedDecision,
-)
-from daimon.core.continuity.dispatch import (
-    dispatch_pending_continuations as dispatch_core,
-)
-from daimon.core.neutral_resources import WorkerSpecRefused
+from daimon.core.continuity.dispatch import ContinuationContextUnavailable
+from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.errors import AdmissionDenied
@@ -75,7 +69,6 @@ async def dispatch_pending_continuations(
     client: discord.Client | None = None,
     public_base_url: str | None = None,
     identity_enabled: bool = False,
-    worker_finished_decision: WorkerFinishedDecision | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
     """Dispatch under the caller's existing thread guard."""
@@ -169,8 +162,6 @@ async def dispatch_pending_continuations(
         decision_context=context,
         notice=post,
         settle_before_notice=False,
-        # A refused fleet wake settles its row; its card is ended by the turn's own surface.
-        dispatch_errors=(discord.HTTPException, WorkerSpecRefused),
+        dispatch_errors=(discord.HTTPException,),
         now=now,
-        worker_finished_decision=worker_finished_decision,
     )

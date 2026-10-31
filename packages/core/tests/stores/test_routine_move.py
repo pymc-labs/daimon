@@ -134,18 +134,20 @@ async def test_run_once_retains_claimed_slot_and_completion(db_session):
         )
     )
     claimed = await claim_due_fireable(db_session, now=claim_now)
+    # The slot follows the real clock, so the export must too.
+    exported_at = datetime.now(UTC)
     assert len(claimed) == 1
     assert claimed[0].last_finished_at is None
     assert claimed[0].last_fired_slot == slot
     assert claimed[0].last_fired_at == claim_now
     await pause_routine(db_session, rows[0].id, tenant_id=tid)
     before = routine_rollback_document(
-        await rollback_rows(db_session, tenant_id=tid), exported_at=NOW
+        await rollback_rows(db_session, tenant_id=tid), exported_at=exported_at
     )
     assert not before["final"] and before["routines"][0]["in_flight"]
     await record_result(db_session, rows[0].id, tail=None, error="failed", expected_row=claimed[0])
     after = routine_rollback_document(
-        await rollback_rows(db_session, tenant_id=tid), exported_at=NOW
+        await rollback_rows(db_session, tenant_id=tid), exported_at=exported_at
     )
     assert after["final"] and not after["routines"][0]["in_flight"]
     assert after["routines"][0]["resume_after"] == slot.isoformat()

@@ -430,3 +430,34 @@ def test_sdk_replay_refuses_present_names_before_any_value_or_allocation(
         patch.setattr(httpx, "AsyncClient", forbidden)
         with pytest.raises(ValueError, match="ambient SDK"):
             replay_client(wire)
+
+
+async def test_catalog_reads_never_wait_behind_the_accounts_records_writer(case: Case) -> None:
+    """Smoke 4681c13f PRE SYNXB1: preparation's agent-catalog retrieve took the records
+    write transaction and waited out its bound behind another copy's writer
+    (gemini_state:records), failing the hand-off turn. Catalog reads use the
+    committed snapshot."""
+    import asyncio
+
+    made = await case.driver.agents.create(SCOPE, spec(), key="create:source")
+    adapter = case.driver.catalog_adapter
+    assert adapter is not None
+    held, release = asyncio.Event(), asyncio.Event()
+
+    async def writer() -> None:
+        async with case.storage.transaction():
+            held.set()
+            await release.wait()
+
+    task = asyncio.create_task(writer())
+    await held.wait()
+    try:
+        assert await asyncio.wait_for(case.driver.agents.retrieve(SCOPE, made.ref), 2) == made
+        assert await asyncio.wait_for(adapter.verify(SCOPE, made), 2) == made
+        listed = await asyncio.wait_for(
+            case.driver.agents.list(SCOPE, filters=AgentFilter(), page=PageRequest()), 2
+        )
+        assert [agent.ref for agent in listed.data] == [made.ref]
+    finally:
+        release.set()
+        await task

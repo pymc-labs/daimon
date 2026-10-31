@@ -287,6 +287,12 @@ def _thread_explanation(binding: ThreadAgentBindingRow) -> str:
             f"{binding.responder_name} answers in this thread because this task was handed "
             "to it; the channel's own default is unchanged."
         )
+    if binding.kind == "owner":
+        return (
+            f"{binding.responder_name} answers in this thread because its owner handed it "
+            "their own conversation; it answers only them, and the channel's own default "
+            "is unchanged."
+        )
     return (
         f"{binding.responder_name} answers in this setup thread; configuring "
         f"{binding.configuration_target_name or 'no visible configuration target'}."

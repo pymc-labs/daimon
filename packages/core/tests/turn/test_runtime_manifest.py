@@ -17,6 +17,7 @@ from daimon.core.turn.runtime_manifest import (
     ProviderRuntimeConfigurationError,
     validate_configured_runtime_manifest,
 )
+from mux.contracts.ids import Provider
 from pydantic import TypeAdapter, ValidationError
 
 PREFIXES = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
@@ -177,3 +178,83 @@ def test_absent_manifest_retains_deferred_selection_refusal(
 def test_existing_environment_identifier_validation_remains(key: str) -> None:
     with pytest.raises(ValidationError):
         TypeAdapter(ApiKeyEnvironment).validate_python(key)
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "today", "before"),
+    [
+        # OpenAI's template already named web fetch a loss before #1483.
+        (
+            "openai",
+            "gpt-6-luna",
+            ("builtin_tool:web_fetch", "builtin_tool:web_search", "memory"),
+            ("builtin_tool:web_fetch", "memory", "tools"),
+        ),
+        # Gemini's named no web tool: both granular losses are new.
+        (
+            "gemini",
+            "gemini-3.8-flash",
+            ("builtin_tool:web_fetch", "builtin_tool:web_search", "memory"),
+            ("memory", "tools"),
+        ),
+    ],
+)
+@pytest.mark.parametrize("instructions", [None, "Source."])
+def test_a_target_is_rebuilt_as_a_pre_1483_consent_named_it(
+    provider: Provider,
+    model: str,
+    today: tuple[str, ...],
+    before: tuple[str, ...],
+    instructions: str | None,
+) -> None:
+    from daimon.core.turn.runtime_manifest import _with_tools_dropped
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, ToolSpec
+
+    def losses(drops: tuple[str, ...]) -> str:
+        line = "Unavailable capabilities: " + ", ".join(drops) + "."
+        return "\n\n".join(p for p in (instructions, line) if p)
+
+    target = AgentSpec(
+        name="copy",
+        model=ModelRef(provider=provider, id=model),
+        system=losses(today),
+        tools=(ToolSpec(name="bash", kind="builtin"),),
+        declared_drops=today,
+    )
+    rebuilt = _with_tools_dropped(target, instructions)
+    assert rebuilt is not None
+    assert rebuilt.tools == () and rebuilt.declared_drops == before
+    # An agent with no instructions of its own has the losses line alone.
+    assert rebuilt.system == losses(before)
+    assert _with_tools_dropped(rebuilt, instructions) is None, "no tools: nothing to rebuild"
+
+
+async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch):
+    """Smoke a1d991fb: Gemini copies and a Flash worker were refused at
+    read_preparation_counterpart's catch-all with nothing logged."""
+    from types import SimpleNamespace
+
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.errors import AdmissionDenied
+    from structlog.testing import capture_logs
+
+    async def broken(_request):
+        raise RuntimeError("catalogue read failed")
+
+    monkeypatch.setattr(runtime_manifest, "prepare_source", broken)
+    request = SimpleNamespace(
+        admission=SimpleNamespace(backend_revision=SimpleNamespace(profile="gemini.inline_reuse")),
+    )
+    with capture_logs() as logs, pytest.raises(AdmissionDenied) as refused:
+        await runtime_manifest.read_preparation_counterpart(request)  # type: ignore[arg-type]
+    assert refused.value.reason == "backend_unsupported"
+    # Not proven missing setup: never "isn't set up here yet".
+    assert refused.value.cause == "preparation_failed"
+    (named,) = [e for e in logs if e["event"] == "turn.preparation_counterpart_error"]
+    assert named["profile"] == "gemini.inline_reuse" and named["transient"] is False
+    (cause,) = named["causes"]
+    assert cause["type"] == "RuntimeError"
+    assert cause["frame"].startswith("daimon.core.turn.runtime_manifest:")
+    # Fixed labels only: the exception's own text never reaches the log.
+    assert "catalogue read failed" not in json.dumps(logs)

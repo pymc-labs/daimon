@@ -421,7 +421,7 @@ async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
     token = card.split("Bearer ")[1].split("\\")[0]
     assert token not in json.dumps(logs, default=str), "the token value is never logged"
     assert other["task"]["value"] == setup_panel.NOT_MINTER
-    assert mine["task"]["value"] == "Token revoked."
+    assert mine["task"]["value"] == "Key revoked. It stops working now."
     assert "already revoked" in again["task"]["value"]
     async with service_session_factory() as session:
         row = await get_mcp_token(session, jti=uuid.UUID(jti))
@@ -501,7 +501,7 @@ async def test_an_admin_mints_lists_and_revokes_operator_tokens_and_a_member_can
     assert set(row.scopes) == {"tenant:read", "promo:redeem"}
     listed = json.dumps(listing)
     assert str(row.jti)[:8] in listed and "Bearer" not in listed, "the listing has no secret"
-    assert "Token revoked." in json.dumps(revoked)
+    assert "Key revoked. It stops working now." in json.dumps(revoked)
     async with service_session_factory() as session:
         assert await list_mcp_tokens(session, now=datetime.now(UTC), tenant_id=TENANT) == []
         events = await list_events(session, tenant_id=TENANT)

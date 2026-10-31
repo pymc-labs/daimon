@@ -529,7 +529,17 @@ async def test_read_only_transaction_rejects_write(context, monkeypatch):
 
 
 async def test_snapshot_has_only_unlocked_reads_and_honors_scope(context):
+    from daimon.core.turn import persistence as persistence_module
+    from daimon.core.turn import run as run_module
+
     await context.run()
+    # The turn's outcome rows and its lease and credential cleanup finish in the
+    # background; let them land before recording what the snapshot itself sends.
+    await drain_outcomes()
+    await asyncio.gather(
+        *persistence_module._PENDING_FINALIZERS,  # pyright: ignore[reportPrivateUsage]
+        *run_module._PENDING_FINALIZERS,  # pyright: ignore[reportPrivateUsage]
+    )
     statements = []
     engine = context.reader.sessions.kw["bind"]
 

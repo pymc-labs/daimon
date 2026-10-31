@@ -64,10 +64,12 @@ from daimon.core.stores.domain import (
     McpTokenRow,
 )
 from daimon.core.text_layout import fit_lines
+from daimon.core.turn.notices import conversations_follow_line
 from mux.contracts.ids import Provider
 
 __all__ = [
     "ACTION_CHANNEL_SKILLS",
+    "ACTION_CODING_KEYS",
     "ACTION_CODING_TOOLS",
     "ACTION_DETAILS",
     "ACTION_AVATAR_CHANGE",
@@ -84,6 +86,7 @@ __all__ = [
     "ACTION_OPERATOR_REVOKE",
     "ACTION_PAGE_NEXT",
     "ACTION_PAGE_PREV",
+    "ACTION_REVOKE_CODING_KEY",
     "ACTION_REVOKE_TOKEN",
     "ACTION_ROUTING",
     "ACTION_RULE_COPY",
@@ -207,6 +210,11 @@ agent, release its agents. Admins only."""
 ACTION_CODING_TOOLS: Final = "agent_setup__coding_tools"
 """Mint a coding-tool token for the agent named in the button's `value`."""
 
+ACTION_CODING_KEYS: Final = "agent_setup__coding_keys"
+"""Open the agent's coding keys, named in the button's `value`. Admins and the agent's owner."""
+ACTION_REVOKE_CODING_KEY: Final = "agent_setup__revoke_coding_key"
+"""Revoke one key on the coding keys list; the button's `value` is its jti."""
+
 ACTION_ADD_SKILL: Final = "agent_setup__skill_add"
 """Open the Add skill form for the agent on Details."""
 ACTION_BACKEND_SELECT: Final = "agent_setup__backend_select"
@@ -286,6 +294,7 @@ DETAILS_BUTTON_LABEL: Final = "🔍 Details"
 NEW_AGENT_LABEL: Final = "➕ New agent"
 ROUTING_LABEL: Final = "📍 Who answers where"
 CODING_TOOLS_LABEL: Final = "🧰 Use from your coding tools"
+CODING_KEYS_LABEL: Final = "🔑 Coding keys"
 ADD_SKILL_LABEL: Final = "➕ Add skill"
 MAX_ENVIRONMENT_LINES: Final = 10
 MAX_SHOWN_ENVIRONMENT_NAME: Final = 200
@@ -528,10 +537,13 @@ def build_details_view(
     avatar_editable: bool | None = None,
     backend_options: tuple[Provider, ...] = (),
     backend_selection: Provider | None = None,
+    viewer_owns: bool = False,
 ) -> dict[str, Any]:
     """One agent's whole readable state, in the order the roster promised.
 
-    `is_admin` controls the avatar, Add skill and coding-tool buttons. The core phrases
+    `is_admin` controls the avatar and Add skill buttons; `is_platform_admin` or
+    `viewer_owns` (the reader owns this agent) the coding-tool buttons. Each click reads both
+    again, so this only decides what to offer. The core phrases
     `details.unrouted_note` in the reader's voice. Key values are not a
     parameter: the model carries names and attribution only.
     """
@@ -617,19 +629,26 @@ def build_details_view(
             _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name)
         )
     # Only the buttons that can work for this reader: adding a skill and minting
-    # a coding-tool token are admin changes (a built-in agent takes no skill even
-    # from an admin), so a member is not offered a button that only refuses.
+    # a coding-tool token are admin changes, the token also an owner's (a built-in
+    # agent takes no skill even from an admin), so a member is not offered a
+    # button that only refuses.
     if is_admin and not details.daimon_managed:
         actions.append(
             _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)
         )
-    if is_platform_admin and coding_tools_available:
+    may_use_coding_tools = is_platform_admin or viewer_owns
+    if may_use_coding_tools:
+        keys_button = _button(
+            action_id=ACTION_CODING_KEYS, label=CODING_KEYS_LABEL, value=details.name
+        )
+        actions.insert(0, keys_button)
+    if may_use_coding_tools and coding_tools_available:
         actions.insert(
             0,
             _button(action_id=ACTION_CODING_TOOLS, label=CODING_TOOLS_LABEL, value=details.name),
         )
     blocks.append({"type": "actions", "elements": actions})
-    if is_admin and not coding_tools_available:
+    if may_use_coding_tools and not coding_tools_available:
         blocks.append(_context(CODING_TOOLS_UNAVAILABLE_NOTE))
     return finish_modal(
         title=title,
@@ -666,7 +685,14 @@ def build_backend_preview_view(
         shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
         lines.append(f"{label}: {shown}")
     lines.extend(
-        [preview.cost_line, "Existing threads keep their provider; channel settings still apply."]
+        [
+            preview.cost_line,
+            conversations_follow_line(
+                meta.agent_name,
+                None if meta.backend_target == "clear" else preview.target_backend,
+            )
+            + " Channel settings still apply.",
+        ]
     )
     blocks = [_section("\n".join(lines))]
     if not preview.allowed:

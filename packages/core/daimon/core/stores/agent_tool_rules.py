@@ -377,3 +377,70 @@ async def clear_rule(
         actor=actor,
         expected_revision=expected_revision,
     )
+
+
+async def copy_rules(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    source_agent_id: str,
+    agent_id: str,
+    agent_name: str,
+    set_by: str,
+) -> int:
+    """Give a new copy every live rule its source has (agent-wide and per channel).
+
+    The copy then runs no looser than its source. In the caller's transaction, for a
+    copy that has no rules yet (it was just created); each row gets its history entry.
+    Returns how many rules were copied.
+    """
+    await session.scalar(
+        select(Tenant.id).where(Tenant.id == tenant_id).with_for_update(key_share=True)
+    )
+    rows = (
+        await session.scalars(
+            select(AgentToolRuleRecord).where(
+                AgentToolRuleRecord.tenant_id == tenant_id,
+                AgentToolRuleRecord.agent_id == source_agent_id,
+                AgentToolRuleRecord.rule.is_not(None),
+            )
+        )
+    ).all()
+    now = datetime.now(UTC)
+    for row in rows:
+        session.add(
+            AgentToolRuleRecord(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                tool_key=row.tool_key,
+                channel_id=row.channel_id,
+                server_url=row.server_url,
+                rule=row.rule,
+                scope=row.scope,
+                revision=1,
+                set_by=set_by,
+                set_at=now,
+            )
+        )
+        session.add(
+            AgentToolRuleHistoryRecord(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                tool_key=row.tool_key,
+                channel_id=row.channel_id,
+                revision=1,
+                set_by=set_by,
+                set_at=now,
+                before_rule=None,
+                before_scope=None,
+                before_agent_name=None,
+                before_server_url=None,
+                after_rule=row.rule,
+                after_scope=row.scope,
+                after_agent_name=agent_name,
+                after_server_url=row.server_url,
+            )
+        )
+    await session.flush()
+    return len(rows)

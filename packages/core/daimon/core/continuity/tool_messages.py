@@ -44,13 +44,14 @@ def render_tool_refusal_setup_thread(target_name: str) -> str:
     )
 
 
-def render_tool_unsaved_work_question(repo: str) -> str:
-    """`ToolError` text: tell the model to ask the D. question, verbatim, on one line."""
+def render_tool_unsaved_work_question(repo: str, *, retry: str = "hand_off_task") -> str:
+    """`ToolError` text: tell the model to ask the D. question, verbatim, on one line,
+    then call `retry` again with the answer."""
     one_line_question = " ".join(render_unsaved_work_question(repo).split("\n"))
     return "\n".join(
         [
             f"Switching would change the checkout and there are uncommitted changes in {repo}.",
-            "Ask the caller this question and nothing else, then call hand_off_task again "
+            f"Ask the caller this question and nothing else, then call {retry} again "
             "with unsaved_work:",
             f'"{one_line_question}"',
             "Nothing was changed.",

@@ -9,6 +9,7 @@ No module-level singletons.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
@@ -18,6 +19,18 @@ from daimon.core.stores.github_installation_coverage import installation_covers_
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedInstallationRepos:
+    """Positive repo evidence tied to the cache version before the GitHub fetch."""
+
+    names: list[str]
+    refreshed_at: datetime | None
+
+
+class StaleInstallationSnapshotError(ValueError):
+    """Reconciliation refreshed the installation while repos were being verified."""
 
 
 async def lock_for_reconciliation(
@@ -79,9 +92,10 @@ async def upsert_github_app(
     account_type: str,
     repository_selection: Literal["all", "selected"],
     suspended_at: datetime | None,
+    freshly_verified_repos: VerifiedInstallationRepos | None = None,
 ) -> GitHubAppInstallationRow:
     """Record new-App metadata and the confirmed repository set in one transaction."""
-    await lock_for_reconciliation(session, installation_id=installation_id)
+    previous = await lock_for_reconciliation(session, installation_id=installation_id)
     await session.flush()
     names = await session.scalars(
         select(TenantGitHubRepo.repo_full_name).where(
@@ -99,14 +113,30 @@ async def upsert_github_app(
         "repo_full_names": repo_full_names,
         "app": "github_app",
     }
+    updates = {k: v for k, v in values.items() if k != "suspended_at"}
+    # A user-scoped list is only positive evidence. Preserve the full snapshot's
+    # other repositories and its unknown (NULL) state until reconciliation runs.
+    if (
+        previous is not None
+        and previous.app == "github_app"
+        and previous.github_repo_full_names is not None
+        and freshly_verified_repos is not None
+    ):
+        if previous.github_refreshed_at != freshly_verified_repos.refreshed_at:
+            raise StaleInstallationSnapshotError(
+                "GitHub installation snapshot changed while repositories were verified"
+            )
+        if freshly_verified_repos.names:
+            updates["github_repo_full_names"] = sorted(
+                set(previous.github_repo_full_names) | set(freshly_verified_repos.names)
+            )
     stmt = (
         pg_insert(GitHubAppInstallation)
         .values(installation_id=installation_id, **values)
         .on_conflict_do_update(
             index_elements=["installation_id"],
             # Reconciliation alone owns suspension after the first insert.
-            set_={k: v for k, v in values.items() if k != "suspended_at"}
-            | {"updated_at": func.now()},
+            set_=updates | {"updated_at": func.now()},
         )
         .returning(GitHubAppInstallation)
     )

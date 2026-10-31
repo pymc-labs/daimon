@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from typing import Any, Literal, cast
 
 from daimon.core._models import (
@@ -269,3 +270,23 @@ async def get_teams_principal_for_account(
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def platform_external_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    account_ids: Collection[uuid.UUID],
+) -> dict[uuid.UUID, str]:
+    """Each account's user id on `platform` in this tenant; accounts with none are left out."""
+    if not account_ids:
+        return {}
+    rows = await session.execute(
+        select(PlatformPrincipal.account_id, PlatformPrincipal.external_id).where(
+            PlatformPrincipal.tenant_id == tenant_id,
+            PlatformPrincipal.platform == platform,
+            PlatformPrincipal.account_id.in_(list(account_ids)),
+        )
+    )
+    return {account_id: external_id for account_id, external_id in rows.all()}

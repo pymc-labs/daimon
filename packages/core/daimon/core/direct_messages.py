@@ -570,6 +570,9 @@ async def _run_admitted_dm_turn(
     destination: AbstractAsyncContextManager[None] | None = None,
     origin: TurnContext = "chat",
     watch_row: TaskContinuationRow | None = None,
+    request_text: str | None = None,
+    platform_channel_id: str | None = None,
+    platform_message_id: str | None = None,
 ) -> tuple[str, str]:
     """Run one admitted, bound private turn and return its final text and session.
 
@@ -593,6 +596,8 @@ async def _run_admitted_dm_turn(
             attended=origin != "routine",
             sender_foreign=prepared.admission.hold is not None and prepared.admission.hold.client,
             shared_channel=prepared.admission.shared_channel,
+            platform_channel_id=platform_channel_id,
+            platform_message_id=platform_message_id,
         ) as turn_origin_row,
     ):
         controls = render_turn_origin(
@@ -612,6 +617,7 @@ async def _run_admitted_dm_turn(
                 thread_id=scope_id,
                 external_user_id=external_user_id,
                 user_message=user_message,
+                request_text=request_text,
                 lifecycle=_CollectReply(),
                 cancel=asyncio.Event(),
                 reseed_user_message=reseed,
@@ -650,6 +656,7 @@ async def reply_to_dm(
     role_ids: tuple[str, ...] = (),
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
+    platform_channel_id: str | None = None,
 ) -> str | None:
     """Compatibility text API for adapters that do not consume a delivery grant."""
     reply = await reply_to_dm_result(
@@ -664,6 +671,7 @@ async def reply_to_dm(
         role_ids=role_ids,
         verified_membership=verified_membership,
         on_agent=on_agent,
+        platform_channel_id=platform_channel_id,
     )
     return reply.text if reply is not None else None
 
@@ -681,8 +689,12 @@ async def reply_to_dm_result(
     role_ids: tuple[str, ...] = (),
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
+    platform_channel_id: str | None = None,
 ) -> DirectMessageReply | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
+
+    `platform_channel_id` is the DM channel as the platform's API names it, recorded
+    on the turn's origin with `message_id`.
 
     A duplicate delivery returns None. The adapter verifies live membership
     and supplies the current role before entering; stored admin roles never
@@ -812,6 +824,9 @@ async def reply_to_dm_result(
                 deadline=deadline,
                 destination=_dm_destination(deps, conversation, admission.slack_turn_context_id),
                 on_sealed=lambda: _quarantine(deps, conversation),
+                request_text=text,
+                platform_channel_id=platform_channel_id,
+                platform_message_id=message_id if platform_channel_id is not None else None,
             )
             turns = bounded_turns(
                 [
