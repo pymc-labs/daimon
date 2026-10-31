@@ -31,6 +31,7 @@ from daimon.adapters.discord.agent_setup.routing_view import (
     build_routing_view,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment, SetupThreadRef
@@ -308,9 +309,10 @@ async def test_picking_saves_this_channel_and_clearing_removes_the_row(
     rerendered = interaction.edit_original_response.call_args.kwargs["view"]
     assert isinstance(rerendered, RoutingView), "the pick redraws the routing screen"
     assert f"<#{CHANNEL_ID}> → **science**" in _text(rerendered), "the screen shows the pick"
-    assert "now runs in the science environment" in interaction.followup.send.call_args.args[0], (
-        "the reader is told what changed"
-    )
+    assert (
+        "now runs in the science environment"
+        in interaction.followup.send.call_args.kwargs["embed"].description
+    ), "the reader is told what changed"
 
     cleared = _select(rerendered)
     assert cleared is not None, "the redrawn screen keeps the select"
@@ -343,7 +345,9 @@ async def test_a_pick_is_refused_when_the_caller_is_no_longer_allowed(
 
     await select.callback(interaction)
 
-    interaction.response.send_message.assert_awaited_once_with(REFUSED_MESSAGE, ephemeral=True)
+    interaction.response.send_message.assert_awaited_once_with(
+        embed=build_notice_embed(REFUSED_MESSAGE), ephemeral=True
+    )
     assert (
         await get_scope(
             db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))
@@ -373,7 +377,7 @@ async def test_an_environment_gone_since_render_writes_nothing(
 
     await select.callback(interaction)
 
-    assert "no longer exists" in interaction.followup.send.call_args.args[0], (
+    assert "no longer exists" in interaction.followup.send.call_args.kwargs["embed"].description, (
         "the reader is told the environment is gone"
     )
     assert (
@@ -404,7 +408,7 @@ async def test_a_forged_value_is_answered_and_writes_nothing(
 
     await select.callback(interaction)
 
-    assert interaction.followup.send.call_args.args[0] == NOT_OFFERED_NOTE, (
+    assert interaction.followup.send.call_args.kwargs["embed"].description == NOT_OFFERED_NOTE, (
         "the deferred click gets an answer instead of hanging"
     )
     assert (
@@ -438,7 +442,7 @@ async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network_in_a_se
     select._values = ["env:science"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
     await select.callback(interaction)
 
-    assert interaction.followup.send.call_args.args[0].endswith(
+    assert interaction.followup.send.call_args.kwargs["embed"].description.endswith(
         "\n\nAsk me in chat to make this change for #growth, then confirm when I ask."
     )
     assert (

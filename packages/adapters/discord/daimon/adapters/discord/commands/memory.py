@@ -15,6 +15,7 @@ import anthropic
 import structlog
 from daimon.adapters.discord.checks import require_registered_guild
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -199,7 +200,9 @@ class MemoryCog(commands.Cog):
             if request.kind not in ("shared_list", "shared_show"):
                 agent = await _resolve_agent(runtime, interaction)
                 if agent is None:
-                    await interaction.followup.send(_EMPTY, ephemeral=True)
+                    await interaction.followup.send(
+                        embed=build_notice_embed(_EMPTY, neutral=True), ephemeral=True
+                    )
                     return
                 reply = await personal_memory_reply(
                     runtime.anthropic,
@@ -211,15 +214,24 @@ class MemoryCog(commands.Cog):
                     scope=resource_scope(tenant_id=str(agent.tenant_id)),
                     held=agent.hold is not None,
                 )
-                await interaction.followup.send(
-                    _personal_text(reply),
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                # Memory itself is plain text; Daimon's own words are a card.
+                text = _personal_text(reply)
+                if reply.content is not None or reply.paths:
+                    await interaction.followup.send(
+                        text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+                    )
+                else:
+                    await interaction.followup.send(
+                        embed=build_notice_embed(text, neutral=not reply.error),
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
                 return
             resolved = await _resolve_store(runtime, interaction)
             if resolved is None:
-                await interaction.followup.send(_EMPTY, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(_EMPTY, neutral=True), ephemeral=True
+                )
                 return
             agent_name, store_id = resolved
             scope = resource_scope(
@@ -236,7 +248,9 @@ class MemoryCog(commands.Cog):
                     if item.type == "memory":
                         paths.append(item.path)
                 if not paths:
-                    await interaction.followup.send(_EMPTY, ephemeral=True)
+                    await interaction.followup.send(
+                        embed=build_notice_embed(_EMPTY, neutral=True), ephemeral=True
+                    )
                     return
                 body = "\n".join(f"- `{p}`" for p in sorted(paths))
                 await interaction.followup.send(
@@ -255,7 +269,9 @@ class MemoryCog(commands.Cog):
                     break
             if mem_id is None:
                 await interaction.followup.send(
-                    f"No memory file called `{path}`.\n\nRun `/memory` to see them all.",
+                    embed=build_notice_embed(
+                        f"No memory file called `{path}`.\n\nRun `/memory` to see them all."
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -269,7 +285,7 @@ class MemoryCog(commands.Cog):
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             log.warning("memory.handler.failed", rid=rid, error=str(exc))
             await interaction.followup.send(
-                render_error(exc, request_id=rid),
+                embed=build_notice_embed(render_error(exc, request_id=rid)),
                 ephemeral=True,
             )
 

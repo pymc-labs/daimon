@@ -17,6 +17,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_owners
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -156,7 +157,7 @@ async def test_an_owner_is_refused_for_another_agent_and_a_member_for_any(
     accounts, _ = people
     for user, agent in (("U-OWNER", "OtherBot"), ("U-MEMBER", "ResearchBot")):
         post = await _run(monkeypatch, db_session_factory, user=user, agent=agent)
-        assert "Only an admin or an owner of this agent" in post.await_args.kwargs["text"]
+        assert "Only an admin or an owner of this agent" in shown_text(post.await_args.kwargs)
         role, invitations = await _role_and_invitations(db_session_factory, accounts[user])
         assert role == Role.USER and invitations == []
 

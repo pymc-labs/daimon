@@ -106,6 +106,7 @@ from daimon.adapters.discord.credential_repo_bind import (
     resolve_ma_agent_for_uuid,
     resolve_repo_binding_credential,
 )
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import FormPinRefused, agent_pin_names
@@ -474,18 +475,22 @@ class EnvCredentialModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         if not is_credential_interaction_valid(interaction, self._row):
-            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+            )
             return
         raw_value = str(self.value_input.value or "")
 
         if not raw_value.strip():
             await interaction.followup.send(
-                "Key value cannot be empty — try again.", ephemeral=True
+                embed=build_notice_embed("Key value cannot be empty — try again."), ephemeral=True
             )
             return
         if len(raw_value.encode()) > MAX_SECRET_VALUE_BYTES:
             await interaction.followup.send(
-                f"Key value is too large. Max {MAX_SECRET_VALUE_BYTES} bytes.",
+                embed=build_notice_embed(
+                    f"Key value is too large. Max {MAX_SECRET_VALUE_BYTES} bytes."
+                ),
                 ephemeral=True,
             )
             return
@@ -500,7 +505,8 @@ class EnvCredentialModal(discord.ui.Modal):
         name_problem = env_name_problem(self._row.target, is_admin=is_admin)
         if name_problem is not None:
             await interaction.followup.send(
-                _env_name_refusal(self._row.target, name_problem), ephemeral=True
+                embed=build_notice_embed(_env_name_refusal(self._row.target, name_problem)),
+                ephemeral=True,
             )
             return
 
@@ -525,23 +531,28 @@ class EnvCredentialModal(discord.ui.Modal):
             )
             consumed_row = result.consumed
             if consumed_row is None:
-                await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+                )
                 return
             state, outcome = result.state, result.outcome
             is_continuation_queued = result.queued
         except FormPinRefused as refused:
             # Decided with the consume: rolled back, nothing stored.
-            await interaction.followup.send(refused.refusal, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(refused.refusal), ephemeral=True
+            )
             return
         except AgentEnvEncryptionRequiredError as err:
             # Rolled back with the consume: nothing stored, the request stays live.
             _log.error("credential_modal.env_write_refused_no_crypto_keys")
-            await interaction.followup.send(str(err), ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(str(err)), ephemeral=True)
             return
         except Exception:
             _log.exception("credential_modal.env_write_failed", key=self._row.target)
             await interaction.followup.send(
-                "Something went wrong — please try again.", ephemeral=True
+                embed=build_notice_embed("Something went wrong — please try again."),
+                ephemeral=True,
             )
             return
 
@@ -563,11 +574,13 @@ class EnvCredentialModal(discord.ui.Modal):
                 replaces=shadowed,
             )
             await interaction.followup.send(
-                _env_card_text(
-                    consumed_row,
-                    state="refused",
-                    refusal="replacement_admin_required",
-                    replaces=shadowed,
+                embed=build_notice_embed(
+                    _env_card_text(
+                        consumed_row,
+                        state="refused",
+                        refusal="replacement_admin_required",
+                        replaces=shadowed,
+                    )
                 ),
                 ephemeral=True,
             )
@@ -575,7 +588,8 @@ class EnvCredentialModal(discord.ui.Modal):
         if state == "superseded":
             await edit_posted_card(interaction.client, row=consumed_row, state="superseded")
             await interaction.followup.send(
-                _env_card_text(consumed_row, state="superseded"), ephemeral=True
+                embed=build_notice_embed(_env_card_text(consumed_row, state="superseded")),
+                ephemeral=True,
             )
             return
         await edit_posted_card(
@@ -643,14 +657,18 @@ class EnvFileModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         if not is_credential_interaction_valid(interaction, self._row):
-            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+            )
             return
         agent_name = _agent_name(self._row)
 
         uploads = self.file_input.values
         if not uploads:
             await interaction.followup.send(
-                f"No file arrived. Upload a .env file to add keys to {agent_name}.",
+                embed=build_notice_embed(
+                    f"No file arrived. Upload a .env file to add keys to {agent_name}."
+                ),
                 ephemeral=True,
             )
             return
@@ -659,7 +677,9 @@ class EnvFileModal(discord.ui.Modal):
         # enforces the same bound, but only once the bytes are already here.
         if upload.size > MAX_ENV_FILE_BYTES:
             await interaction.followup.send(
-                render_env_import_rejected("file_too_large", (), target_name=agent_name),
+                embed=build_notice_embed(
+                    render_env_import_rejected("file_too_large", (), target_name=agent_name)
+                ),
                 ephemeral=True,
             )
             return
@@ -668,7 +688,8 @@ class EnvFileModal(discord.ui.Modal):
         except discord.HTTPException:
             _log.warning("credential_modal.env_file_download_failed", size=upload.size)
             await interaction.followup.send(
-                "I could not read that file. Upload it again.", ephemeral=True
+                embed=build_notice_embed("I could not read that file. Upload it again."),
+                ephemeral=True,
             )
             return
         try:
@@ -680,8 +701,10 @@ class EnvFileModal(discord.ui.Modal):
             # The request is deliberately NOT consumed: a typo in the file
             # must not cost the one click this card is good for.
             await interaction.followup.send(
-                render_env_import_rejected(
-                    rejected.rejection, rejected.problems, target_name=agent_name
+                embed=build_notice_embed(
+                    render_env_import_rejected(
+                        rejected.rejection, rejected.problems, target_name=agent_name
+                    )
                 ),
                 ephemeral=True,
             )
@@ -701,22 +724,27 @@ class EnvFileModal(discord.ui.Modal):
                 now=datetime.now(UTC),
             )
             if consumed_row is None:
-                await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+                )
                 return
         except FormPinRefused as refused:
             # Decided with the consume: rolled back, nothing stored.
-            await interaction.followup.send(refused.refusal, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(refused.refusal), ephemeral=True
+            )
             return
         except AgentEnvEncryptionRequiredError as err:
             # Rolled back with the consume: nothing stored, the request stays live.
             _log.error("credential_modal.env_write_refused_no_crypto_keys")
-            await interaction.followup.send(str(err), ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(str(err)), ephemeral=True)
             return
         except Exception:
             # Named boundary: discord.py swallows whatever escapes on_submit.
             _log.exception("credential_modal.env_file_write_failed", key_count=len(entries))
             await interaction.followup.send(
-                "Something went wrong — please try again.", ephemeral=True
+                embed=build_notice_embed("Something went wrong — please try again."),
+                ephemeral=True,
             )
             return
 
@@ -736,7 +764,9 @@ class EnvFileModal(discord.ui.Modal):
                 refusal_lines=refusal_lines,
             )
             await interaction.followup.send(
-                "\n".join((f"No keys were saved for {agent_name}.", *refusal_lines)),
+                embed=build_notice_embed(
+                    "\n".join((f"No keys were saved for {agent_name}.", *refusal_lines))
+                ),
                 ephemeral=True,
             )
             return
@@ -804,23 +834,28 @@ class McpCredentialModal(discord.ui.Modal):
             refusal="mcp_permission_required" if policy_refused else "replacement_admin_required",
         )
         await interaction.followup.send(
-            (mcp_permission_message(_agent_name(consumed_row)) + " Nothing was saved.")
-            if policy_refused
-            else f"{_agent_name(consumed_row)} already has this connection. Nothing was saved."
-            "\n\nOnly a server admin can replace it.",
+            embed=build_notice_embed(
+                (mcp_permission_message(_agent_name(consumed_row)) + " Nothing was saved.")
+                if policy_refused
+                else f"{_agent_name(consumed_row)} already has this connection. Nothing was saved."
+                "\n\nOnly a server admin can replace it."
+            ),
             ephemeral=True,
         )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         if not is_credential_interaction_valid(interaction, self._row):
-            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+            )
             return
         token_value = str(self.token_input.value or "")
 
         if not token_value.strip():
             await interaction.followup.send(
-                "Connection token cannot be empty — try again.", ephemeral=True
+                embed=build_notice_embed("Connection token cannot be empty — try again."),
+                ephemeral=True,
             )
             return
 
@@ -828,8 +863,10 @@ class McpCredentialModal(discord.ui.Modal):
         jwt_secret_setting = self._runtime.settings.mcp.jwt_secret
         if public_url_setting is None or jwt_secret_setting is None:
             await interaction.followup.send(
-                "Daimon isn't fully set up yet. Ask the operator to finish setup, "
-                "then try again. Nothing was saved.",
+                embed=build_notice_embed(
+                    "Daimon isn't fully set up yet. Ask the operator to finish setup, "
+                    "then try again. Nothing was saved."
+                ),
                 ephemeral=True,
             )
             return
@@ -848,10 +885,14 @@ class McpCredentialModal(discord.ui.Modal):
                 self._runtime.sessionmaker, row=self._row, agent=agent, now=now
             )
         except FormPinRefused as refused:
-            await interaction.followup.send(refused.refusal, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(refused.refusal), ephemeral=True
+            )
             return
         if consumed_row is None:
-            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+            )
             return
 
         async with guard_credential_save(
@@ -880,7 +921,10 @@ class McpCredentialModal(discord.ui.Modal):
                 )
                 await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
                 await interaction.followup.send(
-                    "This request is missing its server URL — please ask again.", ephemeral=True
+                    embed=build_notice_embed(
+                        "This request is missing its server URL — please ask again."
+                    ),
+                    ephemeral=True,
                 )
                 return
 
@@ -898,7 +942,9 @@ class McpCredentialModal(discord.ui.Modal):
             )
             if rejection is not None:
                 await _refuse_for_rejected_token(self._runtime, interaction, consumed_row)
-                await interaction.followup.send(rejected_token_message(rejection), ephemeral=True)
+                await interaction.followup.send(
+                    embed=build_notice_embed(rejected_token_message(rejection)), ephemeral=True
+                )
                 return
             try:
                 await write_mcp_submit(
@@ -929,8 +975,10 @@ class McpCredentialModal(discord.ui.Modal):
                 )
                 await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
                 await interaction.followup.send(
-                    f"`{mcp_server_url}` could not be attached to the "
-                    "agent. Nothing was saved. Try again using the same form.",
+                    embed=build_notice_embed(
+                        f"`{mcp_server_url}` could not be attached to the "
+                        "agent. Nothing was saved. Try again using the same form."
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -958,8 +1006,10 @@ class McpCredentialModal(discord.ui.Modal):
                     ),
                 )
                 await interaction.followup.send(
-                    f"`{mcp_server_url}` is attached, but saving its token did not finish. "
-                    "Try again using the same form.",
+                    embed=build_notice_embed(
+                        f"`{mcp_server_url}` is attached, but saving its token did not finish. "
+                        "Try again using the same form."
+                    ),
                     ephemeral=True,
                 )
                 if is_queued:
@@ -1031,7 +1081,9 @@ class SkillRepoModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         if not is_credential_interaction_valid(interaction, self._row):
-            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+            )
             return
 
         if await refuse_if_shared_and_not_admin_for_request(
@@ -1052,7 +1104,9 @@ class SkillRepoModal(discord.ui.Modal):
 
         pat = str(self.pat_in.value or "").strip()
         if not pat:
-            await interaction.followup.send("Enter a GitHub token.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed("Enter a GitHub token."), ephemeral=True
+            )
             return
 
         agent = await resolve_credential_target(interaction, runtime=self._runtime, row=self._row)
@@ -1064,10 +1118,14 @@ class SkillRepoModal(discord.ui.Modal):
                 self._runtime.sessionmaker, row=self._row, agent=agent, now=now
             )
         except FormPinRefused as refused:
-            await interaction.followup.send(refused.refusal, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(refused.refusal), ephemeral=True
+            )
             return
         if consumed_row is None:
-            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+            )
             return
 
         async with guard_credential_save(
@@ -1109,8 +1167,10 @@ class SkillRepoModal(discord.ui.Modal):
                                 session, token=consumed_row.token, outcome="token_rejected"
                             )
                         await interaction.followup.send(
-                            f"That token cannot read `{normalize_owner_repo(url)}`. Nothing was "
-                            "stored. Try again using the same form.",
+                            embed=build_notice_embed(
+                                f"That token cannot read `{normalize_owner_repo(url)}`. "
+                                "Nothing was stored. Try again using the same form."
+                            ),
                             ephemeral=True,
                         )
                         return
@@ -1157,7 +1217,7 @@ class SkillRepoModal(discord.ui.Modal):
                     "Some changes may have been saved."
                 )
                 await interaction.followup.send(
-                    f"{progress} Try again using the same form.",
+                    embed=build_notice_embed(f"{progress} Try again using the same form."),
                     ephemeral=True,
                 )
                 if is_token_saved:
@@ -1176,7 +1236,7 @@ class SkillRepoModal(discord.ui.Modal):
                     "Some changes may have been saved."
                 )
                 await interaction.followup.send(
-                    f"{progress} Try again using the same form.",
+                    embed=build_notice_embed(f"{progress} Try again using the same form."),
                     ephemeral=True,
                 )
                 if is_token_saved:
@@ -1202,9 +1262,11 @@ class SkillRepoModal(discord.ui.Modal):
                 # The skills are in the library but not on the agent: the waiting
                 # task gets nothing to resume with, and the card says so.
                 await interaction.followup.send(
-                    "Skills imported to the library, but not added to "
-                    f"{_agent_name(consumed_row)}. "
-                    f"{attach_failure}",
+                    embed=build_notice_embed(
+                        "Skills imported to the library, but not added to "
+                        f"{_agent_name(consumed_row)}. "
+                        f"{attach_failure}"
+                    ),
                     ephemeral=True,
                 )
                 is_queued = await _settle_spent_request(
@@ -1400,7 +1462,9 @@ class RepoBindModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         if not is_credential_interaction_valid(interaction, self._row):
-            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+            )
             return
 
         if await refuse_if_shared_and_not_admin_for_request(
@@ -1435,10 +1499,14 @@ class RepoBindModal(discord.ui.Modal):
                 self._runtime.sessionmaker, row=self._row, agent=agent, now=now
             )
         except FormPinRefused as refused:
-            await interaction.followup.send(refused.refusal, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(refused.refusal), ephemeral=True
+            )
             return
         if consumed_row is None:
-            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
+            )
             return
 
         async with guard_credential_save(
@@ -1489,7 +1557,9 @@ class RepoBindModal(discord.ui.Modal):
             except DaimonError:
                 # Only fixed copy: domain errors can carry upstream details.
                 await interaction.followup.send(
-                    "Repository access could not be saved. Try again using the same form.",
+                    embed=build_notice_embed(
+                        "Repository access could not be saved. Try again using the same form."
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -1502,8 +1572,10 @@ class RepoBindModal(discord.ui.Modal):
                 # Keep exception details in the operator log; SDK failures can
                 # include the request envelope.
                 await interaction.followup.send(
-                    "Connecting the working repo did not finish. "
-                    "Some changes may have been saved. Try again using the same form.",
+                    embed=build_notice_embed(
+                        "Connecting the working repo did not finish. "
+                        "Some changes may have been saved. Try again using the same form."
+                    ),
                     ephemeral=True,
                 )
                 return

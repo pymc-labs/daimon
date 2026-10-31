@@ -76,6 +76,11 @@ from daimon.adapters.slack.billing_panel.redeem import (
     run_redeem_submission,
 )
 from daimon.adapters.slack.billing_panel.views import PANEL_ACTION_IDS, REDEEM_OPEN_ACTION_ID
+from daimon.adapters.slack.blockkit import (
+    error_blocks_from_text,
+    notice_fields,
+    notice_update_fields,
+)
 from daimon.adapters.slack.boot_sweep import (
     recover_slack_card_intents,
     retire_orphaned_turns,
@@ -107,7 +112,7 @@ from daimon.adapters.slack.direct_messages import (
 from daimon.adapters.slack.errors import (
     generate_request_id,
     not_set_up_notice,
-    render_error_payload,
+    render_error_notice,
     setup_out_of_date_notice,
 )
 from daimon.adapters.slack.external_access import (
@@ -214,9 +219,7 @@ from daimon.core.continuity.continuation import check_wake_responder, load_askin
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
-    render_replacement_summary,
     render_responder_changed_without_handoff,
-    render_unexpected_loss,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
@@ -533,7 +536,10 @@ class SlackApp:
                     aiohttp.ClientSession() as followup_client,
                     followup_client.post(
                         response_url,
-                        json={"text": notice.text, "response_type": "ephemeral"},
+                        json={
+                            **notice_fields(notice.text, neutral=True),
+                            "response_type": "ephemeral",
+                        },
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as response,
                 ):
@@ -559,13 +565,13 @@ class SlackApp:
                     channel=notice.origin_parent_channel_id,
                     user=notice.requester_platform_user_id,
                     thread_ts=notice.origin_thread_id,
-                    text=notice.text,
+                    **notice_fields(notice.text, neutral=True),
                 )
             else:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=notice.origin_parent_channel_id,
                     user=notice.requester_platform_user_id,
-                    text=notice.text,
+                    **notice_fields(notice.text, neutral=True),
                 )
             return True
         except aiohttp.ClientError:
@@ -585,7 +591,7 @@ class SlackApp:
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=request.parent_channel_id,
                 thread_ts=request.thread_id,
-                text="Stopped waiting for GitHub access. Ask again any time.",
+                **notice_fields("Stopped waiting for GitHub access. Ask again any time."),
             )
             return True
         except SlackApiError as error:
@@ -1591,7 +1597,9 @@ class SlackApp:
             client = await resolve_web_client(self.runtime, team_id=team_id)
             if client is not None:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                    channel=str(payload.get("channel_id") or ""), user=user_id, text=text
+                    channel=str(payload.get("channel_id") or ""),
+                    user=user_id,
+                    **notice_fields(text),
                 )
         except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.slash_refusal_notice_failed", team_id=team_id, exc_info=exc)
@@ -1636,7 +1644,7 @@ class SlackApp:
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                 channel=channel,
                 user=clicker,
-                text=text,
+                **notice_fields(text),
                 **({"thread_ts": parent_thread_ts} if parent_thread_ts else {}),
             )
         except (SlackApiError, InvalidToken, SQLAlchemyError) as exc:
@@ -1836,7 +1844,7 @@ class SlackApp:
                     await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
                         channel=channel,
                         thread_ts=event.get("thread_ts") or event_ts,
-                        **render_error_payload(exc, request_id=request_id),
+                        **render_error_notice(exc, request_id=request_id),
                     )
 
     async def _channel_shared(
@@ -1985,7 +1993,7 @@ class SlackApp:
                 user=str(event.get("user") or ""),
                 # Real thread only — a shed root mention has no thread yet.
                 thread_ts=event.get("thread_ts"),
-                text=TENANT_CAP_NOTICE,
+                **notice_fields(TENANT_CAP_NOTICE),
             )
             return
 
@@ -2109,7 +2117,7 @@ class SlackApp:
                 with contextlib.suppress(SlackApiError):
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                         channel=channel,
-                        text=("Sorry, something went wrong handling that — please try again."),
+                        **notice_fields("Something went wrong handling that.\n\nTry again."),
                         thread_ts=thread_id,
                     )
             finally:
@@ -2173,7 +2181,7 @@ class SlackApp:
             with contextlib.suppress(SlackApiError):
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=q_channel,
-                    text="Sorry, something went wrong handling that — please try again.",
+                    **notice_fields("Something went wrong handling that.\n\nTry again."),
                     thread_ts=thread_id,
                 )
         await self._clear_pending_reactions(events, channel=channel, web_client=web_client)
@@ -2297,7 +2305,9 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                 channel=channel,
                 thread_ts=thread_id,
-                text="I couldn't verify your workspace role, so I didn't reply. Please retry.",
+                **notice_fields(
+                    "Couldn't check your workspace role, so there is no reply.\n\nTry again."
+                ),
             )
             return
         # users.info places the requester; the event's own team fields can only
@@ -2339,7 +2349,7 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=not_set_up_notice(foreign=standing.foreign),
+                **notice_fields(not_set_up_notice(foreign=standing.foreign)),
             )
             return
         except MAResolverMissError as err:
@@ -2352,7 +2362,7 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=setup_out_of_date_notice(foreign=standing.foreign),
+                **notice_fields(setup_out_of_date_notice(foreign=standing.foreign)),
             )
             return
         except AdmissionDenied as err:
@@ -2427,12 +2437,14 @@ class SlackApp:
                 await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel,
                     thread_ts=thread_id,
-                    text=admission_refusal_message(
-                        err.reason,
-                        self.runtime.settings,
-                        foreign=standing.foreign,
-                        cause=err.cause,
-                        provider=err.provider,
+                    **notice_fields(
+                        admission_refusal_message(
+                            err.reason,
+                            self.runtime.settings,
+                            foreign=standing.foreign,
+                            cause=err.cause,
+                            provider=err.provider,
+                        )
                     ),
                 )
             return
@@ -2648,11 +2660,11 @@ class SlackApp:
                         channel=channel,
                         ts=lifecycle.status_ts,
                         text=explanation,
-                        blocks=[],
+                        blocks=error_blocks_from_text(explanation),
                     )
                     intent_terminal = True
                 else:
-                    await lifecycle.post_notice(explanation)
+                    await lifecycle.post_notice(explanation, error=True)
                 return
             except SessionBusyError:
                 # Nothing failed and nothing is misconfigured: the previous
@@ -2667,12 +2679,11 @@ class SlackApp:
                     await web_client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
                         ts=lifecycle.status_ts,
-                        text=busy_text,
-                        blocks=[],
+                        **notice_update_fields(busy_text, neutral=True),
                     )
                     intent_terminal = True
                 else:
-                    await lifecycle.post_notice(busy_text)
+                    await lifecycle.post_notice(busy_text, neutral=True)
                 return
             except SessionAgentMismatch as error:
                 # The recorded (previous) responder's display name is a
@@ -2718,12 +2729,11 @@ class SlackApp:
                     await web_client.chat_update(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                         channel=channel,
                         ts=lifecycle.status_ts,
-                        text=explanation,
-                        blocks=hand_over,
+                        **notice_update_fields(explanation, neutral=True, blocks=hand_over or None),
                     )
                     intent_terminal = True
                 else:
-                    await lifecycle.post_notice(explanation, blocks=hand_over)
+                    await lifecycle.post_notice(explanation, blocks=hand_over or None, neutral=True)
                 return
             ma_session_id = prepared.ma_session_id
             watermark = prepared.watermark
@@ -2738,42 +2748,6 @@ class SlackApp:
                 if prepared.continuity.state != "continued"
                 else None
             )
-            # `prepared.continuity` is the bind's OWN decision, taken before
-            # the turn runs -- it can never be "replaced_after_loss" (that
-            # state only exists on the post-turn `RunOutcome`, set when
-            # `run_prepared_turn`'s recovery cycle recreates the session
-            # mid-call). That notice is posted after the turn instead, once
-            # the outcome is known.
-            replacement_summary: str | None = None
-            if (
-                prepared.continuity.announces_replacement()
-                and prepared.continuity.transfer_kind is not None
-            ):
-                # Not a separate message: the answer is an in-place edit of the
-                # status card posted at mention time, and Slack orders by the
-                # original ts -- so a summary posted at any point after that
-                # card reads BELOW the answer it explains ("the file vanished"
-                # above "here is why"). It becomes the answer's first paragraph
-                # instead. The fallback after the turn covers an answer that
-                # never arrives to carry it.
-                #
-                # A `None` transfer_kind here means a fresh start (no prior
-                # session to summarize a transfer from) -- that path already
-                # announces itself elsewhere, so no prefix is rendered.
-                replacement_summary = render_replacement_summary(
-                    prepared.continuity.transfer_kind, lost=[]
-                )
-                lifecycle.answer_prefix = replacement_summary
-            if prepared.continuity.state == "replaced" and prepared.mapping_id is not None:
-                from daimon.core.stores.thread_sessions import github_key_restart_line
-
-                async with self.runtime.sessionmaker() as notice_session:
-                    key_restart = await github_key_restart_line(
-                        notice_session, mapping_id=prepared.mapping_id
-                    )
-                if key_restart is not None:
-                    replacement_summary = key_restart
-                    lifecycle.answer_prefix = key_restart
 
             # Turn marker: message ts + channel + start time, written as soon as
             # the mapping row is known and the card exists. Slack passes
@@ -2930,17 +2904,6 @@ class SlackApp:
                 if synthetic_prefix:
                     user_message = synthetic_prefix + "\n" + user_message
 
-                # Only claim the images were "linked" when the proxy is configured —
-                # that's the branch that actually minted fetchable URLs into the prefix.
-                if images_skipped:
-                    await lifecycle.post_notice(
-                        (
-                            "Some images couldn't be inlined — I've linked them for the agent to "
-                            "fetch instead: "
-                            + ", ".join(f"`{f['name']}` ({r})" for f, r in images_skipped)
-                        ),
-                    )
-
             # --- Run the turn (run_prepared_turn owns the driver
             # call and the one-shot dead-session recovery cycle). lifecycle and
             # lifecycle_holder were constructed above, before bind_session. ---
@@ -3027,10 +2990,6 @@ class SlackApp:
                     identity=turn_identity,
                     ma_agent_id=str(agent.id),
                 )
-                # The replacement summary belongs to the turn, not to the
-                # lifecycle object that happens to render it -- a recovery
-                # cycle swaps the lifecycle and would otherwise drop it.
-                new_lifecycle.answer_prefix = lifecycle.answer_prefix
                 lifecycle_holder[0] = new_lifecycle
                 # An adopting lifecycle never posts, so it never re-registers
                 # itself -- the entry left by the original post is still bound
@@ -3143,30 +3102,6 @@ class SlackApp:
             mapping_id = outcome.mapping_id
             final_lifecycle = lifecycle_holder[0]
 
-            # The recovery cycle inside run_prepared_turn only learns a
-            # session was lost mid-call, after the turn has already run -- so
-            # unlike the planned-replacement summary above, this notice can
-            # only be posted here, once `outcome.continuity` is known. Posted
-            # regardless of whether the recovered turn itself then answered
-            # or errored: the person needs to know the workspace was lost
-            # either way.
-            if outcome.continuity.state == "replaced_after_loss":
-                loss_kind: Literal["transcript", "history"] = (
-                    "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
-                )
-                loss_notice = render_unexpected_loss(loss_kind)
-                # Edited in above the answer rather than posted under it, for
-                # the same ordering reason as the planned summary above. Falls
-                # back to a message when there is no answer to sit above (a
-                # tool-only or failed turn) or it will not fit.
-                if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                    await final_lifecycle.post_notice(loss_notice)
-            if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
-                # The turn produced no answer to carry the summary (tool-only,
-                # cancelled, or failed). The person still has to be told what
-                # the replacement carried across, so it goes out on its own.
-                await final_lifecycle.post_notice(replacement_summary)
-
             # --- Watermark --- Preserves Slack's original gate exactly (unconditional
             # on final_ts, no state.error branch) -- Discord's inline sequence had an
             # error-vs-success split here, but that is NOT one of the spec's four
@@ -3194,7 +3129,8 @@ class SlackApp:
             # not this one -- the answer they just got used the old config.
             if prepared.continuity.pending:
                 await final_lifecycle.post_notice(
-                    render_current_work_must_finish(admission.agent.name, handoff=False)
+                    render_current_work_must_finish(admission.agent.name, handoff=False),
+                    neutral=True,
                 )
 
             # This turn's own marker is cleared BEFORE anything is dispatched.

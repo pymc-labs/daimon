@@ -398,8 +398,10 @@ def render_turn_origin(
             "process, notebook kernel or shell survived — only files and the conversation "
             "did. If a listed file is missing, say which. If session_state.state is "
             "replaced_after_loss, say what is missing before continuing; do not claim a "
-            "complete restore. Configuration named in session_state.applied is live for "
-            "this turn; anything else applies from the person's next message."
+            "complete restore. If it is replaced and session_state.lost is not empty, tell "
+            "the person in one line what did not come across. Configuration named in "
+            "session_state.applied is live for this turn; anything else applies from the "
+            "person's next message."
         )
     return rendered + "\n</turn_controls>"
 

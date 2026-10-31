@@ -155,7 +155,9 @@ async def test_memory_handler_bytes_pagination_early_break_and_errors(
     sent = interaction.followup.send.call_args
     assert sent.kwargs["ephemeral"] is True
     if expected_error is not None:
-        assert sent.args[0] == render_error(expected_error, request_id="fixed-request")
+        assert sent.kwargs["embed"].description == render_error(
+            expected_error, request_id="fixed-request"
+        )
     elif path is None:
         assert sent.args[0] == "**agent's memory** (2 files)\n- `/a.md`\n- `/z.md`"
     else:

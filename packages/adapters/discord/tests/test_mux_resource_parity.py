@@ -32,8 +32,8 @@ async def test_a_foreign_reread_keeps_the_existing_refusal_and_does_not_upload()
     async def defer() -> None:
         pass
 
-    async def send(text: str, **kwargs: object) -> None:
-        sent.append((text, kwargs))
+    async def send(*, embed: discord.Embed, **kwargs: object) -> None:
+        sent.append((str(embed.description), kwargs))
 
     async with before.client() as old, after.client() as new:
         native = await old.beta.agents.retrieve("agent1")

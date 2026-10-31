@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from typing import Any, Concatenate, ParamSpec, cast
 
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import AdminCaller, is_guild_admin_by_permissions
@@ -93,9 +94,13 @@ async def refuse_if_not_admin(interaction: Interaction[commands.Bot]) -> bool:
     if is_guild_admin(interaction):
         return False
     if interaction.response.is_done():
-        await interaction.followup.send(_ADMIN_ONLY_MESSAGE, ephemeral=True)
+        await interaction.followup.send(
+            embed=build_notice_embed(_ADMIN_ONLY_MESSAGE), ephemeral=True
+        )
     else:
-        await interaction.response.send_message(_ADMIN_ONLY_MESSAGE, ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed(_ADMIN_ONLY_MESSAGE), ephemeral=True
+        )
     return True
 
 
@@ -131,14 +136,16 @@ def require_registered_guild(  # noqa: UP047  -- ParamSpec used for decorator ge
     ) -> None:
         if interaction.guild_id is None:
             await interaction.response.send_message(
-                "This command is only available in a server.",
+                embed=build_notice_embed("This command is only available in a server."),
                 ephemeral=True,
             )
             return
         tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
         if tenant_id is None:
             await interaction.response.send_message(
-                "This server is not registered. Ask an operator to register it.",
+                embed=build_notice_embed(
+                    "This server is not registered. Ask an operator to register it."
+                ),
                 ephemeral=True,
             )
             return
@@ -165,8 +172,10 @@ def require_manage_guild(  # noqa: UP047  -- ParamSpec used for decorator generi
     ) -> None:
         if not is_guild_admin(interaction):
             await interaction.response.send_message(
-                "🛡️ Viewing scheduled routines needs a server admin (Manage Server). "
-                "Ask one: “Please open `/routines` to review this server’s scheduled routines.”",
+                embed=build_notice_embed(
+                    "🛡️ Viewing scheduled routines needs a server admin (Manage Server). "
+                    "Ask one: “Please open `/routines` to review this server’s scheduled routines.”"
+                ),
                 ephemeral=True,
             )
             return

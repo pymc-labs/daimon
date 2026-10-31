@@ -75,6 +75,7 @@ from .conftest import (
     make_channel_activity,
     post_activity,
     running_service,
+    shown_text,
     teams_settings,
 )
 
@@ -502,7 +503,9 @@ async def test_a_message_held_while_draining_moves_the_watermark_past_it(
     assert row is not None, "the stored subscription is read back"
     resource = f"teams('{TEAM_GROUP_ID}')/channels('{PRIVATE}')/messages('100')"
     await harness.subscriptions.on_change(_notice(changeType="created", resource=resource), row)
-    assert [activity.text for _, activity, _ in sender.sent] == [HOLDING], "held, not dropped"
+    assert [shown_text(activity) for _, activity, _ in sender.sent] == [HOLDING], (
+        "held, not dropped"
+    )
     stored = await harness.row()
     assert stored is not None and stored.last_message_id == "100", "the watermark moves past it"
 

@@ -158,6 +158,10 @@ class Replay:
         return self.cap
 
     async def post(self, **kwargs):
+        # The apology is a card now, in other words; the flow is what is compared.
+        if "attachments" in kwargs or "text" in kwargs:
+            kwargs = {k: v for k, v in kwargs.items() if k not in ("text", "attachments")}
+            kwargs["notice"] = True
         self.effects.append(("response", kwargs))
 
     async def unreact(self, **kwargs):

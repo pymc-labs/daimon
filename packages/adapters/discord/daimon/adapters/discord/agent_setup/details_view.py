@@ -40,6 +40,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import is_guild_admin, refuse_if_not_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import (
@@ -542,7 +543,8 @@ class DetailsView(PanelViewBase):
             or not channel_backend.backend_selection_enabled(self.runtime.settings.turn)
         ):
             await interaction.response.send_message(
-                "Model provider wasn't changed. Open the panel again.", ephemeral=True
+                embed=build_notice_embed("Model provider wasn't changed. Open the panel again."),
+                ephemeral=True,
             )
             return False
         return True
@@ -587,7 +589,10 @@ class DetailsView(PanelViewBase):
         if selection is None:
             await self._backend_audit(interaction, outcome="denied", reason="selection_unavailable")
             await interaction.followup.send(
-                "That preview isn't available. Nothing was changed; choose again.", ephemeral=True
+                embed=build_notice_embed(
+                    "That preview isn't available. Nothing was changed; choose again."
+                ),
+                ephemeral=True,
             )
             return
         preview = selection.preview
@@ -653,7 +658,7 @@ class DetailsView(PanelViewBase):
                 )
         except channel_backend.AgentBackendRefused as exc:
             await self._backend_audit(interaction, outcome="denied", reason=exc.reason)
-            await interaction.followup.send(str(exc), ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(str(exc)), ephemeral=True)
             return
         await self._backend_audit(interaction, outcome="allowed", reason="completed")
         self.state.backend_selection = revision.backend
@@ -679,7 +684,9 @@ class DetailsView(PanelViewBase):
         if not await gate.allowed(interaction):
             from daimon.core.github_connect_cards import ask_manager_line
 
-            await interaction.followup.send(ask_manager_line(self.agent.name), ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(ask_manager_line(self.agent.name)), ephemeral=True
+            )
             return
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id))
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=self.agent.ma_agent_id)
@@ -741,7 +748,9 @@ class DetailsView(PanelViewBase):
             agent=agent,
         )
         if view is None:
-            await interaction.followup.send(CODING_KEYS_REFUSAL, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(CODING_KEYS_REFUSAL), ephemeral=True
+            )
             return
         await self.swap_to(interaction, view)
 
@@ -777,11 +786,13 @@ class DetailsView(PanelViewBase):
             request_id = generate_request_id()
             log.exception("agent_setup.add_skill.check_failed", request_id=request_id)
             await interaction.response.send_message(
-                render_error(exc, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )
             return
         if refusal is not None:
-            await interaction.response.send_message(refusal, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(refusal), ephemeral=True
+            )
             return
         await interaction.response.send_modal(AddSkillModal(self, agent))
 

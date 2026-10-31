@@ -39,6 +39,7 @@ from daimon.adapters.discord.embed import (
     update_activity,
 )
 from daimon.adapters.discord.errors import bound_request_id
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import AnswerMessage
 from daimon.adapters.discord.progress_receipt import InitialProgressReceipt
 from daimon.adapters.discord.split import split_for_discord_safe
@@ -52,7 +53,6 @@ from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as EmbedState
-from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
@@ -116,6 +116,8 @@ _SEALED_RESPONSE_MIN_CHARS = 500
 # Reserve one of the five answer messages for the terminal answer/card.
 _MAX_ANSWER_MESSAGES = 5
 _OUTPUT_COLLAPSED_NOTICE = "Additional output was combined into the attached answer.txt."
+_STOPPED_TITLE = "Stopped."
+_STOPPED_NEXT_STEP = "Send a message to start again."
 _TOOL_MARKUP_NOTICE = "The model returned tool-call markup without an answer."
 _TOOL_CALL_MARKUP = re.compile(
     r"<(?P<tag>invoke_[\w:.-]+|tool_call|tool_use|function_call)\b[^>]*>"
@@ -513,17 +515,12 @@ class DiscordTurnLifecycle:
         self._sealed_message_count = 0
         self._last_sealed_text: str | None = None
         self._deferred_sealed_text: list[str] = []
+        # The final reply was only tool markup: the card shows the error, not the markup.
+        self._tool_markup_only = False
         self._output_limit_logged = False
         self._was_answered: bool = False
-        # A continuity notice that belongs ABOVE the answer it explains. The
-        # answer is an in-place edit of the embed posted at mention time, so a
-        # notice sent as its own message always lands below it. Set before the
-        # answer is revealed (a planned replacement, known at bind time);
-        # `prepend_revealed_answer` covers the fact learned only after the turn ran.
-        self.answer_prefix: str | None = None
-        self.answer_prefix_applied: bool = False
-        # The first chunk actually rendered into the message, kept so a late
-        # notice can be edited in above it exactly once.
+        # The first chunk actually rendered into the message: once set, the
+        # answer is delivered.
         self._revealed_first_chunk: str | None = None
 
     async def on_acknowledgment(self, phase: Acknowledgment) -> None:
@@ -658,8 +655,8 @@ class DiscordTurnLifecycle:
                 return
             await self._edit_message(
                 self._message_ref,
-                content=text,
-                embed=None,
+                content=None,
+                embed=build_notice_embed(text),
                 view=None,
                 _allow_replacement=False,
                 recover_missing=False,
@@ -1137,6 +1134,14 @@ class DiscordTurnLifecycle:
             await self._edit_message(self._message_ref, embeds=[embed], view=None)
         self._terminal_shown = True
 
+    async def _show_card_error(self, title: str, body: str | None = None) -> None:
+        """End the turn's card as the red error card; `body` defaults to the usual retry step."""
+        if body is None:
+            body = "Send your message again." if self._in_dm else "@mention Daimon to try again."
+        self._state = update(self._state, EmbedEvent(kind="error", label=title))
+        self._state = dataclasses.replace(self._state, notice=body, notice_title=title)
+        await self._flush_terminal()
+
     async def _persist_sealed_responses(self, state: TurnState) -> None:
         """Post sealed answers (text blocks a later tool call made immutable)
         as permanent messages, once each. Without this, an answer composed
@@ -1207,7 +1212,8 @@ class DiscordTurnLifecycle:
             text = join_messages(_without_adjacent_repeats(messages, self._last_sealed_text))
         if _pure_tool_markup(text):
             log.warning("turn.final_tool_markup_suppressed", turn_id=str(self._turn_id))
-            text = "" if self._unprompted else _TOOL_MARKUP_NOTICE
+            self._tool_markup_only = not self._unprompted
+            text = ""
         return text
 
     def _note_discord_time(self, snowflake: object) -> None:
@@ -1268,21 +1274,24 @@ class DiscordTurnLifecycle:
             and not cancelled
         )
         self._apply_usage(state)
-        self._state = update(self._state, EmbedEvent(kind="done", label=""))
+        if self._tool_markup_only and not response_text and not cancelled:
+            await self._show_card_error(_TOOL_MARKUP_NOTICE)
+            log.info("turn.terminal_success", has_text=False, tool_markup_only=True)
+            return
+        if cancelled:
+            # Any partial text stays as the agent wrote it; the card says it stopped.
+            self._state = update(self._state, EmbedEvent(kind="error", label=_STOPPED_TITLE))
+            self._state = dataclasses.replace(
+                self._state, notice=_STOPPED_NEXT_STEP, notice_title=_STOPPED_TITLE
+            )
+        else:
+            self._state = update(self._state, EmbedEvent(kind="done", label=""))
         # A pinged answer is a fresh message with the summary; the card goes.
         await self._flush_terminal(summary_on_card=not (notify and response_text))
 
-        if cancelled:
-            if not response_text:
-                await self._edit_message(
-                    self._message_ref,
-                    content="Stopped.\nSend a message to start again.",
-                    embed=None,
-                    view=None,
-                )
-                log.info("turn.terminal_success", has_text=False, cancelled=True)
-                return
-            response_text = f"{response_text}\n\nStopped.\nSend a message to start again."
+        if cancelled and not response_text:
+            log.info("turn.terminal_success", has_text=False, cancelled=True)
+            return
         if not response_text:
             # If tools ran but no final text, leave done embed visible.
             # If content is entirely empty, show "Turn cancelled."
@@ -1297,33 +1306,13 @@ class DiscordTurnLifecycle:
                 )
                 # The "Done." card carries the summary, so the turn's files go on it.
                 self._summary_ref = self._message_ref
-                # A tool-only turn has no reply to hang the notice under,
-                # so a dropped server is named on its own line.
-                tool_only_notice = render_degraded_notice(state.mcp_failures)
-                if tool_only_notice is not None:
-                    await self._send_message(
-                        content=tool_only_notice, allowed_mentions=discord.AllowedMentions.none()
-                    )
                 log.info("turn.terminal_success", has_text=False, tool_only=True)
                 return
-            await self._edit_message(
-                self._message_ref,
-                content="Stopped.\nSend a message to start again.",
-                embed=None,
-                view=None,
-            )
+            await self._show_card_error(_STOPPED_TITLE, _STOPPED_NEXT_STEP)
             log.info("turn.terminal_success", has_text=False)
             return
 
         self._was_answered = not cancelled
-        if self.answer_prefix is not None:
-            response_text = f"{self.answer_prefix}\n\n{response_text}"
-            self.answer_prefix_applied = True
-        # A server MA dropped this turn is named under the reply, so a
-        # degraded answer never reads as a complete one.
-        degraded_notice = render_degraded_notice(state.mcp_failures)
-        if degraded_notice is not None:
-            response_text = f"{response_text}\n\n{degraded_notice}"
         use_name_prefix = (
             self._fallback_active is not None
             and self._fallback_active()
@@ -1341,20 +1330,7 @@ class DiscordTurnLifecycle:
                 replied_user=False,
             )
             response_text = f"<@{self._requester_id}>\n{response_text}"
-        collapsed_notice = "\n\n".join(
-            part
-            for part in (
-                _OUTPUT_COLLAPSED_NOTICE,
-                "Stopped.\nSend a message to start again." if cancelled else None,
-                degraded_notice,
-                self.answer_prefix,
-            )
-            if part
-        )
-        # Notices can include operator-provided text or many dropped servers.
-        # Their complete text is in the file; keep the visible notice bounded.
-        if len(collapsed_notice) > 1800:
-            collapsed_notice = collapsed_notice[:1750] + "…\nFull details are in answer.txt."
+        collapsed_notice = _OUTPUT_COLLAPSED_NOTICE
         if notify:
             collapsed_notice = f"<@{self._requester_id}>\n{collapsed_notice}"
         if use_name_prefix:
@@ -1510,48 +1486,6 @@ class DiscordTurnLifecycle:
         if card is None or self._ended_before is None:
             return None
         return card.id, self._ended_before
-
-    async def prepend_revealed_answer(self, notice: str) -> bool:
-        """Edit `notice` in above an answer already on screen; False if it cannot go there.
-
-        For a fact the turn only produces on its way out (an unexpected
-        workspace loss, discovered by the driver's mid-call recovery): by the
-        time the caller knows it, the answer has already replaced the embed.
-        Sending the notice afterwards puts it below the answer it explains, so
-        instead the message is edited once with the notice on top.
-
-        Returns False -- caller sends it as an ordinary message instead -- when
-        there is no revealed answer to sit above, or when the notice would push
-        the first chunk past Discord's message limit (re-splitting would strand
-        the overflow messages already posted).
-        """
-        if (
-            self._revealed_first_chunk is None
-            or self._message_ref is None
-            or self._thread_stopped()
-        ):
-            return False
-        first_chunk = self._revealed_first_chunk
-        prefix = fallback_name_prefix(self._agent_name, "")
-        if (
-            self._fallback_active is not None
-            and self._fallback_active()
-            and first_chunk.startswith(prefix)
-        ):
-            updated = f"{prefix}{notice}\n\n{first_chunk[len(prefix) :]}"
-        else:
-            updated = f"{notice}\n\n{first_chunk}"
-        if len(split_for_discord_safe(updated)) > 1:
-            return False
-        await self._edit_message(
-            self._message_ref,
-            content=updated,
-            view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        self._revealed_first_chunk = updated
-        self.answer_prefix_applied = True
-        return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
         self._discord_mark = None  # only the terminal sends and edits close the window

@@ -22,6 +22,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.agent_setup.write import create_blank_agent, validate_model_id
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError, UserFacingError
@@ -129,7 +130,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
         )
         error = validate_model_id(model_value)
         if error is not None:
-            await interaction.response.send_message(error, ephemeral=True)
+            await interaction.response.send_message(embed=build_notice_embed(error), ephemeral=True)
             return
         await interaction.response.defer()
         tenant_id: uuid.UUID | None = None
@@ -162,8 +163,11 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                 )
             if self._panel_render_seq != self.state.render_seq:
                 await interaction.followup.send(
-                    f"Created **{new_name}**. The setup panel has moved on; run "
-                    "`/agent-setup` again to view it.",
+                    embed=build_notice_embed(
+                        f"Created **{new_name}**. The setup panel has moved on; run "
+                        "`/agent-setup` again to view it.",
+                        neutral=True,
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -172,9 +176,12 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             )
             if agent is None and not self.state.is_admin:
                 await interaction.followup.send(
-                    f"**{new_name}** was created. Not answering in any channel yet. "
-                    "An admin can make it answer in this channel; "
-                    "it will then appear in setup here.",
+                    embed=build_notice_embed(
+                        f"**{new_name}** was created. Not answering in any channel yet. "
+                        "An admin can make it answer in this channel; "
+                        "it will then appear in setup here.",
+                        neutral=True,
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -190,8 +197,11 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             details = await load_details_for(self.runtime, state=self.state, agent=agent)
             if self._panel_render_seq != self.state.render_seq:
                 await interaction.followup.send(
-                    f"Created **{new_name}**. The setup panel has moved on; run "
-                    "`/agent-setup` again to view it.",
+                    embed=build_notice_embed(
+                        f"Created **{new_name}**. The setup panel has moved on; run "
+                        "`/agent-setup` again to view it.",
+                        neutral=True,
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -218,7 +228,9 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                 err_type=type(err).__name__,
                 request_id=rid,
             )
-            await interaction.followup.send(render_error(err, request_id=rid), ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(render_error(err, request_id=rid)), ephemeral=True
+            )
             return
         except Exception as err:
             # Modal-submit boundary: discord.py dispatches on_submit as a bare
@@ -235,6 +247,8 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
             _capture_new_agent_exception(
                 err, tenant_id=tenant_id, guild_id=interaction.guild_id, rid=rid
             )
-            await interaction.followup.send(render_error(err, request_id=rid), ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(render_error(err, request_id=rid)), ephemeral=True
+            )
             return
         log.info("agent_setup.new.created", new_name=new_name, model=model_value)

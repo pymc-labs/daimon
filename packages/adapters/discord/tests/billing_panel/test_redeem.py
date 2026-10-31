@@ -214,7 +214,7 @@ async def test_a_member_cannot_redeem_a_server_wide_code(
     modal.code_in._value = "WELCOME-2026"
     interaction = _interaction(admin=False)
     await modal.on_submit(interaction)
-    assert interaction.followup.send.call_args.args[0] == (
+    assert interaction.followup.send.call_args.kwargs["embed"].description == (
         "🎟️ Only an admin can redeem that code, because it adds credit for everyone here."
     ), "a member should be told who can redeem it"
     rerender.assert_not_awaited()
@@ -246,7 +246,7 @@ async def test_modal_submit_answers_when_the_database_fails() -> None:
 
     interaction.response.defer.assert_awaited_once()
     rerender.assert_not_awaited()
-    assert interaction.followup.send.call_args.kwargs == {"ephemeral": True}, (
+    assert interaction.followup.send.call_args.kwargs["ephemeral"] is True, (
         "the failure should be answered ephemerally"
     )
 
@@ -283,7 +283,7 @@ async def test_modal_submit_redeems_rerenders_and_replies(
     interaction.response.defer.assert_awaited_once()
     rerender.assert_awaited_once_with(interaction)
     assert calls == ["reply", "rerender"], "the reply should go out before the panel rerenders"
-    assert "Added **$10.00**" in interaction.followup.send.call_args.args[0], (
+    assert "Added **$10.00**" in interaction.followup.send.call_args.kwargs["embed"].description, (
         "the reply should confirm the credit"
     )
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("10"), (
@@ -292,9 +292,10 @@ async def test_modal_submit_redeems_rerenders_and_replies(
 
     again = _interaction(admin=True)
     await modal.on_submit(again)
-    assert again.followup.send.call_args.args[0] == "🎟️ That code was already redeemed here.", (
-        "a second redemption should be refused"
-    )
+    assert (
+        again.followup.send.call_args.kwargs["embed"].description
+        == "🎟️ That code was already redeemed here."
+    ), "a second redemption should be refused"
     assert rerender.await_count == 1, "a refused repeat should not rerender the panel"
 
 
@@ -351,7 +352,9 @@ async def test_modal_submit_keeps_the_success_reply_when_the_rerender_fails(
 
     rerender.assert_awaited_once_with(interaction)
     [reply] = interaction.followup.send.call_args_list
-    assert "Added **$10.00**" in reply.args[0], "the only reply should confirm the credit"
+    assert "Added **$10.00**" in reply.kwargs["embed"].description, (
+        "the only reply should confirm the credit"
+    )
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("10"), (
         "the credit should stay in the server ledger"
     )
@@ -436,7 +439,7 @@ async def test_cli_issued_code_redeems_once_through_the_panel(
 
     first = _submitted(modal, f"  {shown.lower()} ")
     await modal.on_submit(first)
-    assert first.followup.send.call_args.args[0] == (
+    assert first.followup.send.call_args.kwargs["embed"].description == (
         "🎟️ Added **$25.00** of credit.\n\nBalance: **$25.00**"
     ), "a fresh code, pasted loosely, should credit the server once"
     first.edit_original_response.assert_awaited_once()
@@ -446,12 +449,13 @@ async def test_cli_issued_code_redeems_once_through_the_panel(
 
     again = _submitted(modal, shown)
     await modal.on_submit(again)
-    assert again.followup.send.call_args.args[0] == "🎟️ That code was already redeemed here.", (
-        "a second redemption should be refused in words"
-    )
+    assert (
+        again.followup.send.call_args.kwargs["embed"].description
+        == "🎟️ That code was already redeemed here."
+    ), "a second redemption should be refused in words"
     unknown = _submitted(modal, generate_promo_code())
     await modal.on_submit(unknown)
-    assert unknown.followup.send.call_args.args[0] == (
+    assert unknown.followup.send.call_args.kwargs["embed"].description == (
         "🎟️ That code is not valid. Check it and try again."
     ), "an unknown code should be refused in words"
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == Decimal("25"), (
@@ -515,11 +519,11 @@ async def test_a_member_redeems_a_channel_code_into_this_channel_through_the_pan
     again = _submitted(modal, shown, admin=False)
     await modal.on_submit(again)
 
-    assert first.followup.send.call_args.args[0] == (
+    assert first.followup.send.call_args.kwargs["embed"].description == (
         f"🎟️ Added **$5.00** to <#{CHANNEL_ID}>'s budget.\n\nIts limit is now **$10.00**."
     )
     first.edit_original_response.assert_awaited_once()
-    assert again.followup.send.call_args.args[0] == (
+    assert again.followup.send.call_args.kwargs["embed"].description == (
         "🎟️ You already redeemed that code in this channel."
     )
     db_session.expire_all()

@@ -891,7 +891,7 @@ async def test_a_timer_never_runs_as_an_agent_it_was_not_set_with(
 
     bind.assert_not_called()
     run_turn.assert_not_called()
-    sent = [call.args[0] for call in thread.send.await_args_list if call.args]
+    sent = [call.kwargs["embed"].description for call in thread.send.await_args_list]
     assert any("set with target-agent" in text and "other-agent" in text for text in sent), sent
     async with db_session_factory() as session:
         row = await get_continuation(session, idempotency_key=key)

@@ -339,6 +339,7 @@ async def handle(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="Only a workspace admin can approve GitHub requests.",
+                error=True,
             )
             return True
         if not await _may_manage_request(
@@ -490,6 +491,7 @@ async def handle(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text=safe_github_error(error),
+                error=True,
             )
             return True
     if (

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -56,6 +57,7 @@ from .conftest import (
     FakeSender,
     TeamsApiFake,
     make_card_action,
+    shown_text,
 )
 
 
@@ -268,11 +270,15 @@ async def test_always_action_refuses_nonadmin_privately(
     other = await cards.on_action(other_click)
     assert requester.value == other.value == "Checking you're an admin..."
     await asyncio.gather(*cards._always_tasks)
-    assert requester_click.send.await_args.args[0].text == (
+    assert shown_text(requester_click.send.await_args.args[0]) == (
         "Only an admin can allow this for everyone.\n"
         "Ask an admin, or use Approve for just this time."
     )
-    assert other_click.send.await_args.args[0].text == "Only an admin can allow this for everyone."
+    assert (
+        shown_text(other_click.send.await_args.args[0])
+        == "Only an admin can allow this for everyone."
+    )
+    assert other_click.send.await_args.args[0].attachments
     assert requester_click.send.await_args.args[0].recipient is None
     assert not future.done() and not sender.sent
     save.assert_not_awaited()
@@ -740,7 +746,8 @@ async def test_private_notice_uses_sdk_endpoint_for_conversation_type(
     assert len(wire.activity_requests) == 1
     request = wire.activity_requests[0]
     assert ("isTargetedActivity=true" in request.url) is (conversation_type != "personal")
-    assert request.body["text"] == "private refusal"
+    assert request.body["attachments"]
+    assert "private refusal" in json.dumps(request.body["attachments"])
 
 
 async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
@@ -790,12 +797,13 @@ async def test_a_card_still_open_reminds_with_an_at_mention_of_its_requester(mon
     reminders = [
         activity
         for _conversation, activity, _url in sender.sent
-        if "still waiting" in (activity.text or "")
+        if activity.attachments and "still waiting" in str(activity.attachments[0].content.body)
     ]
     (reminder,) = reminders
-    assert reminder.text is not None and reminder.text.endswith(
-        "This is still waiting for your click."
-    )
+    [card] = [a.content for a in reminder.attachments]
+    [block] = card.body
+    assert block.text.endswith("This is still waiting for your click."), "words in a neutral card"
+    assert reminder.text is not None and reminder.text.startswith("<at>")
     mentions = [
         entity for entity in reminder.entities or [] if getattr(entity, "type", None) == "mention"
     ]

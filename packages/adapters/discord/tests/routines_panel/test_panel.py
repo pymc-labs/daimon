@@ -341,8 +341,7 @@ async def test_unauthorized_pause_click_rejected(monkeypatch: pytest.MonkeyPatch
     await pause_btn.callback(interaction)
 
     interaction.response.send_message.assert_called_once()
-    args, kwargs = interaction.response.send_message.call_args
-    text = args[0] if args else kwargs.get("content", "")
+    text = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "creator or a server admin" in text, (
         "non-creator non-admin must see the explicit gate message"
     )
@@ -620,8 +619,7 @@ async def test_picker_callback_value_outside_guild_rejected(
 
     await pause_btn.callback(interaction)
     interaction.response.send_message.assert_called_once()
-    args, kwargs = interaction.response.send_message.call_args
-    text = args[0] if args else kwargs.get("content", "")
+    text = interaction.response.send_message.call_args.kwargs["embed"].description
     assert "is from another server" in text, (
         "cross-guild routine ids must be rejected with an explicit message"
     )

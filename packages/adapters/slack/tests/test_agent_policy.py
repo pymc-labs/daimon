@@ -43,6 +43,8 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, mak
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conftest import shown_text
+
 _TEAM_ID = "T_POLICY_TESTS"
 _USER_ID = "U_POLICY_TEST"
 _CHANNEL_ID = "C_POLICY_TEST"
@@ -117,8 +119,7 @@ def _agent_list_handler(
 
 def _ephemeral_texts(mock: AioResponsesMock) -> list[str]:
     return [
-        str((kwargs.get("json") or {}).get("text", ""))
-        for _, kwargs in mock.requests.get(_EPHEMERAL_KEY, [])
+        shown_text(kwargs.get("json") or {}) for _, kwargs in mock.requests.get(_EPHEMERAL_KEY, [])
     ]
 
 

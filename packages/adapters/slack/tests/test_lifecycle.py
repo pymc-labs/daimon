@@ -65,6 +65,7 @@ import structlog
 import yarl
 from anthropic import BadRequestError, RateLimitError
 from daimon.adapters.slack import lifecycle as lifecycle_mod
+from daimon.adapters.slack.blockkit import ERROR_COLOR, NEUTRAL_COLOR
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.errors import TurnError
@@ -302,6 +303,22 @@ async def test_turn_posts_use_agent_header_and_record_intent(
     assert all(row["turn_card_intent_id"] == intent for row in recorded)
     assert all(row["channel_id"] == "C_TEST" for row in recorded)
     assert all(row["thread_ts"] == "1700000000.000000" for row in recorded)
+
+
+async def test_a_notice_posts_as_a_red_card_and_a_neutral_one_when_asked(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+    await lc.post_notice("Refused.", error=True)
+    await lc.post_notice("Waiting.", neutral=True)
+    await lc.post_notice("Plain.")
+    _, refused, waiting, plain = [
+        call.kwargs["json"] for call in fake_slack_web_client.mock.requests[("POST", _POST_URL)]
+    ]
+    assert refused["attachments"][0]["color"] == ERROR_COLOR, "a refusal is an error card"
+    assert waiting["attachments"][0]["color"] == NEUTRAL_COLOR, "information is neutral"
+    assert plain["text"] == "Plain." and "attachments" not in plain, "no flag, no card"
 
 
 async def test_identity_off_posts_as_bot_and_keeps_agent_footer(
@@ -988,27 +1005,51 @@ async def test_terminal_success_bounds_notification_text_on_long_answers(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("partial_text", ["", "Partial analysis before cancellation."])
-async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answer(
-    fake_slack_web_client: Any, partial_text: str
+async def test_interrupted_tool_turn_without_text_shows_cancelled(
+    fake_slack_web_client: Any,
 ) -> None:
     lc, _, _, deregistered = _make_lifecycle(fake_slack_web_client, notify_on_completion=True)
     await lc.post_initial()
     content = [
         ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
     ]
-    if partial_text:
-        content.append(TextBlock(kind="text", text=partial_text))
 
     await lc.on_terminal_success(
         TurnState(content=content, termination=TerminationReason.INTERRUPTED)
     )
 
-    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert "Stopped." in rendered
-    if partial_text:
-        assert partial_text in rendered
-    assert "cancel_turn" not in _action_ids(_last_update_blocks(fake_slack_web_client))
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert "❌ *Stopped.*\nSend a message to start again." in _block_text(blocks)
+    assert "cancel_turn" not in _action_ids(blocks)
+    assert _post_count(fake_slack_web_client) == 1, "cancellation must not send a completion ping"
+    assert lc.final_ts == lc.status_ts
+    assert lc.status_ts in deregistered
+
+
+async def test_interrupted_turn_keeps_partial_answer_and_marks_stopped_as_an_error_card(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, _, _, deregistered = _make_lifecycle(fake_slack_web_client, notify_on_completion=True)
+    await lc.post_initial()
+    partial_text = "Partial analysis before cancellation."
+    content = [
+        ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}),
+        TextBlock(kind="text", text=partial_text),
+    ]
+
+    await lc.on_terminal_success(
+        TurnState(content=content, termination=TerminationReason.INTERRUPTED)
+    )
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    answer = blocks[0]
+    assert answer["type"] == "markdown" and answer["text"] == partial_text, (
+        "the agent's text is untouched, with no system line added"
+    )
+    assert blocks[1]["type"] == "divider", "a rule sets the error apart from the answer"
+    assert blocks[2]["text"]["text"] == "❌ *Stopped.*"
+    assert blocks[3]["text"]["text"] == "Send a message to start again."
+    assert "cancel_turn" not in _action_ids(blocks)
     assert _post_count(fake_slack_web_client) == 1, "cancellation must not send a completion ping"
     assert lc.final_ts == lc.status_ts
     assert lc.status_ts in deregistered
@@ -1090,8 +1131,8 @@ async def test_terminal_success_empty_content_shows_turn_cancelled(
     assert lc.final_ts is not None, "final_ts must be set even for cancelled turns"
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert "Stopped.\nSend a message to start again." in _block_text(blocks), (
-        "an empty turn shows the stop and next step"
+    assert "❌ *Stopped.*\nSend a message to start again." in _block_text(blocks), (
+        "an empty turn shows the stop and next step as an error card"
     )
     assert not _has_actions_block(blocks), "cancelled turn must not keep the cancel button"
 
@@ -1137,7 +1178,7 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     assert notice is not None
     section, context = blocks[1], blocks[-1]
     assert section["type"] == "section"
-    assert blocks[0]["text"]["text"] == notice.title
+    assert blocks[0]["text"]["text"] == f"❌ *{notice.title}*"
     assert section["text"]["text"].startswith(notice.next_step)
     assert "*Next:*" not in section["text"]["text"]
     assert "`fit_model`" in blocks[2]["elements"][0]["text"], "work in flight is named"
@@ -1203,8 +1244,23 @@ async def test_a_notice_that_fails_to_build_still_draws_the_error_card(
     await lc.on_terminal_failure(TurnState(), RuntimeError("upstream timeout"))
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert blocks[0]["text"]["text"] == "Something went wrong."
+    assert blocks[0]["text"]["text"] == "❌ *Something went wrong.*"
     assert not any("upstream timeout" in str(block) for block in blocks)
+
+
+async def test_end_unstarted_draws_the_error_card_for_a_queue_ending(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.post_initial()
+
+    await lc.end_unstarted(stopped=False, text="Something went wrong. Mention me to try again.")
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert blocks[0]["text"]["text"] == "❌ *Something went wrong. Mention me to try again.*", (
+        "a queue ending is the error card, not a plain section"
+    )
+    assert not _has_actions_block(blocks), "the dead Stop button goes"
 
 
 async def test_the_card_reuses_the_rid_bound_for_the_turn(fake_slack_web_client: Any) -> None:
@@ -1407,8 +1463,9 @@ async def test_terminal_success_flush_failure_repairs_status_message(
     )
     blocks = _last_update_blocks(fake_slack_web_client)
     assert "I couldn't send the full answer." in _block_text(blocks), (
-        "the repair must render a plain failure notice, not the live surface"
+        "the repair must render a failure notice, not the live surface"
     )
+    assert blocks[0]["text"]["text"].startswith("❌"), "the repair is the error card"
     assert not _has_actions_block(blocks), "the repair must not keep the dead cancel button"
     assert lc.final_ts is None, (
         "final_ts must stay unset — the watermark must not advance past an answer "
@@ -1535,8 +1592,9 @@ async def test_terminal_failure_flush_failure_repairs_status_message(
     )
     blocks = _last_update_blocks(fake_slack_web_client)
     assert "Something went wrong." in _block_text(blocks), (
-        "the repair must render a plain failure notice, not the live surface"
+        "the repair must render a failure notice, not the live surface"
     )
+    assert blocks[0]["text"]["text"].startswith("❌"), "the repair is the error card"
     assert not _has_actions_block(blocks), "the repair must not keep the dead cancel button"
     assert deregistered == ["1000000000.000001"], "deregister must still run in finally"
 
@@ -1795,40 +1853,36 @@ async def test_cancelled_turn_gets_no_feedback_buttons(fake_slack_web_client: An
     assert "feedback_vote:up" not in _action_ids(_last_update_blocks(fake_slack_web_client))
 
 
-async def test_terminal_success_names_the_failed_mcp_server_under_the_reply(
-    fake_slack_web_client: Any,
-) -> None:
-    """#79: the reply is posted with the dropped server named under it."""
+def _mcp_failure() -> Any:
     from daimon.core.turn.state import McpServerFailure
 
+    return McpServerFailure(
+        server_name="notion",
+        error_type="mcp_authentication_failed_error",
+        message="access forbidden",
+        retry_status="exhausted",
+    )
+
+
+async def test_failed_mcp_server_adds_no_text_to_the_reply(fake_slack_web_client: Any) -> None:
+    """The agent is told next turn; the reply is exactly the agent's text."""
     lc, *_ = _make_lifecycle(fake_slack_web_client)
     await lc.post_initial()
     await lc.on_sse_event(_thinking_event())
 
     state = TurnState(
         content=[TextBlock(kind="text", text="Here is the board.")],
-        mcp_failures=(
-            McpServerFailure(
-                server_name="notion",
-                error_type="mcp_authentication_failed_error",
-                message="access forbidden",
-                retry_status="exhausted",
-            ),
-        ),
+        mcp_failures=(_mcp_failure(),),
     )
     await lc.on_terminal_success(state)
 
     blocks = _last_update_blocks(fake_slack_web_client)
-    assert blocks[0]["text"].startswith("Here is the board."), "the reply itself comes first"
-    assert "notion" in blocks[0]["text"], "the dropped server is named under the reply"
+    assert blocks[0]["text"] == "Here is the board.", "no system line is appended to the reply"
 
 
-async def test_tool_only_turn_posts_the_failed_mcp_server_notice_on_its_own(
+async def test_tool_only_turn_posts_no_failed_mcp_server_notice(
     fake_slack_web_client: Any,
 ) -> None:
-    """#79: no reply to hang the notice under, so it is posted as its own message."""
-    from daimon.core.turn.state import McpServerFailure
-
     lc, *_ = _make_lifecycle(fake_slack_web_client)
     await lc.post_initial()
     await lc.on_sse_event(_thinking_event())
@@ -1838,20 +1892,11 @@ async def test_tool_only_turn_posts_the_failed_mcp_server_notice_on_its_own(
         content=[
             ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}),
         ],
-        mcp_failures=(
-            McpServerFailure(
-                server_name="notion",
-                error_type="mcp_authentication_failed_error",
-                message="access forbidden",
-                retry_status="exhausted",
-            ),
-        ),
+        mcp_failures=(_mcp_failure(),),
     )
     await lc.on_terminal_success(state)
 
-    post_calls = fake_slack_web_client.mock.requests.get(("POST", _POST_URL), [])
-    assert len(post_calls) == initial_posts + 1, "exactly one notice is posted"
-    assert "notion" in post_calls[-1].kwargs["json"]["text"], "the dropped server is named"
+    assert _post_count(fake_slack_web_client) == initial_posts, "no notice message is posted"
 
 
 async def test_completion_ping_is_fresh_and_only_mentions_requester(fake_slack_web_client):
@@ -1868,8 +1913,6 @@ async def test_completion_ping_is_fresh_and_only_mentions_requester(fake_slack_w
     assert "&lt;!channel&gt;" in body["blocks"][0]["text"]
     assert body["blocks"][0]["text"].startswith("<@")
     assert lifecycle.final_ts is not None
-    assert await lifecycle.prepend_revealed_answer("Recovered files.")
-    assert _last_update_blocks(fake)[0]["text"].startswith("Recovered files.")
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -1892,32 +1935,6 @@ async def test_reactions_target_trigger_not_thread_root(fake_slack_web_client, e
     assert any("name=eyes" in url and "reactions.add" in url for url in urls)
     assert any("name=white_check_mark" in url for url in urls) is enabled
     assert any("reactions.remove" in url for url in urls)
-
-
-@pytest.mark.parametrize("notify", [False, True])
-async def test_native_table_survives_late_continuity_notice(fake_slack_web_client, notify):
-    fake = fake_slack_web_client
-    lifecycle, _, _, _ = _make_lifecycle(fake, render_tables=True, notify_on_completion=notify)
-    await lifecycle.post_initial()
-    await lifecycle.on_terminal_success(
-        TurnState(
-            content=[
-                TextBlock(kind="text", text="| Name | Value |\n| --- | ---: |\n| Example | 42 |")
-            ]
-        )
-    )
-    original_blocks = (
-        fake.mock.requests[("POST", _POST_URL)][-1].kwargs["json"]["blocks"]
-        if notify
-        else _last_update_blocks(fake)
-    )
-    assert sum(block["type"] == "table" for block in original_blocks) == 1
-    assert lifecycle.final_ts is not None
-    assert await lifecycle.prepend_revealed_answer("Recovered files.")
-    blocks = _last_update_blocks(fake)
-    assert blocks[0]["type"] == "markdown"
-    table_blocks = [block for block in blocks if block["type"] == "table"]
-    assert len(table_blocks) == 1 and table_blocks[0]["rows"][1][1]["text"] == "42"
 
 
 @pytest.mark.parametrize("prefix", ["", "Before\n\n"])

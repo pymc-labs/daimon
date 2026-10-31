@@ -293,10 +293,15 @@
     {
       "operation": "send",
       "payload": {
-        "args": [
-          "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`."
-        ],
-        "kwargs": {},
+        "args": [],
+        "kwargs": {
+          "embed": {
+            "color": 15548997,
+            "description": "Your team has no Daimon credit yet.\n\nAn admin can add some with `/billing`.",
+            "flags": 0,
+            "type": "rich"
+          }
+        },
         "receiver": {
           "id": "100001"
         }

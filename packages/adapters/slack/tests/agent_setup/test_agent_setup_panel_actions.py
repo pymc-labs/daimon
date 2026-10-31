@@ -70,6 +70,7 @@ from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
@@ -759,7 +760,9 @@ async def test_coding_tools_action_when_unconfigured_posts_a_note_and_mints_noth
         ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
     )
     assert len(ephemerals) == 1, "the click is answered even when nothing can be minted"
-    assert "isn't set up" in ephemerals[0]["text"], "the note names the missing deployment setup"
+    assert "isn't set up" in shown_text(ephemerals[0]), (
+        "the note names the missing deployment setup"
+    )
 
 
 async def test_github_link_from_channel_setup_posts_to_channel(
@@ -911,7 +914,7 @@ async def test_operator_token_click_refuses_a_member(
         fake_slack_web_client.mock,
         ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
     )
-    assert [e["text"] for e in ephemerals] == [OPERATOR_TOKENS_NEED_ADMIN_MESSAGE]
+    assert [shown_text(e) for e in ephemerals] == [OPERATOR_TOKENS_NEED_ADMIN_MESSAGE]
     assert _sent(fake_slack_web_client.mock, _VIEWS_PUSH_KEY) == [], "no form is pushed"
     async with db_session_factory() as session:
         (event,) = await list_events(session, tenant_id=tenant_id)
@@ -939,7 +942,7 @@ async def test_rule_click_refuses_a_member(
         fake_slack_web_client.mock,
         ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
     )
-    assert [e["text"] for e in ephemerals] == [RULE_NEED_ADMIN_MESSAGE]
+    assert [shown_text(e) for e in ephemerals] == [RULE_NEED_ADMIN_MESSAGE]
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
     assert policy.channel_rules == {}, "no rule was set"
@@ -992,7 +995,7 @@ async def test_rule_clicks_refuse_a_shared_agent_then_keep_the_channel_to_a_copy
 
     def texts() -> list[str]:
         posted = _sent(mock, ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")))
-        return [e["text"] for e in posted]
+        return [shown_text(e) for e in posted]
 
     await handle_agent_setup_action(runtime, click(ACTION_RULE_READERS, "own"))
     await handle_agent_setup_action(runtime, click(ACTION_RULE_COPY))

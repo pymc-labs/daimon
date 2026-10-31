@@ -353,6 +353,8 @@ async def test_end_button_ends_once_and_reopening_replaces_the_live_conversation
     assert first.thread_id != second.thread_id, "one live setup conversation per chat"
     assert setup_panel.ALREADY_ENDED in json.dumps(stale)
     assert ENDED in json.dumps(ended) and remaining == []
+    assert '"attention"' in json.dumps(stale), "a refusal is red"
+    assert '"attention"' not in json.dumps(ended), "a confirmation is neutral"
 
 
 async def test_create_rejects_a_bad_name_then_creates_an_unrouted_agent(

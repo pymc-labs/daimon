@@ -110,9 +110,9 @@ async def run_add_skill_submission(
     agent_name, name = meta.agent_name, bundle.preview.name
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    async def tell(text: str) -> None:
+    async def tell(text: str, *, error: bool = True) -> None:
         await post_ephemeral(
-            client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text
+            client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text, error=error
         )
 
     is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
@@ -189,7 +189,9 @@ async def run_add_skill_submission(
         return
     log.info("slack.agent_setup.add_skill.added", agent_name=agent_name, action=result.action)
     done = "already had" if result.action == "unchanged" else "now has"
-    await tell(f"{escape_mrkdwn(agent_name)} {done} the skill *{escape_mrkdwn(name)}*.")
+    await tell(
+        f"{escape_mrkdwn(agent_name)} {done} the skill *{escape_mrkdwn(name)}*.", error=False
+    )
     if meta.root_view_id:
         details = await load_details_view(
             runtime,

@@ -369,7 +369,7 @@ async def test_interaction_check_unknown_row_sends_ephemeral_and_rejects() -> No
 
     assert allowed is False, "no row means the click must be rejected"
     interaction.response.send_message.assert_awaited_once()
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.response.send_message.call_args.kwargs["embed"].description
     assert message == NO_LONGER_VALID_MESSAGE, (
         "the refusal must be the shared card copy, so Discord and Slack cannot drift"
     )
@@ -383,7 +383,7 @@ async def test_interaction_check_wrong_requester_sends_ephemeral_and_rejects() -
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "a non-requester click must be rejected"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.response.send_message.call_args.kwargs["embed"].description
     assert message == WRONG_REQUESTER_MESSAGE, (
         "the refusal must be the shared card copy, so Discord and Slack cannot drift"
     )
@@ -402,7 +402,7 @@ async def test_interaction_check_expired_sends_ephemeral_and_rejects() -> None:
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "an expired row must be rejected"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.response.send_message.call_args.kwargs["embed"].description
     assert message == expired_message(
         kind="env",
         agent_name="research-bot",
@@ -420,7 +420,7 @@ async def test_interaction_check_already_used_sends_ephemeral_and_rejects() -> N
     allowed = await item.interaction_check(interaction)
 
     assert allowed is False, "an already-used row must be rejected"
-    message = interaction.response.send_message.call_args.args[0]
+    message = interaction.response.send_message.call_args.kwargs["embed"].description
     assert message == ALREADY_USED_MESSAGE, (
         "the refusal must be the shared card copy, so Discord and Slack cannot drift"
     )
@@ -530,7 +530,7 @@ async def test_expired_click_flips_the_card() -> None:
     card = _card_text(edit.call_args.kwargs["view"])
     assert EXPIRED_HEADLINE in card, "the card must now say the form expired"
     assert "research-bot" in card, "and name the agent, so the way back is on the card too"
-    refusal = interaction.response.send_message.call_args.args[0]
+    refusal = interaction.response.send_message.call_args.kwargs["embed"].description
     assert all(line in card for line in refusal.split("\n")), (
         "the card and the late clicker's refusal must say the same thing, line for line "
         f"(refusal={refusal!r}, card={card!r})"
@@ -552,9 +552,10 @@ async def test_wrong_requester_click_does_not_edit() -> None:
 
     assert allowed is False, "a non-requester click must be rejected"
     interaction.client.get_partial_messageable.assert_not_called()
-    assert interaction.response.send_message.call_args.args[0] == WRONG_REQUESTER_MESSAGE, (
-        "the wrong clicker is told whose request this is, and changes nothing"
-    )
+    assert (
+        interaction.response.send_message.call_args.kwargs["embed"].description
+        == WRONG_REQUESTER_MESSAGE
+    ), "the wrong clicker is told whose request this is, and changes nothing"
 
 
 # --- callback (mcp_oauth kind): a private sign-in link, no modal ------------------
@@ -662,7 +663,7 @@ async def test_callback_mcp_oauth_kind_refuses_the_click_when_the_deployment_has
         interaction
     )
 
-    text = interaction.followup.send.call_args.args[0]
+    text = interaction.followup.send.call_args.kwargs["embed"].description
     assert "isn't set up yet" in text, "the person learns the operator must finish setup"
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=token)

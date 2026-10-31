@@ -32,6 +32,7 @@ from daimon.adapters.discord.agent_setup.navigation import STALE_PANEL_MESSAGE, 
 from daimon.adapters.discord.agent_setup.state import DenyingRole, PanelState, WebhookBlock
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.roster import Page, RosterAgent, paginate
@@ -307,7 +308,7 @@ class RosterView(PanelViewBase):
 
         if interaction.guild_id != self.state.guild_id or not is_guild_admin(interaction):  # pyright: ignore[reportArgumentType]
             await interaction.response.send_message(
-                "Only a server admin can connect GitHub.", ephemeral=True
+                embed=build_notice_embed("Only a server admin can connect GitHub."), ephemeral=True
             )
             return
         await interaction.response.defer()
@@ -337,7 +338,9 @@ class RosterView(PanelViewBase):
         from daimon.adapters.discord.agent_setup.details_view import DetailsView
 
         if self._is_superseded():
-            await interaction.response.send_message(STALE_PANEL_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(STALE_PANEL_MESSAGE), ephemeral=True
+            )
             return
         self.state.details_request_seq += 1
         request_seq = self.state.details_request_seq
@@ -354,7 +357,7 @@ class RosterView(PanelViewBase):
                 "agent_setup.details.failed", agent_name=agent.name, request_id=request_id
             )
             await interaction.followup.send(
-                render_error(error, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True
             )
             return
         # Multiple clicks on one still-live roster can complete out of order.
@@ -405,7 +408,7 @@ class RosterView(PanelViewBase):
             request_id = generate_request_id()
             log.exception("agent_setup.routing.failed", request_id=request_id)
             await interaction.followup.send(
-                render_error(error, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True
             )
             return
         await self.swap_to(interaction, routing)

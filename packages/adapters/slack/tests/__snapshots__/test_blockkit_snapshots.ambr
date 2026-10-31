@@ -208,7 +208,7 @@
   list([
     dict({
       'text': dict({
-        'text': 'Something went wrong.',
+        'text': '❌ *Something went wrong.*',
         'type': 'mrkdwn',
       }),
       'type': 'section',

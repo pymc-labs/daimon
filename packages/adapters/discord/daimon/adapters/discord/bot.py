@@ -52,6 +52,7 @@ from daimon.adapters.discord.lifecycle import (
     edit_recovered_card,
 )
 from daimon.adapters.discord.names import remember_guild_user
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.post_transport import (
@@ -111,8 +112,6 @@ from daimon.core.continuity.messages import (
     render_access_changed_try_again,
     render_current_work_must_finish,
     render_preparation_failed,
-    render_replacement_summary,
-    render_unexpected_loss,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
 from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
@@ -396,7 +395,9 @@ class _ThreadOpenFailed(Exception):
 async def _explain_thread_open_failure(message: discord.Message) -> None:
     """The one reply a mention gets when its thread could not be created."""
     try:
-        await message.reply(THREAD_OPEN_FAILED_NOTICE, mention_author=False)
+        await message.reply(
+            embed=build_notice_embed(THREAD_OPEN_FAILED_NOTICE), mention_author=False
+        )
     except discord.HTTPException as exc:
         log.warning("discord.thread_open_failed_notice_failed", error=str(exc))
 
@@ -2772,7 +2773,11 @@ class DaimonBot(commands.Bot):
             )
         dm_sent = False
         try:
-            await message.author.send(protected_channel_notice(protection, channel_id=channel_id))
+            await message.author.send(
+                embed=build_notice_embed(
+                    protected_channel_notice(protection, channel_id=channel_id)
+                )
+            )
             dm_sent = True
         except Exception as exc:  # DMs closed, or the author is a bot
             log.info(
@@ -3068,17 +3073,23 @@ class DaimonBot(commands.Bot):
             claimed_message = True
 
             if needs_provisioning:
-                await message.channel.send(_setting_up_message(bot_display_name))
+                await message.channel.send(
+                    embed=build_notice_embed(_setting_up_message(bot_display_name))
+                )
                 return
             if tr.provision_status == "failed":
                 # Self-heal: re-seed if idle (in-flight guard). NEVER show "failed" to the user.
                 self._spawn(
                     self._seed_tenant_defaults(tenant_id=tr.id, guild=guild, was_ready=False)
                 )
-                await message.channel.send(_setting_up_message(bot_display_name))
+                await message.channel.send(
+                    embed=build_notice_embed(_setting_up_message(bot_display_name))
+                )
                 return
             if tr.provision_status == "pending":
-                await message.channel.send(_setting_up_message(bot_display_name))
+                await message.channel.send(
+                    embed=build_notice_embed(_setting_up_message(bot_display_name))
+                )
                 return
             # Only 'ready' proceeds.
 
@@ -3148,7 +3159,7 @@ class DaimonBot(commands.Bot):
                         cap=cap,
                         reason="queue_full",
                     )
-                    await message.channel.send(TENANT_CAP_NOTICE)
+                    await message.channel.send(embed=build_notice_embed(TENANT_CAP_NOTICE))
                     return
                 log.info(
                     "turn.skipped.global_concurrency_shed",
@@ -3157,7 +3168,7 @@ class DaimonBot(commands.Bot):
                     channel_id=str(thread_id),
                     reason="queue_full",
                 )
-                await message.channel.send(GLOBAL_CAP_NOTICE)
+                await message.channel.send(embed=build_notice_embed(GLOBAL_CAP_NOTICE))
                 return
 
             with (
@@ -3282,12 +3293,16 @@ class DaimonBot(commands.Bot):
             "already_stopping": ALREADY_STOPPING,
             "not_allowed": STOP_NOT_ALLOWED,
         }[outcome]
-        await self._reply_quietly(message, reply)
+        await self._reply_quietly(message, reply, neutral=outcome != "not_allowed")
         return True
 
-    async def _reply_quietly(self, message: discord.Message, text: str) -> None:
+    async def _reply_quietly(
+        self, message: discord.Message, text: str, *, neutral: bool = False
+    ) -> None:
         try:
-            await message.reply(text, mention_author=False)
+            await message.reply(
+                embed=build_notice_embed(text, neutral=neutral), mention_author=False
+            )
         except discord.HTTPException as exc:
             log.warning("turn.stop_typed_reply_failed", message_id=str(message.id), error=str(exc))
 
@@ -3414,7 +3429,7 @@ class DaimonBot(commands.Bot):
             return
         rid = generate_request_id()
         try:
-            await message.channel.send(render_error(exc, request_id=rid))
+            await message.channel.send(embed=build_notice_embed(render_error(exc, request_id=rid)))
         except discord.HTTPException:
             log.exception("mention_prologue_error_send_failed", guild_id=guild_id)
 
@@ -3632,9 +3647,11 @@ class DaimonBot(commands.Bot):
                 builtin=True,
             )
             if isinstance(target, discord.Thread):
-                await safe_thread_send(target, error_text, transport=transport)
+                await safe_thread_send(
+                    target, embed=build_notice_embed(error_text), transport=transport
+                )
             else:
-                await transport.send(error_text)
+                await transport.send(embed=build_notice_embed(error_text))
         except Exception as post_exc:  # the error post is the last resort; never raise from it
             if thread is not None and (stop := stop_reason_of(post_exc, write="send")) is not None:
                 self._thread_stops.signal(thread.id, reason=stop[0], code=stop[1], phase="failure")
@@ -3712,7 +3729,7 @@ class DaimonBot(commands.Bot):
             if not isinstance(channel, discord.abc.Messageable):
                 return True
             await channel.send(
-                "Stopped waiting for GitHub access. Ask again any time.",
+                embed=build_notice_embed("Stopped waiting for GitHub access. Ask again any time."),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return True
@@ -3745,7 +3762,7 @@ class DaimonBot(commands.Bot):
                     client.post(
                         f"https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}",
                         json={
-                            "content": notice.text,
+                            "embeds": [build_notice_embed(notice.text, neutral=True).to_dict()],
                             "flags": 64,
                             "allowed_mentions": {"parse": []},
                         },
@@ -4088,7 +4105,7 @@ class DaimonBot(commands.Bot):
             if current.message_ref is not None:
                 await current.end_card(text)
             else:
-                await transport.send(text)
+                await transport.send(embed=build_notice_embed(text))
             shown_on = current.message_ref
             if shown_on is not None and str(shown_on.id) != current.card_message_id:
                 return  # an earlier card still shows its Stop button; recovery retires it
@@ -4738,7 +4755,7 @@ class DaimonBot(commands.Bot):
             if unprompted:
                 return  # nobody asked; a notice per quiet burst would spam the thread
             target = thread or message.channel
-            await target.send(NOT_SET_UP_NOTICE)
+            await target.send(embed=build_notice_embed(NOT_SET_UP_NOTICE))
             return
         except MAResolverMissError as err:
             log.warning(
@@ -4750,7 +4767,7 @@ class DaimonBot(commands.Bot):
             if unprompted:
                 return
             target = thread or message.channel
-            await target.send(SETUP_OUT_OF_DATE_NOTICE)
+            await target.send(embed=build_notice_embed(SETUP_OUT_OF_DATE_NOTICE))
             return
         except AdmissionDenied as err:
             if unprompted:
@@ -4826,8 +4843,13 @@ class DaimonBot(commands.Bot):
                 )
             if err.reason != "writers_none":
                 await target.send(
-                    admission_refusal_message(
-                        err.reason, self.runtime.settings, cause=err.cause, provider=err.provider
+                    embed=build_notice_embed(
+                        admission_refusal_message(
+                            err.reason,
+                            self.runtime.settings,
+                            cause=err.cause,
+                            provider=err.provider,
+                        )
                     )
                 )
             return
@@ -5062,7 +5084,7 @@ class DaimonBot(commands.Bot):
                 # when the card itself now shows the error.
                 await current.end_card(text)
             else:
-                await turn_send(text)
+                await turn_send(embed=build_notice_embed(text))
             shown_on = current.message_ref
             if shown_on is not None and str(shown_on.id) != current.card_message_id:
                 # An earlier edit replaced the card; the original may still show
@@ -5110,17 +5132,20 @@ class DaimonBot(commands.Bot):
                 self._spawn(_unmark_queued(added))
         if slot != "started":
             ended = {
-                "cancelled": "Stopped.\nSend a message to start again.",
+                "cancelled": "Send a message to start again.",
                 "timed_out": QUEUE_TIMED_OUT_TEXT,
                 "balance_depleted": admission_refusal_message(
                     "balance_depleted", self.runtime.settings
                 ),
                 "queue_full": TENANT_CAP_NOTICE,
             }[slot]
+            ended_embed = build_notice_embed(
+                ended, title="Stopped." if slot == "cancelled" else None
+            )
             if lifecycle.message_ref is not None:
-                await lifecycle.edit_card(content=ended, embed=None, view=None)
+                await lifecycle.edit_card(content=None, embed=ended_embed, view=None)
             else:
-                await turn_send(ended)
+                await turn_send(embed=ended_embed)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -5248,11 +5273,11 @@ class DaimonBot(commands.Bot):
             # Nothing was attempted -- bind_session did not run the turn
             # against a configuration nobody asked for, so no turn to render
             # here either; the copy says what was preserved and asks for a retry.
-            failure_text = render_preparation_failed(agent.name)
+            failure_embed = build_notice_embed(render_preparation_failed(agent.name))
             if lifecycle.message_ref is not None:
-                await lifecycle.edit_card(content=failure_text, embed=None, view=None)
+                await lifecycle.edit_card(content=None, embed=failure_embed, view=None)
             else:
-                await turn_send(failure_text)
+                await turn_send(embed=failure_embed)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -5269,15 +5294,17 @@ class DaimonBot(commands.Bot):
             # finishes first and the switch applies to their next one. A seal
             # that landed while the turn was prepared defers it the same way;
             # the next message is prepared read-only, so it says to send again.
-            busy_text = (
+            sealed = "seal" in busy.pending_reasons
+            busy_embed = build_notice_embed(
                 render_access_changed_try_again()
-                if "seal" in busy.pending_reasons
-                else render_current_work_must_finish(agent.name, handoff=True)
+                if sealed
+                else render_current_work_must_finish(agent.name, handoff=True),
+                neutral=not sealed,
             )
             if lifecycle.message_ref is not None:
-                await lifecycle.edit_card(content=busy_text, embed=None, view=None)
+                await lifecycle.edit_card(content=None, embed=busy_embed, view=None)
             else:
-                await turn_send(busy_text)
+                await turn_send(embed=busy_embed)
             await retire_terminal_turn_card(
                 self.runtime.sessionmaker,
                 intent_id=turn_card_intent.id,
@@ -5293,47 +5320,11 @@ class DaimonBot(commands.Bot):
             reused=prepared.reused,
         )
         watch.session_id = prepared.ma_session_id
-        # A planned transition the caller didn't necessarily ask to see this
-        # turn: say what happened to the workspace BEFORE the answer, so a
-        # replacement is never discovered only by its side effects.
-        # `prepared.continuity` is the bind's OWN decision, taken before the
-        # turn runs -- it can never be "replaced_after_loss" (that state only
-        # exists on the post-turn `RunOutcome`, set when `run_prepared_turn`'s
-        # recovery cycle recreates the session mid-call). That notice is
-        # posted after the turn instead, once the outcome is known.
-        replacement_summary: str | None = None
-        if (
-            prepared.continuity.announces_replacement()
-            and prepared.continuity.transfer_kind is not None
-        ):
-            # Not a separate message: the answer is an in-place edit of the
-            # embed posted at mention time, so a summary sent at any point
-            # after that lands BELOW the answer it explains ("the file
-            # vanished" above "here is why"). It becomes the answer's first
-            # paragraph instead. The fallback after the turn covers an answer
-            # that never arrives to carry it.
-            #
-            # A `None` transfer_kind here means a fresh start (no prior
-            # session to summarize a transfer from) -- that path already
-            # announces itself elsewhere, so no prefix is rendered.
-            replacement_summary = render_replacement_summary(prepared.continuity.transfer_kind, [])
-            lifecycle.answer_prefix = replacement_summary
-        if prepared.continuity.state == "replaced" and prepared.mapping_id is not None:
-            from daimon.core.stores.thread_sessions import github_key_restart_line
-
-            async with self.runtime.sessionmaker() as notice_session:
-                key_restart = await github_key_restart_line(
-                    notice_session, mapping_id=prepared.mapping_id
-                )
-            if key_restart is not None:
-                replacement_summary = key_restart
-                lifecycle.answer_prefix = key_restart
+        # What happened to the workspace is the agent's to say, from the turn controls.
         session_state = (
             None
             if prepared.continuity.state == "continued"
-            else SessionState(
-                state=prepared.continuity.state, applied=prepared.continuity.applied, lost=()
-            )
+            else prepared.continuity.session_state()
         )
 
         # Flag the turn as in flight. The render loop lives in THIS process, so
@@ -5490,13 +5481,6 @@ class DaimonBot(commands.Bot):
         if synthetic_prefix:
             user_message = synthetic_prefix + "\n" + user_message
 
-        if images_skipped:
-            await turn_send(
-                "Some images couldn't be inlined — I've linked them for the agent to "
-                "fetch instead: "
-                + ", ".join(f"`{att.filename}` ({r})" for att, r in images_skipped)
-            )
-
         # --- Run the turn (run_prepared_turn owns the driver
         # call and the one-shot dead-session recovery cycle). ---
 
@@ -5596,10 +5580,6 @@ class DaimonBot(commands.Bot):
                     thread, msg, turn_card_intent_id=turn_card_intent.id
                 ),
             )
-            # The replacement summary belongs to the turn, not to the lifecycle
-            # object that happens to render it -- a recovery cycle swaps the
-            # lifecycle and would otherwise drop it.
-            new_lifecycle.answer_prefix = lifecycle.answer_prefix
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
@@ -5723,29 +5703,6 @@ class DaimonBot(commands.Bot):
         mapping_id = outcome.mapping_id
         final_lifecycle = lifecycle_holder[0]
 
-        # The recovery cycle inside run_prepared_turn only learns a session was
-        # lost mid-call, after the turn has already run -- so unlike the
-        # planned-replacement summary above, this notice can only be posted
-        # here, once `outcome.continuity` is known. Posted regardless of
-        # whether the recovered turn itself then answered or errored: the
-        # person needs to know the workspace was lost either way.
-        if outcome.continuity.state == "replaced_after_loss":
-            loss_kind: Literal["transcript", "history"] = (
-                "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
-            )
-            loss_notice = render_unexpected_loss(loss_kind)
-            # Edited in above the answer rather than sent under it, for the
-            # same ordering reason as the planned summary above. Falls back to
-            # a message when there is no answer to sit above (a tool-only or
-            # failed turn) or it will not fit.
-            if not await final_lifecycle.prepend_revealed_answer(loss_notice):
-                await turn_send(loss_notice)
-        if replacement_summary is not None and not final_lifecycle.answer_prefix_applied:
-            # The turn produced no answer to carry the summary (tool-only,
-            # cancelled, or failed). The person still has to be told what the
-            # replacement carried across, so it goes out on its own.
-            await turn_send(replacement_summary)
-
         if state.error is not None:
             log.warning(
                 "turn.error",
@@ -5779,7 +5736,12 @@ class DaimonBot(commands.Bot):
             # -- said only after the answer, so it never reads as a caveat on
             # work that already finished.
             if prepared.continuity.pending:
-                await turn_send(render_current_work_must_finish(agent.name, handoff=False))
+                await turn_send(
+                    embed=build_notice_embed(
+                        render_current_work_must_finish(agent.name, handoff=False),
+                        neutral=True,
+                    )
+                )
             # Any task handed to another agent in THIS thread, with work to
             # continue, gets its first turn dispatched now -- still inside this
             # turn's concurrency guard, so nothing else can land in the thread

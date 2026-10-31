@@ -76,6 +76,17 @@ def _json(value):
     return value
 
 
+def _refusal(*args, **kwargs):
+    """A refusal's words and delivery; its words moved from plain text into a card."""
+    words = [*args, *(kwargs.pop(key) for key in ("text", "content") if key in kwargs)]
+    embed = kwargs.pop("embed", None)
+    words += [embed.description] if embed is not None else []
+    words += [card["fallback"] for card in kwargs.pop("attachments", None) or []]
+    for styling in ("mrkdwn", "parse"):
+        kwargs.pop(styling, None)
+    return ("refusal", "\n".join(words), {k: _json(v) for k, v in kwargs.items()})
+
+
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize(
     "scenario",
@@ -117,7 +128,7 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
             trace.append(("edit", {k: _json(v) for k, v in kwargs.items()}))
 
         async def ephemeral(**kwargs):
-            trace.append(("refusal", {k: _json(v) for k, v in kwargs.items()}))
+            trace.append(_refusal(**kwargs))
 
         if platform == "discord":
             hook = implementation.discord_confirmation_hook(SimpleNamespace(send=send))
@@ -165,9 +176,7 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
             if platform == "discord":
                 response = SimpleNamespace(
                     send_message=AsyncMock(
-                        side_effect=lambda text, **kw: trace.append(
-                            ("refusal", text, {k: _json(v) for k, v in kw.items()})
-                        )
+                        side_effect=lambda *a, **kw: trace.append(_refusal(*a, **kw))
                     ),
                     edit_message=edit,
                 )
@@ -276,16 +285,16 @@ async def test_confirmation_base_and_new(platform, scenario, monkeypatch):
             edits = [item[1] for item in trace if item[0] == "edit"]
             assert len(edits) == 1 and edits[0]["text"].startswith("Approved")
         if scenario == "stranger":
-            refusals = [item[1] for item in trace if item[0] == "refusal"]
+            refusals = [item[2] for item in trace if item[0] == "refusal"]
             assert len(refusals) == 1 and refusals[0]["thread_ts"] == "1699.9"
 
     if platform == "slack" and scenario in ("stranger", "lost"):
         # Main 8e4280f0518c3f669a715dab20951a24eaaac43c threads refusal replies.
         # Update only that cited field in the two pre-main expected rows.
         assert expected[1][0] == actual[1][0] == "refusal"
-        assert "thread_ts" not in expected[1][1]
-        assert actual[1][1]["thread_ts"] == "1699.9"
-        expected[1][1]["thread_ts"] = "1699.9"
+        assert "thread_ts" not in expected[1][2]
+        assert actual[1][2]["thread_ts"] == "1699.9"
+        expected[1][2]["thread_ts"] = "1699.9"
     assert expected == actual
 
 
@@ -353,7 +362,9 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             return is_admin or row.created_by_user_id == user_id
 
         client = SimpleNamespace(
-            chat_postEphemeral=AsyncMock(side_effect=lambda **kw: trace.append(("refusal", kw))),
+            chat_postEphemeral=AsyncMock(
+                side_effect=lambda *a, **kw: trace.append(_refusal(*a, **kw))
+            ),
             views_update=AsyncMock(side_effect=lambda **kw: trace.append(("render", kw))),
         )
         scope = {
@@ -440,4 +451,11 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             trace.append("error")
         return trace
 
-    assert await run(old) == await run(module)
+    expected, actual = await run(old), await run(module)
+    if platform == "discord":
+        # Main e7a70df78 reworded these refusals; compare where and how they go.
+        expected, actual = (
+            [("refusal", "", i[2]) if isinstance(i, tuple) and i[0] == "refusal" else i for i in t]
+            for t in (expected, actual)
+        )
+    assert expected == actual

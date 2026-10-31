@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from daimon.adapters.discord import layout
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.routines_panel.state import derive_state, state_label
 from daimon.core.stores.domain import RoutineRow
 
@@ -66,7 +67,7 @@ class ViewLastOutputSubView(discord.ui.LayoutView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]  # base uses broader Interaction[Client] type
         if interaction.user.id != self.allowed_user_id:
             await interaction.response.send_message(
-                "Only the person who opened this can use it.",
+                embed=build_notice_embed("Only the person who opened this can use it."),
                 ephemeral=True,
             )
             return False

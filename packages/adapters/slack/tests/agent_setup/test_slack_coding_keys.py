@@ -21,6 +21,7 @@ from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
 from daimon.core.stores.agent_owners import set_owner
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -158,7 +159,7 @@ async def test_another_member_cannot_open_the_list(world: _World) -> None:
     view, ephemerals = await world.press(ACTION_CODING_KEYS, user_id=_MEMBER, is_admin=False)
 
     assert view is None
-    assert [e["text"] for e in ephemerals] == [coding_keys.CODING_KEYS_REFUSAL]
+    assert [shown_text(e) for e in ephemerals] == [coding_keys.CODING_KEYS_REFUSAL]
 
 
 async def test_an_owner_revokes_their_own_key_and_the_list_refreshes(world: _World) -> None:

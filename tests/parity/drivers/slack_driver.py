@@ -189,8 +189,12 @@ def _extract_posted_texts(mock: AioResponsesMock) -> list[str]:
             req_kwargs = cast(dict[str, Any], req.kwargs)  # pyright: ignore[reportUnknownMemberType]
             body = cast(dict[str, Any], req_kwargs.get("json") or {})
             text = cast(Any, body.get("text"))
-            if isinstance(text, str):
+            if isinstance(text, str) and text:
                 posted.append(text)
+            for attachment in cast(list[dict[str, Any]], body.get("attachments") or []):
+                fallback = attachment.get("fallback")
+                if isinstance(fallback, str):
+                    posted.append(fallback)
     return posted
 
 
@@ -742,7 +746,8 @@ class SlackDriver:
             return None
         if not refusals:
             raise AssertionError("the click neither opened a form nor said why not")
-        return str(refusals[0].get("text") or "")
+        attachments = refusals[0].get("attachments") or [{}]
+        return str(attachments[0].get("fallback") or refusals[0].get("text") or "")
 
     async def submit_private_input(
         self,

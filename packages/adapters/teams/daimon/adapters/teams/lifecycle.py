@@ -42,7 +42,6 @@ from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.teams_markdown import has_math
 from daimon.core.tenant_balance import debit_amount
-from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
@@ -53,7 +52,7 @@ from daimon.core.turn.state import (
     extract_sealed_responses,
 )
 from daimon.core.turn.status_lines import format_summary
-from daimon.core.turn.termination import termination_reason
+from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
 from microsoft_teams.api import Account, Attachment, MessageActivityInput, SentActivity
 from microsoft_teams.cards import Action, AdaptiveCard, ExecuteAction
@@ -110,7 +109,6 @@ def bound_request_id() -> str:
 
 
 # (timed out, failed) events per kind of edit to a shown answer.
-_PREFIX_EVENTS = ("teams.turn.answer_prefix_timed_out", "teams.turn.answer_prefix_failed")
 _SUFFIX_EVENTS = ("teams.turn.answer_suffix_timed_out", "teams.turn.answer_suffix_failed")
 
 
@@ -244,16 +242,13 @@ class TeamsTurnLifecycle:
         # The card no longer shows a live turn, so the boot sweep must not
         # touch it: its card intent can retire.
         self.card_closed = False
-        # A continuity notice that belongs above the answer it explains.
-        self.answer_prefix: str | None = None
-        self.answer_prefix_applied = False
         # The first answer message: the card itself unless a ping posted it fresh.
         self._answer_id: str | None = None
         # Each answer message's text as on screen, for later edits.
         self._shown: dict[str, str] = {}
         # Shown messages that are notice cards, not answers: edited as cards,
         # with their buttons, whether they carry 👍/👎, and their summary line.
-        self._notices: dict[str, tuple[tuple[Action, ...], str | None]] = {}
+        self._notices: dict[str, tuple[tuple[Action, ...], str | None, bool]] = {}
         # Previews edited into an answer message as markdown images, kept apart
         # from `_shown` (TEAMS_LIMIT counts the text alone): every later edit
         # sends them again.
@@ -429,9 +424,17 @@ class TeamsTurnLifecycle:
         return self._clock() - self._tool_done_at
 
     async def close_with_notice(
-        self, text: str, *, actions: Sequence[ExecuteAction] = (), summary: str | None = None
+        self,
+        text: str,
+        *,
+        actions: Sequence[ExecuteAction] = (),
+        summary: str | None = None,
+        error: bool = True,
     ) -> None:
-        """Terminal render for adapter-side bailouts. Never raises on a send error."""
+        """Terminal render for adapter-side bailouts. Never raises on a send error.
+
+        `error=False` is for information, such as a change that waits for the next message.
+        """
         if self._terminal:
             return
         self._terminal = True
@@ -440,7 +443,7 @@ class TeamsTurnLifecycle:
             log.info("teams.turn.unprompted_notice_dropped")
             return
         try:
-            await self._close(text, actions=tuple(actions), summary=summary)
+            await self._close(text, actions=tuple(actions), summary=summary, error=error)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.notice_failed", exc_info=True)
 
@@ -450,14 +453,15 @@ class TeamsTurnLifecycle:
         *,
         actions: tuple[Action, ...] = (),
         summary: str | None = None,
+        error: bool = True,
     ) -> None:
         """Replace the card with a final notice; an edit that timed out is sent once more."""
-        notice = card.notice_card(text, actions=actions, summary=summary)
+        notice = card.notice_card(text, actions=actions, summary=summary, error=error)
         self._message_id = message_id = await self._edit(notice, self._message_id)
         self.final_message_id = self._answer_id = message_id
         self.card_closed = True
         # A tool-only or failed turn's notice still carries what is edited into it.
-        self._notices[message_id] = (actions, summary)
+        self._notices[message_id] = (actions, summary, error)
         self._shown[message_id] = text
 
     async def _summary(self, state: TurnState, *, named_above: bool = False) -> str:
@@ -524,30 +528,26 @@ class TeamsTurnLifecycle:
         self._terminal = True
         await self._settle_stopping()
         answer = self._answer_text(state)
-        degraded = render_degraded_notice(state.mcp_failures)
+        # A stopped turn ends on the red Stopped card, with no vote buttons.
+        cancelled = state.termination == TerminationReason.INTERRUPTED
         replaced = False
         try:
             if not answer and self._unprompted:
                 return  # an unprompted turn with nothing to say leaves the thread as it was
             if not answer:
-                tool_only = any(isinstance(b, ToolUseBlock) for b in state.content)
+                tool_only = not cancelled and any(
+                    isinstance(b, ToolUseBlock) for b in state.content
+                )
                 text = card.TOOLS_DONE_NOTICE if tool_only else card.CANCELLED_NOTICE
-                if tool_only and degraded is not None:
-                    text = f"{degraded}\n\n{text}"
                 # As on Slack: a cancelled turn carries no controls, a tool-only one does.
                 # A tool-only turn's result is an answer too: it can be voted on.
                 actions = (*card.vote_actions(),) if tool_only else ()
                 if tool_only and self._ask_human:
                     actions = (*actions, card.ask_human_action())
                 summary = await self._summary(state)
-                await self._close(text, actions=actions, summary=summary)
+                await self._close(text, actions=actions, summary=summary, error=not tool_only)
                 self._answered = tool_only
                 return
-            if self.answer_prefix is not None:
-                answer = f"{self.answer_prefix}\n\n{answer}"
-                self.answer_prefix_applied = True
-            if degraded is not None:
-                answer = f"{answer}\n\n{degraded}"
             if self._agent_name_prefix is not None:
                 answer = f"**{self._agent_name_prefix}**\n\n{answer}"
             chunks = split_fenced(answer, card.TEAMS_LIMIT)
@@ -569,7 +569,9 @@ class TeamsTurnLifecycle:
             self.final_message_id = current
             if fresh:  # retire before the best-effort controls so a lost post can't strand it
                 await self._retire_card()
-            await self._post_controls(state, hold=self._hold_controls and _may_have_outputs(state))
+            await self._post_controls(
+                state, hold=self._hold_controls and _may_have_outputs(state), cancelled=cancelled
+            )
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
@@ -594,14 +596,21 @@ class TeamsTurnLifecycle:
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
 
-    async def _post_controls(self, state: TurnState, *, hold: bool = False) -> None:
+    async def _post_controls(
+        self, state: TurnState, *, hold: bool = False, cancelled: bool = False
+    ) -> None:
         """The summary line, Ask a human and 👍/👎 below the answer; best effort, it landed.
 
         `hold` keeps them for `release_controls`, timed as the turn ended.
+        A stopped turn gets the red Stopped card with the summary, and no votes.
         """
         named = self._agent_name_prefix is not None
         summary = await self._summary(state, named_above=named)
-        controls = card.controls_card(summary, ask_human=self._ask_human)
+        controls = (
+            card.notice_card(card.CANCELLED_NOTICE, summary=summary)
+            if cancelled
+            else card.controls_card(summary, ask_human=self._ask_human)
+        )
         if hold:
             self._held_controls = controls
         else:
@@ -622,23 +631,11 @@ class TeamsTurnLifecycle:
     async def _retire_card(self) -> None:
         """Point the card at the answer posted below it; best effort, the answer landed."""
         try:
-            await self._edit(card.notice_card(card.ANSWERED_BELOW), self._message_id)
+            await self._edit(card.notice_card(card.ANSWERED_BELOW, error=False), self._message_id)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.card_retire_failed", exc_info=True)
         # Closed either way: the boot sweep must not mark an answered turn interrupted.
         self.card_closed = True
-
-    async def prepend_revealed_answer(self, notice: str) -> bool:
-        """Edit `notice` in above the answer on screen; False if it cannot go there.
-
-        An unexpected workspace loss is known only after the answer replaced
-        the card, and a message sent then lands below the answer it explains.
-        False when no answer was shown, the notice would overflow the first
-        message, or the edit fails; the caller then sends it on its own.
-        """
-        return await self._amend(
-            self._answer_id, lambda text: f"{notice}\n\n{text}", _PREFIX_EVENTS
-        )
 
     async def append_to_answer(
         self, text: str | None = None, attachments: Sequence[Attachment] = ()
@@ -681,8 +678,8 @@ class TeamsTurnLifecycle:
             if len(attached) > MAX_PREVIEWS:
                 return False  # image_preview's size budget is MAX_PREVIEWS per message.
             if message_id in self._notices:
-                actions, summary = self._notices[message_id]
-                rendered = card.notice_card(updated, actions=actions, summary=summary)
+                actions, summary, error = self._notices[message_id]
+                rendered = card.notice_card(updated, actions=actions, summary=summary, error=error)
             else:
                 rendered = card.answer_message(updated, mention=mention, images=attached)
             try:

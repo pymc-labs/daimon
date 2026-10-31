@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.posted_controls import switch_card as module
 from daimon.core.switch_cards import SwitchCardPress, card_custom_id
 
@@ -46,7 +47,9 @@ async def test_someone_elses_press_is_answered_privately_and_the_card_stays(monk
     monkeypatch.setattr(module, "press_switch_card", AsyncMock(return_value=None))
     interaction = _interaction()
     await _control().callback(interaction)
-    interaction.followup.send.assert_awaited_once_with(module.NOT_YOURS, ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(
+        embed=build_notice_embed(module.NOT_YOURS), ephemeral=True
+    )
     interaction.message.edit.assert_not_awaited()
 
 
@@ -69,7 +72,9 @@ async def test_a_failed_press_is_reported_privately(monkeypatch):
     monkeypatch.setattr(module, "press_switch_card", AsyncMock(side_effect=RuntimeError("boom")))
     interaction = _interaction()
     await _control().callback(interaction)
-    interaction.followup.send.assert_awaited_once_with(module.UNAVAILABLE, ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(
+        embed=build_notice_embed(module.UNAVAILABLE), ephemeral=True
+    )
 
 
 async def test_a_press_while_a_confirm_is_applying_answers_privately(monkeypatch):
@@ -77,5 +82,7 @@ async def test_a_press_while_a_confirm_is_applying_answers_privately(monkeypatch
     monkeypatch.setattr(module, "press_switch_card", AsyncMock(return_value=press))
     interaction = _interaction()
     await _control("cancel").callback(interaction)
-    interaction.followup.send.assert_awaited_once_with(press.text, ephemeral=True)
+    interaction.followup.send.assert_awaited_once_with(
+        embed=build_notice_embed(press.text, neutral=True), ephemeral=True
+    )
     interaction.message.edit.assert_not_awaited()

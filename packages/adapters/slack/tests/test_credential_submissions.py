@@ -66,6 +66,7 @@ from mux.testing.drivers.anthropic.ma import list_response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .conftest import shown_text
 from .credential_helpers import (
     _CHANNEL_ID,
     _CHAT_UPDATE_URL,
@@ -1568,7 +1569,7 @@ async def test_env_submission_member_cannot_store_a_non_secret_name(
     assert rows == [], f"a member must not store {target}"
     assert request_row is not None and request_row.used_at is None, "a refusal spends nothing"
     ephemeral = fake_slack_web_client.mock.requests[("POST", _EPHEMERAL_URL)][-1].kwargs["json"]
-    assert target in ephemeral["text"], "the refusal names the key"
+    assert target in shown_text(ephemeral), "the refusal names the key"
     assert "private-value" not in json.dumps(ephemeral), "the value never reaches a message"
 
 

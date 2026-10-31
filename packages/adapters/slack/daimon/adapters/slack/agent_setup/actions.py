@@ -111,7 +111,7 @@ from daimon.adapters.slack.agent_setup.state import (
     encode_panel_metadata,
 )
 from daimon.adapters.slack.credential_submissions import post_ephemeral
-from daimon.adapters.slack.errors import render_error
+from daimon.adapters.slack.errors import render_error_notice
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.modal_limits import fit_title
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
@@ -847,6 +847,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="Model provider wasn't changed. Ask a workspace admin to open the panel.",
+                error=True,
             )
             return
         if action_id == panel_views.ACTION_BACKEND_CANCEL:
@@ -873,6 +874,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="That preview is no longer available. Choose a model provider again.",
+                error=True,
             )
             return
         if action_id == panel_views.ACTION_BACKEND_SELECT:
@@ -902,6 +904,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="That preview isn't available. Nothing was changed; choose again.",
+                error=True,
             )
             return
         preview = selection.preview
@@ -969,7 +972,11 @@ async def _dispatch_panel_action(
                 agent_name=name,
             )
             await post_ephemeral(
-                client, channel_id=meta.channel_id or user_id, user_id=user_id, text=str(exc)
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text=str(exc),
+                error=True,
             )
         else:
             await record_panel_write(
@@ -1047,6 +1054,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="Ask a workspace admin to connect GitHub.",
+                error=True,
             )
             return
         try:
@@ -1074,6 +1082,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text=safe_github_error(error),
+                error=True,
             )
             return
         await send_link(
@@ -1093,6 +1102,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text="Only a workspace admin can connect GitHub.",
+                error=True,
             )
             return
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
@@ -1236,6 +1246,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text=CHANNEL_SKILLS_NEED_ADMIN_MESSAGE,
+                error=True,
             )
             return
         async with runtime.sessionmaker() as session:
@@ -1267,6 +1278,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
                 text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE,
+                error=True,
             )
             return
         await client.views_push(  # pyright: ignore[reportUnknownMemberType]
@@ -1309,6 +1321,7 @@ async def _dispatch_panel_action(
                 channel_id=meta.channel_id,
                 user_id=user_id,
                 text=ENVIRONMENT_NEED_ADMIN_MESSAGE,
+                error=True,
             )
             await record_panel_write(
                 runtime.sessionmaker,
@@ -1334,14 +1347,21 @@ async def _dispatch_panel_action(
                 runtime, client, tenant_id=tenant_id, meta=meta, is_admin=is_admin, user_id=user_id
             ),
         )
-        await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=note)
+        # A saved or cleared pick names the channel; a refusal does not.
+        await post_ephemeral(
+            client,
+            channel_id=meta.channel_id,
+            user_id=user_id,
+            text=note,
+            error=f"<#{meta.channel_id}>" not in note,
+        )
         return
 
     if action_id in _RULE_ACTIONS:
         option = cast("Mapping[str, object]", action.get("selected_option") or {})
         value = str(option.get("value") or "")
         if not is_admin or not meta.channel_id:
-            text = RULE_NEED_ADMIN_MESSAGE
+            text, failed = RULE_NEED_ADMIN_MESSAGE, True
             await record_panel_write(
                 runtime.sessionmaker,
                 tenant_id=tenant_id,
@@ -1352,7 +1372,7 @@ async def _dispatch_panel_action(
                 reason="needs_admin",
             )
         else:
-            text = await change_rule(
+            text, failed = await change_rule(
                 runtime,
                 client,
                 tenant_id=tenant_id,
@@ -1368,7 +1388,7 @@ async def _dispatch_panel_action(
                 release=action_id == panel_views.ACTION_RULE_RELEASE,
             )
         await post_ephemeral(
-            client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text
+            client, channel_id=meta.channel_id or user_id, user_id=user_id, text=text, error=failed
         )
         if is_admin and view_id:
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -1563,6 +1583,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             channel_id=channel_id or user_id,
             user_id=user_id,
             text="That setup control is no longer available. Reopen setup.",
+            error=True,
         )
 
     except (
@@ -1597,5 +1618,5 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                     channel=channel_id or user_id,
                     user=user_id,
-                    text=render_error(exc, request_id=request_id),
+                    **render_error_notice(exc, request_id=request_id),
                 )

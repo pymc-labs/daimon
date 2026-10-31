@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import TypedDict
 
 import structlog
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREYPLE
 from daimon.core.posted_controls.lifecycle import edit_card_within
 from daimon.core.turn.prepare import PreparedTurn
@@ -114,7 +115,9 @@ class ProviderActionView(discord.ui.LayoutView):
             refusal = "This request expired."
         if refusal is not None:
             await interaction.response.send_message(
-                refusal, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+                embed=build_notice_embed(refusal),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
         if self.answer is not None:

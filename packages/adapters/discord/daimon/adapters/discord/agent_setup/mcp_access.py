@@ -34,6 +34,7 @@ from daimon.adapters.discord.agent_setup.expiry import (
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.checks import admin_caller, is_guild_admin
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
@@ -123,8 +124,10 @@ async def send_coding_tools_access(
             )
         except DaimonError:
             await interaction.response.send_message(
-                f"Agent **{card_agent.name}** is no longer available. "
-                "Reopen Details and try again.",
+                embed=build_notice_embed(
+                    f"Agent **{card_agent.name}** is no longer available. "
+                    "Reopen Details and try again."
+                ),
                 ephemeral=True,
             )
             return
@@ -138,7 +141,8 @@ async def send_coding_tools_access(
     if ma_agent is None:
         log.info("agent_setup.coding_tools.agent_missing", agent_name=selected.name)
         await interaction.response.send_message(
-            f"Could not find agent **{selected.name}** on MA.", ephemeral=True
+            embed=build_notice_embed(f"Could not find agent **{selected.name}** on MA."),
+            ephemeral=True,
         )
         return
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))
@@ -158,7 +162,9 @@ async def send_coding_tools_access(
                 account_id=state.account_id,
             )
     except AccessPolicyUnreadable:
-        await interaction.response.send_message(POLICY_UNREADABLE_REFUSAL, ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed(POLICY_UNREADABLE_REFUSAL), ephemeral=True
+        )
         return
     channel = interaction.channel
     parent_id = channel.parent_id if isinstance(channel, discord.Thread) else interaction.channel_id
@@ -173,7 +179,9 @@ async def send_coding_tools_access(
         log.info(
             "agent_setup.coding_tools.refused", agent_name=selected.name, reason=decision.reason
         )
-        await interaction.response.send_message(CODING_TOOLS_REFUSAL, ephemeral=True)
+        await interaction.response.send_message(
+            embed=build_notice_embed(CODING_TOOLS_REFUSAL), ephemeral=True
+        )
         await _audit(
             runtime,
             tenant_id=tenant_id,
@@ -359,7 +367,8 @@ class _McpAccessView(ExpiringView, discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:  # type: ignore[override]
         if interaction.user.id != self._allowed_user_id:
             await interaction.response.send_message(
-                "Only the command invoker can use these buttons.", ephemeral=True
+                embed=build_notice_embed("Only the command invoker can use these buttons."),
+                ephemeral=True,
             )
             await self._audit_revoke(interaction, outcome="denied", reason="not_minter")
             return False
@@ -393,13 +402,16 @@ class _McpAccessView(ExpiringView, discord.ui.View):
             )
         if row is None:
             log.info("agent_setup.mcp_access.revoke.already_revoked", jti=str(self._jti))
-            await interaction.response.send_message("That key was already revoked.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed("That key was already revoked."), ephemeral=True
+            )
             await self._audit_revoke(interaction, outcome="error", reason="already_revoked")
             return
         log.info("agent_setup.mcp_access.revoke.done", jti=str(self._jti))
         await self._audit_revoke(interaction, outcome="allowed", reason="completed")
         await interaction.response.edit_message(
-            content="Key revoked. It stops working now.",
+            content=None,
+            embed=build_notice_embed("Key revoked. It stops working now.", neutral=True),
             view=None,
         )
         # That edit deliberately drops the view; a still-running timer would

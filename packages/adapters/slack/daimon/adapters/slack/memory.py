@@ -16,11 +16,12 @@ boundary (S3).
 from __future__ import annotations
 
 import contextlib
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import aiohttp
 import anthropic
 import structlog
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.errors import DaimonError
@@ -44,6 +45,7 @@ log = structlog.get_logger()
 
 _SLACK_LIMIT = 3800  # headroom under Slack's ~4000-char text limit
 _EMPTY = "No memory to show here."
+_Kind = Literal["content", "notice", "error"]
 
 
 async def _requester_org(client: AsyncWebClient, *, team_id: str, user_id: str) -> RequesterOrg:
@@ -99,15 +101,29 @@ def _fenced(header: str, content: str, limit: int) -> str:
     return f"{header}\n```\n{content}\n```"
 
 
-def _personal_text(reply: PersonalMemoryReply) -> str:
+def _personal_text(reply: PersonalMemoryReply) -> tuple[str, _Kind]:
+    """The reply's text, and whether it is memory content or a message from Daimon."""
     if reply.content is not None:
-        return _fenced(f"*`{reply.title}`*", reply.content, _SLACK_LIMIT)
+        return _fenced(f"*`{reply.title}`*", reply.content, _SLACK_LIMIT), "content"
     parts = [f"*{reply.title}*"]
     if reply.paths:
         parts.append("\n".join(f"• `{p}`" for p in reply.paths))
     if reply.hint:
         parts.append(f"_{reply.hint}_")
-    return _truncate("\n\n".join(parts))
+    kind: _Kind = "content" if reply.paths else "error" if reply.error else "notice"
+    return _truncate("\n\n".join(parts)), kind
+
+
+async def _post(
+    client: AsyncWebClient, *, channel_id: str, user_id: str, text: str, kind: _Kind
+) -> None:
+    """Memory content goes out as plain text; Daimon's own words as a notice card."""
+    fields: dict[str, Any] = (
+        {"text": text} if kind == "content" else notice_fields(text, neutral=kind == "notice")
+    )
+    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+        channel=channel_id, user=user_id, **fields
+    )
 
 
 async def _personal_memory_text(
@@ -118,8 +134,11 @@ async def _personal_memory_text(
     user_id: str,
     channel_id: str,
     args: str,
-) -> str:
-    """The invoker's own personal memory: never anyone else's, whatever the args."""
+) -> tuple[str, _Kind]:
+    """The invoker's own personal memory: never anyone else's, whatever the args.
+
+    Returns the text and whether it is memory content or a message.
+    """
     request = parse_memory_args(args)
     agent = await resolve_channel_agent(
         runtime.sessionmaker,
@@ -133,7 +152,7 @@ async def _personal_memory_text(
         channel_shared=await _channel_shared(client, channel_id=channel_id),
     )
     if agent is None:
-        return _EMPTY
+        return _EMPTY, "notice"
     store_id = await get_own_personal_memory_store(runtime.sessionmaker, agent)
     reply = await personal_memory_reply(
         runtime.anthropic,
@@ -169,17 +188,20 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
 
     try:
         if parse_memory_args(path_arg).kind not in ("shared_list", "shared_show"):
-            await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                channel=channel_id,
-                user=user_id,
-                text=await _personal_memory_text(
-                    runtime,
-                    client,
-                    team_id=team_id,
-                    user_id=user_id,
-                    channel_id=channel_id,
-                    args=path_arg,
-                ),
+            personal, personal_kind = await _personal_memory_text(
+                runtime,
+                client,
+                team_id=team_id,
+                user_id=user_id,
+                channel_id=channel_id,
+                args=path_arg,
+            )
+            await _post(
+                client,
+                channel_id=channel_id,
+                user_id=user_id,
+                text=personal,
+                kind=personal_kind,
             )
             return
         resolved = await get_channel_memory_store(
@@ -193,11 +215,13 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             requester_org=await _requester_org(client, team_id=team_id, user_id=user_id),
             channel_shared=await _channel_shared(client, channel_id=channel_id),
         )
+        kind: _Kind = "content"
         if resolved is None:
-            text = _EMPTY
+            text, kind = _EMPTY, "notice"
         elif not path_arg:
             agent_name, store_id = resolved
             paths = await list_memory_paths(runtime.anthropic, store_id)
+            kind = "content" if paths else "notice"
             text = (
                 _EMPTY
                 if not paths
@@ -211,14 +235,11 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             content = await get_memory_content(runtime.anthropic, store_id, path_arg)
             if content is None:
                 text = f"No memory file called `{path_arg}`.\n\nRun `/memory` to see them all."
+                kind = "error"
             else:
                 text = _fenced(f"*`{path_arg}`*", content, _SLACK_LIMIT)
 
-        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel_id,
-            user=user_id,
-            text=text,
-        )
+        await _post(client, channel_id=channel_id, user_id=user_id, text=text, kind=kind)
     except (DaimonError, anthropic.APIError, SlackApiError) as exc:
         log.warning("slack.memory_command.failed", team_id=team_id, exc_info=exc)
         error_text = (
@@ -230,5 +251,5 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
-                text=error_text,
+                **notice_fields(error_text),
             )

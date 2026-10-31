@@ -31,6 +31,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.routines import list_routines_for_tenant
+from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
@@ -265,7 +266,9 @@ async def test_run_routines_create_when_admin_creates_row_with_creator_user_id(
     assert ephemeral_key in fake_slack_web_client.mock.requests, (
         "success should post a confirmation ephemeral"
     )
-    texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
+    texts = [
+        shown_text(c.kwargs["json"]) for c in fake_slack_web_client.mock.requests[ephemeral_key]
+    ]
     assert any("✅ Routine created for" in t for t in texts)
     assert any("every day at 18:00 UTC" in t for t in texts), "schedule is shown in words"
     assert not any("0 18 * * *" in t for t in texts), "the raw cron is not echoed"
@@ -312,7 +315,9 @@ async def test_run_routines_create_when_bad_cron_creates_no_row_and_posts_error(
 
     ephemeral_key = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
     assert ephemeral_key in fake_slack_web_client.mock.requests, "bad cron should post an ephemeral"
-    texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
+    texts = [
+        shown_text(c.kwargs["json"]) for c in fake_slack_web_client.mock.requests[ephemeral_key]
+    ]
     assert any(
         "That schedule or time zone isn't valid.\n\nCheck both and try again." in t for t in texts
     )

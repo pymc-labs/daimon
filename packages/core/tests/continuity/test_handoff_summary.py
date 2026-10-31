@@ -227,8 +227,18 @@ async def test_a_summary_goes_back_only_when_its_turn_never_sent(
             mark.append(True)
         raise RuntimeError("provider failed")
 
+    async def no_notices(
+        *_a: Any, user_message: str, reseed_user_message: Any, **_k: Any
+    ) -> tuple[str, Any, list[str]]:
+        return user_message, reseed_user_message, []
+
+    async def no_queue(*_a: Any, **_k: Any) -> None:
+        return None
+
     monkeypatch.setattr(run_module, "_with_handoff_summary", seeded)
     monkeypatch.setattr(run_module, "_restore_handoff_summary", restore)
+    monkeypatch.setattr(run_module, "_with_agent_notices", no_notices)
+    monkeypatch.setattr(run_module, "_queue_agent_notices", no_queue)
     monkeypatch.setattr(run_module, "run_prepared_turn_impl", failing_turn)
     observation = SimpleNamespace(
         activate=contextlib.nullcontext,

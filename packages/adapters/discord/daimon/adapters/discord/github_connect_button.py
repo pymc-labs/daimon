@@ -13,6 +13,7 @@ from daimon.adapters.discord.agent_setup.github_connect_card import connect_embe
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import (
@@ -75,23 +76,25 @@ class GitHubConnectButton(
             _log.exception("github_connect.button_failed", error_type=type(error).__name__)
             if interaction.response.is_done():
                 await interaction.followup.send(
-                    "GitHub setup is unavailable. Try again.", ephemeral=True
+                    embed=build_notice_embed("GitHub setup is unavailable. Try again."),
+                    ephemeral=True,
                 )
             else:
                 await interaction.response.send_message(
-                    "GitHub setup is unavailable. Try again.", ephemeral=True
+                    embed=build_notice_embed("GitHub setup is unavailable. Try again."),
+                    ephemeral=True,
                 )
 
     async def _reveal(self, interaction: discord.Interaction[commands.Bot]) -> None:
         if interaction.guild_id is None or interaction.channel_id is None:
             await interaction.response.send_message(
-                "This connection is no longer available.", ephemeral=True
+                embed=build_notice_embed("This connection is no longer available."), ephemeral=True
             )
             return
         guild = interaction.guild or interaction.client.get_guild(interaction.guild_id)
         if guild is None:
             await interaction.response.send_message(
-                "This connection is no longer available.", ephemeral=True
+                embed=build_notice_embed("This connection is no longer available."), ephemeral=True
             )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -107,7 +110,7 @@ class GitHubConnectButton(
         )
         if clicker.refusal is not None:
             await interaction.followup.send(
-                clicker.refusal,
+                embed=build_notice_embed(clicker.refusal),
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -117,20 +120,22 @@ class GitHubConnectButton(
             requester = await guild.fetch_member(int(self.requester_id))
         except discord.HTTPException:
             await interaction.followup.send(
-                "This connection is no longer available.", ephemeral=True
+                embed=build_notice_embed("This connection is no longer available."), ephemeral=True
             )
             return
         manages = False
         if not is_member_guild_admin(requester, guild_owner_id=guild.owner_id):
             refusal = await _manager_refusal(bot, requester, tenant_id, self.intent_id)
             if refusal is not None:
-                await interaction.followup.send(refusal, ephemeral=True)
+                await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)
                 return
             manages = True
         settings = bot.runtime.settings
         root = settings.mcp.app_root_url
         if root is None:
-            await interaction.followup.send("GitHub setup is unavailable.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed("GitHub setup is unavailable."), ephemeral=True
+            )
             return
         credentials = build_multifernet(
             tuple(key.get_secret_value() for key in settings.crypto.keys)
@@ -167,7 +172,7 @@ class GitHubConnectButton(
                 )
         if link is None:
             await interaction.followup.send(
-                "This connection is no longer available.", ephemeral=True
+                embed=build_notice_embed("This connection is no longer available."), ephemeral=True
             )
             return
         encrypted_token, agent_name = link

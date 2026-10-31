@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.continuity.messages import render_fresh_start
@@ -80,4 +81,4 @@ async def fresh_start(context: CommandContext) -> None:
             )
         if live is not None:
             await request_fresh_start(session, id=live.id, at=datetime.now(UTC))
-    await context.send(MessageActivityInput(text=render_fresh_start("the agent")))
+    await context.send(notice_card(render_fresh_start("the agent"), error=False))

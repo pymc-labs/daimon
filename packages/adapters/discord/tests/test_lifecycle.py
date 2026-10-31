@@ -272,7 +272,11 @@ async def test_late_progress_edits_cannot_overwrite_terminal_delivery(
         assert current.get("content") == "Recovered answer"
         assert len(sends) == post_count
         return
-    if "embed" in current:
+    if "embed" in current and ending == "external":
+        assert current["embed"].description == "Outer turn failure", (
+            "an outer failure ends the card on the error card"
+        )
+    elif "embed" in current:
         assert current["embed"] is None
     else:
         assert current["embeds"] == final_embeds
@@ -604,7 +608,7 @@ async def test_uncertain_terminal_repairs_late_progress(
         await asyncio.wait_for(asyncio.gather(*pending), 1)
     if lc._terminal_reassert_task is not None:
         await asyncio.wait_for(lc._terminal_reassert_task, 1)
-    assert current["content"] == "Done"
+    assert current["embed"].description == "Done", "the terminal card is the notice"
     assert current["view"] is None
     assert terminal_edits == 2
     assert sends == 1
@@ -681,29 +685,68 @@ def _make_success_state(text: str = "Hello response") -> TurnState:
     return TurnState(content=[TextBlock(kind="text", text=text)])
 
 
-@pytest.mark.parametrize("partial_text", ["", "Partial analysis before cancellation."])
-async def test_interrupted_tool_turn_shows_cancelled_and_preserves_partial_answer(
-    partial_text: str,
-) -> None:
+def _all_embeds(sends: list[Any], edits: list[Any]) -> list[discord.Embed]:
+    found: list[discord.Embed] = []
+    for kwargs in [*sends, *[kw for _, kw in edits]]:
+        found.extend(kwargs.get("embeds") or [])
+        if kwargs.get("embed") is not None:
+            found.append(kwargs["embed"])
+    return found
+
+
+def _assert_stopped_card(edit_kwargs: dict[str, Any]) -> None:
+    """The last card write is the red Stopped embed with its next step, and no reply text."""
+    assert not edit_kwargs.get("content"), "no plain text: the card is the whole notice"
+    (card,) = edit_kwargs["embeds"]
+    assert card.title == "Stopped."
+    assert card.description == "Send a message to start again."
+    assert card.colour is not None and card.colour.value == COLOR_RED
+    assert edit_kwargs.get("view") is None, "the Stop button is gone"
+
+
+async def test_interrupted_tool_turn_without_text_shows_cancelled() -> None:
     lc, sends, edits = _make_lifecycle(notify_on_completion=True)
     await lc.post_initial()
     content = [
         ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
     ]
-    if partial_text:
-        content.append(TextBlock(kind="text", text=partial_text))
 
     await lc.on_terminal_success(
         TurnState(content=content, termination=TerminationReason.INTERRUPTED)
     )
 
-    rendered = "\n".join(
-        str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
-    )
-    assert "Stopped.\nSend a message to start again." in rendered
-    if partial_text:
-        assert partial_text in rendered
+    _assert_stopped_card(edits[-1][1])
+    rendered = "\n".join(str(kwargs.get("content", "")) for kwargs in sends)
     assert "<@123>" not in rendered, "cancellation must not send a completion ping"
+    assert not lc.was_answered
+
+
+async def test_interrupted_turn_keeps_partial_answer_and_shows_stopped_on_the_red_card() -> None:
+    lc, sends, edits = _make_lifecycle(notify_on_completion=True)
+    await lc.post_initial()
+    partial_text = "Partial analysis before cancellation."
+    content = [
+        ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}),
+        TextBlock(kind="text", text=partial_text),
+    ]
+
+    await lc.on_terminal_success(
+        TurnState(content=content, termination=TerminationReason.INTERRUPTED)
+    )
+
+    answers = [
+        str(kwargs["content"])
+        for kwargs in [*sends, *[kw for _, kw in edits]]
+        if kwargs.get("content")
+    ]
+    assert answers, "the partial answer is posted"
+    assert all("Stopped." not in text for text in answers), "the reply text carries no system line"
+    assert all("Send a message to start again" not in text for text in answers)
+    assert any(text.strip() == partial_text for text in answers), "partial text is untouched"
+    stopped = [e for e in _all_embeds(sends, edits) if e.title == "Stopped."]
+    assert stopped, "the turn's card says it stopped"
+    assert stopped[-1].colour is not None and stopped[-1].colour.value == COLOR_RED
+    assert "Send a message to start again." in (stopped[-1].description or "")
     assert not lc.was_answered
 
 
@@ -1750,16 +1793,7 @@ class TestCancelViewWiring:
         state = TurnState()
         await lc.on_terminal_success(state)
         # The last edit should be the "Turn cancelled." clean-replace
-        cancel_edit = edits[-1]
-        assert cancel_edit[1].get("content") == "Stopped.\nSend a message to start again.", (
-            "empty-content terminal success must show 'Turn cancelled.'"
-        )
-        assert cancel_edit[1].get("embed") is None, (
-            "empty-content terminal success must remove embed"
-        )
-        assert cancel_edit[1].get("view") is None, (
-            "empty-content terminal success must remove cancel view"
-        )
+        _assert_stopped_card(edits[-1][1])
 
 
 # ---------------------------------------------------------------------------
@@ -1888,9 +1922,7 @@ class TestZeroMessageBehavior:
         state = TurnState()  # completely empty content
         await lc.on_terminal_success(state)
 
-        cancel_edit = edits[-1]
-        assert cancel_edit[1].get("content") == "Stopped.\nSend a message to start again."
-        assert cancel_edit[1].get("embed") is None
+        _assert_stopped_card(edits[-1][1])
 
 
 # ---------------------------------------------------------------------------
@@ -2188,10 +2220,7 @@ class TestWasAnswered:
         await lc.on_terminal_success(state)
 
         assert lc.was_answered is False, "a cancelled turn must not report an answer"
-        cancel_edit = edits[-1]
-        assert cancel_edit[1].get("content") == "Stopped.\nSend a message to start again.", (
-            "a cancelled turn must render as 'Turn cancelled.'"
-        )
+        _assert_stopped_card(edits[-1][1])
 
     async def test_was_answered_is_false_when_terminal_failure(self) -> None:
         """A failed turn must not report an answer."""
@@ -2567,36 +2596,33 @@ class TestUnpromptedTurn:
         assert "silent" not in sends[0], "mention turns notify as they always have"
 
 
-class TestDegradedTurnNotice:
-    async def test_terminal_success_names_the_failed_mcp_server_under_the_reply(self) -> None:
-        """#79: a reply produced after an MCP failure is delivered, with the
-        dropped server named under it instead of a blank failure embed."""
-        from daimon.core.turn.state import McpServerFailure
+class TestDegradedTurnReply:
+    """A failed MCP server never adds text to the reply: the agent is told next turn."""
 
+    @staticmethod
+    def _failure() -> McpServerFailure:
+        return McpServerFailure(
+            server_name="notion",
+            error_type="mcp_authentication_failed_error",
+            message="access forbidden",
+            retry_status="exhausted",
+        )
+
+    async def test_terminal_success_reply_is_exactly_the_agents_text(self) -> None:
         lc, _sends, edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
         state = TurnState(
             content=[TextBlock(kind="text", text="Here is the board.")],
-            mcp_failures=(
-                McpServerFailure(
-                    server_name="notion",
-                    error_type="mcp_authentication_failed_error",
-                    message="access forbidden",
-                    retry_status="exhausted",
-                ),
-            ),
+            mcp_failures=(self._failure(),),
         )
         await lc.on_terminal_success(state)
 
-        content = edits[-1][1]["content"]
-        assert content.startswith("Here is the board."), "the reply itself comes first"
-        assert "`notion`" in content, "the dropped server is named under the reply"
+        assert edits[-1][1]["content"] == "Here is the board.", (
+            "no system line is appended to the reply"
+        )
         assert lc.was_answered, "a degraded turn still counts as answered"
 
-    async def test_tool_only_turn_posts_the_notice_on_its_own(self) -> None:
-        """No reply to hang the notice under: it goes out as its own message."""
-        from daimon.core.turn.state import McpServerFailure
-
+    async def test_tool_only_turn_posts_no_notice(self) -> None:
         lc, sends, _edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
         state = TurnState(
@@ -2605,19 +2631,13 @@ class TestDegradedTurnNotice:
                     kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
                 )
             ],
-            mcp_failures=(
-                McpServerFailure(
-                    server_name="notion",
-                    error_type="mcp_authentication_failed_error",
-                    message="access forbidden",
-                    retry_status="exhausted",
-                ),
-            ),
+            mcp_failures=(self._failure(),),
         )
         await lc.on_terminal_success(state)
 
-        notices = [s for s in sends if "`notion`" in str(s.get("content", ""))]
-        assert len(notices) == 1, "the dropped server is named once, on its own line"
+        assert not [s for s in sends if "notion" in str(s.get("content", ""))], (
+            "a tool-only turn posts no line about the dropped server"
+        )
 
 
 async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
@@ -2631,8 +2651,6 @@ async def test_completion_ping_posts_fresh_answer_and_limits_mentions():
     assert "everyone" not in mentions["parse"]
     assert "roles" not in mentions["parse"]
     assert not any(e.get("content") == sends[-1]["content"] for _, e in edits)
-    assert await lifecycle.prepend_revealed_answer("Recovered files.")
-    assert edits[-1][1]["content"].startswith("Recovered files.")
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -2747,13 +2765,12 @@ async def test_rejected_table_upload_retries_original_answer_as_text(status, not
         notify_on_completion=notify,
         requester_id=123,
     )
-    lifecycle.answer_prefix = "Recovered files."
     text = "| Name | Value |\n| --- | ---: |\n| Example | 42 |\n\n" + "Tail. " * 500
     await lifecycle.post_initial()
     with capture_logs() as logs:
         await lifecycle.on_terminal_success(_make_success_state(text))
     assert [part["content"] for part in delivered] == split_for_discord_safe(
-        ("<@123>\n" if notify else "") + "Recovered files.\n\n" + text
+        ("<@123>\n" if notify else "") + text
     )
     assert all("attachments" not in part and "files" not in part for part in delivered)
     assert all(part["allowed_mentions"].to_dict()["parse"] == [] for part in delivered)
@@ -2821,7 +2838,7 @@ async def test_answer_keeps_the_channel_budget_footer_on_the_visible_message(
     final_edit = edits[-1][1]
     assert final_edit["content"] == "Hello response"
     assert "embed" not in final_edit, "editing the answer must retain the terminal embed"
-    assert await lc.prepend_revealed_answer("Recovered files.")
+    await lc.edit_card(content="Hello response")
     assert "embed" not in edits[-1][1], "a later answer edit must retain the footer too"
 
 
@@ -2919,7 +2936,7 @@ async def test_missing_message_after_answer_delivery_is_a_logged_noop():
     await lifecycle.on_terminal_success(_make_success_state())
     missing[0] = True
     with capture_logs() as logs:
-        await lifecycle.prepend_revealed_answer("Recovered files.")
+        await lifecycle.edit_card(content="Late edit.")
     assert len(sent) == 1, "a stale edit must not duplicate an already delivered answer"
     assert any(entry["event"] == "turn.message_missing" and entry["delivered"] for entry in logs)
 
@@ -3050,9 +3067,12 @@ async def test_r20_captured_final_markup_flood_is_one_notice(notify):
     )
     await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=text)]))
     visible = [m.content for m in thread.messages.values() if m.content]
-    assert len(visible) == 1
-    assert "tool-call markup without an answer" in visible[0]
-    assert "<invoke_fleet_check>" not in visible[0]
+    assert visible == [], "the markup is never shown as reply text"
+    cards = [embed for m in thread.messages.values() for embed in m.embeds]
+    assert len(cards) == 1, "one error card is the whole notice"
+    assert cards[0].title == "The model returned tool-call markup without an answer."
+    assert cards[0].colour is not None and cards[0].colour.value == COLOR_RED
+    assert "<invoke_fleet_check>" not in (cards[0].description or "")
 
 
 async def test_repeated_and_markup_sealed_blocks_do_not_post():
@@ -3251,32 +3271,17 @@ async def test_an_answer_repeated_after_a_tool_is_not_posted_twice(log_on: bool)
     assert sum(text.count(first) for text in posted) == 1, "the repeated answer posts once"
 
 
-@pytest.mark.parametrize("notice", ["cancel", "degraded", "continuity"])
-async def test_overflow_keeps_operational_notices_visible(notice):
+async def test_overflow_cancel_shows_stopped_on_the_card_not_in_the_text():
     lc, _, edits = _make_lifecycle()
-    state = TurnState(content=[TextBlock(kind="text", text="Useful answer. " * 1000)])
-    if notice == "cancel":
-        state = dataclasses.replace(state, termination=TerminationReason.INTERRUPTED)
-        expected = "Stopped."
-    elif notice == "degraded":
-        state = dataclasses.replace(
-            state,
-            mcp_failures=(
-                McpServerFailure(
-                    server_name="notion",
-                    error_type="mcp_authentication_failed_error",
-                    message="access forbidden",
-                    retry_status="exhausted",
-                ),
-            ),
-        )
-        expected = "`notion`"
-    else:
-        lc.answer_prefix = "Recovered files."
-        expected = lc.answer_prefix
+    state = TurnState(
+        content=[TextBlock(kind="text", text="Useful answer. " * 1000)],
+        termination=TerminationReason.INTERRUPTED,
+    )
     await lc.on_terminal_success(state)
-    assert expected in edits[-1][1]["content"]
-    assert expected in edits[-1][1]["attachments"][0].fp.read().decode()
+    last = edits[-1][1]
+    assert "Stopped." not in last["content"], "the collapsed notice carries no system line"
+    assert "Stopped." not in last["attachments"][0].fp.read().decode()
+    assert [e.title for e in last["embeds"]] == ["Stopped."], "the card carries it"
 
 
 async def test_unprompted_markup_only_output_stays_silent():
@@ -3292,16 +3297,16 @@ async def test_unprompted_markup_only_output_stays_silent():
     assert not lc.was_answered
 
 
-async def test_overflow_keeps_fallback_identity_and_bounds_long_notice():
+async def test_overflow_keeps_fallback_identity_on_the_visible_notice():
     lc, sends, edits = _make_lifecycle()
     lc._fallback_active = lambda: True
-    lc.answer_prefix = "Recovery details. " * 1000
-    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Answer.")]))
+    await lc.on_terminal_success(
+        TurnState(content=[TextBlock(kind="text", text="Answer. " * 2000)])
+    )
     visible = edits[-1][1]["content"]
     assert visible.startswith("-# test-agent\n")
     assert "answer.txt" in visible
     assert len(visible) <= 2000
-    assert lc.answer_prefix in edits[-1][1]["attachments"][0].fp.read().decode()
     assert not [sent for sent in sends if "content" in sent]
 
 

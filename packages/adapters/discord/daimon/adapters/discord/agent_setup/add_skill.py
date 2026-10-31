@@ -23,6 +23,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import ADMIN_NOUN, admin_caller
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
@@ -233,17 +234,19 @@ class AddSkillModal(discord.ui.Modal):
                 interaction, runtime=view.runtime, state=view.state, agent=agent
             )
         except SkillIngestError as exc:
-            await interaction.followup.send(f"{exc} Nothing was added.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(f"{exc} Nothing was added."), ephemeral=True
+            )
             return
         except (DaimonError, anthropic.APIError) as exc:
             request_id = generate_request_id()
             log.exception("agent_setup.add_skill.preview_failed", request_id=request_id)
             await interaction.followup.send(
-                render_error(exc, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )
             return
         if refusal is not None:
-            await interaction.followup.send(refusal, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)
             return
         log.info("agent_setup.add_skill.preview", agent_name=agent.name)
         await view.swap_to(
@@ -352,22 +355,25 @@ class SkillPreviewView(PanelViewBase):
                 recheck=recheck,
             )
         except _AddRefused as exc:
-            await interaction.followup.send(exc.refusal, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(exc.refusal), ephemeral=True)
             return
         except SkillIngestError as exc:
-            await interaction.followup.send(f"{exc} Nothing was added.", ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(f"{exc} Nothing was added."), ephemeral=True
+            )
             return
         except (DaimonError, anthropic.APIError) as exc:
             request_id = generate_request_id()
             log.exception("agent_setup.add_skill.failed", agent_name=name, request_id=request_id)
             await interaction.followup.send(
-                render_error(exc, request_id=request_id), ephemeral=True
+                embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )
             return
         log.info("agent_setup.add_skill.added", agent_name=name, action=result.action)
         done = "already had" if result.action == "unchanged" else "now has"
         await interaction.followup.send(
-            f"{name} {done} the skill **{preview.name}**.", ephemeral=True
+            embed=build_notice_embed(f"{name} {done} the skill **{preview.name}**.", neutral=True),
+            ephemeral=True,
         )
         try:
             details = await load_details_for(self.runtime, state=self.state, agent=self.agent)

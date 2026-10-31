@@ -113,11 +113,11 @@ async def run_operator_token_submission(
     )
     if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
         await audit(outcome="denied", reason="needs_admin")
-        await reply(text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE)
+        await reply(text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE, error=True)
         return
     secret = runtime.settings.mcp.jwt_secret
     if secret is None:
-        await reply(text=NOT_CONFIGURED_MESSAGE)
+        await reply(text=NOT_CONFIGURED_MESSAGE, error=True)
         return
     try:
         async with runtime.sessionmaker.begin() as session:
@@ -133,15 +133,18 @@ async def run_operator_token_submission(
             )
     except OperatorTokenError as exc:
         await audit(outcome="denied", reason="scopes")
-        await reply(text=f"{exc}. Nothing was minted.")
+        await reply(text=f"{exc}. Nothing was minted.", error=True)
         return
     await audit(outcome="allowed", reason="completed", token_jti=minted.jti)
     log.info("slack.agent_setup.operator_token.minted", jti=str(minted.jti))  # never the token
-    await reply(
+    # The minted token is content, shown as plain text rather than a notice card.
+    await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+        channel=meta.channel_id or user_id,
+        user=user_id,
         text=(
             f"```{minted.token}```\nScopes: {', '.join(sorted(minted.scopes))}. Expires "
             f"{minted.expires_at.date().isoformat()}. This is the one time it is shown."
-        )
+        ),
     )
     await _refresh(runtime, client, meta=meta, view_id=meta.root_view_id)
 
@@ -163,7 +166,7 @@ async def handle_operator_token_revoke(
     )
     if not is_admin:
         await audit(outcome="denied", reason="needs_admin", token_jti=jti)
-        await reply(text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE)
+        await reply(text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE, error=True)
         return
     async with runtime.sessionmaker.begin() as session:
         revoked = await revoke_panel_operator_token(
@@ -177,5 +180,8 @@ async def handle_operator_token_revoke(
     else:
         await audit(outcome="error", reason="already_revoked", token_jti=jti)
     log.info("slack.agent_setup.operator_token.revoked", jti=str(jti), revoked=revoked)
-    await reply(text="Token revoked." if revoked else "That token was already revoked.")
+    await reply(
+        text="Token revoked." if revoked else "That token was already revoked.",
+        error=not revoked,
+    )
     await _refresh(runtime, client, meta=meta, view_id=view_id)

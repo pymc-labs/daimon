@@ -225,6 +225,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
             channel_id=channel_id,
             user_id=user_id,
             text="Only a workspace admin can use this card.",
+            error=True,
         )
         return
     if action_id == ACTION_CONNECT:

@@ -58,7 +58,10 @@ async def test_dms_off_for_a_known_server_gets_the_two_line_answer(
 
     await _cog()._reply(message)  # pyright: ignore[reportPrivateUsage]
 
-    message.channel.send.assert_awaited_once_with(_OFF)
+    message.channel.send.assert_awaited_once()
+    assert message.channel.send.await_args.kwargs["embed"].description == _OFF, (
+        "the answer is the error card"
+    )
 
 
 async def test_a_cold_dm_names_no_server(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -69,7 +72,7 @@ async def test_a_cold_dm_names_no_server(monkeypatch: pytest.MonkeyPatch) -> Non
 
     await _cog()._reply(message)  # pyright: ignore[reportPrivateUsage]
 
-    text = message.channel.send.await_args.args[0]
+    text = message.channel.send.await_args.kwargs["embed"].description
     assert text.startswith("I can't start a private chat from here.")
     assert "are off here" not in text
 
@@ -99,4 +102,7 @@ async def test_a_failed_answer_is_retried_on_the_next_message(
     await cog._reply(failing)  # pyright: ignore[reportPrivateUsage]
     await cog._reply(retry)  # pyright: ignore[reportPrivateUsage]
 
-    retry.channel.send.assert_awaited_once_with(_OFF)
+    retry.channel.send.assert_awaited_once()
+    assert retry.channel.send.await_args.kwargs["embed"].description == _OFF, (
+        "the retry sends the same card"
+    )

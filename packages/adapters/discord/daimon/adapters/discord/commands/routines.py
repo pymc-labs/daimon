@@ -14,6 +14,7 @@ from daimon.adapters.discord.checks import (
     resolve_tenant_for_interaction,
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.routines_panel.panel import RoutinesPanelView
 from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState
@@ -80,6 +81,6 @@ class RoutinesCog(commands.Cog):
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await interaction.followup.send(
-                render_error(exc, request_id=rid),
+                embed=build_notice_embed(render_error(exc, request_id=rid)),
                 ephemeral=True,
             )

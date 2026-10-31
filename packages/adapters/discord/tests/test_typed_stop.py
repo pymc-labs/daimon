@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import discord
 import pytest
 from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.typed_stop import (
     ALREADY_STOPPING,
     STOPPED,
@@ -104,11 +105,15 @@ async def test_the_requester_typing_stop_stops_the_running_reply(queued_bot: Dai
     stop = _typed("<@999> stop", REQUESTER)
     await queued_bot.on_message(stop)
     assert cancel.is_set()
-    stop.reply.assert_awaited_once_with(STOPPED, mention_author=False)  # type: ignore[attr-defined]
+    stop.reply.assert_awaited_once_with(
+        embed=build_notice_embed(STOPPED, neutral=True), mention_author=False
+    )  # type: ignore[attr-defined]
     stop.add_reaction.assert_not_called()  # type: ignore[attr-defined]  # not queued
     again = _typed("<@999> cancel that", REQUESTER)
     await queued_bot.on_message(again)
-    again.reply.assert_awaited_once_with(ALREADY_STOPPING, mention_author=False)  # type: ignore[attr-defined]
+    again.reply.assert_awaited_once_with(
+        embed=build_notice_embed(ALREADY_STOPPING, neutral=True), mention_author=False
+    )  # type: ignore[attr-defined]
     finish.set()
     await task
     assert calls == ["write a long story"], "a stop never becomes a turn of its own"
@@ -120,7 +125,9 @@ async def test_someone_else_typing_stop_is_told_who_can(queued_bot: DaimonBot) -
     stop = _typed("<@999> stop", STRANGER)
     await queued_bot.on_message(stop)
     assert not cancel.is_set()
-    stop.reply.assert_awaited_once_with(STOP_NOT_ALLOWED, mention_author=False)  # type: ignore[attr-defined]
+    stop.reply.assert_awaited_once_with(
+        embed=build_notice_embed(STOP_NOT_ALLOWED), mention_author=False
+    )  # type: ignore[attr-defined]
     cancel.set()
     finish.set()
     await task

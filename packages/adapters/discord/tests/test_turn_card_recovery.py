@@ -878,7 +878,7 @@ async def test_initial_card_intent_is_committed_before_send_and_retired_after_ca
 
     await lifecycle.on_terminal_success(TurnState())
     assert any(
-        edit.get("content") == "Stopped.\nSend a message to start again." for edit in edits
+        [embed.title for embed in edit.get("embeds") or []] == ["Stopped."] for edit in edits
     ), "empty terminal success should render the existing cancellation state"
     assert await retire_terminal_turn_card(
         db_session_factory, intent_id=intent.id, expected_message_id="900"

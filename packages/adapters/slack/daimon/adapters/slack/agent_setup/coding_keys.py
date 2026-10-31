@@ -216,6 +216,7 @@ async def handle(
             channel_id=meta.channel_id or user_id,
             user_id=user_id,
             text=CODING_KEYS_REFUSAL,
+            error=True,
         )
         if action_id == ACTION_REVOKE_CODING_KEY:
             await _audit(runtime, tenant_id, user_id, _jti(action), "denied", "not_allowed")
@@ -282,6 +283,7 @@ async def _revoke(
         channel_id=channel_id or user_id,
         user_id=user_id,
         text="That key was already revoked.",
+        error=True,
     )
 
 

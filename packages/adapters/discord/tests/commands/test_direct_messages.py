@@ -13,6 +13,7 @@ import discord
 import pytest
 from daimon.adapters.discord.commands import direct_messages as dm_module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn_queue import TurnQueue
@@ -54,8 +55,26 @@ async def test_dm_policy_replies_use_server_words(
     runtime = MagicMock()
     cog = DirectMessageCog(MagicMock(runtime=runtime))
     await cog.dm.callback.__wrapped__(cog, interaction, action)  # pyright: ignore[reportFunctionMemberAccess]
-    assert interaction.followup.send.await_args.args[0] == expected
+    sent = interaction.followup.send.await_args
+    if admin:
+        assert sent.kwargs["embed"].description == expected
+    else:
+        assert sent.args == () and sent.kwargs["embed"].description == expected
+        assert sent.kwargs["embed"].color.value == COLOR_RED
+    assert sent.kwargs["ephemeral"] is True
     assert save.await_count == (1 if admin else 0)
+
+
+async def test_dm_from_somewhere_without_history_is_a_red_card() -> None:
+    interaction = MagicMock()
+    interaction.guild = None
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    cog = DirectMessageCog(MagicMock())
+    await cog.dm.callback.__wrapped__(cog, interaction, "move")  # pyright: ignore[reportFunctionMemberAccess]
+    sent = interaction.followup.send.await_args
+    assert sent.kwargs["embed"].color.value == COLOR_RED
+    assert sent.kwargs["embed"].description.startswith("You can't start a private conversation")
 
 
 async def _no_history(*, limit: int) -> AsyncIterator[discord.Message]:
@@ -117,13 +136,15 @@ async def test_dm_from_a_thread_admits_and_records_its_parent_channel(
     assert (call["is_dm"], call["dm_source_channel_id"]) == (True, str(_PARENT)), (
         "admitted against the thread's parent channel"
     )
-    (reply,), _ = interaction.followup.send.await_args
     if over_budget:
+        reply = interaction.followup.send.await_args.kwargs["embed"].description
         assert reply == _OVER_BUDGET, "the member is told why"
         start_dm.assert_not_awaited()
         member.create_dm.assert_not_awaited()
     else:
-        assert reply == "Ready in your DMs.", "a channel within its budget opens the DM"
+        assert (
+            interaction.followup.send.await_args.kwargs["embed"].description == "Ready in your DMs."
+        ), "a channel within its budget opens the DM"
         assert start_dm.await_args.kwargs["source_channel_id"] == str(_PARENT), (
             "the DM records its source channel"
         )
@@ -174,7 +195,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
 
     await cog.on_message(message)
 
-    (reply,), _ = message.channel.send.await_args
+    reply = message.channel.send.await_args.kwargs["embed"].description
     assert reply == _OVER_BUDGET, "the member is told why the DM stopped"
     assert bot.turn_queue.in_flight() == 0, "the slot is returned"
 

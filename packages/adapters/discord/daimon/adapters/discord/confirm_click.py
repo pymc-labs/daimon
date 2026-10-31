@@ -234,7 +234,10 @@ class _ClickAdapter(AsyncWebhookAdapter):
         return {}
 
     def _keep(self, kind: str, data: dict[str, Any]) -> None:
-        self.replies.append({"kind": kind, "content": data.get("content") or ""})
+        # System notices are cards now: their words live in the embed description.
+        embeds = cast(list[dict[str, Any]], data.get("embeds") or [])
+        words = [str(data.get("content") or ""), *(str(e.get("description") or "") for e in embeds)]
+        self.replies.append({"kind": kind, "content": "\n".join(w for w in words if w)})
 
     async def _edit_card(self, data: dict[str, Any]) -> dict[str, Any]:
         message = await self.http.edit_message(

@@ -15,9 +15,15 @@ from typing import Any, Literal
 
 import pytest
 from daimon.adapters.slack.blockkit import (
+    ERROR_COLOR,
+    NEUTRAL_COLOR,
     EmbedEvent,
     State,
     TurnPhase,
+    error_blocks_from_text,
+    notice_attachments,
+    notice_fields,
+    notice_update_fields,
     to_blocks,
     to_fallback_text,
     to_interrupted_blocks,
@@ -318,8 +324,54 @@ class TestToBlocks:
         assert context_blocks, "ERROR state must produce a context block"
         summary_text = context_blocks[-1]["elements"][0]["text"]
         assert summary_text == "Atlas\u2003\u20035s"
-        assert blocks[0]["text"]["text"] == "Something went wrong."
+        assert blocks[0]["text"]["text"] == "❌ *Something went wrong.*", "cross-led bold title"
         assert "rate limited" not in str(blocks)
+
+    def test_error_under_an_answer_is_set_off_by_a_rule(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.ERROR),
+            notice="Send a message to start again.",
+            notice_title="Stopped.",
+        )
+        blocks = to_blocks(state, now=5.0, answer_visible=True)
+        assert [block["type"] for block in blocks[:3]] == ["divider", "section", "section"]
+        assert blocks[1]["text"]["text"] == "❌ *Stopped.*"
+
+    def test_notice_attachment_is_a_red_bar_with_no_top_level_text(self) -> None:
+        (attachment,) = notice_attachments("<@U1>, it's too big.")
+        assert attachment["color"] == ERROR_COLOR
+        assert attachment["fallback"] == "<@U1>, it's too big."
+        assert attachment["blocks"][0]["text"]["text"] == "<@U1>, it's too big.", (
+            "the text is mrkdwn, as a plain post's is: the mention stays live"
+        )
+
+    def test_neutral_notice_attachment_is_not_red(self) -> None:
+        (attachment,) = notice_attachments("Still working.", neutral=True)
+        assert attachment["color"] == NEUTRAL_COLOR, "information gets the neutral bar"
+        assert attachment["color"] != ERROR_COLOR
+
+    def test_notice_fields_carry_only_the_attachment(self) -> None:
+        fields = notice_fields("Not allowed.")
+        assert list(fields) == ["attachments"], "no top-level text to print above the bar"
+        assert fields["attachments"][0]["color"] == ERROR_COLOR
+
+    def test_notice_update_fields_clear_the_status_card_it_replaces(self) -> None:
+        fields = notice_update_fields("Busy.", neutral=True)
+        assert fields["text"] == "" and fields["blocks"] == [], "the card's own blocks are gone"
+        assert fields["attachments"][0]["color"] == NEUTRAL_COLOR
+
+    def test_notice_attachment_keeps_the_given_buttons(self) -> None:
+        buttons = [{"type": "actions", "elements": []}]
+        (attachment,) = notice_attachments("Hand over?", neutral=True, blocks=buttons)
+        assert attachment["blocks"] == buttons, "the buttons replace the one section"
+
+    def test_error_blocks_from_text_split_title_and_next_step(self) -> None:
+        blocks = error_blocks_from_text("Something went wrong.\n\nMention me to try again.")
+        assert [b["text"]["text"] for b in blocks] == [
+            "❌ *Something went wrong.*",
+            "Mention me to try again.",
+        ]
+        assert len(error_blocks_from_text("Too many chats.")) == 1, "one line is only a title"
 
     def test_error_uses_notice_next_step_once(self) -> None:
         state = replace(

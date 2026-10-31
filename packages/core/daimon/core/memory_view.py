@@ -334,6 +334,7 @@ class PersonalMemoryReply:
     paths: tuple[str, ...] = ()
     content: str | None = None
     hint: str | None = None
+    error: bool = False
 
 
 async def personal_memory_reply(
@@ -372,6 +373,7 @@ async def personal_memory_reply(
             return PersonalMemoryReply(
                 f"No file called {path} in your personal memory.",
                 hint=f"{command} {MINE} lists them.",
+                error=True,
             )
         return PersonalMemoryReply(path, content=content)
     # Listed once: a forget confirmation is checked against, and deletes only,
@@ -402,6 +404,7 @@ async def personal_memory_reply(
         return PersonalMemoryReply(
             "Nothing was deleted: that code doesn't match your personal memory as it is now.",
             hint=f"Run {command} {FORGET_MINE} to get a new code.",
+            error=True,
         )
     deleted = await delete_memory_records(anthropic, store_id, records, scope=scope)
     kept = len(await list_memory_records(anthropic, store_id, scope=scope))

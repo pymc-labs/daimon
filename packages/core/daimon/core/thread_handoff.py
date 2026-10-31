@@ -85,6 +85,7 @@ from daimon.core.stores.access_policy import (
     lock_access_policy,
 )
 from daimon.core.stores.accounts import key_share_lock_account
+from daimon.core.stores.agent_notices import record_agent_notices
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
@@ -95,6 +96,7 @@ from daimon.core.stores.thread_sessions import (
     thread_session_accounts,
 )
 from daimon.core.stores.turn_origins import thread_requester_accounts
+from daimon.core.turn.agent_notices import HANDED_OVER_NOTICE
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -599,6 +601,15 @@ async def switch_thread_on_request(
                 default=default,
                 now=now,
                 recorded=recorded,
+            )
+            # The person hears of it from the agent now answering, not from Daimon.
+            await record_agent_notices(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                agent_id=agent.id,
+                texts=(HANDED_OVER_NOTICE,),
             )
     except ThreadHandoffRefused as refused:
         if refused.refusal.authz_reason is not None:

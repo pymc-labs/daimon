@@ -6,7 +6,7 @@ must render `render_responder_changed_without_handoff`, not the generic error co
 and never run a turn; `is_setup` on the turn origin must come from
 `admission.config.thread_binding_kind == "setup"`, not merely "a binding exists" (a
 handoff binding must NOT count as setup); and each non-"continued" `ContinuityOutcome`
-state must produce its documented pre/post-answer notice.
+state must leave the reply as the agent's own text, with no system line.
 
 `bind_session` (and, for the notice-copy tests, `run_prepared_turn`) are mocked at the
 `daimon.adapters.slack.app` boundary -- the same precedent test_app.py's ceiling tests
@@ -31,9 +31,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
-    render_replacement_summary,
     render_responder_changed_without_handoff,
-    render_unexpected_loss,
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.github_credentials import build_multifernet, encrypt_token
@@ -65,6 +63,8 @@ from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
+
+from .conftest import shown_text
 
 _AGENT_ID = "agent_continuity_test"
 _ENV_ID = "env_continuity_test"
@@ -254,7 +254,7 @@ async def test_session_preparation_failed_renders_copy_and_does_not_run_turn(
     ]
     assert len(updates) == 1, "the status card must be edited in place with the failure copy"
     body = updates[0].kwargs["json"]
-    assert body["text"] == render_preparation_failed("uat-agent")
+    assert shown_text(body) == render_preparation_failed("uat-agent")
 
 
 @pytest.mark.parametrize("selfhosted", [False, True])
@@ -343,7 +343,7 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
     # lookup resolves the SAME fake agent ("uat-agent") -- this pins the
     # renderer call shape, not a distinct owner name (there is only one
     # agent in this fake).
-    assert body["text"] == render_responder_changed_without_handoff(
+    assert shown_text(body) == render_responder_changed_without_handoff(
         new_responder="uat-agent",
         owner="the previous agent" if selfhosted else "uat-agent",
         channel=f"<#{channel}>",
@@ -351,7 +351,7 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
     )
     buttons = [
         element
-        for block in body["blocks"]
+        for block in (body.get("blocks") or body["attachments"][0]["blocks"])
         if block["type"] == "actions"
         for element in block["elements"]
     ]
@@ -439,18 +439,12 @@ async def test_is_setup_is_false_for_a_handoff_binding(
     )
 
 
-async def test_replaced_makes_the_replacement_summary_the_answers_first_paragraph(
+async def test_replaced_leaves_the_reply_as_the_agents_text(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """The summary explains the answer, so it has to be readable above it.
-
-    The answer is an in-place edit of the status card posted at mention time
-    and Slack orders by the original ts, so a summary posted as its own
-    message sorts BELOW the answer no matter when it is sent -- the reader
-    saw "the file vanished" before the explanation. It rides the answer text
-    instead."""
+    """A planned replacement adds no summary to the reply; the agent says it."""
     team_id = "T_REPLACED"
     channel = "C_TEST"
     thread_ts = "9100000004.000001"
@@ -509,99 +503,21 @@ async def test_replaced_makes_the_replacement_summary_the_answers_first_paragrap
 
         await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
 
-    summary = render_replacement_summary("full", lost=[])
-    assert _final_answer_text(fake_slack_web_client) == f"{summary}\n\n{_ANSWER}", (
-        "the replacement summary must be the answer's first paragraph"
-    )
-    assert summary not in _posted_texts(fake_slack_web_client), (
-        "the summary must not also arrive as its own message below the answer"
-    )
-
-
-async def test_replaced_with_no_transfer_kind_renders_no_summary_prefix(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """A fresh start (`transfer_kind=None`) is a `replaced` bind with nothing
-    carried across -- not a transfer whose contents need summarizing. The old
-    `transfer_kind or "full"` fallback rendered the FULL-transfer summary
-    ("Your conversation, decisions and working files came across.") on a
-    fresh start, contradicting the fresh-start confirmation already posted.
-    No prefix should be rendered at all."""
-    team_id = "T_REPLACED_FRESH_START"
-    channel = "C_TEST"
-    thread_ts = "9100000006.000001"
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    fernet_key = Fernet.generate_key().decode()
-
-    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
-    await upsert_slack_bot_token(
-        db_session,
-        team_id=team_id,
-        encrypted_token=encrypt_token(build_multifernet((fernet_key,)), "xoxb-fresh-start"),
-    )
-    await db_session.commit()
-
-    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
-    app.runtime.settings.crypto.keys = (SecretStr(fernet_key),)
-
-    event = _event(channel=channel, thread_ts=thread_ts, user="U_REPLACED_FRESH_START")
-
-    prepared = _prepared_turn(continuity=ContinuityOutcome(state="replaced", transfer_kind=None))
-
-    with (
-        patch(
-            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
-        ) as mock_resolve_agent,
-        patch(
-            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
-        ) as mock_resolve_env,
-        patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
-        ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
-        patch(
-            "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
-        ) as mock_bind_session,
-        patch(
-            "daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock
-        ) as mock_run_prepared_turn,
-    ):
-        mock_resolve_agent.return_value = _AGENT_ID
-        mock_resolve_env.return_value = _ENV_ID
-        mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
-        mock_bind_session.return_value = prepared
-        mock_run_prepared_turn.side_effect = _run_turn_revealing_answer(
-            RunOutcome(
-                state=TurnState(),
-                ma_session_id=prepared.ma_session_id,
-                mapping_id=prepared.mapping_id,
-                recovered=False,
-                continuity=prepared.continuity,
-            )
-        )
-
-        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
-
     assert _final_answer_text(fake_slack_web_client) == _ANSWER, (
-        "a fresh start must not prefix the answer with a replacement summary"
+        "the reply must be exactly the agent's text, with no replacement summary"
     )
-    posted = _posted_texts(fake_slack_web_client)
-    assert render_replacement_summary("full", lost=[]) not in posted
-    assert render_replacement_summary("transcript", lost=[]) not in posted
-    assert render_replacement_summary("history", lost=[]) not in posted
+    assert _posted_texts(fake_slack_web_client) == ["Working on it…"], (
+        "only the status card is posted, no summary"
+    )
 
 
-async def test_replaced_falls_back_to_its_own_message_when_no_answer_is_revealed(
+async def test_replaced_with_no_answer_posts_no_summary_message(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """A tool-only, cancelled or failed turn reveals no answer to carry the
-    summary. The person still has to be told what the replacement carried
-    across, so it goes out on its own rather than being dropped."""
+    """A tool-only, cancelled or failed turn has no answer to hang a summary on,
+    and none is posted on its own."""
     team_id = "T_REPLACED_NO_ANSWER"
     channel = "C_TEST"
     thread_ts = "9100000004.000009"
@@ -657,9 +573,9 @@ async def test_replaced_falls_back_to_its_own_message_when_no_answer_is_revealed
 
         await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
 
-    assert render_replacement_summary("transcript", lost=[]) in _posted_texts(
-        fake_slack_web_client
-    ), "with no answer to carry it, the summary must still reach the person"
+    assert _posted_texts(fake_slack_web_client) == ["Working on it…"], (
+        "only the status card is posted, no summary"
+    )
 
 
 @pytest.mark.parametrize(
@@ -667,19 +583,14 @@ async def test_replaced_falls_back_to_its_own_message_when_no_answer_is_revealed
     ["transcript", "history", None],
     ids=["transcript_variant", "history_variant", "history_variant_default"],
 )
-async def test_outcome_replaced_after_loss_prepends_exactly_one_loss_notice_to_the_answer(
+async def test_outcome_replaced_after_loss_leaves_the_reply_as_the_agents_text(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
     transfer_kind: Literal["transcript", "history"] | None,
 ) -> None:
-    """A dead-session recovery must tell the person their workspace was lost.
-    `run_prepared_turn` only learns this mid-call, so the notice is keyed off
-    `outcome.continuity` (the post-turn `RunOutcome`), never
-    `prepared.continuity` (the pre-turn bind decision, which can never
-    actually carry "replaced_after_loss"). By then the answer has already
-    replaced the status card, so the card is edited once more to put the
-    notice above the answer instead of sending it underneath."""
+    """A dead-session recovery adds no system line of its own: what was lost is
+    the agent's to say, so the reply is exactly the agent's text."""
     team_id = f"T_REPLACED_AFTER_LOSS_{transfer_kind}"
     channel = "C_TEST"
     thread_ts = "9100000005.000001"
@@ -740,93 +651,12 @@ async def test_outcome_replaced_after_loss_prepends_exactly_one_loss_notice_to_t
 
         await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
 
-    expected = render_unexpected_loss("transcript" if transfer_kind == "transcript" else "history")
-    assert _final_answer_text(fake_slack_web_client) == f"{expected}\n\n{_ANSWER}", (
-        "the loss notice must be the answer's first paragraph, exactly once"
+    assert _final_answer_text(fake_slack_web_client) == _ANSWER, (
+        "the reply must be exactly the agent's text, with no system line"
     )
-    assert expected not in _posted_texts(fake_slack_web_client), (
-        "the loss notice must not also arrive as its own message below the answer"
+    assert _posted_texts(fake_slack_web_client) == ["Working on it…"], (
+        "only the status card is posted, no system message"
     )
-
-
-async def test_bind_replaced_after_loss_never_fires_before_the_turn(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """`bind_session`'s own `PreparedTurn.continuity` can never be
-    "replaced_after_loss" in real code -- this is a regression guard for the
-    dead pre-turn branch removed from `_run_thread_turn`: even if
-    `prepared.continuity` somehow carried that state, no loss notice is
-    posted from it, only from `outcome.continuity`."""
-    team_id = "T_BIND_NEVER_LOSS"
-    channel = "C_TEST"
-    thread_ts = "9100000008.000001"
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    fernet_key = Fernet.generate_key().decode()
-
-    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
-    await upsert_slack_bot_token(
-        db_session,
-        team_id=team_id,
-        encrypted_token=encrypt_token(build_multifernet((fernet_key,)), "xoxb-bind-never-loss"),
-    )
-    await db_session.commit()
-
-    app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
-    app.runtime.settings.crypto.keys = (SecretStr(fernet_key),)
-
-    event = _event(channel=channel, thread_ts=thread_ts, user="U_BIND_NEVER_LOSS")
-
-    prepared = _prepared_turn(
-        continuity=ContinuityOutcome(state="replaced_after_loss", transfer_kind="transcript")
-    )
-
-    with (
-        patch(
-            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
-        ) as mock_resolve_agent,
-        patch(
-            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
-        ) as mock_resolve_env,
-        patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
-        ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
-        patch(
-            "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
-        ) as mock_bind_session,
-        patch(
-            "daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock
-        ) as mock_run_prepared_turn,
-    ):
-        mock_resolve_agent.return_value = _AGENT_ID
-        mock_resolve_env.return_value = _ENV_ID
-        mock_over_balance.return_value = False
-        mock_over_cap.return_value = False
-        mock_bind_session.return_value = prepared
-        # The real run_prepared_turn always restates a mid-call recovery
-        # through outcome.continuity -- this fakes an ordinary completed turn,
-        # exactly what happens if prepared.continuity were (wrongly) trusted.
-        mock_run_prepared_turn.return_value = RunOutcome(
-            state=TurnState(),
-            ma_session_id=prepared.ma_session_id,
-            mapping_id=prepared.mapping_id,
-            recovered=False,
-            continuity=ContinuityOutcome(),
-        )
-
-        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
-
-    posts = [
-        req
-        for (_method, url), reqs in fake_slack_web_client.mock.requests.items()
-        if url == URL("https://slack.com/api/chat.postMessage")
-        for req in reqs
-    ]
-    texts = [p.kwargs["json"]["text"] for p in posts]
-    assert render_unexpected_loss("transcript") not in texts
-    assert render_unexpected_loss("history") not in texts
 
 
 async def test_pending_posts_must_finish_copy_after_the_answer(
@@ -894,8 +724,10 @@ async def test_pending_posts_must_finish_copy_after_the_answer(
         if url == URL("https://slack.com/api/chat.postMessage")
         for req in reqs
     ]
-    texts = [p.kwargs["json"]["text"] for p in posts]
-    assert render_current_work_must_finish("uat-agent", handoff=False) in texts
+    notices = [attachment for p in posts for attachment in p.kwargs["json"].get("attachments", [])]
+    assert [(a["color"], a["blocks"][0]["text"]["text"]) for a in notices] == [
+        ("#5865F2", render_current_work_must_finish("uat-agent", handoff=False))
+    ], "the must-finish line is a neutral-barred notice after the answer, not a red error"
 
 
 async def test_session_busy_renders_must_finish_copy_and_does_not_run_turn(
@@ -963,7 +795,7 @@ async def test_session_busy_renders_must_finish_copy_and_does_not_run_turn(
         for req in reqs
     ]
     assert len(updates) == 1, "the status card must be edited in place with the busy copy"
-    assert updates[0].kwargs["json"]["text"] == render_current_work_must_finish(
+    assert shown_text(updates[0].kwargs["json"]) == render_current_work_must_finish(
         "uat-agent", handoff=True
     )
 

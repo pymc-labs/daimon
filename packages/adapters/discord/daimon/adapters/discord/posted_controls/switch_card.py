@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import structlog
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.switch_cards import (
@@ -74,7 +75,9 @@ class SwitchCardControl(
         bot = cast("DaimonBot", interaction.client)
         guild = interaction.guild
         if guild is None or interaction.message is None:
-            await interaction.response.send_message(UNAVAILABLE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(UNAVAILABLE), ephemeral=True
+            )
             return
         # Re-verifying reads the agent's setup from its provider: past the 3 s budget.
         await interaction.response.defer()
@@ -102,13 +105,15 @@ class SwitchCardControl(
             )
         except Exception:
             log.exception("switch_card.press_failed", card_id=str(self.card_id))
-            await interaction.followup.send(UNAVAILABLE, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(UNAVAILABLE), ephemeral=True)
             return
         if press is None:
-            await interaction.followup.send(NOT_YOURS, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(NOT_YOURS), ephemeral=True)
             return
         if not press.closed:
-            await interaction.followup.send(press.text, ephemeral=True)
+            await interaction.followup.send(
+                embed=build_notice_embed(press.text, neutral=True), ephemeral=True
+            )
             return
         await interaction.message.edit(
             view=build_card_view(answered_switch_card(press)),

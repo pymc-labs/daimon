@@ -49,7 +49,11 @@ import anthropic as _anthropic
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.blockkit import to_interrupted_blocks
+from daimon.adapters.slack.blockkit import (
+    INTERRUPTED_NOTICE,
+    notice_update_fields,
+    to_interrupted_blocks,
+)
 from daimon.adapters.slack.card_recovery import CardLookupStatus, find_turn_card_by_key
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -84,11 +88,6 @@ _SWEEP_CONCURRENCY = 2
 _CARD_RECOVERY_WINDOW_SECONDS = 360.0
 _CARD_RECOVERY_RETRY_DELAY_SECONDS = 60.0
 _CARD_RECOVERY_MAX_ATTEMPTS = 3
-
-# Slack's notification-fallback requirement (blocks= always ships with text=).
-_INTERRUPTED_FALLBACK_TEXT = (
-    "Daimon restarted before this request finished. @mention Daimon with your request to try again."
-)
 
 # Everything a chat.update can raise. Mirrors lifecycle.py's _SLACK_SEND_ERRORS
 # exactly -- no error-code branching, the same posture the rest of the Slack
@@ -387,8 +386,9 @@ async def recover_slack_card_intents(
                                 await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                                     channel=channel_id,
                                     ts=message_ts,
-                                    blocks=to_interrupted_blocks(),
-                                    text=_INTERRUPTED_FALLBACK_TEXT,
+                                    **notice_update_fields(
+                                        INTERRUPTED_NOTICE, blocks=to_interrupted_blocks()
+                                    ),
                                 )
                             except _SLACK_UPDATE_ERRORS as error:
                                 edits_succeeded = False
@@ -596,8 +596,7 @@ async def retire_orphaned_turns(runtime: SlackRuntime, *, now: datetime) -> None
                     await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                         channel=channel_id,
                         ts=message_id,
-                        blocks=to_interrupted_blocks(),
-                        text=_INTERRUPTED_FALLBACK_TEXT,
+                        **notice_update_fields(INTERRUPTED_NOTICE, blocks=to_interrupted_blocks()),
                     )
                     log.info(
                         "slack.turn.orphan_retired",

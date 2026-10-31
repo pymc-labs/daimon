@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack import direct_messages as dm_module
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.direct_messages import ColdDmNotices
 from daimon.core.stores.direct_messages import set_dm_enabled
@@ -62,7 +63,7 @@ async def test_cold_dm_with_private_chats_off_gets_the_two_line_answer(
         _runtime(db_session_factory), _event(), team_id="T_COLD_OFF"
     )
 
-    client.chat_postMessage.assert_awaited_once_with(channel="D_COLD", text=_OFF)
+    client.chat_postMessage.assert_awaited_once_with(channel="D_COLD", **notice_fields(_OFF))
 
 
 async def test_cold_dm_with_private_chats_on_points_to_dm_me(
@@ -77,7 +78,7 @@ async def test_cold_dm_with_private_chats_on_points_to_dm_me(
         _runtime(db_session_factory), _event(), team_id="T_COLD_ON"
     )
 
-    client.chat_postMessage.assert_awaited_once_with(channel="D_COLD", text=_ON)
+    client.chat_postMessage.assert_awaited_once_with(channel="D_COLD", **notice_fields(_ON))
 
 
 async def test_dms_off_after_a_conversation_exists_gets_the_off_answer(
@@ -102,7 +103,7 @@ async def test_dms_off_after_a_conversation_exists_gets_the_off_answer(
         _runtime(db_session_factory), _event(), team_id="T_COLD_CONV"
     )
 
-    client.chat_postMessage.assert_awaited_once_with(channel="D_COLD", text=_OFF)
+    client.chat_postMessage.assert_awaited_once_with(channel="D_COLD", **notice_fields(_OFF))
 
 
 async def test_each_person_is_answered_once_per_process(

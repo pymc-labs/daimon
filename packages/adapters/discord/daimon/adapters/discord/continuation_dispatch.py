@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.agent_identity import AgentIdentity, resolve_agent_identity
 from daimon.core.continuity.continuation import ContinuationDecision
@@ -90,7 +91,7 @@ async def dispatch_pending_continuations(
     async def post(row: TaskContinuationRow, text: str, reason: str) -> None:
         if await may_post():
             if client is None:
-                await thread.send(text)
+                await thread.send(embed=build_notice_embed(text))
             else:
                 try:
                     async with sessionmaker.begin() as session:
@@ -117,7 +118,7 @@ async def dispatch_pending_continuations(
                     builtin=identity.builtin,
                     identity_enabled=identity_enabled,
                 )
-                await transport.send(text)
+                await transport.send(embed=build_notice_embed(text))
         else:
             log.info("continuation.notice_withheld", thread_id=row.thread_id, reason=reason)
 

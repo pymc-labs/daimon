@@ -22,6 +22,7 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 import structlog
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
 from daimon.core.authz import Subject
 from daimon.core.confirmation import (
@@ -190,7 +191,9 @@ class _ConfirmationView(discord.ui.LayoutView):
         reference = self._prompt.tool_rule
         clicker = str(interaction.user.id)
         if reference is None or self._rule_factory is None or self._rule_subject is None:
-            await interaction.response.send_message(NO_LONGER_PENDING_MESSAGE, ephemeral=True)
+            await interaction.response.send_message(
+                embed=build_notice_embed(NO_LONGER_PENDING_MESSAGE), ephemeral=True
+            )
             return
         await interaction.response.defer()
         try:
@@ -203,10 +206,10 @@ class _ConfirmationView(discord.ui.LayoutView):
             message = ONLY_ADMIN_MESSAGE
             if clicker == self._prompt.requester_platform_user_id:
                 message += "\n" + ASK_ADMIN_MESSAGE
-            await interaction.followup.send(message, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(message), ephemeral=True)
             return
         if refusal := settle_local_admin_confirmation(self._prompt, self._answer):
-            await interaction.followup.send(refusal, ephemeral=True)
+            await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)
             return
         self.stop()
         self._queue_always_answer(interaction, clicker, "once")
@@ -232,7 +235,9 @@ class _ConfirmationView(discord.ui.LayoutView):
             log.info("tool_confirmation.always_edit_token_expired")
         if result != "saved":
             await interaction.followup.send(
-                STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE,
+                embed=build_notice_embed(
+                    STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE
+                ),
                 ephemeral=True,
             )
 
@@ -257,8 +262,11 @@ class _ConfirmationView(discord.ui.LayoutView):
 
     async def _on_details(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            "\n".join(_safe_text(line) for line in self._prompt.detail_lines)
-            or "No additional details.",
+            embed=build_notice_embed(
+                "\n".join(_safe_text(line) for line in self._prompt.detail_lines)
+                or "No additional details.",
+                neutral=True,
+            ),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -280,7 +288,9 @@ class _ConfirmationView(discord.ui.LayoutView):
             if refusal == NOT_YOURS_MESSAGE:
                 refusal = refusal.format(requester=f"<@{self._prompt.requester_platform_user_id}>")
             await interaction.response.send_message(
-                refusal, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+                embed=build_notice_embed(refusal),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
         # Answered: nothing on this card listens any more.
@@ -551,7 +561,8 @@ def discord_confirmation_hook(
         async def remind() -> None:
             # Once, after a while: the requester is pinged in the card's own thread.
             await message.reply(
-                f"<@{prompt.requester_platform_user_id}> {STILL_WAITING_MESSAGE}",
+                f"<@{prompt.requester_platform_user_id}>",
+                embed=build_notice_embed(STILL_WAITING_MESSAGE, neutral=True),
                 allowed_mentions=discord.AllowedMentions(
                     users=True, roles=False, everyone=False, replied_user=False
                 ),

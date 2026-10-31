@@ -1185,9 +1185,9 @@ async def test_a_submit_over_the_per_tenant_cap_with_a_full_queue_runs_no_turn_a
     )
 
     posted_texts = [
-        call.args[0]
+        call.kwargs["embed"].description
         for call in channel.send.call_args_list
-        if call.args and isinstance(call.args[0], str)
+        if "embed" in call.kwargs
     ]
     assert any("recorded" in text and "chats at once" in text for text in posted_texts), (
         f"the refusal must say the answers were recorded and the server is busy, "
@@ -1342,11 +1342,15 @@ async def test_a_queued_submit_that_never_runs_collapses_its_card_and_leaves_not
             assert stream_hits == []
             card = channel.send.return_value
             expected = (
-                "Stopped.\nSend a message to start again."
+                ("Stopped.", "Send a message to start again.")
                 if ending == "stopped"
-                else "Something went wrong. Mention me to try again."
+                else (None, "Something went wrong. Mention me to try again.")
             )
-            assert [c.kwargs.get("content") for c in card.edit.await_args_list] == [expected]
+            assert [
+                (c.kwargs["embed"].title, c.kwargs["embed"].description)
+                for c in card.edit.await_args_list
+            ] == [expected]
+            assert card.edit.await_args.kwargs["content"] is None
             assert await list_orphaned_turns(db_session, platform="discord") == []
             async with db_session_factory() as session:
                 intents = await list_recoverable_turn_card_intents(session, platform="discord")
@@ -1434,9 +1438,9 @@ async def test_a_submitter_over_balance_is_told_and_no_turn_runs(
     assert stream_hits == [], "an over-balance refusal must never reach the SSE turn stream"
 
     posted_texts = [
-        call.args[0]
+        call.kwargs["embed"].description
         for call in channel.send.call_args_list
-        if call.args and isinstance(call.args[0], str)
+        if "embed" in call.kwargs
     ]
     assert any("recorded" in text for text in posted_texts), (
         f"the refusal must say the answers were recorded, got: {posted_texts}"
@@ -1491,9 +1495,9 @@ async def test_a_demoted_admin_outside_the_allowlist_is_refused_on_submit(
 
     assert stream_hits == [], "a refused submitter must never reach the turn stream"
     posted_texts = [
-        call.args[0]
+        call.kwargs["embed"].description
         for call in channel.send.call_args_list
-        if call.args and isinstance(call.args[0], str)
+        if "embed" in call.kwargs
     ]
     assert any(
         "Your answers were recorded.\n\nDaimon can't accept your request here." in t
@@ -1693,9 +1697,9 @@ async def test_a_bind_phase_ceiling_does_not_escape_the_background_task(
 
     assert stream_hits == [], "a bind-phase ceiling must never reach the SSE turn stream"
     posted_texts = [
-        call.args[0]
+        call.kwargs["embed"].description
         for call in channel.send.call_args_list
-        if call.args and isinstance(call.args[0], str)
+        if "embed" in call.kwargs
     ]
     assert posted_texts, "the bind-phase ceiling must render through the existing turn-failure path"
 

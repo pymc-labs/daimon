@@ -25,6 +25,7 @@ from typing import Any
 import anthropic
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.routines_panel.read import load_routines, routines_viewer
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
@@ -178,7 +179,7 @@ async def _refuse_non_admin(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=":x: You no longer have permission to create routines.",
+            **notice_fields("You no longer have permission to create routines."),
         )
         return True
     return False
@@ -227,7 +228,9 @@ async def run_routines_create_submission(
             await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
-                text=("That schedule or time zone isn't valid.\n\nCheck both and try again."),
+                **notice_fields(
+                    "That schedule or time zone isn't valid.\n\nCheck both and try again."
+                ),
             )
             return
 
@@ -238,7 +241,7 @@ async def run_routines_create_submission(
             await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,
                 user=user_id,
-                text=f":x: No agent named `{agent_name}` found for this workspace.",
+                **notice_fields(f"No agent named `{agent_name}` found for this workspace."),
             )
             return
 
@@ -267,7 +270,10 @@ async def run_routines_create_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text=f"✅ Routine created for {agent_name}, {schedule_words(cron_expr, timezone_)}.",
+            **notice_fields(
+                f"✅ Routine created for {agent_name}, {schedule_words(cron_expr, timezone_)}.",
+                neutral=True,
+            ),
         )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:
         log.error("slack.routines_create_failed", team_id=team_id, exc_info=exc)
@@ -275,7 +281,7 @@ async def run_routines_create_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             user=user_id,
-            text="Couldn't create the routine.\n\nTry again.",
+            **notice_fields("Couldn't create the routine.\n\nTry again."),
         )
 
 
@@ -311,7 +317,7 @@ async def run_routines_delete_submission(
                 await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
-                    text="This routine no longer exists.",
+                    **notice_fields("This routine no longer exists."),
                 )
                 return
             is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
@@ -319,7 +325,7 @@ async def run_routines_delete_submission(
                 await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id or user_id,
                     user=user_id,
-                    text=(
+                    **notice_fields(
                         "Only the routine's creator or a workspace admin can delete this routine."
                     ),
                 )
@@ -347,7 +353,7 @@ async def run_routines_delete_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id or user_id,
             user=user_id,
-            text=":wastebasket: Routine deleted.",
+            **notice_fields(":wastebasket: Routine deleted.", neutral=True),
         )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:
         log.error("slack.routines_delete_failed", team_id=team_id, exc_info=exc)
@@ -355,5 +361,5 @@ async def run_routines_delete_submission(
         await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id or user_id,
             user=user_id,
-            text="Couldn't delete the routine.\n\nTry again.",
+            **notice_fields("Couldn't delete the routine.\n\nTry again."),
         )
