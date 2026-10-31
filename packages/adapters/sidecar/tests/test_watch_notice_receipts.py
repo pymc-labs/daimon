@@ -209,3 +209,98 @@ async def test_a_send_that_times_out_after_discord_stored_it_is_not_sent_twice(
         (1, "interrupted", None),
         (2, "sent", "901"),
     ]
+
+
+async def _paused(
+    sessions: async_sessionmaker[AsyncSession], definition: ImportedWatch, reason: str
+) -> WatchRow:
+    now = datetime.now(UTC)
+    async with sessions.begin() as db:
+        row = await watches.import_watch(db, definition, now=now)
+        await db.execute(
+            text(
+                "UPDATE watches SET status='paused', paused_at=:at, "
+                "source_state=jsonb_build_object('reason', CAST(:reason AS text)) WHERE id=:id"
+            ),
+            {"at": now, "reason": reason, "id": row.id},
+        )
+    return row
+
+
+async def _state(sessions: async_sessionmaker[AsyncSession], row: WatchRow) -> dict[str, object]:
+    async with sessions() as db:
+        current = await watches.get_watch(db, row.id)
+    assert current is not None
+    return current.source_state
+
+
+@pytest.mark.parametrize("reason", ["tool_unlisted", "access_revoked"])
+async def test_a_refused_notice_is_recorded_and_never_retried(
+    db_session_factory: async_sessionmaker[AsyncSession], definition: ImportedWatch, reason: str
+) -> None:
+    row = await _paused(db_session_factory, definition, reason)
+    deliver = AsyncMock(return_value=watches.REFUSED)
+    await poll_watch_notices(db_session_factory, deliver=deliver)
+    await _expire_lease(db_session_factory, row)
+    await poll_watch_notices(db_session_factory, deliver=deliver)
+    deliver.assert_awaited_once()
+    receipts = await _receipts(db_session_factory, row)
+    assert [(r.kind, r.attempt, r.outcome) for r in receipts] == [(reason, 1, "refused")]
+    state = await _state(db_session_factory, row)
+    assert state["notice_pending"] is False and state["notice_lease_until"] is None
+
+
+async def test_a_failed_notice_waits_longer_before_each_retry(
+    db_session_factory: async_sessionmaker[AsyncSession], definition: ImportedWatch
+) -> None:
+    row = await _paused(db_session_factory, definition, "tool_unlisted")
+    waits: list[timedelta] = []
+    for _ in range(6):
+        before = datetime.now(UTC)
+        await poll_watch_notices(db_session_factory, deliver=AsyncMock(return_value=False))
+        until = (await _state(db_session_factory, row))["notice_lease_until"]
+        waits.append(datetime.fromisoformat(str(until)) - before)
+        await _expire_lease(db_session_factory, row)
+    assert [round(wait.total_seconds() / 60) for wait in waits] == [5, 10, 20, 40, 60, 60]
+    assert len(await _receipts(db_session_factory, row)) == 6
+
+
+async def test_a_notice_still_failing_a_day_after_its_first_attempt_is_dropped(
+    db_session_factory: async_sessionmaker[AsyncSession], definition: ImportedWatch
+) -> None:
+    async with db_session_factory.begin() as db:
+        row = await watches.import_watch(db, definition, now=datetime.now(UTC))
+        await db.execute(
+            text(
+                "UPDATE watches SET status='active', source_state="
+                '\'{"notice_state": "daily_cap", "notice_pending": true}\' WHERE id=:id'
+            ),
+            {"id": row.id},
+        )
+    await poll_watch_notices(db_session_factory, deliver=AsyncMock(return_value=False))
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE watch_notice_receipts SET attempted_at=attempted_at - CAST(:age AS interval) "
+                "WHERE watch_id=:id"
+            ),
+            {"age": watches.NOTICE_RETRY_WINDOW, "id": row.id},
+        )
+    await _expire_lease(db_session_factory, row)
+    deliver = AsyncMock(return_value=True)
+    for _ in range(2):
+        await poll_watch_notices(db_session_factory, deliver=deliver)
+    deliver.assert_not_awaited()
+    receipts = await _receipts(db_session_factory, row)
+    assert [(r.kind, r.outcome) for r in receipts] == [("daily_cap", "failed")]
+    state = await _state(db_session_factory, row)
+    assert state["notice_pending"] is False and state["notice_open"] is None
+
+
+def test_retry_delay_doubles_to_an_hour_and_stops_after_a_day() -> None:
+    now = datetime.now(UTC)
+    delays = [watches.notice_retry_in(n, first=now, now=now) for n in (1, 2, 3, 4, 5, 30)]
+    assert delays == [timedelta(minutes=m) for m in (5, 10, 20, 40, 60, 60)]
+    last_chance = now - watches.NOTICE_RETRY_WINDOW + timedelta(seconds=1)
+    assert watches.notice_retry_in(9, first=last_chance, now=now) == timedelta(hours=1)
+    assert watches.notice_retry_in(9, first=now - watches.NOTICE_RETRY_WINDOW, now=now) is None

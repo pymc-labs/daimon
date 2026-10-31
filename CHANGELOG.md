@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A watch owner notice that cannot be delivered no longer retries every five minutes until the watch is deleted. When Discord will never deliver it (the owner closed their DMs, blocked the bot, left the server or is a bot account) the attempt is recorded as `refused` and the notice stops; any other failure retries after 5, 10, 20 and 40 minutes, then hourly, and is dropped a day after its first attempt. Every notice kind follows the same rule (migration `0166_watch_notice_refused`).
+
 - An agent that enables Daimon tools by name now sees all of them. Before, it saw only the tools that wait for a person's Approve: the rest were listed only behind `search_tools` and `call_tool`, which its list did not enable. Daimon records each agent's list when a session for it is created or updated and lists those tools directly for that agent (migration `0165_agent_daimon_tools`).
 
 - QA confirm clicks and QA auto-approve also run on the `lane-preview` dev lane, not only on staging: the host's project must end in `-dev` and its deployment name must be `lane-preview`. The QA bot allow-list, the read-only control files and the audit log apply as on staging, and publish cards stay manual.

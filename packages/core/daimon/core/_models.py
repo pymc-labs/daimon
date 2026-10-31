@@ -4428,7 +4428,7 @@ class WatchNoticeReceipt(Base):
             "watch_id", "kind", "generation", "attempt", name="uq_watch_notice_attempt"
         ),
         CheckConstraint(
-            "outcome IN ('pending', 'sent', 'failed', 'interrupted')",
+            "outcome IN ('pending', 'sent', 'failed', 'interrupted', 'refused')",
             name="ck_watch_notice_outcome",
         ),
         Index("ix_watch_notice_receipt_time", "attempted_at"),

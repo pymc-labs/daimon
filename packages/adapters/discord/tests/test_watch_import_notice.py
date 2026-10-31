@@ -12,7 +12,7 @@ import pytest
 from daimon.adapters.discord.budget_notice import send_member_notice, send_watch_notice
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.watch_imports import UNMAPPED_NOTICE
-from daimon.core.stores.watches import UNCLEAR, NoticeAttempt, SentNotice
+from daimon.core.stores.watches import REFUSED, UNCLEAR, NoticeAttempt, SentNotice
 
 
 @pytest.mark.parametrize("closed,allowed", [(False, True), (True, True), (False, False)])
@@ -151,6 +151,60 @@ async def test_watch_notice_send_that_may_have_landed_is_unclear(
     response: Any = SimpleNamespace(status=status, reason="x")
     failure: Exception = TimeoutError() if error else discord.HTTPException(response, "x")
     dm = SimpleNamespace(send=AsyncMock(side_effect=failure), history=_history())
+    result = await send_watch_notice(
+        _runtime(tenant_id),
+        AsyncMock(return_value=dm),
+        lambda: False,
+        bot_user_id=7,
+        tenant_id=tenant_id,
+        workspace_id="100",
+        recipient_id="123",
+        text="Watch expired.",
+        attempt=_attempt(),
+    )
+    assert result == expected
+
+
+def _discord_error(kind: type[discord.HTTPException], status: int, code: int) -> Exception:
+    response: Any = SimpleNamespace(status=status, reason="x")
+    return kind(response, {"code": code, "message": "x"})
+
+
+@pytest.mark.parametrize(
+    "open_error,expected",
+    [
+        (LookupError("the routine's creator is not a human member"), REFUSED),
+        (_discord_error(discord.NotFound, 404, 10007), REFUSED),
+        (_discord_error(discord.NotFound, 404, 10013), REFUSED),
+        (_discord_error(discord.NotFound, 404, 10004), None),
+        (_discord_error(discord.HTTPException, 503, 0), None),
+    ],
+)
+async def test_watch_notice_to_an_owner_discord_cannot_reach_is_refused(
+    open_error: Exception, expected: object
+) -> None:
+    tenant_id = uuid.uuid4()
+    result = await send_watch_notice(
+        _runtime(tenant_id),
+        AsyncMock(side_effect=open_error),
+        lambda: False,
+        bot_user_id=7,
+        tenant_id=tenant_id,
+        workspace_id="100",
+        recipient_id="123",
+        text="Watch expired.",
+        attempt=_attempt(),
+    )
+    assert result == expected
+
+
+@pytest.mark.parametrize("code,expected", [(50007, REFUSED), (50001, None)])
+async def test_watch_notice_to_an_owner_with_closed_dms_is_refused(
+    code: int, expected: object
+) -> None:
+    tenant_id = uuid.uuid4()
+    send = AsyncMock(side_effect=_discord_error(discord.Forbidden, 403, code))
+    dm = SimpleNamespace(send=send, history=_history())
     result = await send_watch_notice(
         _runtime(tenant_id),
         AsyncMock(return_value=dm),

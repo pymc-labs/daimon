@@ -13,7 +13,14 @@ import structlog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
-from daimon.core.stores.watches import UNCLEAR, NoticeAttempt, SentNotice, Unclear
+from daimon.core.stores.watches import (
+    REFUSED,
+    UNCLEAR,
+    NoticeAttempt,
+    Refused,
+    SentNotice,
+    Unclear,
+)
 from daimon.core.turn.deps import TurnDeps
 
 import discord
@@ -113,6 +120,8 @@ async def send_member_notice(
 
 # Discord's clock and ours can disagree; look a little before the earlier attempt.
 _HISTORY_SKEW = timedelta(minutes=1)
+# Unknown Member, Unknown User, Cannot send messages to this user (DMs closed or blocked).
+_UNREACHABLE_CODES = frozenset({10007, 10013, 50007})
 
 
 async def send_watch_notice(
@@ -126,7 +135,7 @@ async def send_watch_notice(
     recipient_id: str,
     text: str,
     attempt: NoticeAttempt,
-) -> SentNotice | Unclear | None:
+) -> SentNotice | Unclear | Refused | None:
     """The member-notice transport for watch owner notices, sent at most once per notice.
 
     The nonce makes Discord return the first message for a concurrent resend
@@ -134,12 +143,21 @@ async def send_watch_notice(
     matching message from the bot counts as sent. A failed read sends nothing,
     so the claim retries later. A timeout or server error on the send itself is
     `UNCLEAR`: Discord may have stored the message, so the next attempt checks.
+    An owner Discord will never deliver to (a bot, gone from the server, DMs
+    closed or the bot blocked) is `REFUSED`.
     """
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
     if is_closed() or not policy.allows(recipient_id):
         return None
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))
+    except LookupError:
+        return REFUSED  # The owner is not a human member of the server.
+    except discord.HTTPException as exc:
+        return REFUSED if exc.code in _UNREACHABLE_CODES else None
+    except ValueError:
+        return None
+    try:
         if attempt.since is not None:
             if bot_user_id is None:
                 return None
@@ -154,7 +172,9 @@ async def send_watch_notice(
         )
     except discord.HTTPException as exc:
         # Discord refused a 4xx outright; a 5xx may have been stored before it failed.
-        return UNCLEAR if exc.status >= 500 else None
+        if exc.status >= 500:
+            return UNCLEAR
+        return REFUSED if exc.code in _UNREACHABLE_CODES else None
     except (TimeoutError, aiohttp.ClientError, OSError):
         return UNCLEAR
     return SentNotice(str(message.channel.id), str(message.id))

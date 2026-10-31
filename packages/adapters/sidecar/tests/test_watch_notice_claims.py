@@ -106,7 +106,7 @@ async def test_expired_notices_are_bounded_by_expiry_age(
         assert (notice is not None) is expected
         if notice is not None:
             assert notice[0].id == row.id
-            await watches.settle_import_notice(db, notice[0], delivered=True)
+            await watches.settle_import_notice(db, notice[0], retry_in=None)
             assert await watches.claim_import_notice(db, now=now) is None
         current = await watches.get_watch(db, row.id)
         assert current is not None
