@@ -38,12 +38,13 @@ TOKEN_SHA256 = hashlib.sha256(TOKEN.encode()).hexdigest()
 GUILD, CHANNEL, CARD, BOT, QA, OTHER_QA, HUMAN = 10, 20, 30, 40, 111, 222, 333
 
 
-def _settings(qa: tuple[str, ...] = (str(QA), str(OTHER_QA))) -> Settings:
+def _settings(qa: tuple[str, ...] = (str(QA), str(OTHER_QA)), environment: str = "") -> Settings:
     return Settings.model_validate(
         {
             "database": {"url": "postgresql+asyncpg://localhost/offline"},
             "anthropic": {"api_key": "offline"},
             "discord": {"bot_token": "offline", "qa_bot_user_ids": qa},
+            "environment": {"name": environment},
         }
     )
 
@@ -292,6 +293,10 @@ def _request(**overrides: Any) -> ClickRequest:
         (_settings(), None, Path("/run/x.json"), "not a staging host"),
         (_settings(), "example-prod", Path("/run/x.json"), "not a staging host"),
         (_settings(), "example-staging-not", Path("/run/x.json"), "not a staging host"),
+        (_settings(), "example-dev", Path("/run/x.json"), "not a staging host"),
+        (_settings(environment="lane-other"), "example-dev", Path("/run/x.json"), "not a staging"),
+        (_settings(environment="lane-preview"), "example-prod", Path("/run/x.json"), "not a"),
+        (_settings(environment="lane-preview"), None, Path("/run/x.json"), "not a staging host"),
     ],
 )
 def test_listening_is_refused_unless_qa_runtime_file_and_staging(
@@ -303,6 +308,11 @@ def test_listening_is_refused_unless_qa_runtime_file_and_staging(
 
 def test_listening_is_allowed_on_a_staging_project() -> None:
     assert listen_refusal(_settings(), "example-staging", Path("/run/x.json")) is None
+
+
+def test_listening_is_allowed_on_the_qa_lane_of_a_dev_project() -> None:
+    settings = _settings(environment="lane-preview")
+    assert listen_refusal(settings, "example-dev", Path("/run/x.json")) is None
 
 
 def test_control_file_sits_beside_the_provider_runtime_file(

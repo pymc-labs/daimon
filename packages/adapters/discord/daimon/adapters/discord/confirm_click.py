@@ -18,7 +18,8 @@ staging only, through the same handler path a real click takes:
 
 Who may use it. A Unix socket inside the Discord container (0600, same uid)
 listens only when the GCE metadata server names a project ending in
-`-staging`, QA bots are allow-listed and DAIMON_TURN__PROVIDER_RUNTIME_FILE
+`-staging` (or one ending in `-dev` whose deployment name is `lane-preview`, the
+QA dev lane), QA bots are allow-listed and DAIMON_TURN__PROVIDER_RUNTIME_FILE
 is set. Each request then re-reads `confirm-click.json` next to that runtime
 file, which the operator swaps on the host: it must say
 ``{"enabled": true, "token_sha256": "<64 lowercase hex>"}`` and must not be
@@ -71,6 +72,7 @@ __all__ = [
     "control_file_path",
     "listen_refusal",
     "load_control",
+    "qa_host",
     "start_confirm_click_server",
 ]
 
@@ -81,6 +83,12 @@ AUDIT_TOOL = "discord_confirm_click"
 RUNTIME_FILE_ENV = "DAIMON_TURN__PROVIDER_RUNTIME_FILE"
 CONTROL_FILE_NAME = "confirm-click.json"
 STAGING_PROJECT_SUFFIX = "-staging"
+#: The one dev lane that counts as a QA host: its project must end in
+#: DEV_PROJECT_SUFFIX (from the metadata server) and its deployment name must be
+#: QA_LANE_ENVIRONMENT. The name alone is an environment variable, so it never
+#: qualifies a host on its own.
+DEV_PROJECT_SUFFIX = "-dev"
+QA_LANE_ENVIRONMENT = "lane-preview"
 METADATA_PROJECT_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
 #: Labels of the Confirm card's answer buttons. "Always allow" is left out: it
 #: saves a lasting rule, which a test must never install.
@@ -114,6 +122,15 @@ async def gcp_project_id(timeout_s: float = 2.0) -> str | None:
         return None
 
 
+def qa_host(project_id: str | None, environment_name: str) -> bool:
+    """Whether QA clicks may run here: a staging project, or the QA dev lane."""
+    if project_id is None:
+        return False
+    if project_id.endswith(STAGING_PROJECT_SUFFIX):
+        return True
+    return project_id.endswith(DEV_PROJECT_SUFFIX) and environment_name == QA_LANE_ENVIRONMENT
+
+
 def control_file_path() -> Path | None:
     """`confirm-click.json` beside the provider runtime file, or None when that is unset."""
     runtime_file = os.environ.get(RUNTIME_FILE_ENV)
@@ -128,8 +145,8 @@ def listen_refusal(
         return "no QA bot is allow-listed"
     if control_file is None:
         return "no provider runtime file, so no control file"
-    if project_id is None or not project_id.endswith(STAGING_PROJECT_SUFFIX):
-        return "this is not a staging host"
+    if not qa_host(project_id, settings.environment.name):
+        return "this is not a staging host or the QA lane"
     return None
 
 
