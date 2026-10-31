@@ -155,3 +155,17 @@ async def test_non_production_dms_and_their_buttons_reach_the_listeners() -> Non
         parse({"type": 3, "data": {"custom_id": "dm-switch", "component_type": 2}})
         make_interaction.assert_called_once()
     await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_non_production_dms_reach_only_allowlisted_tenants() -> None:
+    lane, _, _, _ = await _ready_bot("lane-preview", [111])
+    production, _, _, _ = await _ready_bot("", [])
+    allowed = SimpleNamespace(external_id="111")
+    other = SimpleNamespace(external_id="222")
+    assert lane.allows_tenant(allowed)  # type: ignore[arg-type]
+    assert not lane.allows_tenant(other), "a lane must not answer DMs for a guild off its list"  # type: ignore[arg-type]
+    assert not lane.allows_tenant(None)
+    assert production.allows_tenant(other)  # type: ignore[arg-type]
+    await lane.close()  # type: ignore[attr-defined]
+    await production.close()  # type: ignore[attr-defined]

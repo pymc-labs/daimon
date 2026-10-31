@@ -2238,14 +2238,18 @@ class DaimonBot(commands.Bot):
     def _allows_guild(self, guild_id: int | None) -> bool:
         """Non-production accepts only configured guilds.
 
-        DMs and their buttons carry no guild and pass as in production: the
-        direct-message cog admits a person only through a tenant they are a
-        verified member of, so a lane bot still answers no one outside its guilds.
+        DMs and their buttons carry no guild and pass as in production; the
+        direct-message cog then answers only through a tenant `allows_tenant`
+        accepts, so a lane bot still serves no one outside its guilds.
         """
         if not self._non_production or guild_id is None:
             return True
         settings = self.runtime.settings.discord
         return settings is not None and guild_id in settings.command_guild_ids
+
+    def allows_tenant(self, tenant: TenantRow | None) -> bool:
+        """Whether a DM may be answered through `tenant`, whose external id is its guild."""
+        return tenant is not None and self._allows_guild(int(tenant.external_id))
 
     def dispatch(self, event: str, /, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         """Stop guild events before any registered cog listener sees them."""
