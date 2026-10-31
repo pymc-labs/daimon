@@ -291,6 +291,15 @@ active budget shows the tenant's prepaid balance when one exists. An unpriced
 model drops the cost, and an operator-funded tenant outside a budgeted channel
 drops the money left.
 
+An admin can hide the line for the whole server or workspace
+(`tenants.cost_footer`, on by default): `/cost-footer hide` on Discord, or the
+admin-only `set_cost_footer` tool on any platform. With it hidden a finished
+answer has no summary under it: Discord sends the answer with no embed, Slack's
+card reads "Done.", and Teams keeps only 👍/👎 (and Ask a human) below the
+answer. A failed turn still shows its notice. Billing is unchanged, and
+`/billing` still shows usage and credit. A failed read of the setting shows
+the line.
+
 A denial raises `AdmissionDenied` carrying only the reason literal
 (`balance_depleted`, `cap_exceeded` or `channel_budget_exceeded`); the wording
 comes from `packages/core/daimon/core/turn/notices.py` with each adapter's

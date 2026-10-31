@@ -113,7 +113,10 @@ LIFETIME_CAPS_HEAD = "0164_watch_lifetime_caps"
 AGENT_TOOLS_HEAD = "0165_agent_daimon_tools"
 
 
-HEAD = "0166_watch_notice_refused"
+NOTICE_REFUSED_HEAD = "0166_watch_notice_refused"
+
+
+HEAD = "0167_cost_footer"
 
 
 CHAIN = [
@@ -149,6 +152,7 @@ CHAIN = [
     DELIVERY_HEAD,
     LIFETIME_CAPS_HEAD,
     AGENT_TOOLS_HEAD,
+    NOTICE_REFUSED_HEAD,
     HEAD,
 ]
 
@@ -288,6 +292,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
                 "seeded_after",
                 "source_routine_id",
                 "internal_routine_id",
+                "cost_footer",
             }
             and expected != HEAD
         ):

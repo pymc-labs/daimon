@@ -35,6 +35,7 @@ from daimon.adapters.teams.image_preview import MAX_PREVIEWS
 from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
+from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.message_split import split_fenced
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
@@ -462,11 +463,18 @@ class TeamsTurnLifecycle(OutputGate):
         self._notices[message_id] = (actions, summary)
         self._shown[message_id] = text
 
-    async def _summary(self, state: TurnState, *, named_above: bool = False) -> str:
+    async def _summary(self, state: TurnState, *, named_above: bool = False) -> str | None:
         """Slack's summary line: the agent, the time, what was debited, the money left.
 
         `named_above`: agent identity's bold name leads the answer just above it.
+        None when an admin hid the footer.
         """
+        if (
+            self._sessionmaker is not None
+            and self._tenant_id is not None
+            and not await cost_footer_shown(self._sessionmaker, tenant_id=self._tenant_id)
+        ):
+            return None
         t = state.usage_totals
         cost = None
         if self._provider_draft is None and not isinstance(t, ProviderUsageTotals):

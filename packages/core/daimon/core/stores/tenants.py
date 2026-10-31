@@ -79,6 +79,14 @@ async def get_plain_text_mentions(
     return bool(enabled)
 
 
+async def get_cost_footer(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Whether finished turns show their cost footer; True for an unknown tenant."""
+    shown = (
+        await session.execute(select(Tenant.cost_footer).where(Tenant.id == tenant_id))
+    ).scalar_one_or_none()
+    return shown is not False
+
+
 _LAST_RECONCILE_ERROR_MAX_LENGTH = 2000
 _LAST_RECONCILE_ERROR_TRUNCATION_MARKER = "... [truncated]"
 
@@ -298,6 +306,20 @@ async def set_turn_cap(
         raise StoreError(f"tenant {tenant_id} not found")
     await session.flush()
     return TenantRow.model_validate(row)
+
+
+async def set_cost_footer(session: AsyncSession, *, tenant_id: uuid.UUID, shown: bool) -> None:
+    """Show or hide the tenant's finished-turn cost footer."""
+    tenant = (
+        await session.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id)
+            .values(cost_footer=shown)
+            .returning(Tenant.id)
+        )
+    ).scalar_one_or_none()
+    if tenant is None:
+        raise StoreError(f"tenant {tenant_id} not found")
 
 
 async def set_plain_text_mentions(

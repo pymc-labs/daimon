@@ -333,6 +333,14 @@ prompts. `set_plain_text_mentions(enabled)` changes it for everyone in this `wor
 `note` back. Direct messages, bots and webhooks are unaffected. A name followed
 by "(" or by a dot and a letter is ignored ("@Daimon (urgent)", "@Daimon.Thanks").
 
+## The cost footer
+
+Each finished answer ends with one line naming the agent, the time taken, what
+it cost and the money left. On by default; an admin can hide it for everyone in
+this `words.space` with `set_cost_footer(shown=false)` and bring it back with
+`shown=true`; `get_cost_footer()` reads it. Read the returned `note` back.
+Hiding it changes nothing else: the billing panel still shows usage and credit.
+
 ## Scheduled routines
 
 Use `create_routine` after confirming the agent, schedule, timezone, and task.

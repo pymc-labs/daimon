@@ -476,6 +476,38 @@ async def test_the_summary_line_leaves_out_a_name_shown_above_and_money_it_canno
     assert summary["text"] == "Ada\u2003\u20030s", "no answer above names the agent here"
 
 
+async def test_a_hidden_cost_footer_leaves_only_the_vote_buttons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def hidden(session_factory: object, **kw: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(lifecycle_module, "cost_footer_shown", hidden)
+    sender = FakeSender()
+    lifecycle = await _posted(
+        sender, tenant_id=uuid.uuid4(), agent_name="Ada", sessionmaker=_Sessions()
+    )
+    await lifecycle.on_terminal_success(_answer("Done."))
+
+    controls = sender.activities[-1]
+    assert _rated(controls), "the 👍/👎 still land below the answer"
+    assert [element["type"] for element in _card_body(sender, -1)] == ["ActionSet"], (
+        "no summary line above the buttons"
+    )
+
+    sender = FakeSender()
+    lifecycle = await _posted(
+        sender, tenant_id=uuid.uuid4(), agent_name="Ada", sessionmaker=_Sessions()
+    )
+    error = TurnError(kind="upstream", message="overloaded")
+    await lifecycle.on_terminal_failure(TurnState(error=error), error)
+    texts = [element.get("text", "") for element in _card_body(sender, -1)]
+    assert "try again" in texts[0], "the failure itself is still said"
+    assert not any(text.startswith("Ada") for text in texts), (
+        "a failure's notice carries no summary line either"
+    )
+
+
 async def test_a_failed_turn_card_carries_the_summary_line() -> None:
     sender, clock = FakeSender(), Clock()
     lifecycle = await _posted(sender, clock, agent_name="Ada")

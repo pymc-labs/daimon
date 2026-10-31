@@ -239,6 +239,21 @@ class TestToEmbedData:
         )
         assert data.details is None, "no Details field on a finished card"
 
+    def test_hidden_footer_leaves_done_bare_and_error_its_notice(self) -> None:
+        done = dataclasses.replace(
+            _make_state(phase=TurnPhase.DONE, agent_name="Atlas", cost_str="$0.04"),
+            balance_str="$12.50 left",
+            footer_hidden=True,
+        )
+        assert to_embed_data(done, now=12.0).footer is None, "an admin hid the footer"
+
+        error = dataclasses.replace(
+            _make_state(phase=TurnPhase.ERROR, agent_name="Atlas"), footer_hidden=True
+        )
+        data = to_embed_data(error, now=12.0)
+        assert data.footer is None
+        assert data.title == "Something went wrong.", "the failure itself is still said"
+
     def test_footer_omits_cost_when_unpriced(self) -> None:
         state = _make_state(
             phase=TurnPhase.DONE,

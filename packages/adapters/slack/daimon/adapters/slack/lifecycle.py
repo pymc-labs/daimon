@@ -76,6 +76,7 @@ from daimon.core.agent_identity import AgentIdentity
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post
+from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
@@ -531,7 +532,11 @@ class SlackTurnLifecycle(OutputGate):
             )
 
     async def _apply_balance(self) -> None:
+        """Put the money left on the footer, or hide the footer where an admin did."""
         if self._sessionmaker is not None and self._tenant_id is not None:
+            if not await cost_footer_shown(self._sessionmaker, tenant_id=self._tenant_id):
+                self._state = dataclasses.replace(self._state, footer_hidden=True)
+                return
             try:
                 async with self._sessionmaker() as session:
                     footer = await balance_footer(
