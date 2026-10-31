@@ -18,7 +18,7 @@ from typing import Final, Protocol, cast
 from urllib.parse import unquote, urlsplit
 
 import yaml
-from daimon.core.defaults.loader import RESERVED_SKILL_SUBSTRINGS
+from daimon.core.defaults.loader import RESERVED_SKILL_SUBSTRINGS, split_frontmatter
 from daimon.core.skill_zip import MAX_FILES as PROVIDER_MAX_FILES
 from daimon.core.skills.ingest import SkillIngestError
 from pydantic import JsonValue
@@ -211,20 +211,19 @@ def read_frontmatter(skill_md: bytes) -> dict[str, object]:
         text = skill_md.decode()
     except UnicodeDecodeError as err:
         raise SkillRejected("SKILL.md is not UTF-8") from err
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        raise SkillRejected("SKILL.md does not begin with frontmatter")
-    end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
-    if end is None:
-        raise SkillRejected("SKILL.md frontmatter is not closed")
-    block = "\n".join(lines[1:end])
+    # The block the skill loader parses later, so the checks below cover what it reads.
+    parts = split_frontmatter(text)
+    if parts is None:
+        raise SkillRejected("SKILL.md does not begin with closed frontmatter")
+    block = parts[0]
     if len(block.encode()) > MAX_FRONTMATTER_BYTES:
         raise SkillRejected("SKILL.md frontmatter is too large")
     try:
         _refuse_references(block)
         loaded: object = yaml.safe_load(block)
-    # Deep nesting overflows the parser's recursion: refused like any other bad YAML.
-    except (yaml.YAMLError, RecursionError) as err:
+    # Deep nesting overflows the parser's recursion, bad dates raise ValueError: refused like
+    # any other bad YAML.
+    except (yaml.YAMLError, RecursionError, ValueError) as err:
         raise SkillRejected("SKILL.md frontmatter is not plain YAML") from err
     normalized = _json_like(loaded)
     if not isinstance(normalized, dict):

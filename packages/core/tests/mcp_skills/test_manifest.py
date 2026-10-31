@@ -212,8 +212,19 @@ _BOMB = "\n".join(
         ("name: triage\ndescription: d\nx:\n  <<: {a: 1}", "merge key"),
         ("name: triage\ndescription: d\nx: " + "[" * 3000 + "]" * 3000, "nested too deeply"),
         ("name: triage\ndescription: " + "d" * 9000, "too large"),
+        # An indented `---` must not end the checked block before the loader's does.
+        ("name: triage\ndescription: d\nk: |\n  ---\n" + _BOMB.split("\n", 2)[2], "aliases"),
+        ("name: triage\ndescription: d\nsince: 2001-13-45", "not plain YAML"),
     ],
-    ids=["alias-bomb", "self-reference", "merge-key", "deep-nesting", "oversized"],
+    ids=[
+        "alias-bomb",
+        "self-reference",
+        "merge-key",
+        "deep-nesting",
+        "oversized",
+        "bomb-after-indented-fence",
+        "bad-date",
+    ],
 )
 def test_frontmatter_that_could_expand_or_recurse_is_rejected(
     frontmatter: str, message: str
