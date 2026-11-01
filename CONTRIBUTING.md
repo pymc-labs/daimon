@@ -124,7 +124,7 @@ A pull request runs only the jobs its changed files need: `scripts/ci/plan.py`
 maps each path to the suites that cover it, and main runs everything. A path
 the planner does not know runs every job. A test that reads a file outside its
 own package, such as a manifest under `docs/`, needs that file in the planner's
-`FILES`.
+`FILES`; `tests/test_ci_plan.py` flags the reads it can find.
 
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.

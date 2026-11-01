@@ -34,6 +34,9 @@ def _ci() -> dict[str, Any]:
         ("packages/adapters/web/README.md", "web"),
         ("web/src/App.tsx", "spa"),
         ("tests/parity/test_x.py", "parity"),
+        ("tests/golden/turn.json", "golden"),
+        ("packages/testing/daimon/testing/asgi.py", "testing"),
+        ("packages/core/daimon/core/x.py", "core"),
         ("apps/report-host/src/report_host/app.py", "report-host"),
         ("pyproject.toml", "all"),
         ("uv.lock", "all"),
@@ -65,6 +68,11 @@ def test_web_adapter_change_runs_only_its_suites() -> None:
     suites, jobs = _tests(["packages/adapters/web/daimon/adapters/web/app.py"])
     assert suites == {"web", "parity", "parity-mux", "lint", "shard-check", "image-daimon"}
     assert jobs == {"lint", "pytest-db", "pytest-mux-leg", "shard-check", "docker-build"}
+
+
+def test_test_helpers_run_every_pytest_job() -> None:
+    _, jobs = _tests(["packages/testing/daimon/testing/asgi.py"])
+    assert jobs == set(plan.JOBS) - {"web", "docker-build", "harness-image"}
 
 
 def test_a_journey_file_runs_the_journeys() -> None:
@@ -134,6 +142,39 @@ def test_leaf_packages_are_imported_only_by_selected_suites(leaf: str) -> None:
         if suite not in plan.SUITES[leaf]
         for path in paths
         if pattern.search(path.read_text(encoding="utf-8"))
+    )
+    assert not offenders
+
+
+# Reads through `Path(__file__).parents[N] / "..."`, directly or through a name bound to it.
+_ANCHOR = re.compile(r"^(\w+)\s*=\s*Path\(__file__\)(?:\.resolve\(\))?\.parents\[(\d+)\]\s*$", re.M)
+_READ = re.compile(
+    r"(?:Path\(__file__\)(?:\.resolve\(\))?\.parents\[(\d+)\]|\b(\w+))((?:\s*/\s*f?\"[^\"{]*\"?)+)"
+)
+_PART = re.compile(r"\"([^\"{]*)")
+
+
+def _reads(path: Path) -> set[str]:
+    text = path.read_text(encoding="utf-8")
+    anchors = {name: int(level) for name, level in _ANCHOR.findall(text)}
+    found: set[str] = set()
+    for level, name, chain in _READ.findall(text):
+        up = int(level) if level else anchors.get(name)
+        if up is None or up >= len(path.parents):
+            continue
+        target = (path.parents[up] / "/".join(_PART.findall(chain))).resolve()
+        if target.is_relative_to(_ROOT) and target.exists():
+            found.add(target.relative_to(_ROOT).as_posix() + ("/" if target.is_dir() else ""))
+    return found
+
+
+def test_files_a_suite_reads_select_it() -> None:
+    offenders = sorted(
+        f"{suite}: {path.relative_to(_ROOT)} reads {read}"
+        for suite, paths in _suite_files().items()
+        for path in paths
+        for read in _reads(path)
+        if (name := plan.area(read)) != "all" and suite not in plan.SUITES[name]
     )
     assert not offenders
 

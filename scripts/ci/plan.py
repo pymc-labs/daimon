@@ -40,6 +40,7 @@ RULES: tuple[tuple[str, str], ...] = (
     ("web/", "spa"),
     ("tests/parity/", "parity"),
     ("tests/harness_conformance/", "harness"),
+    ("tests/golden/", "golden"),
     ("tests/", "tests"),
     ("qa/", "tests"),
     ("packages/mux/", "mux"),
@@ -49,7 +50,9 @@ RULES: tuple[tuple[str, str], ...] = (
     ("packages/adapters/teams/", "teams"),
     ("packages/adapters/mcp/", "mcp"),
     ("packages/adapters/scheduler/", "scheduler"),
-    # Core, testing and the CLI, which migrations and the smoke turn run through.
+    # Every pytest run loads its stop_leg_default plugin (pyproject addopts).
+    ("packages/testing/", "testing"),
+    # Core and the CLI, which migrations and the smoke turn run through.
     ("packages/", "core"),
     ("defaults/", "core"),
     ("alembic.ini", "core"),
@@ -87,11 +90,14 @@ SUITES: dict[str, tuple[str, ...]] = {
     "web": ("web", "parity", "parity-mux", "lint", "shard-check", "image-daimon"),
     "parity": ("parity", "parity-mux", "staging-config", "lint", "shard-check"),
     "tests": DAIMON,
-    "core": _HOSTS,
+    # The mux tests read the golden scenarios, defaults/ (core) and the agent-chat tool (mcp).
+    "golden": (*DAIMON, "mux"),
+    "testing": (*DAIMON, "mux", "harness", "harness-conformance", "report-host", "notebook-host"),
+    "core": (*_HOSTS, "mux"),
     "discord": _HOSTS,
     "slack": _HOSTS,
     "teams": _HOSTS,
-    "mcp": _HOSTS,
+    "mcp": (*_HOSTS, "mux"),
     "scheduler": _HOSTS,
     "mux": (*_HOSTS, "mux", "harness", "harness-conformance", "image-harness"),
     # The mux tests drive the harness service.
