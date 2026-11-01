@@ -16,11 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Web access follows chat membership.** Every sign-in reaches each workspace where the
   person's chat account is a member, and leaving a Discord server or Slack workspace ends
   web access there at once; a chat admin is a web admin. The Discord bot needs the Server
-  Members intent for this; without it the bot still connects and each sign-in decides. Slack
-  apps apply the manifest (`team_join`, `user_change`) and reinstall. An OpenID Connect provider can
-  vouch for chat accounts (`DAIMON_WEB__OIDC__TRUST_CHAT_ACCOUNTS`), and an embedded app
-  with `identity_server` gets a token by token exchange for chat sign-ins; an app with no
-  token for the person is hidden. Migration 0156 adds the member lists.
+  Members intent for this; without it the bot still connects and each sign-in decides.
+  Slack apps apply the manifest (`team_join`, `user_change`) and reinstall. An OpenID
+  Connect provider can vouch for chat accounts (`DAIMON_WEB__OIDC__TRUST_CHAT_ACCOUNTS`),
+  and an embedded app with `identity_server` gets a token by token exchange for chat
+  sign-ins; an app with no token for the person is hidden. Migration 0156 adds the member
+  lists.
 - **Failures are the agent's to explain, or a card.** While a turn runs, Daimon no longer
   writes its own lines into or beside the reply: an MCP server that dropped out, a lost or
   replaced workspace, a GitHub key restart and skipped images reach the agent as a short note
