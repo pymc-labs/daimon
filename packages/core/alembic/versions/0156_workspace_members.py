@@ -79,8 +79,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
-    op.drop_table("workspace_member_syncs")
-    op.drop_table("workspace_members")
+    op.drop_table("workspace_member_syncs", if_exists=True)
+    op.drop_table("workspace_members", if_exists=True)
     with op.get_context().autocommit_block():
         op.drop_index(
             PRINCIPAL_ACCOUNT_INDEX,
