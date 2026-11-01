@@ -892,6 +892,10 @@ def test_a_config_change_recreates_and_checks_every_worker() -> None:
     assert run.index("before=$(config)") < run.index("daimon-refresh-env")
     assert run.index(f'echo "{marker}"') < run.index("wants() {")
     assert f'grep -q "^{marker}"' in run
+    # Nothing restarted, so the refresh must not stamp the workers as refreshed.
+    unchanged = "worker config unchanged"
+    assert f'echo "{unchanged}: nothing to recreate"' in run
+    assert run.index(f'grep -q "^{unchanged}"') < run.index("workers-refreshed-at")
     reconcile = "steps.refresh.outputs.reconcile || steps.plan.outputs.reconcile"
     settle = steps["Let the adapters' boot reconcile settle"]
     assert settle["env"]["SERVICES"] == f"${{{{ {reconcile} }}}}"
