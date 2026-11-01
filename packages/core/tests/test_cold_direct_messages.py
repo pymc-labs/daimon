@@ -431,3 +431,64 @@ async def test_dm_admission_does_not_trust_a_previously_resolved_admin(db_sessio
             )
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize("with_surface", [True, False], ids=["card", "no-card"])
+async def test_dm_turn_uses_the_adapters_confirmation_hook(
+    db_session_factory, monkeypatch, with_surface
+):
+    from types import SimpleNamespace
+
+    from daimon.core import direct_messages
+    from daimon.core.direct_messages import reply_to_dm_result
+
+    tenant, admission, deps = await seed(db_session_factory)
+    row = await start_cold_dm(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        workspace_id=tenant.external_id,
+        route_key="555",
+        external_user_id="999",
+    )
+    monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
+    monkeypatch.setattr(
+        direct_messages,
+        "bind_session",
+        AsyncMock(return_value=SimpleNamespace(admission=admission)),
+    )
+    seen: dict[str, object] = {}
+
+    class Stop(Exception):
+        pass
+
+    async def run(deps, prepared, **kwargs):
+        seen.update(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
+    hook = AsyncMock(return_value="approved")
+    built: list[Admission] = []
+
+    def confirmation_for(admitted):
+        built.append(admitted)
+        return hook
+
+    with pytest.raises(Stop):
+        await reply_to_dm_result(
+            deps,
+            platform="discord",
+            route_key="555",
+            external_user_id="999",
+            message_id="101",
+            expected_scope_id=row.scope_id,
+            text="publish it",
+            role=Role.USER,
+            verified_membership=True,
+            confirmation_for=confirmation_for if with_surface else None,
+        )
+    if with_surface:
+        assert seen["confirm_write"] is hook, "the DM turn asks through the adapter's card"
+        assert built == [admission], "the hook is built for the admitted turn"
+    else:
+        assert seen["confirm_write"] is None, "without a card surface approvals stay refused"

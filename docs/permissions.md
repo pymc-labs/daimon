@@ -812,6 +812,11 @@ An unknown membership lookup during discovery can ask for a retry without naming
 servers. Server selection belongs only to the requester and their physical DM route,
 expires after five minutes, and rechecks access before creating a scope.
 
+A write in a Discord DM that needs approval posts the usual confirmation card in
+the DM, and only the person who sent the message can answer it; the turn waits
+under the typing indicator until they do or the card times out. Slack and Teams
+DMs have no card, so such a write is refused there.
+
 Cold conversations copy no public history and grant no additional channel access.
 They mount the tenant's and caller's personal memory under ordinary private-turn
 rules. `dm_memory_read_only` keeps its false default; enabling it makes those mounts
