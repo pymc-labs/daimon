@@ -42,7 +42,7 @@ from daimon.core.tenant_summary import load_tenant_summary
 from fastapi import APIRouter, Depends, HTTPException
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, StringConstraints, ValidationError
 
 Viewer = Annotated[WebCaller, Depends(requires("agents.view"))]
 Editor = Annotated[WebCaller, Depends(requires("agents.edit"))]
@@ -125,7 +125,10 @@ class SkillFilesBody(BaseModel):
     """The whole file set of a skill. None content keeps that file as the current version has it."""
 
     skill_id: str | None = None
-    files: dict[str, str | None] = Field(min_length=1, max_length=100)
+    version: str | None = None  # the version the editor loaded; unchanged files come from it
+    files: dict[
+        str, Annotated[str | None, StringConstraints(max_length=agent_skill_files.MAX_EDIT_BYTES)]
+    ] = Field(min_length=1, max_length=100)
 
 
 class TokenBody(BaseModel):
@@ -447,6 +450,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 actor=actor_of(caller),
                 ma_agent_id=agent_id,
                 skill_id=body.skill_id,
+                version=body.version,
                 files=body.files,
             )
         except AgentEditError as exc:
