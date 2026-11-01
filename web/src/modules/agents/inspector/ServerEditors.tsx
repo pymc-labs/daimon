@@ -14,7 +14,8 @@ import { cn } from "@/lib/utils"
 import { Dot, Locked } from "../bits"
 import { RULE } from "../lib"
 import type { McpServer, ToolRule } from "../types"
-import { Field, Section, useLocal, type Props } from "./parts"
+import { Field, Section, type Props } from "./parts"
+import { useLocal } from "./useLocal"
 
 export function ServerEditor({ agent, ro, update, select, server: s, changed }: Props & { server: McpServer }) {
   const set = (fn: (x: McpServer) => void, d = 0) => update((c) => fn(c.mcp_servers.find((x) => x.key === s.key)!), d)

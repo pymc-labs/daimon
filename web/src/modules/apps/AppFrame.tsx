@@ -4,7 +4,7 @@ import { useLocation, useNavigate } from "react-router"
 import { useShell } from "@/components/shell/shell-context"
 import { api } from "@/lib/api"
 import { useMe } from "@/lib/hooks"
-import { useTheme } from "@/lib/theme"
+import { useTheme } from "@/lib/theme-context"
 import { pageTitle } from "@/lib/title"
 import type { EmbeddedApp } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -43,9 +43,7 @@ export function AppFrames() {
   const sub = `${m?.[2] ?? "/"}${search}`
   const [opened, setOpened] = useState<Record<string, string>>({})
   const active = m?.[1]
-  useEffect(() => {
-    if (active && !opened[active]) setOpened((o) => ({ ...o, [active]: sub }))
-  }, [active, sub, opened])
+  if (active && !opened[active]) setOpened((o) => ({ ...o, [active]: sub }))
   if (!me) return null
   return (
     <>

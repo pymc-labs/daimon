@@ -1,6 +1,6 @@
 import { Plus } from "lucide-react"
 import { Navigate, Route, Routes, useLocation } from "react-router"
-import { useParam } from "@/components/filters"
+import { useParam } from "@/lib/filters"
 import { useCan } from "@/lib/hooks"
 import type { Capability } from "@/lib/types"
 import { Page } from "@/components/shell/Page"

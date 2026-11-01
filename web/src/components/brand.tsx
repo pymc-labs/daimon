@@ -1,16 +1,14 @@
 import { useState } from "react"
-import { Database, Globe, KeyRound, Link2, Mail, Plug } from "lucide-react"
+import { Database, Globe, Mail } from "lucide-react"
 import { siDiscord, siGithub, siGoogle } from "simple-icons"
 
+import { APP_ICONS } from "@/lib/app-icons"
 import { cn } from "@/lib/utils"
 
 /** Daimon, the product mark. */
 export function Logo({ className }: { className?: string }) {
   return <img src="/daimon.png" alt="" className={cn("size-6 shrink-0 object-contain", className)} />
 }
-
-/** Icons an embedded app may name for itself and its pages. */
-export const APP_ICONS: Record<string, typeof Database> = { database: Database, plug: Plug, "key-round": KeyRound, link: Link2 }
 
 /** An icon is a Lucide name from `APP_ICONS`, or an image the operator supplies as a data URI. */
 const IMAGE_ICON = /^data:image\/(?:svg\+xml|png);base64,/

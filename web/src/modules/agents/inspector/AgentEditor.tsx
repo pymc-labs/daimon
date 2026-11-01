@@ -1,7 +1,8 @@
 import { AgentAvatar, Avatar } from "@/components/common"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Field, Section, useLocal, type Props } from "./parts"
+import { Field, Section, type Props } from "./parts"
+import { useLocal } from "./useLocal"
 
 export function AgentEditor({ agent, config, ro, update, changed }: Props) {
   const [purpose, setPurpose] = useLocal(config.purpose, (v) => update((c) => { c.purpose = v }, 500))

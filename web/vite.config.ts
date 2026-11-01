@@ -13,7 +13,7 @@ const noMockWorker = (): Plugin => ({
 
 export default defineConfig(({ mode }) => ({
   plugins: [react(), tailwindcss(), noMockWorker()],
-  resolve: { alias: { '@': path.resolve(__dirname, './src') } },
+  resolve: { alias: { '@': path.resolve(import.meta.dirname, './src') } },
   server: {
     port: 5174, strictPort: true,
     // dev: the local web adapter. dev:mock: MSW in the browser, no proxy.

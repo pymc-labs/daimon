@@ -3,7 +3,7 @@ import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, Sparkl
 import { useMemo } from "react"
 import { Link, useParams } from "react-router"
 
-import { useParam } from "@/components/filters"
+import { useParam } from "@/lib/filters"
 import { ErrorState } from "@/components/QueryState"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"

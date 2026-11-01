@@ -3,7 +3,7 @@ import { useState } from "react"
 import { toast } from "sonner"
 import { AgentAvatar, CopyButton } from "@/components/common"
 import { Drawer } from "@/components/Drawer"
-import { rowProps, useParam } from "@/components/filters"
+import { rowProps, useParam } from "@/lib/filters"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -18,7 +18,8 @@ import { useChatAgents, usePaged } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 import { LoadMore, QueryState } from "@/components/QueryState"
 import type { Invite } from "./types"
-import { Facts, Field, PanelSection, ROLE } from "./shared"
+import { ROLE } from "./roles"
+import { Facts, Field, PanelSection } from "./shared"
 
 // Invites
 
