@@ -20,7 +20,7 @@ from mux.drivers.anthropic.resources._authorization import (
     visible_skill,
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
-from mux.errors import UnsupportedCapability
+from mux.errors import ProviderError, UnsupportedCapability
 
 
 class NativeSkillVersions(SkillVersions, Protocol):
@@ -174,13 +174,19 @@ class AnthropicSkillVersions:
         authorize(self._authorization, scope, "skill", ref.id)
         if ref.version is None:
             raise ValueError("a version must be pinned before downloading")
-        content = await provider_call(
-            self._client.beta.skills.versions.download(ref.version, skill_id=ref.id)
-        )
-        try:
-            yield await provider_call(content.read())
-        finally:
-            await provider_call(content.close())
+        # The skills beta header gets a workspace key refused (403). Without it the
+        # endpoint names a version by its id, not its number, so the id is looked up.
+        version_id = await self._version_id(ref.id, ref.version)
+        async for chunk in self.download_by_id(scope, ref.id, version_id):
+            yield chunk
+
+    async def _version_id(self, skill_id: str, version: str) -> str:
+        async for item in provider_iter(
+            self._client.beta.skills.versions.list(skill_id=skill_id, limit=100)
+        ):
+            if item.version == version:
+                return item.id
+        raise ProviderError("not_found", retryable=False)
 
     async def walk_native(self, scope: Scope, skill_id: str) -> AsyncIterator[dict[str, JsonValue]]:
         """Preserve main's lazy list and partial native version rows."""

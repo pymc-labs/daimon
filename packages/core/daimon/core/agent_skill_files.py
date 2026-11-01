@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Final
 
 import anthropic
+import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_editing
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
@@ -25,9 +26,12 @@ from daimon.core.skills.ingest import (
 )
 from daimon.core.stores import agent_drafts as drafts_store
 from mux.contracts.errors import ScopeViolation
+from mux.errors import ProviderError
 from pydantic import BaseModel, ConfigDict
 
 __all__ = ["SkillFileDoc", "SkillFilesDoc", "read_skill_files", "save_skill_files"]
+
+log = structlog.get_logger()
 
 #: Over this a file is listed but not opened for editing.
 MAX_EDIT_BYTES: Final = 200_000
@@ -52,6 +56,18 @@ class SkillFilesDoc(BaseModel):
 
 def _refused(exc: Exception) -> AgentEditError:
     return AgentEditError(str(exc), kind="invalid")
+
+
+def _unreadable(exc: Exception, *, skill_id: str, step: str) -> AgentEditError:
+    """Log why a skill's files can't be read, then the refusal people see."""
+    log.warning(
+        "agent_skill_files.read_failed",
+        skill_id=skill_id,
+        step=step,
+        error=type(exc).__name__,
+        status=exc.status_code if isinstance(exc, anthropic.APIStatusError) else None,
+    )
+    return AgentEditError("This skill's files can't be read.", kind="not_found")
 
 
 async def _attached_skill(
@@ -98,8 +114,8 @@ async def _concrete_version(
                 deps.client, skill_id, limit=100, scope=actor.scope()
             )
         ]
-    except (anthropic.APIStatusError, ScopeViolation) as exc:
-        raise AgentEditError("This skill's files can't be read.", kind="not_found") from exc
+    except (anthropic.APIStatusError, ProviderError, ScopeViolation) as exc:
+        raise _unreadable(exc, skill_id=skill_id, step="versions") from exc
     if not listed:
         raise AgentEditError("This skill has no version to read.", kind="invalid")
     return max(listed, key=_version_order)
@@ -114,8 +130,8 @@ async def _download_files(
     try:
         data = await download_skill_version(deps.client, skill_id, version, scope=actor.scope())
         return retained_archive_files(data)
-    except (anthropic.APIStatusError, ScopeViolation, SkillIngestError) as exc:
-        raise AgentEditError("This skill's files can't be read.", kind="not_found") from exc
+    except (anthropic.APIStatusError, ProviderError, ScopeViolation, SkillIngestError) as exc:
+        raise _unreadable(exc, skill_id=skill_id, step="download") from exc
 
 
 async def read_skill_files(
