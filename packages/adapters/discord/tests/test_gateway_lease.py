@@ -615,3 +615,22 @@ async def test_a_refusal_without_the_members_intent_still_fails() -> None:
     with pytest.raises(discord.PrivilegedIntentsRequired):
         await connect_gateway(bot, "token")
     bot.connect.assert_not_awaited()
+
+
+async def test_the_members_intent_swap_reaches_a_real_bots_intents() -> None:
+    """The swap writes a private attribute of discord.py's connection state; on a real
+    bot it must still turn the public `intents.members` off, or a rename there would
+    leave the bot identifying with the intent unnoticed."""
+    intents = discord.Intents.default()
+    intents.members = True
+    bot = commands.Bot(command_prefix="!", intents=intents)
+    assert bot.intents.members is True, "the bot starts with the intent on"
+    bot.runtime = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]  # stand-in for DaimonRuntime
+    bot.start = AsyncMock(side_effect=discord.PrivilegedIntentsRequired(None))  # pyright: ignore[reportAttributeAccessIssue]
+    bot.connect = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+
+    with patch("daimon.adapters.discord.__main__.members_store.clear_platform_lists", AsyncMock()):
+        await connect_gateway(cast("Any", bot), "token")
+
+    assert bot.intents.members is False, "the real bot no longer asks for the members intent"
+    bot.connect.assert_awaited_once()
