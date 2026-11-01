@@ -3,7 +3,10 @@
 The chat adapters load each workspace's member list and keep it current from join,
 leave and role events; `workspace_member_syncs` marks the workspaces loaded in full.
 The web app reads both to keep a person's access in step with their chat membership.
-Also indexes `platform_principals.account_id`, which every web request reads.
+Also indexes `platform_principals.account_id`, which every web request reads. That
+index is built concurrently, outside the migration transaction and before the tables,
+so principals keep being written meanwhile and a run cut off mid-build is simply
+retried: a leftover invalid index is dropped and built again.
 Downgrading drops the lists; the next start loads them again.
 
 downgrade: destructive
@@ -20,8 +23,28 @@ down_revision: str | None = "0155_web_oidc_tokens"
 branch_labels: str | None = None
 depends_on: str | None = None
 
+PRINCIPAL_ACCOUNT_INDEX = "ix_platform_principals_account_id"
+
 
 def upgrade() -> None:
+    with op.get_context().autocommit_block():
+        invalid = op.get_bind().scalar(
+            sa.text("SELECT NOT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:name)"),
+            {"name": PRINCIPAL_ACCOUNT_INDEX},
+        )
+        if invalid:
+            op.drop_index(
+                PRINCIPAL_ACCOUNT_INDEX,
+                table_name="platform_principals",
+                postgresql_concurrently=True,
+            )
+        op.create_index(
+            PRINCIPAL_ACCOUNT_INDEX,
+            "platform_principals",
+            ["account_id"],
+            postgresql_concurrently=True,
+            if_not_exists=True,
+        )
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.create_table(
         "workspace_members",
@@ -52,11 +75,16 @@ def upgrade() -> None:
             name="fk_workspace_member_syncs_tenants",
         ),
     )
-    op.create_index("ix_platform_principals_account_id", "platform_principals", ["account_id"])
 
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
-    op.drop_index("ix_platform_principals_account_id", table_name="platform_principals")
     op.drop_table("workspace_member_syncs")
     op.drop_table("workspace_members")
+    with op.get_context().autocommit_block():
+        op.drop_index(
+            PRINCIPAL_ACCOUNT_INDEX,
+            table_name="platform_principals",
+            if_exists=True,
+            postgresql_concurrently=True,
+        )
