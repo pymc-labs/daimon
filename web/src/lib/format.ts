@@ -61,3 +61,7 @@ export const duration = (ms: number) => {
 
 const money = new Intl.NumberFormat("en", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 })
 export const usd = (n: number | null | undefined) => (n == null ? "–" : money.format(n))
+
+const UNNAMED_CHANNEL = "Unnamed channel"
+/** A channel as people write it; a channel the platform never named stays unnamed. */
+export const channelLabel = (name: string | null | undefined) => (!name || name === UNNAMED_CHANNEL ? UNNAMED_CHANNEL : `#${name}`)

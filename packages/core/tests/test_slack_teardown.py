@@ -17,6 +17,7 @@ from daimon.core.defaults.provisioning import (
     teardown_slack_install,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token, upsert_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import mark_connect_prompted, was_connect_prompted
 from daimon.core.stores.slack_event_dedup import insert_if_new
@@ -208,3 +209,23 @@ async def test_teardown_newer_than_the_stored_token_tears_down(
         await db_session.execute(select(Tenant).where(Tenant.id == tenant_id))
     ).scalar_one()
     assert tenant_row.archived_at is not None
+
+
+async def test_teardown_forgets_the_member_list(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    team_id = "T_TEARDOWN_MEMBERS"
+    provisioned = await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    tenant_id = provisioned.tenant_id
+    async with db_session_factory.begin() as session:
+        await members_store.replace_members(
+            session, tenant_id=tenant_id, members={"U1": False}, workspace_name="T", now=_NOW
+        )
+
+    await teardown_slack_install(db_session_factory, team_id=team_id, now=_NOW)
+
+    async with db_session_factory() as session:
+        assert await members_store.list_synced(session, tenant_ids=[tenant_id]) == {}
+        assert not await members_store.list_member_tenant_ids(
+            session, platform_user_id="U1", tenant_ids=[tenant_id]
+        ), "an ended install keeps no members"

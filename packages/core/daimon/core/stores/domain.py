@@ -1366,6 +1366,26 @@ class WebSessionRow(BaseModel):
     roles_checked_at: datetime
 
 
+class ChatStandingRow(BaseModel):
+    """The chat account a person's account has in one workspace, against its member list."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    platform: str
+    platform_user_id: str
+    # The workspace's member list was loaded in full at least once.
+    synced: bool
+    member: bool
+    is_admin: bool
+
+    @property
+    def admitted(self) -> bool:
+        """Still in the workspace. An unsynced list knows nothing, so the sign-in's proof stands."""
+        return self.member or not self.synced
+
+
 class WebOidcTokenRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

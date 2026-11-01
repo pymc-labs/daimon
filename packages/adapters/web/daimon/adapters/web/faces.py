@@ -8,12 +8,12 @@ from collections.abc import Sequence
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.agent_view import load_avatar_urls
+from daimon.core.config import origin_of
 
 
-def avatar_base_url(runtime: WebRuntime) -> str | None:
-    """Where stored avatars are served; None when this deployment serves none."""
-    public_url = runtime.settings.mcp.public_url
-    return str(public_url) if public_url is not None else None
+def avatar_base_url(runtime: WebRuntime) -> str:
+    """Where stored avatars are served: this app's own origin, which its image policy allows."""
+    return origin_of(str(runtime.web.public_url))
 
 
 async def avatars_of(
@@ -21,7 +21,7 @@ async def avatars_of(
 ) -> dict[str, str]:
     """Each agent's avatar URL, by agent id; an agent with none is left out."""
     base = avatar_base_url(runtime)
-    if base is None or not agents:
+    if not agents:
         return {}
     async with runtime.sessionmaker() as db:
         return await load_avatar_urls(db, tenant_id=tenant_id, agents=agents, base_url=base)

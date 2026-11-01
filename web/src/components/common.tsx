@@ -104,8 +104,9 @@ export function Prose({ text, breaks, className }: { text: string; breaks?: bool
 
 /** An agent's face: the generated avatar, square with rounded corners. */
 export function AgentAvatar({ src, name, className }: { src?: string | null; name: string; className?: string }) {
-  if (!src) return <Avatar name={name} className={cn("rounded-md", className)} />
-  return <img src={src} alt="" className={cn("size-6 shrink-0 rounded-md object-cover", className)} />
+  const [failed, setFailed] = useState<string | null>(null)
+  if (!src || failed === src) return <Avatar name={name} className={cn("rounded-md", className)} />
+  return <img src={src} alt="" onError={() => setFailed(src)} className={cn("size-6 shrink-0 rounded-md object-cover", className)} />
 }
 
 export function Money({ usd: n, className }: { usd: number | null | undefined; className?: string }) {

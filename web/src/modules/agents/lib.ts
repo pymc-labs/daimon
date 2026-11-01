@@ -1,4 +1,5 @@
 // Pure helpers shared by the agents module.
+import { channelLabel } from "@/lib/format"
 import type { Effect, Place, ToolRule } from "./types"
 
 export const EFFECT: Record<Effect, { label: string; fact: string; cls: string }> = {
@@ -15,7 +16,7 @@ export const RULE: Record<ToolRule, { label: string; cls: string }> = {
   deny: { label: "Deny", cls: "bg-destructive/10 text-destructive" },
 }
 
-export const placeName = (p: Place) => (p.kind === "channel" ? `#${p.name}` : p.name)
+export const placeName = (p: Place) => (p.kind === "channel" ? channelLabel(p.name) : p.name)
 
 type Op = { t: " " | "+" | "-"; s: string }
 

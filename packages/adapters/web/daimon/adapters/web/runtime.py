@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.adapters.web.app_probe import AppStatusCache
 from daimon.adapters.web.card_listener import NoticeListener
 from daimon.adapters.web.directory import AgentDirectory
@@ -30,6 +32,7 @@ from daimon.core.defaults.loader import (
 )
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
+from daimon.core.mcp_identity import load_signing_key
 from daimon.core.mcp_tool_listing import McpToolLister
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
@@ -77,6 +80,21 @@ class WebRuntime:
     agent_templates: Sequence[AgentSpec] = ()
     agents: AgentDirectory = field(default_factory=AgentDirectory)
     app_statuses: AppStatusCache = field(default_factory=AppStatusCache)
+    # Signs who a chat sign-in is, for apps that take a token exchange; None where none do.
+    identity_key: Ed25519PrivateKey | None = None
+    # (person, app) whose exchange was refused, until when it is not tried again.
+    exchange_refused: dict[tuple[uuid.UUID, str], datetime] = field(
+        default_factory=dict[tuple[uuid.UUID, str], datetime]
+    )
+
+
+def identity_key_of(settings: Settings) -> Ed25519PrivateKey | None:
+    """The caller-identity key, when an embedded app exchanges tokens with it."""
+    key = settings.mcp_identity.signing_key
+    web = settings.web
+    if key is None or web is None or not any(a.identity_server for a in web.apps):
+        return None
+    return load_signing_key(key.get_secret_value())
 
 
 def _stripe_client(config: BillingConfig | None) -> StripeClient | None:
@@ -150,6 +168,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[WebRuntime]:
                     deployment_default=deployment_default,
                     skill_descriptions=load_skill_descriptions(settings.defaults_root / "skills"),
                     agent_templates=load_agent_templates(settings.defaults_root / "agents"),
+                    identity_key=identity_key_of(settings),
                 )
             finally:
                 listener.cancel()

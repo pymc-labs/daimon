@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table"
 import { api } from "@/lib/api"
 import { shortDate, usd } from "@/lib/format"
 import { useMe } from "@/lib/hooks"
+import { cn } from "@/lib/utils"
 import type { Mine } from "./types"
 import { Section } from "./shared"
 
@@ -17,15 +18,18 @@ export function MineTab() {
 
 function MineBody({ data }: { data: Mine }) {
   const { data: me } = useMe()
-  if (!me?.credit) return null
+  const meter = me?.credit
+  if (!meter && !data.by_agent.length && !data.turns.length) return <div className="py-16 text-center text-sm text-muted-foreground">No spend yet</div>
   const max = Math.max(...data.by_agent.map((r) => r.usd), 1)
   return (
     <div className="mx-auto max-w-[1040px]">
-      <div className="rounded-lg border p-4">
-        <CreditMeter meter={me.credit} />
-        {me.credit.resets_at && <div className="mt-2 text-xs text-muted-foreground">Resets {shortDate(me.credit.resets_at)}</div>}
-      </div>
-      <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
+      {meter && (
+        <div className="rounded-lg border p-4">
+          <CreditMeter meter={meter} />
+          {meter.resets_at && <div className="mt-2 text-xs text-muted-foreground">Resets {shortDate(meter.resets_at)}</div>}
+        </div>
+      )}
+      <div className={cn("grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]", meter && "mt-8")}>
         <Section title="By agent" className="mt-0">
           <div className="divide-y rounded-lg border">
             {data.by_agent.map((r) => (

@@ -108,6 +108,9 @@ settings:
       - channel_shared
       - channel_unshared
       - member_joined_channel
+      # Workspace member list, which web access follows.
+      - team_join
+      - user_change
   interactivity:
     is_enabled: true
   socket_mode_enabled: true

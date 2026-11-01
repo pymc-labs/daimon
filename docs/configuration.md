@@ -393,7 +393,8 @@ Read from `daimon.core.config.McpIdentitySettings`. Prefix `DAIMON_MCP_IDENTITY_
 Ed25519 private key that signs caller identities for the servers in
 DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte seed.
 Generate one with `daimon mcp identity-keygen`, which also prints the public key to
-register with each server. Read only by the mcp service.
+register with each server. Read by the mcp service, and by the web service when an
+embedded app sets identity_server.
 
 ### `DAIMON_MCP_IDENTITY__SERVERS`
 
@@ -1073,6 +1074,17 @@ ID token claim that lists the person's groups, matched against group roles.
 
 Email domains that may sign in, comma-separated. Only verified addresses count. Empty:
 the provider alone decides who may sign in.
+
+### `DAIMON_WEB__OIDC__TRUST_CHAT_ACCOUNTS`
+
+`bool` · optional · default `False`
+
+Trust the provider's chat_accounts ID token claim: a list of "discord:&lt;user id&gt;",
+"slack:&lt;team id&gt;:&lt;user id&gt;" and "teams:&lt;tenant id&gt;:&lt;user object
+id&gt;". A person then also signs in to every chat workspace where one of those accounts
+is a member, acting as it. Membership is read from the workspace's member list; for
+Teams, and for a workspace whose list has not loaded yet, the claim alone is the proof.
+Turn on only for a provider that verifies those accounts itself.
 
 ### `DAIMON_WEB__APPS`
 

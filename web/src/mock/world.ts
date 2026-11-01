@@ -94,7 +94,7 @@ export const session = {
   setWorkspace: (id: string) => localStorage.setItem(K_WS, id),
 }
 
-// Credit spent by turns in this tab. `?credit=out` (or `?credit=0.5`) at load sets everyone's left amount.
+// Credit spent by turns in this tab. `?credit=out` (or `?credit=0.5`) at load sets everyone's left amount; `?credit=none` leaves nobody governed.
 const K_CREDIT = "daimon:mock:credit"
 try {
   const flag = new URLSearchParams(location.search).get("credit")
@@ -103,7 +103,7 @@ try {
 const spent: Record<string, number> = {}
 export const spend = (pid: string, usd: number) => { spent[pid] = (spent[pid] ?? 0) + usd }
 function live(pid: string, c: Me["credit"]): Me["credit"] {
-  if (!c) return null
+  if (!c || localStorage.getItem(K_CREDIT) === "none") return null
   const o = Number(localStorage.getItem(K_CREDIT) ?? NaN)
   const base = Number.isNaN(o) ? c.left_usd : o
   return { ...c, left_usd: Math.max(0, +(base - (spent[pid] ?? 0)).toFixed(2)) }
