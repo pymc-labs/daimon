@@ -1,9 +1,12 @@
 """Pending ordinary provider usage settles exactly once when its cost is known."""
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 import pytest
 from daimon.core import usage_outbox_drain
+from daimon.core.stores import usage_events
 from daimon.core.usage_outbox_drain import drain_pending_usage
 from sqlalchemy import text
 
@@ -40,6 +43,23 @@ async def test_pending_gemini_usage_is_debited_once_when_drained(sm):
     # Idempotent: a second pass applies nothing and debits nothing.
     assert await drain_pending_usage(sm, markup=Decimal(1)) == (0, Decimal(0))
     assert await _debited(sm) == -usd
+
+
+async def test_drained_usage_shows_as_spent_at_what_it_debited(sm):
+    """The drain records no person; the workspace and per-agent spend still count the row,
+    priced at the dated tariff its debit used."""
+    binding = await pending_usage(sm)
+    _, usd = await drain_pending_usage(sm, markup=Decimal(1))
+    tenant_id, since = UUID(binding.thread.channel.tenant_id), datetime.now(UTC) - timedelta(1)
+    async with sm() as db:
+        rows = await usage_events.list_for_tenant(db, tenant_id=tenant_id)
+        total = await usage_events.cost_for_tenant_since(db, tenant_id=tenant_id, since=since)
+        by_agent = await usage_events.costs_by_agent_in_tenant_since(
+            db, tenant_id=tenant_id, since=since
+        )
+    assert [r.platform_user_id for r in rows] == [None], "a drained row has no person"
+    assert usd > 0 and total == pytest.approx(float(usd)), "spent equals the debit"
+    assert by_agent == {None: pytest.approx(float(usd))}, "the agents add up to the total"
 
 
 async def test_the_drain_leaves_a_profile_with_unknown_infrastructure_pending(sm):

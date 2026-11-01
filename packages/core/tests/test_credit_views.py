@@ -131,10 +131,10 @@ async def test_spend_is_billed_grouped_and_windowed(db_session: AsyncSession) ->
         db_session, tenant_id=tenant.id, markup=MARKUP, since=start
     )
     assert [(r.agent_id, r.usd) for r in team] == [
-        ("ag_a", Decimal("30.000000")),
+        ("ag_a", Decimal("40.000000")),
         (None, Decimal("10.000000")),
         ("ag_b", Decimal("10.000000")),
-    ], "agent-less spend is its own row and NULL-user spend is left out"
+    ], "agent-less spend is its own row and spend with no person counts on its agent"
 
     people = await views.spend_by_person(
         db_session, tenant_id=tenant.id, markup=MARKUP, since=start

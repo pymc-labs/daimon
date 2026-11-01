@@ -1,8 +1,9 @@
 """Per-turn usage events store. BILL-01.
 
-Cost is computed at read time against MODEL_PRICING — repricing is a query
-change, no backfill needed. Writes are idempotent on
-(managed_session_id, event_id) so SSE replay is a no-op.
+Cost is computed at read time against MODEL_PRICING, and provider models against
+the dated tariff they settled at — repricing is a query change, no backfill
+needed. Writes are idempotent on (managed_session_id, event_id) so SSE replay is
+a no-op.
 
 Per `guideline:architecture` Error Propagation: this module does NOT
 swallow exceptions — the cma predecessor's `try/except: log; return` pattern
@@ -13,25 +14,29 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, cast
 
 from daimon.core._models import UsageEvent
 from daimon.core.pricing import (
     LONG_CONTEXT_PROMPT_TOKENS,
     MODEL_PRICING,
+    PROVIDER_PRICED_INPUT_LIMITS,
     LegacyUsage,
     UsageTokens,
     cost_of_bucket,
+    provider_cost_of_bucket,
+    provider_price_on,
     usage_tokens,
 )
 from daimon.core.stores.domain import UsageEventRow
 from mux.contracts.usage import UsageObservation
 from mux.errors import ScopeViolation
-from sqlalchemy import ColumnElement, Select, delete, func, select, update
+from sqlalchemy import ColumnElement, Date, Select, case, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 
 
 async def record(
@@ -234,50 +239,90 @@ async def list_for_tenant(
 
 
 def _long_prompt() -> ColumnElement[bool]:
-    """Whether one row's request crossed the long-context threshold."""
+    """Whether one row's prompt crossed its model's long-context threshold.
+
+    A provider model's threshold is its tariff's priced input limit; every other
+    model's is LONG_CONTEXT_PROMPT_TOKENS.
+    """
+    limits = {model: n for model, n in PROVIDER_PRICED_INPUT_LIMITS.items() if n is not None}
+    threshold = case(limits, value=UsageEvent.model, else_=LONG_CONTEXT_PROMPT_TOKENS)
     return (
         UsageEvent.input_tokens
         + UsageEvent.cache_creation_input_tokens
         + UsageEvent.cache_read_input_tokens
-        > LONG_CONTEXT_PROMPT_TOKENS
+        > threshold
     ).label("long_prompt")
 
 
-async def _cost_since(session: AsyncSession, *where: ColumnElement[bool]) -> float:
-    """Sum of every matching row's cost, priced per (model, long-prompt tier) bucket.
+def _tariff_day() -> ColumnElement[date | None]:
+    """The UTC day a provider model's row is priced on; NULL for list-priced models.
 
-    Cost is linear in each token count within a bucket, so summing tokens in
-    SQL and pricing each bucket once equals pricing every row; it spares the
-    per-turn cap gate from loading a window's worth of rows. Buckets must not
-    merge tiers: summing first would push short requests into the long tier.
+    Provider tariffs are dated, so their rows are bucketed per day.
     """
-    long_prompt = _long_prompt()
+    day = func.date(func.timezone("UTC", UsageEvent.occurred_at), type_=Date)
+    return case(dict.fromkeys(PROVIDER_PRICED_INPUT_LIMITS, day), value=UsageEvent.model).label(
+        "tariff_day"
+    )
+
+
+def _bucket_cost(model: str, day: date | None, usage: UsageTokens, *, long_prompt: bool) -> float:
+    """One bucket's cost before markup, as the ledger debited it; 0 when unpriced."""
+    if day is None:
+        return cost_of_bucket(usage, MODEL_PRICING.get(model), long_prompt=long_prompt) or 0.0
+    price = provider_price_on(model, day)
+    cost = None if price is None else provider_cost_of_bucket(usage, price, long_prompt=long_prompt)
+    return 0.0 if cost is None else float(cost)
+
+
+async def _costs_by(
+    session: AsyncSession,
+    key: InstrumentedAttribute[str | None] | None,
+    *where: ColumnElement[bool],
+) -> dict[str | None, float]:
+    """Spend of the matching rows by `key` (all under None without one).
+
+    Priced per (model, long-prompt tier, tariff day) bucket: cost is linear in each
+    token count within a bucket, so summing tokens in SQL and pricing each bucket once
+    equals pricing every row, without loading a window's worth of rows on the per-turn
+    cap gate. Buckets must not merge tiers: summing first would push short requests
+    into the long tier.
+    """
+    long_prompt, day = _long_prompt(), _tariff_day()
+    groups: list[ColumnElement[Any] | InstrumentedAttribute[Any]] = [
+        UsageEvent.model,
+        long_prompt,
+        day,
+    ]
+    if key is not None:
+        groups.append(key)
     stmt = (
         select(
-            UsageEvent.model,
-            long_prompt,
+            *groups,
             func.sum(UsageEvent.input_tokens).label("in_tok"),
             func.sum(UsageEvent.output_tokens).label("out_tok"),
             func.sum(UsageEvent.cache_creation_input_tokens).label("cw_tok"),
             func.sum(UsageEvent.cache_read_input_tokens).label("cr_tok"),
         )
         .where(*where)
-        .group_by(UsageEvent.model, long_prompt)
+        .group_by(*groups)
     )
-    total = 0.0
+    costs: dict[str | None, float] = {}
     for row in (await session.execute(stmt)).all():
         usage = UsageTokens(
-            input_tokens=int(row.in_tok),
-            output_tokens=int(row.out_tok),
-            cache_creation_input_tokens=int(row.cw_tok),
-            cache_read_input_tokens=int(row.cr_tok),
+            input_tokens=int(row.in_tok or 0),
+            output_tokens=int(row.out_tok or 0),
+            cache_creation_input_tokens=int(row.cw_tok or 0),
+            cache_read_input_tokens=int(row.cr_tok or 0),
         )
-        cost = cost_of_bucket(
-            usage, MODEL_PRICING.get(row.model), long_prompt=bool(row.long_prompt)
-        )
-        if cost is not None:
-            total += cost
-    return total
+        name: str | None = row[3] if key is not None else None
+        cost = _bucket_cost(row.model, row.tariff_day, usage, long_prompt=bool(row.long_prompt))
+        costs[name] = costs.get(name, 0.0) + cost
+    return costs
+
+
+async def _cost_since(session: AsyncSession, *where: ColumnElement[bool]) -> float:
+    """Sum of every matching row's cost."""
+    return sum((await _costs_by(session, None, *where)).values(), 0.0)
 
 
 async def cost_for_user_in_tenant_since(
@@ -344,15 +389,15 @@ async def cost_for_tenant_since(
     tenant_id: uuid.UUID,
     since: datetime,
 ) -> float:
-    """Total tenant spend since `since`, EXCLUDING rows with NULL platform_user_id.
+    """Total tenant spend since `since`, including rows with no person recorded.
 
-    Excludes NULL-attributed rows so the tenant total equals the sum of
-    per-member rows. Reprices in Python at read time.
+    Those rows were debited too (usage settled after its turn, calls made for no
+    one), so the total matches the ledger and the agents add up to it; the
+    per-person reads alone leave them out. Reprices in Python at read time.
     """
     return await _cost_since(
         session,
         UsageEvent.tenant_id == tenant_id,
-        UsageEvent.platform_user_id.is_not(None),
         UsageEvent.occurred_at >= since,
     )
 
@@ -365,12 +410,10 @@ async def turn_count_for_tenant_since(
 ) -> int:
     """Distinct managed_session count for the tenant since `since`.
 
-    EXCLUDES rows with NULL platform_user_id so the count matches the sum
-    of per-member turn counts.
+    Counts rows with no person recorded, as `cost_for_tenant_since` does.
     """
     stmt = select(func.count(func.distinct(UsageEvent.managed_session_id))).where(
         UsageEvent.tenant_id == tenant_id,
-        UsageEvent.platform_user_id.is_not(None),
         UsageEvent.occurred_at >= since,
     )
     return int((await session.execute(stmt)).scalar_one())
@@ -395,47 +438,18 @@ async def costs_by_user_in_tenant_since(
 
     EXCLUDES NULL platform_user_id.
 
-    GROUP BY (platform_user_id, model, long-prompt tier) so each bucket is
-    repriced in Python at its own rates: summing first and pricing the total
-    would push short Haiku 5.5 requests into its long-context tier. Results
-    are folded back to a per-user total. Pair with
-    `turns_by_user_in_tenant_since` to assemble per-user (cost, turns) rows —
-    turn counts cannot be derived from this aggregate without double-counting
-    sessions that span multiple models.
+    Pair with `turns_by_user_in_tenant_since` to assemble per-user (cost, turns)
+    rows — turn counts cannot be derived from this aggregate without
+    double-counting sessions that span multiple models.
     """
-    long_prompt = _long_prompt()
-    stmt = (
-        select(
-            UsageEvent.platform_user_id,
-            UsageEvent.model,
-            long_prompt,
-            func.sum(UsageEvent.input_tokens).label("in_tok"),
-            func.sum(UsageEvent.output_tokens).label("out_tok"),
-            func.sum(UsageEvent.cache_creation_input_tokens).label("cw_tok"),
-            func.sum(UsageEvent.cache_read_input_tokens).label("cr_tok"),
-        )
-        .where(
-            UsageEvent.tenant_id == tenant_id,
-            UsageEvent.platform_user_id.is_not(None),
-            *_window(since, until),
-        )
-        .group_by(UsageEvent.platform_user_id, UsageEvent.model, long_prompt)
+    costs = await _costs_by(
+        session,
+        UsageEvent.platform_user_id,
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.platform_user_id.is_not(None),
+        *_window(since, until),
     )
-    result = await session.execute(stmt)
-    per_user: dict[str, float] = {}
-    for row in result.all():
-        user_id = row.platform_user_id
-        if user_id is None:
-            continue
-        usage = UsageTokens(
-            input_tokens=int(row.in_tok or 0),
-            output_tokens=int(row.out_tok or 0),
-            cache_creation_input_tokens=int(row.cw_tok or 0),
-            cache_read_input_tokens=int(row.cr_tok or 0),
-        )
-        c = cost_of_bucket(usage, MODEL_PRICING.get(row.model), long_prompt=bool(row.long_prompt))
-        per_user[user_id] = per_user.get(user_id, 0.0) + (c if c is not None else 0.0)
-    return per_user
+    return {user_id: cost for user_id, cost in costs.items() if user_id is not None}
 
 
 async def turns_by_user_in_tenant_since(
@@ -504,44 +518,6 @@ async def count_all(session: AsyncSession) -> int:
     return int((await session.execute(select(func.count()).select_from(UsageEvent))).scalar_one())
 
 
-async def _costs_by_agent(
-    session: AsyncSession, *where: ColumnElement[bool]
-) -> dict[str | None, float]:
-    """Spend per agent for the matching rows, priced per (model, long-prompt tier) bucket.
-
-    Keyed by `agent_id`; the `None` key is spend no agent was recorded for (rows from
-    before attribution, tool calls with no live origin). Buckets are repriced one by one
-    for the reason `costs_by_user_in_tenant_since` gives.
-    """
-    long_prompt = _long_prompt()
-    stmt = (
-        select(
-            UsageEvent.agent_id,
-            UsageEvent.model,
-            long_prompt,
-            func.sum(UsageEvent.input_tokens).label("in_tok"),
-            func.sum(UsageEvent.output_tokens).label("out_tok"),
-            func.sum(UsageEvent.cache_creation_input_tokens).label("cw_tok"),
-            func.sum(UsageEvent.cache_read_input_tokens).label("cr_tok"),
-        )
-        .where(*where)
-        .group_by(UsageEvent.agent_id, UsageEvent.model, long_prompt)
-    )
-    per_agent: dict[str | None, float] = {}
-    for row in (await session.execute(stmt)).all():
-        usage = UsageTokens(
-            input_tokens=int(row.in_tok or 0),
-            output_tokens=int(row.out_tok or 0),
-            cache_creation_input_tokens=int(row.cw_tok or 0),
-            cache_read_input_tokens=int(row.cr_tok or 0),
-        )
-        cost = cost_of_bucket(
-            usage, MODEL_PRICING.get(row.model), long_prompt=bool(row.long_prompt)
-        )
-        per_agent[row.agent_id] = per_agent.get(row.agent_id, 0.0) + (cost or 0.0)
-    return per_agent
-
-
 async def costs_by_agent_for_user_since(
     session: AsyncSession,
     *,
@@ -551,8 +527,9 @@ async def costs_by_agent_for_user_since(
     until: datetime | None = None,
 ) -> dict[str | None, float]:
     """One person's spend since `since`, by agent (provider cost, before markup)."""
-    return await _costs_by_agent(
+    return await _costs_by(
         session,
+        UsageEvent.agent_id,
         UsageEvent.tenant_id == tenant_id,
         UsageEvent.platform_user_id == platform_user_id,
         *_window(since, until),
@@ -568,14 +545,11 @@ async def costs_by_agent_in_tenant_since(
 ) -> dict[str | None, float]:
     """A tenant's spend since `since`, by agent (provider cost, before markup).
 
-    Excludes NULL platform_user_id rows like the other tenant totals, so the agents
-    add up to `cost_for_tenant_since`.
+    `None` keys spend no agent was recorded for. Counts rows with no person
+    recorded, so the agents add up to `cost_for_tenant_since`.
     """
-    return await _costs_by_agent(
-        session,
-        UsageEvent.tenant_id == tenant_id,
-        UsageEvent.platform_user_id.is_not(None),
-        *_window(since, until),
+    return await _costs_by(
+        session, UsageEvent.agent_id, UsageEvent.tenant_id == tenant_id, *_window(since, until)
     )
 
 
@@ -618,10 +592,5 @@ async def turns_by_agent_in_tenant_since(
     since: datetime,
     until: datetime | None = None,
 ) -> dict[str | None, int]:
-    """A tenant's turn count since `since`, by agent, leaving out NULL-user rows."""
-    return await _turns_by_agent(
-        session,
-        UsageEvent.tenant_id == tenant_id,
-        UsageEvent.platform_user_id.is_not(None),
-        *_window(since, until),
-    )
+    """A tenant's turn count since `since`, by agent, rows with no person included."""
+    return await _turns_by_agent(session, UsageEvent.tenant_id == tenant_id, *_window(since, until))

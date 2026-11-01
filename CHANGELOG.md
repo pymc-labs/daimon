@@ -204,6 +204,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   app compresses its answers. A channel name lookup that times out is retried a minute
   later. Agent spend includes sessions settled after the turn, and migration
   `0158_usage_agent_backfill` credits older usage to the agent whose session spent it.
+  Spend on OpenAI and Gemini models shows at the dated price it was charged, and workspace
+  and agent totals count usage that settled with no person recorded.
 
 - Discord MCP posts from self-hosted agents use their local name and avatar when agent identity is enabled, without an Anthropic lookup.
 
