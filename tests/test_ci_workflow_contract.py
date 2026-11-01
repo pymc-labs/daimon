@@ -1,6 +1,7 @@
 """Keep the CI verdict and image-promotion gates linked as workflows evolve."""
 
 import glob
+import importlib.util
 import os
 import re
 import shlex
@@ -29,9 +30,19 @@ def _workflow(name: str) -> dict[str, Any]:
     return yaml.safe_load((_WORKFLOWS / name).read_text())
 
 
+_spec = importlib.util.spec_from_file_location("ci_plan", _ROOT / "scripts/ci/plan.py")
+assert _spec and _spec.loader
+_plan = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_plan)
+
+
+def _legs(job: dict[str, Any]) -> list[dict[str, Any]]:
+    return _plan.matrix_legs(job)
+
+
 def _pytest_commands(job: dict[str, Any]) -> list[str]:
     """Every `uv run pytest` command of a job, once per matrix leg with the leg's values filled in."""
-    legs: list[dict[str, Any]] = job.get("strategy", {}).get("matrix", {}).get("include") or [{}]
+    legs = _legs(job) or [{}]
     commands: list[str] = []
     for leg in legs:
         for step in job.get("steps", []):
@@ -72,8 +83,8 @@ def test_ci_pytest_commands_collect_top_level_and_performance_tests() -> None:
 def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     jobs = _workflow("ci.yml")["jobs"]
     deploy = jobs["deploy-gcp"]
-    legs = jobs["pytest-db"]["strategy"]["matrix"]["include"]
-    discord_legs = jobs["pytest-discord"]["strategy"]["matrix"]["include"]
+    legs = _legs(jobs["pytest-db"])
+    discord_legs = _legs(jobs["pytest-discord"])
     for suite, count in (("core", 6), ("mcp", 2), ("discord", 2)):
         suite_legs = [leg for leg in legs + discord_legs if leg["suite"] == suite]
         shards = [leg["shard"] for leg in suite_legs]
@@ -111,7 +122,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "journeys-offline",
         "docker-publish-candidate",
     }
-    assert {leg["suite"] for leg in jobs["pytest-light"]["strategy"]["matrix"]["include"]} == {
+    assert {leg["suite"] for leg in _legs(jobs["pytest-light"])} == {
         "report-host",
         "mux",
         "harness",
@@ -163,7 +174,7 @@ def test_core_legs_check_out_full_history() -> None:
     job = _workflow("ci.yml")["jobs"]["pytest-db"]
     checkout = next(step for step in job["steps"] if "actions/checkout" in step.get("uses", ""))
     assert checkout["with"]["fetch-depth"] == "${{ matrix.fetch-depth }}"
-    legs = job["strategy"]["matrix"]["include"]
+    legs = _legs(job)
     core = [leg for leg in legs if leg["suite"] == "core"]
     assert len(core) == 6
     assert all(leg["fetch-depth"] == 0 for leg in core), "core must fetch every branch and commit"
@@ -194,9 +205,7 @@ def test_every_sharded_job_loads_the_plugin_the_checker_discovers() -> None:
     with_shards = {
         name
         for name, job in jobs.items()
-        if any(
-            "shards" in leg for leg in job.get("strategy", {}).get("matrix", {}).get("include", [])
-        )
+        if any("shards" in leg for leg in _legs(job))
     }
     assert (
         with_plugin

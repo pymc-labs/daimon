@@ -33,6 +33,9 @@ jobs:
     outputs:
       jobs: ${{ steps.plan.outputs.jobs }}
       suites: ${{ steps.plan.outputs.suites }}
+      pytest-db: ${{ steps.plan.outputs.pytest-db }}
+      pytest-mux-leg: ${{ steps.plan.outputs.pytest-mux-leg }}
+      pytest-light: ${{ steps.plan.outputs.pytest-light }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -137,20 +140,8 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { suite: core, shard: 0, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 1, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 2, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 3, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 4, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: core, shard: 5, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
-          - { suite: mcp, shard: 0, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
-          - { suite: mcp, shard: 1, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
-          - { suite: slack, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/slack }
-          - { suite: teams, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/teams }
-          - { suite: web, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/web }
-          - { suite: parity, shard: 0, shards: 1, fetch-depth: 1, paths: tests/parity }
+      # Legs: MATRICES in scripts/ci/plan.py, trimmed to the selected suites.
+      matrix: ${{ fromJSON(needs.changes.outputs.pytest-db) }}
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -172,15 +163,12 @@ jobs:
       TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        if: contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
         with:
           fetch-depth: ${{ matrix.fetch-depth }}  # Some core tests read other commits (origin/integration/neutral-core, pinned base commits), so core fetches full history.
       - uses: ./.github/actions/setup-daimon
-        if: contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
         with:
           database: "true"
       - name: pytest (${{ matrix.suite }})
-        if: contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
         run: >-
           uv run pytest ${{ matrix.paths }} -n 4 --dist worksteal
           -p daimon.testing.ci_shard --ci-shard-by=file
@@ -189,7 +177,7 @@ jobs:
           --ci-shard-count=${{ matrix.shards }} --durations=20
           --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        if: always() && contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
+        if: always()
         with:
           name: ${{ matrix.suite }}-shard-${{ matrix.shard }}-junit
           path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
@@ -219,33 +207,8 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { suite: turn-mux, shard: 0, shards: 1, paths: packages/core/tests/turn }
-          - { suite: parity-mux, shard: 0, shards: 1, paths: tests/parity }
-          - { suite: slack-mux, shard: 0, shards: 1, paths: packages/adapters/slack }
-          - { suite: discord-mux, shard: 0, shards: 2, paths: packages/adapters/discord }
-          - { suite: discord-mux, shard: 1, shards: 2, paths: packages/adapters/discord }
-          - { suite: teams-mux, shard: 0, shards: 1, paths: packages/adapters/teams }
-          - { suite: scheduler-mux, shard: 0, shards: 1, paths: packages/adapters/scheduler }
-          - { suite: cli-run-mux, shard: 0, shards: 1, paths: packages/adapters/cli/tests/run }
-          - suite: nonchat-mux
-            shard: 0
-            shards: 1
-            paths: >-
-              packages/core/tests/test_headless_runner.py
-              packages/core/tests/test_headless_ports.py
-              packages/core/tests/test_headless_tool_safety.py
-              packages/core/tests/test_routine_delivery_headless.py
-              packages/core/tests/test_scheduler_dispatch.py
-              packages/core/tests/test_smoke.py
-              packages/core/tests/test_workspace_transfer.py
-              packages/core/tests/test_transfer_checkpoint_paths.py
-              packages/core/tests/test_session_preparation.py
-              packages/core/tests/test_channel_backend.py
-              packages/core/tests/test_shared_threads.py
-              tests/integration/test_routines_end_to_end.py
-              tests/integration/test_direct_messages.py
+      # Legs: MATRICES in scripts/ci/plan.py, trimmed to the selected suites.
+      matrix: ${{ fromJSON(needs.changes.outputs.pytest-mux-leg) }}
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -267,13 +230,10 @@ jobs:
       TMPDIR: /dev/shm
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        if: contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
       - uses: ./.github/actions/setup-daimon
-        if: contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
         with:
           database: "true"
       - name: pytest (${{ matrix.suite }})
-        if: contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
         run: >-
           uv run pytest ${{ matrix.paths }} -n 2 -rfE --tb=short
           -p daimon.testing.ci_shard -p daimon.testing.mux_leg_known
@@ -283,7 +243,7 @@ jobs:
           --ci-shard-count=${{ matrix.shards }} --durations=20
           --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        if: always() && contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
+        if: always()
         with:
           name: ${{ matrix.suite }}-shard-${{ matrix.shard }}-junit
           path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
@@ -505,19 +465,13 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { suite: report-host, paths: apps/report-host }
-          - { suite: harness, paths: apps/harness }
-          - { suite: mux, paths: packages/mux }
-          - { suite: harness-conformance, paths: tests/harness_conformance }
+      # Legs: MATRICES in scripts/ci/plan.py, trimmed to the selected suites.
+      matrix: ${{ fromJSON(needs.changes.outputs.pytest-light) }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        if: contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
       - uses: ./.github/actions/setup-daimon
-        if: contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
       - name: Install pinned Codex controller (harness)
-        if: (matrix.suite == 'harness' || matrix.suite == 'harness-conformance') && contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
+        if: matrix.suite == 'harness' || matrix.suite == 'harness-conformance'
         run: |
           codex_dir=$(mktemp -d)
           curl --fail --location --retry 3 \
@@ -529,12 +483,11 @@ jobs:
           echo "HARNESS_CODEX_BINARY=$codex_dir/codex-x86_64-unknown-linux-musl" >> "$GITHUB_ENV"
           "$codex_dir/codex-x86_64-unknown-linux-musl" --version | grep -Fx 'codex-cli 0.162.1'
       - name: pytest (${{ matrix.suite }})
-        if: contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
         run: >-
           uv run pytest ${{ matrix.paths }} -n 4 --dist worksteal
           --durations=20 --junitxml=${{ matrix.suite }}.xml
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        if: always() && contains(fromJSON(needs.changes.outputs.suites), matrix.suite)
+        if: always()
         with:
           name: ${{ matrix.suite }}-junit
           path: ${{ matrix.suite }}.xml

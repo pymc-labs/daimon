@@ -113,15 +113,16 @@ from it still runs, on the shard its path hashes to. Refresh the table from a
 run's junit artifacts with `uv run python scripts/generate_ci_durations.py --run <run-id>`.
 Each job runs `-n 4 --dist worksteal` (the four vCPUs of a hosted runner;
 Discord keeps `-n 2`), so a failure names the failing area in the job list. Add
-a shard by adding a leg to the `pytest-db` matrix (or the `pytest-discord` one)
-in `.github/workflows/ci.yml`. The `shard-check` job
+a shard by adding a leg to `pytest-db` in `MATRICES` in `scripts/ci/plan.py`
+(or to the `pytest-discord` matrix in `.github/workflows/ci.yml`). The `shard-check` job
 runs `uv run python scripts/check_ci_shards.py`, which collects each split suite
 once (`--collect-only`, no database), places its files the way CI will, and
 fails if a shard is empty or the shards omit or repeat a test, so a new test
 file lands in exactly one shard without any edit.
 
 A pull request runs only the jobs its changed files need: `scripts/ci/plan.py`
-maps each path to the suites that cover it, and main runs everything. A path
+maps each path to the suites that cover it and starts only their jobs and matrix
+legs; main runs everything. A path
 the planner does not know runs every job. A test that reads a file outside its
 own package, such as a manifest under `docs/`, needs that file in the planner's
 `FILES`; `tests/test_ci_plan.py` flags the reads it can find.

@@ -1,8 +1,9 @@
 """Prove the CI pytest shards cover each suite exactly once.
 
-Reads the matrix of every job in ``.github/workflows/ci.yml`` whose pytest step
+Reads the legs of every job in ``.github/workflows/ci.yml`` whose pytest step
 loads the plugin (``-p daimon.testing.ci_shard``: today ``pytest-db`` and
-``pytest-discord``). For every suite it collects the matrix paths once,
+``pytest-discord``), from its matrix or from ``scripts/ci/plan.py`` where the plan
+fills the matrix in. For every suite it collects the matrix paths once,
 unsharded and with ``--collect-only`` (no database, nothing runs), then places
 each collected test file with ``daimon.testing.ci_shard.file_shard`` -- the
 function the plugin applies in CI, which depends only on a file's path, the
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import importlib.util
 import re
 import shlex
 import subprocess
@@ -39,6 +41,10 @@ import yaml
 from daimon.testing.ci_shard import DURATIONS, file_shard, projected_loads
 
 _WORKFLOW = Path(".github/workflows/ci.yml")
+_spec = importlib.util.spec_from_file_location("ci_plan", Path(__file__).parent / "ci" / "plan.py")
+assert _spec and _spec.loader
+_plan = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_plan)
 _PLUGIN = "-p daimon.testing.ci_shard"
 _NODEID = re.compile(r"^(.+?\.py)::")
 _REQUIRED_OPTIONS = (
@@ -75,7 +81,7 @@ def _legs(jobs: dict[str, dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any
     owner: dict[str, str] = {}
     problems: list[str] = []
     for name, job in jobs.items():
-        for leg in cast("list[dict[str, Any]]", job["strategy"]["matrix"]["include"]):
+        for leg in cast("list[dict[str, Any]]", _plan.matrix_legs(job)):
             suite = str(leg["suite"])
             if owner.setdefault(suite, name) != name:
                 problems.append(f"{suite}: legs in both {owner[suite]} and {name}")

@@ -65,9 +65,22 @@ def test_prose_runs_nothing() -> None:
 
 
 def test_web_adapter_change_runs_only_its_suites() -> None:
-    suites, jobs = _tests(["packages/adapters/web/daimon/adapters/web/app.py"])
+    paths = ["packages/adapters/web/daimon/adapters/web/app.py"]
+    suites, jobs = _tests(paths)
     assert suites == {"web", "parity", "parity-mux", "lint", "shard-check", "image-daimon"}
     assert jobs == {"lint", "pytest-db", "pytest-mux-leg", "shard-check", "docker-build"}
+    # Only the selected legs start.
+    result = plan.plan_tests(paths)
+    legs = {job: json.loads(result[job])["include"] for job in plan.MATRICES}
+    assert [leg["suite"] for leg in legs["pytest-db"]] == ["web", "parity"]
+    assert [leg["suite"] for leg in legs["pytest-mux-leg"]] == ["parity-mux"]
+    assert legs["pytest-light"] == []
+
+
+def test_without_a_base_every_leg_runs() -> None:
+    result = plan.plan_tests(None)
+    for job, legs in plan.MATRICES.items():
+        assert json.loads(result[job]) == {"include": legs}
 
 
 def test_test_helpers_run_every_pytest_job() -> None:
@@ -86,25 +99,23 @@ def test_jobs_match_ci_yml() -> None:
         job = jobs[name]
         assert job["needs"] == "changes"
         assert f"contains(fromJSON(needs.changes.outputs.jobs), '{name}')" in job["if"]
-        legs = job.get("strategy", {}).get("matrix", {}).get("include")
+        legs = plan.matrix_legs(job)
         if legs and "suite" in legs[0]:
             assert {leg["suite"] for leg in legs} == set(owned), name
     selected = {"changes", "journeys-offline", "docker-publish-candidate", "deploy-gcp"}
     assert set(jobs) == set(plan.JOBS) | selected
 
 
-def _gated(job: dict[str, Any], suite: str) -> None:
-    for step in job["steps"]:
-        assert f"contains(fromJSON(needs.changes.outputs.suites), {suite})" in step["if"], step
-
-
-def test_matrix_legs_skip_unselected_suites() -> None:
+def test_planned_matrices_come_from_the_changes_job() -> None:
     jobs = _ci()
-    for name in ("pytest-db", "pytest-mux-leg", "pytest-light"):
-        _gated(jobs[name], "matrix.suite")
+    for name in plan.MATRICES:
+        expression = f"needs.changes.outputs.{name}"
+        assert jobs[name]["strategy"]["matrix"] == f"${{{{ fromJSON({expression}) }}}}"
+        assert jobs["changes"]["outputs"][name] == f"${{{{ steps.plan.outputs.{name} }}}}"
     # A required check: it always runs and skips its steps instead.
     assert "if" not in jobs["journeys-offline"]
-    _gated(jobs["journeys-offline"], "'journeys'")
+    for step in jobs["journeys-offline"]["steps"]:
+        assert "contains(fromJSON(needs.changes.outputs.suites), 'journeys')" in step["if"], step
 
 
 # Test files must not import a leaf area's package unless the planner selects their
@@ -120,7 +131,7 @@ _LEAVES = {
 def _suite_files() -> dict[str, set[Path]]:
     files: dict[str, set[Path]] = {}
     for job in _ci().values():
-        for leg in job.get("strategy", {}).get("matrix", {}).get("include", []):
+        for leg in plan.matrix_legs(job):
             if "suite" not in leg or "paths" not in leg:
                 continue
             found = files.setdefault(leg["suite"], set())

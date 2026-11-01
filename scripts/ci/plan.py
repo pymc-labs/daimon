@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Which CI jobs a change needs, and which staging components a deploy refreshes.
+"""Which CI jobs and legs a change needs, and which staging components a deploy refreshes.
 
 Each changed path maps to one area: FILES by exact path, then prose (*.md outside
 the code trees), then the first prefix in RULES that matches. A path nothing
@@ -20,7 +20,8 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 #: Files outside the code that tests read or lint regenerates and compares.
 FILES: dict[str, str] = {
@@ -107,25 +108,76 @@ SUITES: dict[str, tuple[str, ...]] = {
     "report-host": (*DAIMON, "report-host", "image-report-host"),
 }
 
+Leg = dict[str, str | int]
+
+
+def _shards(suite: str, count: int, paths: str, **extra: str | int) -> list[Leg]:
+    return [
+        {"suite": suite, "shard": i, "shards": count, **extra, "paths": paths} for i in range(count)
+    ]
+
+
+_CORE = (
+    "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing"
+    " tests/integration tests/platform_contract tests/test_*.py tests/performance"
+)
+_NONCHAT = " ".join(
+    [
+        *(f"packages/core/tests/test_{name}.py" for name in (
+            "headless_runner", "headless_ports", "headless_tool_safety",
+            "routine_delivery_headless", "scheduler_dispatch", "smoke", "workspace_transfer",
+            "transfer_checkpoint_paths", "session_preparation", "channel_backend", "shared_threads",
+        )),
+        "tests/integration/test_routines_end_to_end.py",
+        "tests/integration/test_direct_messages.py",
+    ]
+)  # fmt: skip
+#: The legs of the ci.yml jobs whose matrix the plan fills in: a pull request gets only
+#: the legs of its selected suites, so an unselected leg never starts. Add a shard here.
+MATRICES: dict[str, list[Leg]] = {
+    "pytest-db": [
+        *_shards("core", 6, _CORE, **{"fetch-depth": 0}),
+        *_shards("mcp", 2, "packages/adapters/mcp", **{"fetch-depth": 1}),
+        *(
+            leg
+            for suite, paths in (
+                ("slack", "packages/adapters/slack"),
+                ("teams", "packages/adapters/teams"),
+                ("web", "packages/adapters/web"),
+                ("parity", "tests/parity"),
+            )
+            for leg in _shards(suite, 1, paths, **{"fetch-depth": 1})
+        ),
+    ],
+    "pytest-mux-leg": [
+        *_shards("turn-mux", 1, "packages/core/tests/turn"),
+        *_shards("parity-mux", 1, "tests/parity"),
+        *_shards("slack-mux", 1, "packages/adapters/slack"),
+        *_shards("discord-mux", 2, "packages/adapters/discord"),
+        *_shards("teams-mux", 1, "packages/adapters/teams"),
+        *_shards("scheduler-mux", 1, "packages/adapters/scheduler"),
+        *_shards("cli-run-mux", 1, "packages/adapters/cli/tests/run"),
+        *_shards("nonchat-mux", 1, _NONCHAT),
+    ],
+    "pytest-light": [
+        {"suite": "report-host", "paths": "apps/report-host"},
+        {"suite": "harness", "paths": "apps/harness"},
+        {"suite": "mux", "paths": "packages/mux"},
+        {"suite": "harness-conformance", "paths": "tests/harness_conformance"},
+    ],
+}
+
 #: Every ci.yml job that can be skipped whole, with the suites it runs.
 #: journeys-offline is a required check, so it always runs and gates its steps.
 JOBS: dict[str, tuple[str, ...]] = {
     "lint": ("lint",),
     "web": ("spa",),
-    "pytest-db": ("core", "mcp", "slack", "teams", "web", "parity"),
-    "pytest-mux-leg": (
-        "turn-mux",
-        "parity-mux",
-        "slack-mux",
-        "discord-mux",
-        "teams-mux",
-        "scheduler-mux",
-        "cli-run-mux",
-        "nonchat-mux",
-    ),  # fmt: skip
+    **{
+        job: tuple(dict.fromkeys(str(leg["suite"]) for leg in legs))
+        for job, legs in MATRICES.items()
+    },
     "pytest-staging-config": ("staging-config",),
     "pytest-discord": ("discord",),
-    "pytest-light": ("report-host", "harness", "mux", "harness-conformance"),
     "mux-standalone": ("mux",),
     "pytest-notebook-host": ("notebook-host",),
     "shard-check": ("shard-check",),
@@ -187,7 +239,22 @@ def plan_tests(paths: Iterable[str] | None) -> dict[str, str]:
     if paths is None:
         suites.update(ALL_SUITES)
     jobs = sorted(job for job, owned in JOBS.items() if suites & set(owned))
-    return {"suites": json.dumps(sorted(suites)), "jobs": json.dumps(jobs)}
+    matrices = {
+        job: json.dumps({"include": [leg for leg in legs if leg["suite"] in suites]})
+        for job, legs in MATRICES.items()
+    }
+    return {"suites": json.dumps(sorted(suites)), "jobs": json.dumps(jobs), **matrices}
+
+
+def matrix_legs(job: Mapping[str, Any]) -> list[Leg]:
+    """A ci.yml job's legs: its matrix, or the MATRICES entry its matrix expression names."""
+    matrix = job.get("strategy", {}).get("matrix", {})
+    if not isinstance(matrix, str):
+        return list(matrix.get("include", []))
+    planned = re.search(r"needs\.changes\.outputs\.([\w-]+)", matrix)
+    if not planned:
+        raise ValueError(f"unknown matrix expression: {matrix}")
+    return list(MATRICES[planned[1]])
 
 
 def _shipped(path: str) -> bool:

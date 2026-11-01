@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import tomllib
 from pathlib import Path
 
@@ -23,7 +24,11 @@ def test_teams_is_in_adapter_independence_contract() -> None:
 
 def test_ci_runs_teams_tests() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text())
-    legs = workflow["jobs"]["pytest-db"]["strategy"]["matrix"]["include"]
+    spec = importlib.util.spec_from_file_location("ci_plan", REPO_ROOT / "scripts/ci/plan.py")
+    assert spec and spec.loader
+    plan = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plan)
+    legs = plan.matrix_legs(workflow["jobs"]["pytest-db"])
     teams = [leg for leg in legs if leg["suite"] == "teams"]
     assert len(teams) == 1, "CI must run the Teams adapter tests"
     assert teams[0]["paths"] == "packages/adapters/teams", (
