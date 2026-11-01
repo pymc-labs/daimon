@@ -53,7 +53,8 @@ from daimon.core.channel_backend import (
     load_backend_agent,
 )
 from daimon.core.constants import MODEL_DISPLAY_NAMES
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.defaults.ma_index import list_skills_lenient
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, strip_tenant_prefix
 from daimon.core.model_presets import ModelConfig
 from daimon.core.permissions import WEB_PLACE_ID
 from daimon.core.stores import agent_drafts as drafts_store
@@ -852,6 +853,28 @@ async def discard_draft(deps: AgentChangeDeps, *, actor: AgentActor, ma_agent_id
     await _drop_draft(deps, actor=actor, agent_id=agent.id)
 
 
+async def _check_added_skills(
+    deps: AgentChangeDeps, *, actor: AgentActor, base: AgentConfigDoc, target: AgentConfigDoc
+) -> None:
+    """Refuse an added custom skill this workspace does not own; Managed Agents takes any id."""
+    known = {skill.skill_id for skill in base.skills}
+    added = [skill for skill in target.skills if skill.skill_id not in known]
+    if not added:
+        return
+    rows, _truncated = await list_skills_lenient(deps.edit.client)
+    own = {
+        row.id
+        for row in rows
+        if row.display_title is not None
+        and strip_tenant_prefix(tenant_id=actor.tenant_id, display_title=row.display_title)
+        is not None
+    }
+    # Whatever type the entry claims, a listed custom skill must be this workspace's own.
+    foreign = {row.id for row in rows if row.source == "custom"} - own
+    if any(s.skill_id in foreign or (s.type == "custom" and s.skill_id not in own) for s in added):
+        raise AgentEditError("That skill isn't available here.", kind="invalid")
+
+
 async def _write(
     deps: AgentChangeDeps,
     *,
@@ -872,6 +895,7 @@ async def _write(
     rules = rule_changes(changes)
     if rules and not actor.subject.is_admin:
         raise AgentEditError("Only an admin can change tool rules.", kind="forbidden")
+    await _check_added_skills(deps, actor=actor, base=base, target=target)
     patch = patch_for(agent, changes, target)
     before, after = place_edits(base.places), place_edits(target.places)
     # Checked before the first write; a rule or a missing right stops the whole change.

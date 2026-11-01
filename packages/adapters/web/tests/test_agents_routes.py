@@ -255,6 +255,47 @@ async def test_the_owner_drafts_applies_and_sees_history(
     assert again.status_code == 409 and again.json()["detail"] == "Nothing to apply"
 
 
+async def test_applying_another_workspaces_skill_is_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, _other = await _people(db_session)
+    agents.skills = [
+        {
+            "id": skill_id,
+            "type": "skill",
+            "display_title": title,
+            "latest_version": "7",
+            "source": "custom",
+            "created_at": "2030-01-01T00:00:00Z",
+            "updated_at": "2030-01-01T00:00:00Z",
+        }
+        for skill_id, title in [
+            ("skill_own", f"{str(owner.tenant_id)[:8]}-notes"),
+            ("skill_theirs", "deadbeef-notes"),
+        ]
+    ]
+    token = await _token(db_session_factory, owner)
+    async with _client(agents, owner.tenant_id, db_session_factory, token) as client:
+        config = (await client.get("/api/agents/ag_w")).json()
+        statuses: list[int] = []
+        for kind, skill_id in (
+            ("custom", "skill_theirs"),
+            ("anthropic", "skill_theirs"),
+            ("custom", "skill_own"),
+        ):
+            config["skills"] = [
+                {"type": kind, "skill_id": skill_id, "title": "notes", "version": "latest"}
+            ]
+            draft = await client.patch(
+                "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
+            )
+            assert draft.status_code == 200, draft.text
+            statuses.append(
+                (await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)).status_code
+            )
+    assert statuses == [422, 422, 200], "only this workspace's own skills can be added"
+
+
 async def test_apply_after_the_agent_moved_is_409(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
