@@ -98,7 +98,7 @@ def _script() -> str:
     ):
         source = f"us-central1-docker.pkg.dev/test-project/test-repo/{package}@{_DIGESTS[package]}"
         target = f"us-central1-docker.pkg.dev/test-project/test-repo/{package}:{_TAG}"
-        script = script.replace(f"${{{{ steps.images.outputs.{output} }}}}", source)
+        script = script.replace(f"${{{{ steps.record.outputs.{output} }}}}", source)
         script = script.replace(f"${{{{ steps.tags.outputs.{output} }}}}", target)
     assert "${{" not in script
     return script

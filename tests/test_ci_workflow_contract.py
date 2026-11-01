@@ -1,6 +1,7 @@
 """Keep the CI verdict and image-promotion gates linked as workflows evolve."""
 
 import glob
+import importlib.util
 import os
 import re
 import shlex
@@ -29,9 +30,19 @@ def _workflow(name: str) -> dict[str, Any]:
     return yaml.safe_load((_WORKFLOWS / name).read_text())
 
 
+_spec = importlib.util.spec_from_file_location("ci_plan", _ROOT / "scripts/ci/plan.py")
+assert _spec and _spec.loader
+_plan = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_plan)
+
+
+def _legs(job: dict[str, Any]) -> list[dict[str, Any]]:
+    return _plan.matrix_legs(job)
+
+
 def _pytest_commands(job: dict[str, Any]) -> list[str]:
     """Every `uv run pytest` command of a job, once per matrix leg with the leg's values filled in."""
-    legs: list[dict[str, Any]] = job.get("strategy", {}).get("matrix", {}).get("include") or [{}]
+    legs = _legs(job) or [{}]
     commands: list[str] = []
     for leg in legs:
         for step in job.get("steps", []):
@@ -72,8 +83,8 @@ def test_ci_pytest_commands_collect_top_level_and_performance_tests() -> None:
 def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     jobs = _workflow("ci.yml")["jobs"]
     deploy = jobs["deploy-gcp"]
-    legs = jobs["pytest-db"]["strategy"]["matrix"]["include"]
-    discord_legs = jobs["pytest-discord"]["strategy"]["matrix"]["include"]
+    legs = _legs(jobs["pytest-db"])
+    discord_legs = _legs(jobs["pytest-discord"])
     for suite, count in (("core", 6), ("mcp", 2), ("discord", 2)):
         suite_legs = [leg for leg in legs + discord_legs if leg["suite"] == suite]
         shards = [leg["shard"] for leg in suite_legs]
@@ -111,7 +122,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "journeys-offline",
         "docker-publish-candidate",
     }
-    assert {leg["suite"] for leg in jobs["pytest-light"]["strategy"]["matrix"]["include"]} == {
+    assert {leg["suite"] for leg in _legs(jobs["pytest-light"])} == {
         "report-host",
         "mux",
         "harness",
@@ -163,7 +174,7 @@ def test_core_legs_check_out_full_history() -> None:
     job = _workflow("ci.yml")["jobs"]["pytest-db"]
     checkout = next(step for step in job["steps"] if "actions/checkout" in step.get("uses", ""))
     assert checkout["with"]["fetch-depth"] == "${{ matrix.fetch-depth }}"
-    legs = job["strategy"]["matrix"]["include"]
+    legs = _legs(job)
     core = [leg for leg in legs if leg["suite"] == "core"]
     assert len(core) == 6
     assert all(leg["fetch-depth"] == 0 for leg in core), "core must fetch every branch and commit"
@@ -191,13 +202,7 @@ def test_every_sharded_job_loads_the_plugin_the_checker_discovers() -> None:
         for name, job in jobs.items()
         if any("-p daimon.testing.ci_shard" in command for command in _pytest_commands(job))
     }
-    with_shards = {
-        name
-        for name, job in jobs.items()
-        if any(
-            "shards" in leg for leg in job.get("strategy", {}).get("matrix", {}).get("include", [])
-        )
-    }
+    with_shards = {name for name, job in jobs.items() if any("shards" in leg for leg in _legs(job))}
     assert (
         with_plugin
         == with_shards
@@ -300,35 +305,80 @@ def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
     assert "Prebuilt digests are restricted to staging" in select["run"]
     assert "^sha256:[0-9a-f]{64}$" in select["run"]
     assert "gcloud artifacts docker images describe" in select["run"]
-    for step in steps:
-        if step.get("name", "").startswith("Build + push"):
-            assert without_freshness(step["if"]) == "steps.images.outputs.prebuilt != 'true'"
+    assert "Prebuilt digests need the selective main CI path" in select["run"]
+    builds = {
+        step["name"]: without_freshness(step["if"])
+        for step in steps
+        if step.get("name", "").startswith("Build + push")
+    }
+    # A build lands on the tag the images step chose, never straight on the short SHA.
+    assert {
+        step["with"]["tags"] for step in steps if step.get("name", "").startswith("Build + push")
+    } == {f"${{{{ steps.images.outputs.{name} }}}}" for name in ("daimon", "notebook", "report")}
+    assert builds == {
+        f"Build + push {name} image": f"steps.images.outputs.build_{output} == 'true'"
+        for name, output in (
+            ("daimon", "daimon"),
+            ("notebook-host", "notebook"),
+            ("report-host", "report"),
+        )
+    }
     promote = _workflow("promote.yml")["jobs"]
     assert promote["deploy"]["needs"] == "validate"
     assert promote["deploy"]["with"]["environment"] == "production"
     assert "daimon_digest" not in promote["deploy"]["with"]
 
 
+_DIGEST = {
+    name: "sha256:" + char * 64
+    for name, char in (("daimon", "a"), ("notebook", "b"), ("report", "c"))
+}
+_RECORDED = {
+    "daimon": "example.test/test-project/images/daimon@sha256:" + "d" * 64,
+    "notebook": "example.test/test-project/images/notebook-host@sha256:" + "e" * 64,
+    "report": "example.test/test-project/images/report-host@sha256:" + "f" * 64,
+}
+_TAGS = {name: f"example/{name}:abc1234" for name in ("daimon", "notebook", "report")}
+_RUN_TAG = "deploy-7-1"
+
+
 @pytest.mark.parametrize(
-    ("environment", "digests", "prebuilt"),
+    ("environment", "selective", "digests", "changed", "expected"),
     [
-        ("staging", ("", "", ""), False),
-        ("staging", ("sha256:" + "a" * 64, "sha256:" + "b" * 64, "sha256:" + "c" * 64), True),
-        ("staging", ("sha256:" + "a" * 64, "", ""), None),
-        ("staging", ("sha256:" + "A" * 64, "sha256:" + "b" * 64, "sha256:" + "c" * 64), None),
-        (
-            "staging",
-            ("sha256:" + "a" * 64 + "\nextra", "sha256:" + "b" * 64, "sha256:" + "c" * 64),
-            None,
-        ),
-        ("production", ("sha256:" + "a" * 64, "sha256:" + "b" * 64, "sha256:" + "c" * 64), None),
+        # Manual and production deploys build every image from source.
+        ("staging", False, {}, (), {"prebuilt": "false", **_TAGS}),
+        ("production", False, {}, (), {"prebuilt": "false", **_TAGS}),
+        ("staging", False, _DIGEST, (), None),
+        ("production", True, _DIGEST, (), None),
+        # Main CI: this run's candidates, else the deployed image, else a build.
+        ("staging", True, _DIGEST, ("daimon", "notebook", "report"), {
+            "prebuilt": "true",
+            **{name: f"example.test/test-project/images/{pkg}@{_DIGEST[name]}"
+               for name, pkg in (("daimon", "daimon"), ("notebook", "notebook-host"), ("report", "report-host"))},
+        }),
+        ("staging", True, {"daimon": _DIGEST["daimon"]}, ("daimon",), {
+            "daimon": f"example.test/test-project/images/daimon@{_DIGEST['daimon']}",
+            "notebook": _RECORDED["notebook"],
+            "report": _RECORDED["report"],
+            "build_notebook": "false",
+        }),
+        ("staging", True, {}, ("report",), {
+            "daimon": _RECORDED["daimon"],
+            "report": f"example.test/test-project/images/report-host:{_RUN_TAG}",
+            "build_daimon": "false",
+            "build_report": "true",
+        }),
+        ("staging", True, {"daimon": "sha256:" + "A" * 64}, (), None),
+        ("staging", True, {"daimon": _DIGEST["daimon"] + "\nextra"}, (), None),
     ],
-)
+)  # fmt: skip
 def test_image_selection_shell_validation(
     tmp_path: Path,
     environment: str,
-    digests: tuple[str, str, str],
-    prebuilt: bool | None,
+    selective: bool,
+    digests: dict[str, str],
+    changed: tuple[str, ...],
+    expected: dict[str, str] | None,
 ) -> None:
     """Execute the workflow's Bash, including its full-value digest check."""
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
@@ -336,39 +386,93 @@ def test_image_selection_shell_validation(
     for expression, value in {
         "${{ inputs.environment }}": environment,
         "${{ vars.GCP_PROJECT_ID }}": "test-project",
-        "${{ steps.tags.outputs.daimon }}": "example/daimon:abc1234",
-        "${{ steps.tags.outputs.notebook }}": "example/notebook-host:abc1234",
-        "${{ steps.tags.outputs.report }}": "example/report-host:abc1234",
+        **{f"${{{{ steps.tags.outputs.{name} }}}}": tag for name, tag in _TAGS.items()},
     }.items():
         script = script.replace(expression, value)
+    # Reads the image a VM boots, and accepts any manifest it is asked about.
+    fake_gcloud = "\n".join(
+        [
+            "gcloud() {",
+            '  case "$*" in',
+            *(f'    *"extract({key}-image)"*) echo "$REC_{key.upper()}" ;;' for key in ("daimon", "notebook", "report")),
+            "  esac",
+            "}",
+            "",
+        ]
+    )  # fmt: skip
     output = tmp_path / "outputs"
     env = {
         **os.environ,
         "GITHUB_OUTPUT": str(output),
         "AR_HOST": "example.test",
         "REPO": "images",
-        "DAIMON_DIGEST": digests[0],
-        "NOTEBOOK_DIGEST": digests[1],
-        "REPORT_DIGEST": digests[2],
+        "ZONE": "zone-a",
+        "VM_PREFIX": "env-daimon",
+        "SELECTIVE": str(selective).lower(),
+        "RUN_TAG": _RUN_TAG,
+        **{f"{name.upper()}_DIGEST": digests.get(name, "") for name in _TAGS},
+        **{f"{name.upper()}_CHANGED": str(name in changed).lower() for name in _TAGS},
+        **{f"REC_{name.upper()}": ref for name, ref in _RECORDED.items()},
     }
     result = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", "gcloud() { :; }\n" + script],
+        ["bash", "-e", "-o", "pipefail", "-c", fake_gcloud + script],
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
-    if prebuilt is None:
+    if expected is None:
         assert result.returncode != 0
-        assert not output.exists() or "prebuilt=true" not in output.read_text()
-    else:
-        assert result.returncode == 0, result.stderr
-        lines = output.read_text().splitlines()
-        assert f"prebuilt={str(prebuilt).lower()}" in lines
-        if prebuilt:
-            assert f"daimon=example.test/test-project/images/daimon@{digests[0]}" in lines
-        else:
-            assert "daimon=example/daimon:abc1234" in lines
+        assert not output.exists() or "prebuilt=true" not in output.read_text().splitlines()
+        return
+    assert result.returncode == 0, result.stderr
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert outputs == outputs | expected
+
+
+@pytest.mark.parametrize(
+    ("recorded", "served"),
+    [
+        # From another registry path: never reused.
+        ("elsewhere/daimon@sha256:" + "d" * 64, True),
+        # Deleted from the registry since it was deployed.
+        (_RECORDED["daimon"], False),
+    ],
+)
+def test_unusable_deployed_image_is_rebuilt(tmp_path: Path, recorded: str, served: bool) -> None:
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "images")
+    script = script.replace("${{ inputs.environment }}", "staging")
+    script = script.replace("${{ vars.GCP_PROJECT_ID }}", "test-project")
+    for name, tag in _TAGS.items():
+        script = script.replace(f"${{{{ steps.tags.outputs.{name} }}}}", tag)
+    output = tmp_path / "outputs"
+    env = {
+        **os.environ,
+        "GITHUB_OUTPUT": str(output),
+        "AR_HOST": "example.test",
+        "REPO": "images",
+        "ZONE": "zone-a",
+        "VM_PREFIX": "env-daimon",
+        "SELECTIVE": "true",
+        "RUN_TAG": _RUN_TAG,
+        **{f"{name.upper()}_CHANGED": "false" for name in _TAGS},
+    }
+    fake = (
+        f'gcloud() {{ case "$*" in *extract*) echo "{recorded}" ;; '
+        f"*images\\ describe*) return {0 if served else 1} ;; esac; }}\n"
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", fake + script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert outputs["build_daimon"] == "true"
+    assert outputs["daimon"] == f"example.test/test-project/images/daimon:{_RUN_TAG}"
 
 
 _RECORD_STEP = "Record deployed image digests for VM boot"
@@ -414,7 +518,7 @@ def test_boot_digests_write_only_the_deploy_owned_keys() -> None:
     assert "daimon-secret-env" not in script
     assert "startup-script" not in script
     keys = re.findall(r"record \"\$VM_PREFIX-\w+\" ([\w-]+)", script)
-    assert keys == ["daimon-image", "notebook-image", "report-image"]
+    assert keys == ["daimon-image", "notebook-image", "report-image", "deployed-sha"]
 
 
 @pytest.mark.parametrize("fail_write", [False, True])
@@ -423,8 +527,10 @@ def test_boot_digests_script_records_full_digest_references(
 ) -> None:
     step = _record_step()
     base = "example.test/proj/images"
+    sha = "0123456789abcdef" * 2 + "01234567"
     env = {
         **os.environ,
+        "GITHUB_OUTPUT": str(tmp_path / "outputs"),
         "FAKE_LOG": str(tmp_path / "log"),
         "FAKE_STATE": str(tmp_path / "state"),
         "ZONE": "zone-a",
@@ -436,7 +542,14 @@ def test_boot_digests_script_records_full_digest_references(
     if fail_write:
         env["FAKE_FAIL_WRITE"] = "1"
     result = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", "sleep() { :; }\n" + _FAKE_GCLOUD + step["run"]],
+        [
+            "bash",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            "sleep() { :; }\n" + _FAKE_GCLOUD + step["run"].replace("${{ inputs.sha }}", sha),
+        ],  # fmt: skip
         env=env,
         capture_output=True,
         text=True,
@@ -451,6 +564,7 @@ def test_boot_digests_script_records_full_digest_references(
     for line in (tmp_path / "state").read_text().splitlines():
         vm, key, value = line.split(" ")
         written[(vm, key)] = value
+    assert written.pop(("env-daimon-workers", "deployed-sha")) == sha
     assert set(written) == {
         ("env-daimon-workers", "daimon-image"),
         ("env-daimon-notebook", "notebook-image"),
@@ -460,6 +574,13 @@ def test_boot_digests_script_records_full_digest_references(
         assert re.fullmatch(rf"{re.escape(base)}/[a-z-]+@sha256:[0-9a-f]{{64}}", value)
     assert written[("env-daimon-notebook", "notebook-image")].endswith("b" * 64)
     assert "daimon:" not in "".join(written.values())
+    # The promotion step tags these pinned references, never the build tags.
+    outputs = dict(line.split("=", 1) for line in (tmp_path / "outputs").read_text().splitlines())
+    assert outputs == {
+        "daimon": written[("env-daimon-workers", "daimon-image")],
+        "notebook": written[("env-daimon-notebook", "notebook-image")],
+        "report": written[("env-daimon-notebook", "report-image")],
+    }
 
 
 @pytest.mark.parametrize(
@@ -705,3 +826,79 @@ def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> Non
         "packages/core/tests/turn/test_staging_configuration_paths.py",
     ):
         assert selected in command
+
+
+_CLEAR_STEP = "Forget the deployed commit until this deploy passes"
+
+
+@pytest.mark.parametrize("removable", [True, False])
+def test_staging_forgets_its_deployed_commit_before_any_change(
+    tmp_path: Path, removable: bool
+) -> None:
+    """A deploy that stops midway leaves no record, so the next one is full."""
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    names = [step.get("name") for step in steps]
+    assert names.index("Plan the components to refresh") < names.index(_CLEAR_STEP)
+    assert names.index(_CLEAR_STEP) < names.index("Run migrations (blocking gate)")
+    step = steps[names.index(_CLEAR_STEP)]
+    assert without_freshness(step["if"]) == "inputs.environment == 'staging'"
+    state = tmp_path / "deployed-sha"
+    state.write_text("a" * 40)
+    fake = (
+        'gcloud() { case "$*" in *describe*) cat "$STATE" ;; '
+        '*remove-metadata*) [ "$REMOVABLE" = 1 ] && : > "$STATE" ;; esac; }\n'
+        "sleep() { :; }\n"
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", fake + step["run"]],
+        env={
+            **os.environ,
+            "STATE": str(state),
+            "REMOVABLE": str(int(removable)),
+            "WORKERS_VM": "vm",
+            "ZONE": "zone-a",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is removable, result.stderr
+    assert (state.read_text() == "") is removable
+
+
+@pytest.mark.parametrize(
+    ("name", "planned", "marker"),
+    [
+        ("Refresh worker VM containers (recreate in place)", "workers", "worker"),
+        ("Start notebook-host VM refresh (in the background)", "notebook_vm", "notebook"),
+    ],
+)
+def test_every_deploy_refreshes_vm_env_and_recreates_only_on_change(
+    name: str, planned: str, marker: str
+) -> None:
+    """A secret change reaches both VMs with the next deploy, whatever it changed."""
+    steps = {step.get("name"): step for step in _workflow("deploy.yml")["jobs"]["deploy"]["steps"]}
+    assert steps[name]["if"] == "steps.fresh.outputs.superseded != 'true'"
+    run = steps[name]["run"]
+    skip = run.index(f'echo "{marker} config unchanged: nothing to recreate"')
+    assert run.index("before=$(config)") < run.index("daimon-refresh-env") < skip
+    assert run.index(f"steps.plan.outputs.{planned}") < skip < run.index(".yml pull")
+
+
+def test_a_config_change_recreates_and_checks_every_worker() -> None:
+    steps = {step.get("name"): step for step in _workflow("deploy.yml")["jobs"]["deploy"]["steps"]}
+    run = steps["Refresh worker VM containers (recreate in place)"]["run"]
+    marker = "config changed: recreating every service"
+    assert run.index("before=$(config)") < run.index("daimon-refresh-env")
+    assert run.index(f'echo "{marker}"') < run.index("wants() {")
+    assert f'grep -q "^{marker}"' in run
+    # Nothing restarted, so the refresh must not stamp the workers as refreshed.
+    unchanged = "worker config unchanged"
+    assert f'echo "{unchanged}: nothing to recreate"' in run
+    assert run.index(f'grep -q "^{unchanged}"') < run.index("workers-refreshed-at")
+    reconcile = "steps.refresh.outputs.reconcile || steps.plan.outputs.reconcile"
+    settle = steps["Let the adapters' boot reconcile settle"]
+    assert settle["env"]["SERVICES"] == f"${{{{ {reconcile} }}}}"
+    for step in (settle, steps["Verify deployed installs match shipped defaults"]):
+        assert without_freshness(step["if"]) == f"({reconcile}) != ''"
+    assert "steps.refresh.outputs.smoke == 'true'" in steps["Post-deploy smoke turn"]["if"]
