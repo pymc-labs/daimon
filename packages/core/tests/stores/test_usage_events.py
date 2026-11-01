@@ -221,7 +221,7 @@ async def test_turn_count_for_user_in_tenant_since_filters_period(
     assert count == 0, "since filter in the future should exclude existing rows"
 
 
-async def test_cost_for_tenant_since_excludes_null_user_rows(
+async def test_cost_for_tenant_since_counts_rows_with_no_person(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
@@ -250,7 +250,7 @@ async def test_cost_for_tenant_since_excludes_null_user_rows(
         tenant_id=tenant_id,
         since=past,
     )
-    assert cost == 5.0, "tenant cost should exclude rows with NULL platform_user_id"
+    assert cost == 10.0, "rows with no person were debited too, so the tenant total counts them"
 
 
 async def test_cost_for_tenant_since_sums_across_users(
@@ -289,7 +289,7 @@ async def test_cost_for_tenant_since_sums_across_users(
     assert tenant_cost == u1_cost + u2_cost, "tenant cost should equal sum of per-user costs"
 
 
-async def test_turn_count_for_tenant_since_excludes_null_user_rows(
+async def test_turn_count_for_tenant_since_counts_rows_with_no_person(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
@@ -318,7 +318,7 @@ async def test_turn_count_for_tenant_since_excludes_null_user_rows(
         tenant_id=tenant_id,
         since=past,
     )
-    assert count == 1, "tenant turn count should exclude NULL platform_user_id rows"
+    assert count == 2, "a debited turn with no person recorded still counts"
 
 
 async def test_turn_count_for_tenant_since_counts_distinct_sessions_across_users(
@@ -740,7 +740,7 @@ async def test_cost_aggregates_equal_the_per_row_priced_sum(db_session: AsyncSes
     def per_row(user: str | None) -> float:
         total = 0.0
         for row in stored:
-            if row.platform_user_id is None or (user is not None and row.platform_user_id != user):
+            if user is not None and row.platform_user_id != user:
                 continue
             usage = ma_model_usage(
                 input_tokens=row.input_tokens,
@@ -833,7 +833,7 @@ async def test_costs_by_agent_in_tenant_since_matches_the_tenant_total(
         db_session, tenant_id=tenant_id, since=past
     )
     total = await usage_events.cost_for_tenant_since(db_session, tenant_id=tenant_id, since=past)
-    assert by_agent == {"a1": 10.0, "a2": 5.0}, "unattributed-user rows are left out"
+    assert by_agent == {"a1": 10.0, "a2": 10.0}, "rows with no person count on their agent"
     assert sum(by_agent.values()) == total, "the agents add up to the tenant total"
 
 
@@ -900,7 +900,7 @@ async def test_agent_reads_split_cost_and_turns_and_honour_the_window(
     )
 
     assert own == {"ag_a": 2, "ag_b": 1}, "one person's turns by agent, inside the window"
-    assert team == {"ag_a": 2, "ag_b": 1, None: 1}, "NULL-user rows are left out"
+    assert team == {"ag_a": 3, "ag_b": 1, None: 1}, "rows with no person count on their agent"
     assert old == {"ag_a": 1}, "`until` closes the window"
     assert set(cost_own) == {"ag_a", "ag_b"} and cost_own["ag_a"] == pytest.approx(
         2 * cost_own["ag_b"]
@@ -913,3 +913,87 @@ async def make_tenant_ref(db_session: AsyncSession, tenant_id: uuid.UUID) -> Ten
     tenant = await tenants.get_tenant(db_session, tenant_id)
     assert tenant is not None
     return tenant
+
+
+async def test_provider_model_rows_are_priced_at_their_dated_tariff(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    """OpenAI and Gemini rows cost what their tariff on the row's day charged, each row at
+    its own long-context tier; a row with no person still counts for its agent."""
+    day = datetime(2026, 10, 25, 12, tzinfo=UTC)
+    rows = [
+        # (user, agent, model, uncached input, output, cache read, day)
+        ("u1", "a_openai", "gpt-6-astra", 100_000, 10_000, 100_000, day),  # $1.60
+        ("u1", "a_openai", "gpt-6-astra", 200_000, 10_000, 100_000, day),  # long: $4.95
+        (None, "a_gemini", "gemini-3.8-flash", 1_000_000, 100_000, 200_000, day),  # $1.14
+        ("u1", "a_gemini", "gemini-4-argon", 1_000_000, 0, 0, datetime(2026, 10, 20, tzinfo=UTC)),
+        ("u1", "a_claude", "claude-opus-4-7", 1_000_000, 0, 0, day),  # $5.00
+    ]
+    for n, (user, agent, model, inp, out, cache_read, at) in enumerate(rows):
+        await usage_events.record(
+            db_session,
+            tenant_id=tenant_id,
+            platform_user_id=user,
+            managed_session_id=f"s{n}",
+            model=model,
+            model_usage=ma_model_usage(
+                input_tokens=inp, output_tokens=out, cache_read_input_tokens=cache_read
+            ),
+            event_id=f"evt_{n}",
+            agent_id=agent,
+        )
+        await db_session.execute(
+            update(UsageEvent).where(UsageEvent.event_id == f"evt_{n}").values(occurred_at=at)
+        )
+    since, until = datetime(2026, 10, 1, tzinfo=UTC), datetime(2026, 11, 1, tzinfo=UTC)
+
+    by_agent = await usage_events.costs_by_agent_in_tenant_since(
+        db_session, tenant_id=tenant_id, since=since, until=until
+    )
+    by_user = await usage_events.costs_by_user_in_tenant_since(
+        db_session, tenant_id=tenant_id, since=since, until=until
+    )
+
+    assert by_agent == {
+        "a_openai": pytest.approx(6.55),
+        "a_gemini": pytest.approx(1.14),
+        "a_claude": pytest.approx(5.0),
+    }, "dated tariffs, per-row tiers; argon before its tariff's checked date costs nothing"
+    assert by_user == {"u1": pytest.approx(11.55)}, "the per-person read leaves out no-person rows"
+
+
+async def test_per_user_cap_read_counts_openai_and_gemini_spend_of_that_person(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    """The cap compares a person's spend across providers; another person's rows and rows
+    with no person stay out of it."""
+    day = datetime(2026, 10, 25, 12, tzinfo=UTC)
+    rows = [
+        # (user, model, uncached input, output, cache read)
+        ("u1", "gpt-6-astra", 100_000, 10_000, 100_000),  # $1.60
+        ("u1", "gemini-3.8-flash", 1_000_000, 100_000, 200_000),  # $1.14
+        ("u2", "gpt-6-astra", 100_000, 10_000, 100_000),
+        (None, "gemini-3.8-flash", 1_000_000, 100_000, 200_000),
+    ]
+    for n, (user, model, inp, out, cache_read) in enumerate(rows):
+        await usage_events.record(
+            db_session,
+            tenant_id=tenant_id,
+            platform_user_id=user,
+            managed_session_id=f"cap{n}",
+            model=model,
+            model_usage=ma_model_usage(
+                input_tokens=inp, output_tokens=out, cache_read_input_tokens=cache_read
+            ),
+            event_id=f"cap_evt_{n}",
+        )
+        await db_session.execute(
+            update(UsageEvent).where(UsageEvent.event_id == f"cap_evt_{n}").values(occurred_at=day)
+        )
+    since = datetime(2026, 10, 1, tzinfo=UTC)
+
+    spent = await usage_events.cost_for_user_in_tenant_since(
+        db_session, tenant_id=tenant_id, platform_user_id="u1", since=since
+    )
+
+    assert spent == pytest.approx(2.74), "u1's OpenAI and Gemini rows both count toward the cap"

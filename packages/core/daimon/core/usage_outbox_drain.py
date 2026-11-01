@@ -12,6 +12,7 @@ revision of each observation first (a settled revision closes its older ones). R
 cannot price (unknown tariff, partial counts, another profile) stay pending.
 """
 
+import uuid
 from decimal import Decimal
 
 import structlog
@@ -48,6 +49,7 @@ async def drain_pending_usage(
     applied, debited, skipped, estimated = 0, Decimal(0), 0, 0
     # An observation's newest revision carries its whole cost; older ones only close.
     counted: set[tuple[str, str]] = set()
+    agents: dict[tuple[uuid.UUID, str, str], str | None] = {}
     for settlement in rows:
         row, tenant_id = settlement.row, settlement.tenant_id
         observation = row.observation
@@ -64,6 +66,14 @@ async def drain_pending_usage(
             continue
         try:
             async with sessionmaker.begin() as db:
+                agent_key = (tenant_id, row.binding_id, observation.session.id)
+                if agent_key not in agents:
+                    agents[agent_key] = await mux_state.agent_of_usage_session(
+                        db,
+                        tenant_id=tenant_id,
+                        binding_id=row.binding_id,
+                        managed_session_id=observation.session.id,
+                    )
                 claimed = await apply_usage_outbox(
                     db,
                     row,
@@ -75,6 +85,7 @@ async def drain_pending_usage(
                     billing_grain=observation.grain,
                     markup=markup,
                     channel_id=settlement.channel_id,
+                    agent_id=agents[agent_key],
                 )
         except Exception as error:  # one bad row must not stop the rest
             log.warning(
