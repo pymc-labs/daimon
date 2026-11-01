@@ -38,6 +38,11 @@ on:
         description: "Prebuilt staging report-host image digest from this CI run"
         required: false
         type: string
+      selective:
+        description: "Refresh only what changed since the last staging deploy (main CI)"
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       environment:
@@ -140,41 +145,98 @@ jobs:
           echo "notebook=$BASE/notebook-host:$SHA" >> "$GITHUB_OUTPUT"
           echo "report=$BASE/report-host:$SHA" >> "$GITHUB_OUTPUT"
 
+      # Main CI refreshes only the components whose files changed since the last
+      # deploy recorded its commit (scripts/ci/plan.py). Planned again here, not
+      # taken from the candidate job: another deploy may have moved that record
+      # since. Manual and production deploys refresh everything, inline, because
+      # a rollback checks out an old SHA that may not have the planner.
+      - name: Plan the components to refresh
+        if: steps.fresh.outputs.superseded != 'true'
+        id: plan
+        env:
+          SELECTIVE: ${{ inputs.selective }}
+          WORKERS_VM: ${{ vars.GCP_AR_REPO }}-workers
+        run: |
+          if [ "$SELECTIVE" = true ] && [ "${{ inputs.environment }}" = staging ]; then
+            bash scripts/ci/deploy_plan.sh "$WORKERS_VM" "$ZONE"
+          else
+            printf '%s\n' full=true daimon_image=true notebook_image=true report_image=true \
+              migrate=true mcp=true workers=all "reconcile=discord slack teams" smoke=true \
+              notebook_vm=true ssh=true | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      # gcloud's IAP tunnel warns, and runs slower, without NumPy.
+      - name: Give the IAP tunnel NumPy
+        if: (steps.plan.outputs.ssh == 'true') && steps.fresh.outputs.superseded != 'true'
+        run: |
+          py="$RUNNER_TEMP/gcloud-python"
+          if python3 -m venv "$py" && "$py/bin/pip" install --quiet --disable-pip-version-check numpy; then
+            printf '%s\n' "CLOUDSDK_PYTHON=$py/bin/python" CLOUDSDK_PYTHON_SITEPACKAGES=1 >> "$GITHUB_ENV"
+          fi
+
       - name: Select immutable prebuilt images or canonical build tags
         if: steps.fresh.outputs.superseded != 'true'
         id: images
         env:
+          SELECTIVE: ${{ inputs.selective }}
           DAIMON_DIGEST: ${{ inputs.daimon_digest }}
           NOTEBOOK_DIGEST: ${{ inputs.notebook_digest }}
           REPORT_DIGEST: ${{ inputs.report_digest }}
+          DAIMON_CHANGED: ${{ steps.plan.outputs.daimon_image }}
+          NOTEBOOK_CHANGED: ${{ steps.plan.outputs.notebook_image }}
+          REPORT_CHANGED: ${{ steps.plan.outputs.report_image }}
+          VM_PREFIX: ${{ vars.GCP_AR_REPO }}
         run: |
-          if [ -z "$DAIMON_DIGEST$NOTEBOOK_DIGEST$REPORT_DIGEST" ]; then
+          if [ "$SELECTIVE" != true ]; then
+            if [ -n "$DAIMON_DIGEST$NOTEBOOK_DIGEST$REPORT_DIGEST" ]; then
+              echo "Prebuilt digests need the selective main CI path" >&2
+              exit 1
+            fi
             echo "prebuilt=false" >> "$GITHUB_OUTPUT"
+            for image in daimon notebook report; do echo "build_$image=true" >> "$GITHUB_OUTPUT"; done
             echo "daimon=${{ steps.tags.outputs.daimon }}" >> "$GITHUB_OUTPUT"
             echo "notebook=${{ steps.tags.outputs.notebook }}" >> "$GITHUB_OUTPUT"
             echo "report=${{ steps.tags.outputs.report }}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # A partial or malformed set must never silently fall back to a build.
-          for digest in "$DAIMON_DIGEST" "$NOTEBOOK_DIGEST" "$REPORT_DIGEST"; do
-            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
-          done
           if [ "${{ inputs.environment }}" != staging ]; then
             echo "Prebuilt digests are restricted to staging" >&2
             exit 1
           fi
           BASE="$AR_HOST/${{ vars.GCP_PROJECT_ID }}/$REPO"
+          # This run's candidate; else, unchanged since the last deploy, the image
+          # the VM boots; else a build from source below. A malformed candidate
+          # digest fails rather than falling back to a build.
+          select_image() {
+            local name="$1" package="$2" digest="$3" changed="$4" vm="$5" key="$6" tag="$7" ref=""
+            if [ -n "$digest" ]; then
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Malformed $name digest" >&2; return 1; }
+              ref="$BASE/$package@$digest"
+            elif [ "$changed" != true ]; then
+              ref="$(gcloud compute instances describe "$vm" --zone "$ZONE" \
+                --format="value(metadata.items.extract($key).flatten())" || true)"
+              [[ "$ref" =~ ^"$BASE/$package@"sha256:[0-9a-f]{64}$ ]] || ref=""
+            fi
+            if [ -z "$ref" ]; then
+              echo "build_$name=true" >> "$GITHUB_OUTPUT"
+              echo "$name=$tag" >> "$GITHUB_OUTPUT"
+              return 0
+            fi
+            # Confirm the digest is a manifest Artifact Registry can serve.
+            gcloud artifacts docker images describe "$ref" --format=json >/dev/null
+            echo "build_$name=false" >> "$GITHUB_OUTPUT"
+            echo "$name=$ref" >> "$GITHUB_OUTPUT"
+          }
+          select_image daimon daimon "$DAIMON_DIGEST" "$DAIMON_CHANGED" \
+            "$VM_PREFIX-workers" daimon-image "${{ steps.tags.outputs.daimon }}"
+          select_image notebook notebook-host "$NOTEBOOK_DIGEST" "$NOTEBOOK_CHANGED" \
+            "$VM_PREFIX-notebook" notebook-image "${{ steps.tags.outputs.notebook }}"
+          select_image report report-host "$REPORT_DIGEST" "$REPORT_CHANGED" \
+            "$VM_PREFIX-notebook" report-image "${{ steps.tags.outputs.report }}"
           echo "prebuilt=true" >> "$GITHUB_OUTPUT"
-          echo "daimon=$BASE/daimon@$DAIMON_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "notebook=$BASE/notebook-host@$NOTEBOOK_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "report=$BASE/report-host@$REPORT_DIGEST" >> "$GITHUB_OUTPUT"
-          # Confirm Buildx's digest is a manifest Artifact Registry can serve.
-          for image in "$BASE/daimon@$DAIMON_DIGEST" "$BASE/notebook-host@$NOTEBOOK_DIGEST" "$BASE/report-host@$REPORT_DIGEST"; do
-            gcloud artifacts docker images describe "$image" --format=json >/dev/null
-          done
 
       - name: Start staging IAP SSH key registration
-        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
+        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true' && steps.plan.outputs.ssh == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           REPO_NAME: ${{ vars.GCP_AR_REPO }}
           IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
@@ -184,16 +246,17 @@ jobs:
             >"$IAP_SSH_STATE/launcher.log" 2>&1 < /dev/null &
 
       # Manual staging and production deploys still build from the pinned SHA.
-      # Main CI passes prebuilt digests and skips these steps. No provenance or
-      # SBOM attestations: they would turn the push into an image index, while
+      # Main CI passes the images it built and reuses the deployed ones that did
+      # not change, so it builds here only an image neither covers. No provenance
+      # or SBOM attestations: they would turn the push into an image index, while
       # existing consumers expect a plain image manifest.
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
+        if: (steps.images.outputs.build_daimon == 'true' || steps.images.outputs.build_notebook == 'true' || steps.images.outputs.build_report == 'true') && steps.fresh.outputs.superseded != 'true'
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - name: Build + push daimon image
-        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
+        if: (steps.images.outputs.build_daimon == 'true') && steps.fresh.outputs.superseded != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -206,7 +269,7 @@ jobs:
           cache-from: type=gha,scope=daimon
 
       - name: Build + push notebook-host image
-        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
+        if: (steps.images.outputs.build_notebook == 'true') && steps.fresh.outputs.superseded != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -218,7 +281,7 @@ jobs:
           cache-from: type=gha,scope=notebook-host
 
       - name: Build + push report-host image
-        if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
+        if: (steps.images.outputs.build_report == 'true') && steps.fresh.outputs.superseded != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -230,7 +293,7 @@ jobs:
           cache-from: type=gha,scope=report-host
 
       - name: Run migrations (blocking gate)
-        if: steps.fresh.outputs.superseded != 'true'
+        if: (steps.plan.outputs.migrate == 'true') && steps.fresh.outputs.superseded != 'true'
         run: |
           gcloud run jobs update ${{ vars.GCP_AR_REPO }}-migrate --region "$REGION" \
             --image "${{ steps.images.outputs.daimon }}"
@@ -240,7 +303,7 @@ jobs:
       # Update it before any drain, using a bounded compatibility window on
       # the initial cutover. All later deployments keep strict admission.
       - name: Deploy MCP registered minters
-        if: steps.fresh.outputs.superseded != 'true'
+        if: (steps.plan.outputs.mcp == 'true') && steps.fresh.outputs.superseded != 'true'
         id: mcp_minters
         env:
           DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
@@ -302,7 +365,7 @@ jobs:
           echo "url=$URL/mcp" >> "$GITHUB_OUTPUT"
 
       - name: Wait for staging IAP SSH key registration
-        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
+        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true' && steps.plan.outputs.ssh == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
         run: scripts/ci/iap-ssh-key.sh wait "$IAP_SSH_STATE" 190
@@ -335,7 +398,7 @@ jobs:
           fi
 
       - name: Start notebook-host VM refresh (in the background)
-        if: steps.fresh.outputs.superseded != 'true'
+        if: (steps.plan.outputs.notebook_vm == 'true') && steps.fresh.outputs.superseded != 'true'
         id: notebook_refresh
         run: |
           # Runs alongside the worker refresh below; the two VMs share nothing.
@@ -420,7 +483,7 @@ jobs:
           ) > "$RUNNER_TEMP/notebook-refresh.log" 2>&1 < /dev/null &
 
       - name: Refresh worker VM containers (recreate in place)
-        if: steps.fresh.outputs.superseded != 'true'
+        if: (steps.plan.outputs.workers != '') && steps.fresh.outputs.superseded != 'true'
         run: |
           # Skip the refresh when the workers VM is stopped (nothing to recreate).
           STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-workers \
@@ -467,6 +530,10 @@ jobs:
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.worker.yml /etc/daimon/compose.worker.yml
               cd /etc/daimon
               sudo -E docker compose -f compose.worker.yml pull
+              # Main CI recreates only the services whose files changed; the rest
+              # keep running. "all" is every service in the compose file.
+              services="${{ steps.plan.outputs.workers }}"
+              wants() { case " $services " in *" all "*|*" $1 "*) return 0 ;; esac; return 1; }
               # --timeout exceeds the 90s stop_grace_period in the worker asset.
               # The adapters drain in-flight turns for up to 60s
               # after SIGTERM (_DRAIN_GRACE_S), but docker kills a container
@@ -475,66 +542,72 @@ jobs:
               # Images from before the gateway lease would connect at once beside
               # the live replica, so a rollback to one (promote.yml reuses this
               # workflow for older SHAs) falls back to stop-first recreation.
-              if sudo docker run --rm --entrypoint python "$DAIMON_IMAGE" -c "import importlib.util,sys; sys.exit(importlib.util.find_spec(\"daimon.core.stores.discord_gateway_lease\") is None)"; then
-                echo "discord deploy path: overlap (image has the gateway lease)"
-                # Discord overlap. Stop-first recreation leaves the gateway closed
-                # until the new process has imported, built its runtime and
-                # connected (~14s), and any interaction in that gap gets no ack.
-                # Start the new replica beside the old one instead: it warms up and
-                # then waits on the Discord gateway lease (a Postgres advisory
-                # lock). The old process keeps serving until it is stopped, drains,
-                # closes its gateway and releases the lease; the new one connects
-                # right after. Compose numbers containers max+1, so the names
-                # alternate (daimon-discord-1, -2, -3...); never assume `-1`.
-                OLD_DISCORD=$(sudo -E docker compose -f compose.worker.yml ps -a -q discord)
-                OLD_COUNT=$(printf "%s\n" "$OLD_DISCORD" | grep -c . || true)
-                sudo -E docker compose -f compose.worker.yml up -d --no-deps --no-recreate \
-                  --scale discord=$((OLD_COUNT + 1)) discord
-                NEW_DISCORD=""
-                for id in $(sudo -E docker compose -f compose.worker.yml ps -a -q discord); do
-                  printf "%s\n" "$OLD_DISCORD" | grep -q "^$id" || NEW_DISCORD="$NEW_DISCORD $id"
-                done
-                # Do not stop the old process until the new one is a warm standby
-                # (container up, liveness responder bound, which main binds before
-                # it waits for the lease). An idle old process would otherwise
-                # close the gateway at once and the gap would again include the
-                # new process startup. If the new one never gets there, fail the
-                # deploy and leave the old one serving.
-                discord_ready=""
-                for i in $(seq 1 40); do
-                  sleep 3
-                  discord_ready=1
-                  for id in $NEW_DISCORD; do
-                    running=$(sudo docker inspect --format "{{.State.Running}}" "$id")
-                    restarts=$(sudo docker inspect --format "{{.RestartCount}}" "$id")
-                    if [ "$running" != "true" ] || [ "$restarts" != "0" ] \
-                      || ! sudo docker exec "$id" python -c "import urllib.request; from daimon.core.config import load_settings; urllib.request.urlopen(\"http://localhost:%d/\" % load_settings().discord.health_port, timeout=3)" 2>/dev/null; then
-                      discord_ready=""
-                    fi
+              if wants discord; then
+                if sudo docker run --rm --entrypoint python "$DAIMON_IMAGE" -c "import importlib.util,sys; sys.exit(importlib.util.find_spec(\"daimon.core.stores.discord_gateway_lease\") is None)"; then
+                  echo "discord deploy path: overlap (image has the gateway lease)"
+                  # Discord overlap. Stop-first recreation leaves the gateway closed
+                  # until the new process has imported, built its runtime and
+                  # connected (~14s), and any interaction in that gap gets no ack.
+                  # Start the new replica beside the old one instead: it warms up and
+                  # then waits on the Discord gateway lease (a Postgres advisory
+                  # lock). The old process keeps serving until it is stopped, drains,
+                  # closes its gateway and releases the lease; the new one connects
+                  # right after. Compose numbers containers max+1, so the names
+                  # alternate (daimon-discord-1, -2, -3...); never assume `-1`.
+                  OLD_DISCORD=$(sudo -E docker compose -f compose.worker.yml ps -a -q discord)
+                  OLD_COUNT=$(printf "%s\n" "$OLD_DISCORD" | grep -c . || true)
+                  sudo -E docker compose -f compose.worker.yml up -d --no-deps --no-recreate \
+                    --scale discord=$((OLD_COUNT + 1)) discord
+                  NEW_DISCORD=""
+                  for id in $(sudo -E docker compose -f compose.worker.yml ps -a -q discord); do
+                    printf "%s\n" "$OLD_DISCORD" | grep -q "^$id" || NEW_DISCORD="$NEW_DISCORD $id"
                   done
-                  if [ -n "$NEW_DISCORD" ] && [ -n "$discord_ready" ]; then
-                    echo "new discord replica is a warm standby (attempt $i)"
-                    break
-                  fi
+                  # Do not stop the old process until the new one is a warm standby
+                  # (container up, liveness responder bound, which main binds before
+                  # it waits for the lease). An idle old process would otherwise
+                  # close the gateway at once and the gap would again include the
+                  # new process startup. If the new one never gets there, fail the
+                  # deploy and leave the old one serving.
                   discord_ready=""
-                done
-                if [ -z "$discord_ready" ]; then
-                  echo "new discord replica not ready after 120s; keeping the old one" >&2
-                  sudo docker logs --tail 50 $NEW_DISCORD >&2 || true
-                  sudo docker rm -f $NEW_DISCORD || true
-                  exit 1
+                  for i in $(seq 1 40); do
+                    sleep 3
+                    discord_ready=1
+                    for id in $NEW_DISCORD; do
+                      running=$(sudo docker inspect --format "{{.State.Running}}" "$id")
+                      restarts=$(sudo docker inspect --format "{{.RestartCount}}" "$id")
+                      if [ "$running" != "true" ] || [ "$restarts" != "0" ] \
+                        || ! sudo docker exec "$id" python -c "import urllib.request; from daimon.core.config import load_settings; urllib.request.urlopen(\"http://localhost:%d/\" % load_settings().discord.health_port, timeout=3)" 2>/dev/null; then
+                        discord_ready=""
+                      fi
+                    done
+                    if [ -n "$NEW_DISCORD" ] && [ -n "$discord_ready" ]; then
+                      echo "new discord replica is a warm standby (attempt $i)"
+                      break
+                    fi
+                    discord_ready=""
+                  done
+                  if [ -z "$discord_ready" ]; then
+                    echo "new discord replica not ready after 120s; keeping the old one" >&2
+                    sudo docker logs --tail 50 $NEW_DISCORD >&2 || true
+                    sudo docker rm -f $NEW_DISCORD || true
+                    exit 1
+                  fi
+                  if [ -n "$OLD_DISCORD" ]; then
+                    # Same grace as below: the old process drains in-flight turns.
+                    sudo docker stop -t 95 $OLD_DISCORD
+                    sudo docker rm $OLD_DISCORD
+                  fi
+                else
+                  echo "discord deploy path: stop-first (image has no gateway lease)"
                 fi
-                if [ -n "$OLD_DISCORD" ]; then
-                  # Same grace as below: the old process drains in-flight turns.
-                  sudo docker stop -t 95 $OLD_DISCORD
-                  sudo docker rm $OLD_DISCORD
-                fi
-              else
-                echo "discord deploy path: stop-first (image has no gateway lease)"
               fi
               # Discord is already on the new image with the same config, so this
               # leaves the new replica alone and recreates the other services.
-              sudo -E docker compose -f compose.worker.yml up -d --remove-orphans --timeout 95
+              if [ "$services" = all ]; then
+                sudo -E docker compose -f compose.worker.yml up -d --remove-orphans --timeout 95
+              else
+                sudo -E docker compose -f compose.worker.yml up -d --no-deps --timeout 95 $services
+              fi
               # Gate: the slack worker must come up and stay up. Its liveness
               # responder binds only once startup is done (including
               # `daimon defaults apply` when the service runs through the image
@@ -544,20 +617,44 @@ jobs:
               # refresh done. Discord fails loudly on its own (bad token kills
               # the gateway handshake); Slack is the one that dies silently.
               # Polled every 2s within the same 120s budget.
-              for i in $(seq 1 60); do
-                sleep 2
-                running=$(sudo docker inspect --format "{{.State.Running}}" daimon-slack-1)
-                restarts=$(sudo docker inspect --format "{{.RestartCount}}" daimon-slack-1)
-                if [ "$running" = "true" ] && [ "$restarts" = "0" ] \
-                  && sudo docker exec daimon-slack-1 python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8083/\", timeout=3)" 2>/dev/null; then
-                  echo "slack worker healthy (attempt $i)"
-                  break
-                fi
-                if [ "$i" = "60" ]; then
-                  echo "slack worker not healthy after 120s (running=$running restarts=$restarts)" >&2
-                  exit 1
-                fi
-              done
+              if wants slack; then
+                for i in $(seq 1 60); do
+                  sleep 2
+                  running=$(sudo docker inspect --format "{{.State.Running}}" daimon-slack-1)
+                  restarts=$(sudo docker inspect --format "{{.RestartCount}}" daimon-slack-1)
+                  if [ "$running" = "true" ] && [ "$restarts" = "0" ] \
+                    && sudo docker exec daimon-slack-1 python -c "import urllib.request; urllib.request.urlopen(\"http://localhost:8083/\", timeout=3)" 2>/dev/null; then
+                    echo "slack worker healthy (attempt $i)"
+                    break
+                  fi
+                  if [ "$i" = "60" ]; then
+                    echo "slack worker not healthy after 120s (running=$running restarts=$restarts)" >&2
+                    exit 1
+                  fi
+                done
+              fi
+              # Gate: the web app, the same way. Where it is not configured it exits
+              # 0 at once, which is a clean outcome rather than a crash.
+              if wants web; then
+                for i in $(seq 1 60); do
+                  sleep 2
+                  state=$(sudo docker inspect --format "{{.State.Status}} {{.State.ExitCode}} {{.RestartCount}}" daimon-web-1 || echo "missing 1 0")
+                  set -- $state
+                  if { [ "$1" = exited ] || [ "$1" = restarting ]; } && [ "$2" = 0 ]; then
+                    echo "web app not configured; exited cleanly"
+                    break
+                  fi
+                  if [ "$1" = running ] && [ "$3" = 0 ] \
+                    && sudo docker exec daimon-web-1 python -c "import urllib.request; from daimon.core.config import load_settings; urllib.request.urlopen(\"http://localhost:%d/healthz\" % load_settings().web.port, timeout=3)" 2>/dev/null; then
+                    echo "web app healthy (attempt $i)"
+                    break
+                  fi
+                  if [ "$i" = "60" ]; then
+                    echo "web app not healthy after 120s (status=$1 exit=$2 restarts=$3)" >&2
+                    exit 1
+                  fi
+                done
+              fi
               # Prune superseded image tags after the new ones are in use —
               # each deploy leaves a ~1GB tag behind, and a full root disk
               # breaks IAP SSH key writes (breaking this very refresh step).
@@ -619,7 +716,7 @@ jobs:
           echo "mcp did not become healthy" >&2; exit 1
 
       - name: Post-deploy smoke turn
-        if: (inputs.environment == 'staging') && steps.fresh.outputs.superseded != 'true'
+        if: (inputs.environment == 'staging' && steps.plan.outputs.smoke == 'true') && steps.fresh.outputs.superseded != 'true'
         timeout-minutes: 5
         run: |
           # Deliberately no VM-status precheck and no error-suppressing fallback
@@ -636,9 +733,10 @@ jobs:
             '
 
       - name: Let the adapters' boot reconcile settle
-        if: steps.fresh.outputs.superseded != 'true'
+        if: (steps.plan.outputs.reconcile != '') && steps.fresh.outputs.superseded != 'true'
         env:
           DAIMON_IMAGE: ${{ steps.images.outputs.daimon }}
+          SERVICES: ${{ steps.plan.outputs.reconcile }}
         run: |
           # After it starts, each adapter reconciles its installs against the
           # shipped defaults in the background; the verify below would read a
@@ -655,7 +753,8 @@ jobs:
           [ "$remaining" -gt 0 ] || exit 0
           # Leave the remote loop time to report before the deadline cuts SSH.
           budget=$(( remaining - 10 ))
-          if [ "$budget" -gt 0 ] && [[ "$DAIMON_IMAGE" =~ ^[A-Za-z0-9./:@_-]+$ ]]; then
+          if [ "$budget" -gt 0 ] && [[ "$DAIMON_IMAGE" =~ ^[A-Za-z0-9./:@_-]+$ ]] \
+            && [[ "$SERVICES" =~ ^[a-z\ ]+$ ]]; then
             remote=$(cat <<'REMOTE'
           set -u
           cd /etc/daimon || exit 3
@@ -666,9 +765,9 @@ jobs:
           logged() { printf "%s\n" "$1" | grep -qF "\"event\": \"$2\""; }
           while :; do
             pending=""
-            # Every worker service that reconciles installs at boot. The
-            # scheduler reconciles only on a resolver miss at fire time.
-            for svc in discord slack teams; do
+            # Each worker service this deploy restarted that reconciles installs
+            # at boot. The scheduler reconciles only on a resolver miss at fire time.
+            for svc in $services; do
               case $svc in
                 # One event per process once every reconcile the first
                 # on_ready started (and any seed already in flight) is done.
@@ -719,7 +818,7 @@ jobs:
           done
           REMOTE
           )
-            payload="budget=$budget image=$DAIMON_IMAGE
+            payload="budget=$budget image=$DAIMON_IMAGE services=\"$SERVICES\"
           $remote"
             if timeout "$remaining" gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
               --tunnel-through-iap --command "$payload"; then
@@ -733,11 +832,12 @@ jobs:
           fi
 
       - name: Verify deployed installs match shipped defaults
-        if: steps.fresh.outputs.superseded != 'true'
+        if: (steps.plan.outputs.reconcile != '') && steps.fresh.outputs.superseded != 'true'
         # No environment gate, deliberately: this runs on every staging deploy
-        # AND every production promote — unlike the smoke turn above, which is
-        # scoped to staging only. A production install drifting from the
-        # shipped spec is exactly the failure mode this step exists to catch.
+        # that restarts an adapter that reconciles installs, AND every production
+        # promote — unlike the smoke turn above, which is scoped to staging only.
+        # A production install drifting from the shipped spec is exactly the
+        # failure mode this step exists to catch.
         #
         # Own timeout, sized larger than the smoke turn's: this walks every
         # ready install's resources sequentially against the provider, not a
@@ -789,6 +889,7 @@ jobs:
       # do not roll back. Re-run the job or write the keys by hand.
       - name: Record deployed image digests for VM boot
         if: steps.fresh.outputs.superseded != 'true'
+        id: record
         env:
           DAIMON_IMAGE: ${{ steps.images.outputs.daimon }}
           NOTEBOOK_IMAGE: ${{ steps.images.outputs.notebook }}
@@ -839,6 +940,9 @@ jobs:
           record "$VM_PREFIX-workers" daimon-image "$daimon"
           record "$VM_PREFIX-notebook" notebook-image "$notebook"
           record "$VM_PREFIX-notebook" report-image "$report"
+          # Last: the next main deploy refreshes what changed since this commit.
+          record "$VM_PREFIX-workers" deployed-sha "${{ inputs.sha }}"
+          printf '%s\n' "daimon=$daimon" "notebook=$notebook" "report=$report" >> "$GITHUB_OUTPUT"
 
       - name: Mark tested staging images promotable
         if: (steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
@@ -900,6 +1004,7 @@ jobs:
               return 1
             fi
           }
-          promote_tag notebook-host "${{ steps.images.outputs.notebook }}" "${{ steps.tags.outputs.notebook }}"
-          promote_tag report-host "${{ steps.images.outputs.report }}" "${{ steps.tags.outputs.report }}"
-          promote_tag daimon "${{ steps.images.outputs.daimon }}" "${{ steps.tags.outputs.daimon }}"
+          # Pinned digests: an image built in this job is named by its tag above.
+          promote_tag notebook-host "${{ steps.record.outputs.notebook }}" "${{ steps.tags.outputs.notebook }}"
+          promote_tag report-host "${{ steps.record.outputs.report }}" "${{ steps.tags.outputs.report }}"
+          promote_tag daimon "${{ steps.record.outputs.daimon }}" "${{ steps.tags.outputs.daimon }}"

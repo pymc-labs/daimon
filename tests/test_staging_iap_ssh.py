@@ -204,6 +204,7 @@ def test_staging_prebuilt_join_precedes_both_vm_refreshes() -> None:
     assert (
         without_freshness(start["if"])
         == "inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true'"
+        " && steps.plan.outputs.ssh == 'true'"
     )
     assert join["if"] == start["if"]
     assert (

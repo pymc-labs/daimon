@@ -120,6 +120,12 @@ once (`--collect-only`, no database), places its files the way CI will, and
 fails if a shard is empty or the shards omit or repeat a test, so a new test
 file lands in exactly one shard without any edit.
 
+A pull request runs only the jobs its changed files need: `scripts/ci/plan.py`
+maps each path to the suites that cover it, and main runs everything. A path
+the planner does not know runs every job. A test that reads a file outside its
+own package, such as a manifest under `docs/`, needs that file in the planner's
+`FILES`.
+
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.
 

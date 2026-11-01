@@ -300,35 +300,75 @@ def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
     assert "Prebuilt digests are restricted to staging" in select["run"]
     assert "^sha256:[0-9a-f]{64}$" in select["run"]
     assert "gcloud artifacts docker images describe" in select["run"]
-    for step in steps:
-        if step.get("name", "").startswith("Build + push"):
-            assert without_freshness(step["if"]) == "steps.images.outputs.prebuilt != 'true'"
+    assert "Prebuilt digests need the selective main CI path" in select["run"]
+    builds = {
+        step["name"]: without_freshness(step["if"])
+        for step in steps
+        if step.get("name", "").startswith("Build + push")
+    }
+    assert builds == {
+        f"Build + push {name} image": f"steps.images.outputs.build_{output} == 'true'"
+        for name, output in (
+            ("daimon", "daimon"),
+            ("notebook-host", "notebook"),
+            ("report-host", "report"),
+        )
+    }
     promote = _workflow("promote.yml")["jobs"]
     assert promote["deploy"]["needs"] == "validate"
     assert promote["deploy"]["with"]["environment"] == "production"
     assert "daimon_digest" not in promote["deploy"]["with"]
 
 
+_DIGEST = {
+    name: "sha256:" + char * 64
+    for name, char in (("daimon", "a"), ("notebook", "b"), ("report", "c"))
+}
+_RECORDED = {
+    "daimon": "example.test/test-project/images/daimon@sha256:" + "d" * 64,
+    "notebook": "example.test/test-project/images/notebook-host@sha256:" + "e" * 64,
+    "report": "example.test/test-project/images/report-host@sha256:" + "f" * 64,
+}
+_TAGS = {name: f"example/{name}:abc1234" for name in ("daimon", "notebook", "report")}
+
+
 @pytest.mark.parametrize(
-    ("environment", "digests", "prebuilt"),
+    ("environment", "selective", "digests", "changed", "expected"),
     [
-        ("staging", ("", "", ""), False),
-        ("staging", ("sha256:" + "a" * 64, "sha256:" + "b" * 64, "sha256:" + "c" * 64), True),
-        ("staging", ("sha256:" + "a" * 64, "", ""), None),
-        ("staging", ("sha256:" + "A" * 64, "sha256:" + "b" * 64, "sha256:" + "c" * 64), None),
-        (
-            "staging",
-            ("sha256:" + "a" * 64 + "\nextra", "sha256:" + "b" * 64, "sha256:" + "c" * 64),
-            None,
-        ),
-        ("production", ("sha256:" + "a" * 64, "sha256:" + "b" * 64, "sha256:" + "c" * 64), None),
+        # Manual and production deploys build every image from source.
+        ("staging", False, {}, (), {"prebuilt": "false", **_TAGS}),
+        ("production", False, {}, (), {"prebuilt": "false", **_TAGS}),
+        ("staging", False, _DIGEST, (), None),
+        ("production", True, _DIGEST, (), None),
+        # Main CI: this run's candidates, else the deployed image, else a build.
+        ("staging", True, _DIGEST, ("daimon", "notebook", "report"), {
+            "prebuilt": "true",
+            **{name: f"example.test/test-project/images/{pkg}@{_DIGEST[name]}"
+               for name, pkg in (("daimon", "daimon"), ("notebook", "notebook-host"), ("report", "report-host"))},
+        }),
+        ("staging", True, {"daimon": _DIGEST["daimon"]}, ("daimon",), {
+            "daimon": f"example.test/test-project/images/daimon@{_DIGEST['daimon']}",
+            "notebook": _RECORDED["notebook"],
+            "report": _RECORDED["report"],
+            "build_notebook": "false",
+        }),
+        ("staging", True, {}, ("report",), {
+            "daimon": _RECORDED["daimon"],
+            "report": _TAGS["report"],
+            "build_daimon": "false",
+            "build_report": "true",
+        }),
+        ("staging", True, {"daimon": "sha256:" + "A" * 64}, (), None),
+        ("staging", True, {"daimon": _DIGEST["daimon"] + "\nextra"}, (), None),
     ],
-)
+)  # fmt: skip
 def test_image_selection_shell_validation(
     tmp_path: Path,
     environment: str,
-    digests: tuple[str, str, str],
-    prebuilt: bool | None,
+    selective: bool,
+    digests: dict[str, str],
+    changed: tuple[str, ...],
+    expected: dict[str, str] | None,
 ) -> None:
     """Execute the workflow's Bash, including its full-value digest check."""
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
@@ -336,39 +376,84 @@ def test_image_selection_shell_validation(
     for expression, value in {
         "${{ inputs.environment }}": environment,
         "${{ vars.GCP_PROJECT_ID }}": "test-project",
-        "${{ steps.tags.outputs.daimon }}": "example/daimon:abc1234",
-        "${{ steps.tags.outputs.notebook }}": "example/notebook-host:abc1234",
-        "${{ steps.tags.outputs.report }}": "example/report-host:abc1234",
+        **{f"${{{{ steps.tags.outputs.{name} }}}}": tag for name, tag in _TAGS.items()},
     }.items():
         script = script.replace(expression, value)
+    # Reads the image a VM boots, and accepts any manifest it is asked about.
+    fake_gcloud = "\n".join(
+        [
+            "gcloud() {",
+            '  case "$*" in',
+            *(f'    *"extract({key}-image)"*) echo "$REC_{key.upper()}" ;;' for key in ("daimon", "notebook", "report")),
+            "  esac",
+            "}",
+            "",
+        ]
+    )  # fmt: skip
     output = tmp_path / "outputs"
     env = {
         **os.environ,
         "GITHUB_OUTPUT": str(output),
         "AR_HOST": "example.test",
         "REPO": "images",
-        "DAIMON_DIGEST": digests[0],
-        "NOTEBOOK_DIGEST": digests[1],
-        "REPORT_DIGEST": digests[2],
+        "ZONE": "zone-a",
+        "VM_PREFIX": "env-daimon",
+        "SELECTIVE": str(selective).lower(),
+        **{f"{name.upper()}_DIGEST": digests.get(name, "") for name in _TAGS},
+        **{f"{name.upper()}_CHANGED": str(name in changed).lower() for name in _TAGS},
+        **{f"REC_{name.upper()}": ref for name, ref in _RECORDED.items()},
     }
     result = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", "gcloud() { :; }\n" + script],
+        ["bash", "-e", "-o", "pipefail", "-c", fake_gcloud + script],
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
-    if prebuilt is None:
+    if expected is None:
         assert result.returncode != 0
-        assert not output.exists() or "prebuilt=true" not in output.read_text()
-    else:
-        assert result.returncode == 0, result.stderr
-        lines = output.read_text().splitlines()
-        assert f"prebuilt={str(prebuilt).lower()}" in lines
-        if prebuilt:
-            assert f"daimon=example.test/test-project/images/daimon@{digests[0]}" in lines
-        else:
-            assert "daimon=example/daimon:abc1234" in lines
+        assert not output.exists() or "prebuilt=true" not in output.read_text().splitlines()
+        return
+    assert result.returncode == 0, result.stderr
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert outputs == outputs | expected
+
+
+def test_unreadable_deployed_image_is_rebuilt(tmp_path: Path) -> None:
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "images")
+    script = script.replace("${{ inputs.environment }}", "staging")
+    script = script.replace("${{ vars.GCP_PROJECT_ID }}", "test-project")
+    for name, tag in _TAGS.items():
+        script = script.replace(f"${{{{ steps.tags.outputs.{name} }}}}", tag)
+    output = tmp_path / "outputs"
+    env = {
+        **os.environ,
+        "GITHUB_OUTPUT": str(output),
+        "AR_HOST": "example.test",
+        "REPO": "images",
+        "ZONE": "zone-a",
+        "VM_PREFIX": "env-daimon",
+        "SELECTIVE": "true",
+        **{f"{name.upper()}_CHANGED": "false" for name in _TAGS},
+    }
+    # A recorded ref from another registry path is never reused.
+    fake = (
+        'gcloud() { case "$*" in *extract*) echo "elsewhere/daimon@sha256:'
+        + "d" * 64
+        + '" ;; esac; }\n'
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", fake + script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert {outputs[f"build_{name}"] for name in _TAGS} == {"true"}
+    assert outputs["daimon"] == _TAGS["daimon"]
 
 
 _RECORD_STEP = "Record deployed image digests for VM boot"
@@ -414,7 +499,7 @@ def test_boot_digests_write_only_the_deploy_owned_keys() -> None:
     assert "daimon-secret-env" not in script
     assert "startup-script" not in script
     keys = re.findall(r"record \"\$VM_PREFIX-\w+\" ([\w-]+)", script)
-    assert keys == ["daimon-image", "notebook-image", "report-image"]
+    assert keys == ["daimon-image", "notebook-image", "report-image", "deployed-sha"]
 
 
 @pytest.mark.parametrize("fail_write", [False, True])
@@ -423,8 +508,10 @@ def test_boot_digests_script_records_full_digest_references(
 ) -> None:
     step = _record_step()
     base = "example.test/proj/images"
+    sha = "0123456789abcdef" * 2 + "01234567"
     env = {
         **os.environ,
+        "GITHUB_OUTPUT": str(tmp_path / "outputs"),
         "FAKE_LOG": str(tmp_path / "log"),
         "FAKE_STATE": str(tmp_path / "state"),
         "ZONE": "zone-a",
@@ -436,7 +523,14 @@ def test_boot_digests_script_records_full_digest_references(
     if fail_write:
         env["FAKE_FAIL_WRITE"] = "1"
     result = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", "sleep() { :; }\n" + _FAKE_GCLOUD + step["run"]],
+        [
+            "bash",
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            "sleep() { :; }\n" + _FAKE_GCLOUD + step["run"].replace("${{ inputs.sha }}", sha),
+        ],  # fmt: skip
         env=env,
         capture_output=True,
         text=True,
@@ -451,6 +545,7 @@ def test_boot_digests_script_records_full_digest_references(
     for line in (tmp_path / "state").read_text().splitlines():
         vm, key, value = line.split(" ")
         written[(vm, key)] = value
+    assert written.pop(("env-daimon-workers", "deployed-sha")) == sha
     assert set(written) == {
         ("env-daimon-workers", "daimon-image"),
         ("env-daimon-notebook", "notebook-image"),
@@ -460,6 +555,13 @@ def test_boot_digests_script_records_full_digest_references(
         assert re.fullmatch(rf"{re.escape(base)}/[a-z-]+@sha256:[0-9a-f]{{64}}", value)
     assert written[("env-daimon-notebook", "notebook-image")].endswith("b" * 64)
     assert "daimon:" not in "".join(written.values())
+    # The promotion step tags these pinned references, never the build tags.
+    outputs = dict(line.split("=", 1) for line in (tmp_path / "outputs").read_text().splitlines())
+    assert outputs == {
+        "daimon": written[("env-daimon-workers", "daimon-image")],
+        "notebook": written[("env-daimon-notebook", "notebook-image")],
+        "report": written[("env-daimon-notebook", "report-image")],
+    }
 
 
 @pytest.mark.parametrize(
