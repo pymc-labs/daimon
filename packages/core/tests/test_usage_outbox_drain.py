@@ -94,6 +94,16 @@ async def test_drained_usage_stays_unattributed_when_no_agent_is_known(sm):
     assert total == pytest.approx(float(usd)), "and still adds up to the total"
 
 
+async def test_drained_usage_stays_unattributed_when_two_agents_shared_its_thread(sm):
+    """Two agents ran in the thread: guessing one would misstate both cards."""
+    binding = await pending_usage(sm)
+    await _seat_agent(sm, binding, "ag_first")
+    await _seat_agent(sm, binding, "ag_second")
+    await drain_pending_usage(sm, markup=Decimal(1))
+    _, _, by_agent = await _spend(sm, binding)
+    assert set(by_agent) == {None}, "an ambiguous thread names no agent"
+
+
 async def test_drained_usage_ignores_an_agent_of_another_tenant(sm):
     """A thread with the same id in another tenant never lends its agent."""
     binding = await pending_usage(sm)
