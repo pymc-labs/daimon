@@ -180,7 +180,9 @@ async def test_the_token_is_never_in_me(
 
     assert me.status_code == 200, me.text
     assert token not in me.text and "access_token" not in me.text, "Me never carries it"
-    assert [a["key"] for a in me.json()["apps"]] == ["data", "down", "other"], "apps are listed"
+    assert [a["key"] for a in me.json()["apps"]] == ["data", "down"], (
+        "an app the person has no token for is left out"
+    )
 
 
 async def test_the_apps_status_probes_each_manifest_as_the_admin_and_is_reused(

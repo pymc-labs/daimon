@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Annotated
 
 from daimon.adapters.web.access import is_admin
-from daimon.adapters.web.apps import AgentApp, agent_apps
+from daimon.adapters.web.apps import AgentApp, agent_apps, available_apps
 from daimon.adapters.web.caller import WebCaller, requires
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import agent_catalog, agent_changes, agent_editing, agent_view
@@ -219,7 +219,9 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
             raise HTTPException(status_code=404, detail="No such agent.")
         mcp_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
         apps = agent_apps(
-            runtime.web.apps, agent_id=str(mcp_id), server_urls=[s.url for s in view.mcp_servers]
+            await available_apps(runtime, caller),
+            agent_id=str(mcp_id),
+            server_urls=[s.url for s in view.mcp_servers],
         )
         return AgentDetail(**dict(view), apps=apps)
 
