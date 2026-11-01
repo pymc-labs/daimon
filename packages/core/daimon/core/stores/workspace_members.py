@@ -144,6 +144,17 @@ async def clear_members(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
     )
 
 
+async def clear_platform_lists(session: AsyncSession, *, platform: str) -> None:
+    """Forget every loaded list of a platform's workspaces, for a gateway that no longer
+    sends member events: a stale list would keep counting as the whole truth, where none
+    leaves each sign-in to decide."""
+    tenant_ids = select(Tenant.id).where(Tenant.platform == platform)
+    await session.execute(delete(WorkspaceMember).where(WorkspaceMember.tenant_id.in_(tenant_ids)))
+    await session.execute(
+        delete(WorkspaceMemberSync).where(WorkspaceMemberSync.tenant_id.in_(tenant_ids))
+    )
+
+
 async def list_member_tenant_ids(
     session: AsyncSession, *, platform_user_id: str, tenant_ids: Collection[uuid.UUID]
 ) -> set[uuid.UUID]:

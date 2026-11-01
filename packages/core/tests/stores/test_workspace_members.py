@@ -90,3 +90,26 @@ async def test_standing_skips_accounts_with_no_chat_account_there(db_session: As
     )
 
     assert standings == {}, "a web-only person has no chat standing to check"
+
+
+async def test_clear_platform_lists_forgets_only_that_platforms_lists(
+    db_session: AsyncSession,
+) -> None:
+    """Lists and loaded markers go for the platform; another platform keeps its own."""
+    discord_tenant = await make_tenant(db_session, workspace_id="333333333333333333")
+    slack_tenant = await make_tenant(db_session, platform="slack", workspace_id="T0333")
+    for tenant in (discord_tenant, slack_tenant):
+        await members_store.replace_members(
+            db_session, tenant_id=tenant.id, members={"u": False}, workspace_name="W", now=_NOW
+        )
+
+    await members_store.clear_platform_lists(db_session, platform="discord")
+
+    ids = [discord_tenant.id, slack_tenant.id]
+    assert await members_store.list_synced(db_session, tenant_ids=ids) == {slack_tenant.id: "W"}, (
+        "only the other platform keeps its loaded marker"
+    )
+    found = await members_store.list_member_tenant_ids(
+        db_session, platform_user_id="u", tenant_ids=ids
+    )
+    assert found == {slack_tenant.id}, "the cleared platform's members are gone"
