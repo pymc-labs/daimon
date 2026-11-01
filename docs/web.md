@@ -86,8 +86,8 @@ on, a person also reaches each chat workspace those accounts are in, as that
 account, the same as signing in with Discord, Slack or Microsoft. Where the
 workspace's member list is loaded, the account must be on it; for Teams, and for
 a workspace whose list has not loaded yet, the claim alone is the proof. A chat
-account that already signs in with another account of the same provider is not
-linked again: the sign-in skips that workspace and the audit log records why.
+account already signed in with another account of the same provider is skipped,
+and the audit log records why.
 
 ### Discord, Slack and Microsoft
 
@@ -105,8 +105,8 @@ People who sign in this way reach every workspace with Daimon installed where
 their chat account is a member. Their spend and memory are the same as in
 chat. Someone who leaves a Discord server or Slack workspace loses it in the
 web app at once. Discord needs the Server Members intent and Slack the
-`team_join` and `user_change` events for this; until a list loads, the sign-in
-itself decides. Slack lists also reload after a reconnect and every six hours,
+`team_join` and `user_change` events for this. Until a list loads, or while the
+intent is off, the sign-in itself decides. Slack lists also reload after a reconnect and every six hours,
 since Slack does not resend events missed while disconnected.
 
 ## Become the owner
