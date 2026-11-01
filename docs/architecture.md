@@ -2122,9 +2122,9 @@ contract and limits.
 things and how a person reaches each command there: Discord's server, server
 admin and `/agent-setup`, Slack's workspace and `/agent-setup`, Teams'
 organisation, admin and `setup` in a 1:1 chat, and where each command works
-(Discord commands other than `/privacy` are server-only; Teams `setup` and
-`support` work only in the 1:1 chat). Help cards, refusals, the here card and
-routine failure notices read it, and MCP tool results that name who must act
+(Discord commands other than `/privacy` and the DM-only `/new` and `/dm-settings` are server-only;
+Teams `setup` and `support` work only in the 1:1 chat). Help cards, refusals,
+the here card and routine failure notices read it, and MCP tool results that name who must act
 use the caller's platform (`tools/_words.py`). The model gets the same words per
 turn as `words` in `<turn_controls>` (chat turns, from the origin's platform and
 place: DM, channel or group chat) and in routine controls. The system prompt,
@@ -2647,12 +2647,17 @@ A cold scope binds its own agent without changing the physical DM channel's conf
 Its context and history start empty, its source channel/thread are absent, and its
 origin label is `Private conversation`. This explicit provenance is distinct from
 old moved conversations that lack recorded sources. The opening notice names the
-server and agent and offers **Switch server**. Only the latest switch control for
-each user/DM route remains active; a later reply or switch stops its predecessor.
-Controls expire absolutely after fifteen minutes, and adapter unload stops all
-controls and pending selectors. Send another message to renew an expired switch
-control. Switching creates a fresh scope, retires the previous session mapping and
-never replays the previous prompt or history.
+server and agent, points to `/dm-settings` and offers **Switch server** and
+**New conversation**; replies carry no controls. `/dm-settings` (DM-only) names the
+current conversation and shows the same controls again. Only the latest control for
+each user/DM route remains active; a later one stops its predecessor. Controls expire
+absolutely after fifteen minutes, and adapter unload stops all controls and pending
+selectors. Run `/dm-settings` to get fresh controls. Switching creates a fresh scope, retires the
+previous session mapping and never replays the previous prompt or history.
+**New conversation**, and the DM-only `/new` command, replace the active conversation
+with an empty cold scope in the same tenant with its current DM agent, so the new
+session reflects agent changes made since. They recheck eligibility as discovery does
+and use the same rate bucket; a control whose conversation has since changed refuses.
 An active conversation always wins over discovery, even if access to its tenant is
 revoked; revoked access is silent and never reroutes the message to another server.
 Route writes serialize even before a conversation exists, and message claims deduplicate

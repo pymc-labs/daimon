@@ -142,6 +142,8 @@ def interaction(selector_id=888, user=999, route=555, channel=None):
     it.response.defer = AsyncMock()
     it.response.send_message = AsyncMock()
     it.edit_original_response = AsyncMock()
+    it.followup = MagicMock()
+    it.followup.send = AsyncMock()
     return it
 
 
@@ -157,7 +159,11 @@ async def test_one_tenant_answers_original_without_public_history(db_session_fac
     assert reply.await_args.kwargs["verified_membership"] is True
     assert fetch.await_count >= 2
     assert "private-0" in msg.channel.send.await_args_list[0].args[0]
+    assert "/dm-settings" in msg.channel.send.await_args_list[0].args[0]
     assert isinstance(msg.channel.send.await_args_list[0].kwargs["view"], module.ServerSwitch)
+    assert "view" not in msg.channel.send.await_args_list[-1].kwargs, (
+        "only the opening message carries the controls, never a reply"
+    )
 
 
 async def test_multiple_tenants_pending_messages_are_silent_and_selection_answers_once(
@@ -338,6 +344,107 @@ async def test_switch_creates_empty_scope_without_replaying_text(db_session_fact
     assert reply.await_count == 1
     view._expiry.cancel()
     view.stop()
+
+
+def switch_view(msg):
+    return msg.channel.send.await_args_list[0].kwargs["view"]
+
+
+async def test_new_conversation_button_replaces_scope_in_same_server(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch, count=2)
+    monkeypatch.setattr(module, "list_tenants_by_platform", AsyncMock(return_value=[tenants[1]]))
+    msg = message()
+    await cog.on_message(msg)
+    old = await conversation(db_session_factory)
+    view = switch_view(msg)
+    assert [child.label for child in view.children] == ["Switch server", "New conversation"]
+    assert not await view.interaction_check(interaction(user=111))
+    assert not await view.interaction_check(interaction(route=666))
+    # No server picker: the restart never looks at the person's other servers.
+    monkeypatch.setattr(module, "list_tenants_by_platform", AsyncMock(return_value=tenants))
+    click = interaction(channel=msg.channel)
+    await view.children[1].callback(click)
+    new = await conversation(db_session_factory)
+    assert new.scope_id != old.scope_id and new.tenant_id == tenants[1].id
+    assert new.context == "" and new.history == []
+    assert click.followup.send.await_args.args[0] == "Started a new conversation."
+    assert click.followup.send.await_args.kwargs["ephemeral"] is True
+    assert "private-1" in msg.channel.send.await_args.args[0]
+    assert not any(
+        isinstance(call.kwargs.get("view"), module.ServerSelector)
+        for call in msg.channel.send.await_args_list
+    )
+    assert reply.await_count == 1
+    await cog.cog_unload()
+
+
+async def test_stale_new_conversation_button_refuses(db_session_factory, monkeypatch):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    msg = message()
+    await cog.on_message(msg)
+    stale = switch_view(msg)
+    await stale.children[1].callback(interaction(channel=msg.channel))
+    current = await conversation(db_session_factory)
+    click = interaction(channel=msg.channel)
+    await stale.children[1].callback(click)
+    assert "conversation changed" in click.response.send_message.await_args.args[0]
+    click.response.defer.assert_not_awaited()
+    assert (await conversation(db_session_factory)).scope_id == current.scope_id
+    await cog.cog_unload()
+
+
+@pytest.mark.parametrize("change", ["membership", "disabled", "agent", "recipient"])
+async def test_new_conversation_rechecks_access(db_session_factory, monkeypatch, change):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    msg = message()
+    await cog.on_message(msg)
+    old = await conversation(db_session_factory)
+    if change == "membership":
+        fetch.return_value = Membership(is_member=False)
+    elif change == "recipient":
+        cog.bot.runtime.settings = SimpleNamespace(
+            direct_message_policies={tenants[0].id: DirectMessagePolicy(mode="disabled")}
+        )
+    else:
+        async with db_session_factory.begin() as session:
+            if change == "disabled":
+                await set_dm_enabled(session, tenant_id=tenants[0].id, enabled=False)
+            else:
+                await set_dm_agent_name(session, tenant_id=tenants[0].id, agent_name=None)
+    click = interaction(channel=msg.channel)
+    await switch_view(msg).children[1].callback(click)
+    assert click.followup.send.await_args.args[0] == "Couldn't start a new conversation."
+    assert (await conversation(db_session_factory)).scope_id == old.scope_id
+    await cog.cog_unload()
+
+
+async def test_new_command_replaces_current_conversation(db_session_factory, monkeypatch):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    msg = message()
+    await cog.on_message(msg)
+    old = await conversation(db_session_factory)
+    command = interaction(channel=msg.channel)
+    await cog.new.callback(cog, command)
+    new = await conversation(db_session_factory)
+    assert new.scope_id != old.scope_id and new.tenant_id == old.tenant_id
+    assert command.followup.send.await_args.args[0] == "Started a new conversation."
+    await cog.cog_unload()
+
+
+async def test_new_command_outside_dms_or_without_conversation_changes_nothing(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    in_guild = interaction(channel=MagicMock(spec=discord.TextChannel))
+    await cog.new.callback(cog, in_guild)
+    assert "DMs" in in_guild.response.send_message.await_args.args[0]
+    first = interaction()
+    await cog.new.callback(cog, first)
+    assert "Send a message" in first.response.send_message.await_args.args[0]
+    assert await conversation(db_session_factory) is None
+    fetch.assert_not_awaited()
 
 
 def test_rate_bucket_shared_and_refills(monkeypatch):
@@ -588,3 +695,40 @@ async def test_dm_turn_posts_approval_cards_in_the_dm(db_session_factory, monkey
     assert kwargs["tenant_id"] == tenants[0].id
     assert kwargs["account_id"] == "acct-1"
     assert kwargs["admission"] is admitted
+
+
+async def test_dm_settings_shows_the_controls_for_the_current_conversation(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    msg = message()
+    await cog.on_message(msg)
+    row = await conversation(db_session_factory)
+    asked = interaction(channel=msg.channel)
+    await cog.dm_settings.callback(cog, asked)
+    text = asked.response.send_message.await_args.args[0]
+    view = asked.response.send_message.await_args.kwargs["view"]
+    assert "private-0" in text
+    assert isinstance(view, module.ServerSwitch)
+    assert [child.label for child in view.children] == ["Switch server", "New conversation"]
+    click = interaction(channel=msg.channel)
+    await view.children[1].callback(click)
+    assert (await conversation(db_session_factory)).scope_id != row.scope_id, (
+        "the controls shown by /dm-settings act on the current conversation"
+    )
+    await cog.cog_unload()
+
+
+async def test_dm_settings_outside_dms_or_without_conversation_shows_no_controls(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    in_guild = interaction(channel=MagicMock(spec=discord.TextChannel))
+    await cog.dm_settings.callback(cog, in_guild)
+    assert "in your DMs" in in_guild.response.send_message.await_args.args[0]
+    first = interaction()
+    await cog.dm_settings.callback(cog, first)
+    assert "Send a message to start one" in first.response.send_message.await_args.args[0]
+    for asked in (in_guild, first):
+        assert "view" not in asked.response.send_message.await_args.kwargs
+    await cog.cog_unload()

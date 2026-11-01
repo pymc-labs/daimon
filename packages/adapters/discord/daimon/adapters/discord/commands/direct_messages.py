@@ -407,8 +407,10 @@ class DirectMessageCog(commands.Cog):
         guild = self.bot.get_guild(int(tenant.external_id))
         server_name = guild.name if guild else tenant.external_id
 
+        # The only message that carries the controls; /dm-settings shows them again.
         await message.channel.send(
-            f"Private conversation with {admission.config.agent_name} in {server_name}.",
+            f"Private conversation with {admission.config.agent_name} in {server_name}.\n"
+            "Run `/dm-settings` to switch server or start a new conversation.",
             view=self._switch_control(
                 user_id=message.author.id,
                 route_id=message.channel.id,
@@ -453,6 +455,9 @@ class DirectMessageCog(commands.Cog):
                     )
                     await self._discover(request, expected_scope_id=scope_id)
 
+        async def restart(interaction: discord.Interaction) -> None:
+            await self._new_conversation(interaction, scope_id=scope_id)
+
         key = (user_id, route_id)
         previous = self._switch_views.pop(key, None)
         if previous is not None:
@@ -462,12 +467,130 @@ class DirectMessageCog(commands.Cog):
             if self._switch_views.get(key) is view:
                 del self._switch_views[key]
 
-        view = ServerSwitch(user_id=user_id, route_id=route_id, switch=switch, expire=expire)
+        view = ServerSwitch(
+            user_id=user_id, route_id=route_id, switch=switch, restart=restart, expire=expire
+        )
         if self._unloaded:
             view.stop()
         else:
             self._switch_views[key] = view
         return view
+
+    async def _new_conversation(
+        self, interaction: discord.Interaction, *, scope_id: str | None
+    ) -> None:
+        """Replace the current private conversation with an empty one in the same server.
+
+        Access is checked as for a first DM, so the new scope gets a fresh session
+        with the server's current DM agent. `scope_id` names the conversation a
+        control was attached to; `/new` names none and replaces whichever is current.
+        """
+        channel = interaction.channel
+        if not isinstance(channel, discord.DMChannel):
+            await interaction.response.send_message("Run /new in your DMs with me.", ephemeral=True)
+            return
+        key = (interaction.user.id, channel.id)
+        async with self._lock(key):
+            async with self.bot.runtime.sessionmaker() as session:
+                current = await get_conversation(
+                    session,
+                    platform="discord",
+                    route_key=str(key[1]),
+                    external_user_id=str(key[0]),
+                )
+            if current is None:
+                await interaction.response.send_message(
+                    "There is no conversation to replace. Send a message to start one.",
+                    ephemeral=True,
+                )
+                return
+            if scope_id is not None and current.scope_id != scope_id:
+                await interaction.response.send_message(
+                    "This conversation changed. Use its latest controls.", ephemeral=True
+                )
+                return
+            pending = self._pending.get(key)
+            if pending is not None and monotonic() < pending.expires_at:
+                await interaction.response.send_message(
+                    "Choose a server first, or wait for the selector to expire.", ephemeral=True
+                )
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            request = _DmRequest(id=interaction.id, author=interaction.user, channel=channel)
+            if self._unloaded or not self._claim_discovery(key[0]):
+                await interaction.followup.send("Please wait a moment and retry.", ephemeral=True)
+                return
+            try:
+                async with self.bot.runtime.sessionmaker() as session:
+                    tenant = await get_tenant(session, current.tenant_id)
+                if tenant is None:
+                    self._suppress(request, "tenant_unavailable")
+                    admission, uncertain = None, False
+                else:
+                    admission, uncertain, _ = await self._eligible(tenant, request)
+                if uncertain:
+                    text = "Server membership is temporarily unavailable. Please retry."
+                elif tenant is None or admission is None:
+                    text = "Couldn't start a new conversation."
+                elif await self._start(
+                    request, tenant, admission, expected_scope_id=current.scope_id
+                ):
+                    text = "Started a new conversation."
+                else:
+                    text = "This conversation changed. Use its latest controls."
+            except _DM_FAILURES as exc:
+                log.warning("discord.dm.restart_failed", error_type=type(exc).__name__)
+                text = _error_text(
+                    exc,
+                    "Couldn't start a new conversation. Please retry.",
+                    settings=self.bot.runtime.settings,
+                )
+            await interaction.followup.send(text, ephemeral=True)
+
+    @app_commands.command(name="new", description=DESCRIPTIONS["new"])
+    # Contexts apply to the global registration production uses; a lane's
+    # per-guild copy also shows /new in channels, where the handler refuses it.
+    @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
+    async def new(self, interaction: discord.Interaction[commands.Bot]) -> None:
+        await self._new_conversation(interaction, scope_id=None)
+
+    @app_commands.command(name="dm-settings", description=DESCRIPTIONS["dm_settings"])
+    @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
+    async def dm_settings(self, interaction: discord.Interaction[commands.Bot]) -> None:
+        """Show who answers this DM, with the switch-server and new-conversation controls."""
+        channel = interaction.channel
+        if not isinstance(channel, discord.DMChannel):
+            await interaction.response.send_message(
+                "Run /dm-settings in your DMs with me.", ephemeral=True
+            )
+            return
+        async with self.bot.runtime.sessionmaker() as session:
+            current = await get_conversation(
+                session,
+                platform="discord",
+                route_key=str(channel.id),
+                external_user_id=str(interaction.user.id),
+            )
+            agent = (
+                await get_dm_agent_name(session, tenant_id=current.tenant_id)
+                if current is not None
+                else None
+            )
+        if current is None:
+            await interaction.response.send_message(
+                "There is no conversation yet. Send a message to start one.", ephemeral=True
+            )
+            return
+        guild = self.bot.get_guild(int(current.workspace_id))
+        server_name = guild.name if guild else "this server"
+        who = f"{agent} in {server_name}" if agent else server_name
+        await interaction.response.send_message(
+            f"Private conversation with {who}.",
+            view=self._switch_control(
+                user_id=interaction.user.id, route_id=channel.id, scope_id=current.scope_id
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @app_commands.command(name="dm-me", description=DESCRIPTIONS["dm_me"])
     @app_commands.guild_only()
@@ -749,21 +872,10 @@ class DirectMessageCog(commands.Cog):
                     ).allows(str(message.author.id)):
                         self._suppress(message, "delivery_recipient_revoked")
                         return
-                    chunk = answer[start : start + 1900]
-                    if start + 1900 >= len(answer):
-                        await message.channel.send(
-                            chunk,
-                            view=self._switch_control(
-                                user_id=message.author.id,
-                                route_id=message.channel.id,
-                                scope_id=conversation.scope_id,
-                            ),
-                            allowed_mentions=discord.AllowedMentions.none(),
-                        )
-                    else:
-                        await message.channel.send(
-                            chunk, allowed_mentions=discord.AllowedMentions.none()
-                        )
+                    await message.channel.send(
+                        answer[start : start + 1900],
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
         except _DM_FAILURES as exc:
             log_anthropic_overload(
                 exc,

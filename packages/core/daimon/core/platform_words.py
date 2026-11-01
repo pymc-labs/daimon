@@ -37,6 +37,7 @@ Action = Literal[
     "cost_footer",
     "privacy",
     "new",
+    "dm_settings",
     "support",
     "help",
 ]
@@ -63,6 +64,7 @@ DESCRIPTIONS: Mapping[Action, str] = MappingProxyType(
         "cost_footer": "Show or hide the cost line under answers (admins)",
         "privacy": "See, export or delete your data",
         "new": "Start a fresh conversation",
+        "dm_settings": "Switch server or start over in our DM",
         "support": "Ask a person",
         "help": "This list",
     }
@@ -145,7 +147,11 @@ class PlatformWords:
         """How a person starts over in `place`."""
         if self.platform == "teams":
             return "start a new post" if place == "channel" else "send `new`"
-        return "start a new thread" if place == "channel" else "ask me to start fresh"
+        if place == "channel":
+            return "start a new thread"
+        if self.platform == "discord" and place == "dm":
+            return "run `/new`"
+        return "ask me to start fresh"
 
     def top_up(self, *, place: Place = "channel", me: str = "me", foreign: bool = False) -> str:
         """Where an admin adds credit, as a noun. On Teams it points to the 1:1 chat,
@@ -166,7 +172,8 @@ class PlatformWords:
         return said
 
 
-# Discord registers every command but /privacy as guild-only.
+# Discord registers every command but /privacy, /new and /dm-settings as guild-only;
+# /new and /dm-settings are DM-only.
 _DISCORD: Mapping[Action, Command] = MappingProxyType(
     {
         "here": Command("/here", "space"),
@@ -179,6 +186,8 @@ _DISCORD: Mapping[Action, Command] = MappingProxyType(
         "billing": Command("/billing", "space"),
         "cost_footer": Command("/cost-footer", "space"),
         "privacy": Command("/privacy"),
+        "new": Command("/new", "chat"),
+        "dm_settings": Command("/dm-settings", "chat"),
         "help": Command("/help", "space"),
     }
 )

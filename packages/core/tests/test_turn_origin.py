@@ -562,7 +562,7 @@ _TEAMS_ONE_TO_ONE = "a:1xyz"
             "discord dm",
             {"platform": "discord", "parent_channel_id": "555", "thread_id": "dm:abc"},
             "run `/agent-setup` in a server channel",
-            "ask me to start fresh",
+            "run `/new`",
         ),
         (
             "discord thread",

@@ -133,7 +133,21 @@ def test_routines_slash_uses_require_registered_guild() -> None:
 def test_direct_message_cog_registers_dm_me_not_dm() -> None:
     """Slack reserves /dm, so both platforms use /dm-me; Discord keeps no /dm alias."""
     names = _all_app_command_names(DirectMessageCog)
-    assert names == {"dm-me"}, f"DirectMessageCog must register only /dm-me; got {names!r}"
+    assert names == {"dm-me", "new", "dm-settings"}, (
+        f"DirectMessageCog must register only /dm-me, /new and /dm-settings; got {names!r}"
+    )
+
+
+def test_new_slash_is_dm_only() -> None:
+    """/new replaces a private conversation, so Discord lists it in DMs and nowhere else."""
+    cmd = next(
+        c
+        for c in DirectMessageCog.__cog_app_commands__  # type: ignore[attr-defined]
+        if isinstance(c, app_commands.Command) and c.name == "new"
+    )
+    ctx = cmd.allowed_contexts
+    assert ctx is not None and ctx.dm_channel is True, f"/new must allow DMs; got {ctx!r}"
+    assert ctx.guild is False, f"/new must not be offered in server channels; got {ctx!r}"
 
 
 def test_billing_cog_registers_billing_slash() -> None:
@@ -213,3 +227,16 @@ def test_privacy_slash_allows_dms() -> None:
         f"/privacy must allow DM invocation (allowed_contexts.dm_channel=True); got {ctx!r}"
     )
     assert ctx.guild is True, f"/privacy must also allow guild invocation; got {ctx!r}"
+
+
+def test_dm_settings_slash_is_dm_only() -> None:
+    """/dm-settings acts on a private conversation, so Discord lists it in DMs only."""
+    cmd = next(
+        c
+        for c in DirectMessageCog.__cog_app_commands__  # type: ignore[attr-defined]
+        if isinstance(c, app_commands.Command) and c.name == "dm-settings"
+    )
+    ctx = cmd.allowed_contexts
+    assert ctx is not None and ctx.dm_channel is True and ctx.guild is False, (
+        f"/dm-settings must be DM-only; got {ctx!r}"
+    )
