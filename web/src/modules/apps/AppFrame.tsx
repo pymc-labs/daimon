@@ -5,6 +5,7 @@ import { useShell } from "@/components/shell/shell-context"
 import { api } from "@/lib/api"
 import { useMe } from "@/lib/hooks"
 import { useTheme } from "@/lib/theme"
+import { pageTitle } from "@/lib/title"
 import type { EmbeddedApp } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { navFor } from "@/modules/registry"
@@ -61,11 +62,12 @@ function Frame({ app, start, path }: { app: EmbeddedApp; start: string; path: st
   const navigate = useNavigate()
   const { openNav, openPalette, openShortcuts } = useShell()
   const { data: me } = useMe()
+  const [reported, setReported] = useState<{ path: string; title: string } | null>(null)
   const send = useBridge(app, ref, (msg) => {
     if (msg.type === "navigate" && msg.path) {
       at.current = msg.path
       if (path !== null && msg.path !== path) navigate(`/apps/${app.key}${msg.path}`, { replace: true })
-    } else if (msg.type === "title" && path !== null) document.title = msg.title ? `${msg.title} - Daimon` : "Daimon"
+    } else if (msg.type === "title") setReported({ path: at.current, title: msg.title ?? "" })
     else if (msg.type === "open-nav") openNav()
     else if (msg.type === "keys") {
       if (msg.key === "k" && msg.mod) openPalette()
@@ -76,6 +78,14 @@ function Frame({ app, start, path }: { app: EmbeddedApp; start: string; path: st
       }
     }
   })
+  // The tab names the app's own page first, then the app, then the workspace.
+  useEffect(() => {
+    if (path === null) return
+    const here = path.split("?")[0]!
+    const navTitle = app.nav.find((n) => n.path === here)?.label
+    const own = reported && reported.path.split("?")[0] === here ? reported.title : ""
+    document.title = pageTitle([own || navTitle, app.name], me?.workspace.name)
+  }, [path, reported, app, me?.workspace.name])
   // Sidebar clicks inside Daimon move the frame without reloading it.
   useEffect(() => {
     if (path !== null && path !== at.current) { at.current = path; send({ type: "navigate", path }) }

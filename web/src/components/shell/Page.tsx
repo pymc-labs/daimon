@@ -2,6 +2,8 @@ import { Menu } from "lucide-react"
 import { Fragment, useEffect, useRef } from "react"
 import { Link, NavLink, useLocation } from "react-router"
 
+import { useMe } from "@/lib/hooks"
+import { pageTitle } from "@/lib/title"
 import { cn } from "@/lib/utils"
 import { useShell } from "./shell-context"
 
@@ -14,8 +16,9 @@ export function Page({ crumbs, actions, tabs, children, className, flush }: {
   const { openNav } = useShell()
   const bar = useRef<HTMLDivElement>(null)
   const { pathname } = useLocation()
-  const title = [...crumbs].reverse().map((c) => c.label).join(", ")
-  useEffect(() => { document.title = title ? `${title} - Daimon` : "Daimon" }, [title])
+  const { data: me } = useMe()
+  const title = pageTitle([...crumbs].reverse().map((c) => c.label), me?.workspace.name)
+  useEffect(() => { document.title = title }, [title])
   useEffect(() => { bar.current?.querySelector("[aria-current=page]")?.scrollIntoView({ block: "nearest", inline: "nearest" }) }, [pathname])
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -54,7 +57,8 @@ export function Page({ crumbs, actions, tabs, children, className, flush }: {
           ))}
         </div>
       )}
-      <main className={cn("min-h-0 flex-1 overflow-y-auto", !flush && "px-4 py-6 lg:px-6", className)}>{children}</main>
+      {/* No top padding on the scroller: a table header sticks to its very top, and the gap scrolls away with the content. */}
+      <main className={cn("min-h-0 flex-1 overflow-y-auto", !flush && "px-4 pb-6 lg:px-6", className)}>{flush ? children : <div className="pt-6">{children}</div>}</main>
     </div>
   )
 }
