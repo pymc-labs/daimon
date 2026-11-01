@@ -11,7 +11,7 @@ from daimon.adapters.web.faces import avatar_base_url
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.agent_changes import AgentChangeDeps
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
-from daimon.core.agent_view import AgentViewDeps, AgentViewer
+from daimon.core.agent_view import AgentViewDeps, AgentViewer, OwnMcpServer
 from daimon.core.authz import Subject, Surface
 from daimon.core.channel_backend import make_backend_service
 from fastapi import Depends, HTTPException
@@ -39,6 +39,12 @@ def change_deps(runtime: WebRuntime) -> AgentChangeDeps:
         raise HTTPException(status_code=503, detail="Agents are not available here.")
     public_url = runtime.settings.mcp.public_url
     base = str(public_url) if public_url is not None else None
+    secret = runtime.settings.mcp.jwt_secret
+    own = (
+        OwnMcpServer(url=base, secret=secret.get_secret_value().encode(), now=runtime.now)
+        if base is not None and secret is not None
+        else None
+    )
     return AgentChangeDeps(
         edit=AgentEditDeps(
             client=runtime.anthropic,
@@ -57,6 +63,7 @@ def change_deps(runtime: WebRuntime) -> AgentChangeDeps:
             skill_descriptions=runtime.skill_descriptions,
             mcp_tools=runtime.mcp_tool_lister,
             fernet=runtime.fernet,
+            own_server=own,
             channel_lookup=channel_lookup_of(runtime),
         ),
         backends=make_backend_service(runtime.sessionmaker, runtime.settings.turn),

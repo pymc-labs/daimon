@@ -23,6 +23,8 @@ export type McpServer = {
   /** `agent_mcp_credentials`: stored once per agent, mirrored into each caller's vault. */
   credential: "connected" | "missing" | "expired" | null
   tools: McpTool[]
+  /** False when the server's own tool list could not be read for this viewer. */
+  listed?: boolean
 }
 
 export type Skill = {

@@ -227,7 +227,7 @@ function McpNode({ id }: { id: string }) {
       className="w-64"
       icon={<Plug />}
       title={s.name}
-      count={s.tools.length}
+      count={s.listed === false ? "Not listed" : s.tools.length}
       action={cred && <Tooltip><TooltipTrigger asChild><span className="flex items-center">{cred}</span></TooltipTrigger><TooltipContent>Sign in again</TooltipContent></Tooltip>}
     >
       <div className="py-1">

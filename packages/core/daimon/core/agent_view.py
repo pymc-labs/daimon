@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
@@ -43,6 +43,9 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
+from daimon.core.mcp_personal_servers import hidden_mcp_server_names
+from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.mcp_tool_listing import ListedTool, McpToolLister, McpToolListingError
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
@@ -60,6 +63,7 @@ from daimon.core.stores import (
     usage_events,
 )
 from daimon.core.stores import agent_mcp_credentials as credentials_store
+from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_avatars import AvatarLink, get_agent_avatars, normalize_agent_name
@@ -67,10 +71,11 @@ from daimon.core.stores.agent_tool_rules import AgentToolRule
 from daimon.core.stores.agent_tool_rules import Rule as RuleChoice
 from daimon.core.stores.direct_messages import DmOrigin, list_dm_origins
 from daimon.core.stores.domain import AgentBackendRevision
+from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tool_safety import ToolAnnotations, ToolSafetyPolicy, classify_tool
-from daimon.core.turn.mcp_context import context_servers
+from daimon.core.turn.mcp_context import ContextServer, context_servers
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.errors import ScopeViolation
 from mux.contracts.ids import Provider
@@ -124,6 +129,8 @@ class McpServer(_Doc):
     auth: Literal["oauth", "token", "none"]
     credential: Literal["connected", "missing", "expired"] | None
     tools: list[McpTool] = Field(default_factory=list[McpTool])
+    # False when the server's own list could not be read for this viewer; None when not asked.
+    listed: bool | None = Field(default=None, exclude_if=_omit_none)
 
 
 def _skill_types() -> frozenset[str]:
@@ -243,6 +250,10 @@ class AgentFacts:
     mcp_tools: Mapping[str, Sequence[ListedTool]] = field(
         default_factory=dict[str, Sequence[ListedTool]]
     )
+    # Whether servers were asked: then one missing from `mcp_tools` could not be listed.
+    tools_read: bool = False
+    # Servers people sign in to one by one, by name: whether this viewer has.
+    sign_ins: Mapping[str, bool] = field(default_factory=dict[str, bool])
 
 
 _NOBODY = PersonRef(id="", name="Daimon")
@@ -323,14 +334,20 @@ def _servers(facts: AgentFacts) -> list[McpServer]:
             ]
         )
         connected = server.url in facts.credential_urls
+        signed_in = facts.sign_ins.get(server.name)
         servers.append(
             McpServer(
                 key=server.name,
                 name=server.name,
                 url=server.url,
                 auth="token" if connected else "none",
-                credential="connected" if connected else None,
+                credential="connected"
+                if connected or signed_in
+                else "missing"
+                if signed_in is False
+                else None,
                 tools=tools,
+                listed=listed is not None if facts.tools_read else None,
             )
         )
     return servers
@@ -422,7 +439,9 @@ def redact_config[Config: AgentConfigDoc](
                 "system": None,
                 "places": None,
                 "mcp_servers": [
-                    server.model_copy(update={"url": "", "credential": None, "tools": []})
+                    server.model_copy(
+                        update={"url": "", "credential": None, "tools": [], "listed": False}
+                    )
                     for server in config.mcp_servers
                     if server.key == DAIMON_MCP_SERVER_NAME
                 ],
@@ -528,6 +547,15 @@ def runs_in_of(places: Sequence[PlaceDoc]) -> list[str]:
 
 
 @dataclass(frozen=True)
+class OwnMcpServer:
+    """The deployment's own MCP server: its URL, and how to mint a viewer a token for it."""
+
+    url: str
+    secret: bytes
+    now: Callable[[], datetime]
+
+
+@dataclass(frozen=True)
 class AgentViewDeps:
     client: AsyncAnthropic
     session_factory: async_sessionmaker[AsyncSession]
@@ -541,6 +569,8 @@ class AgentViewDeps:
     # Where a server's tool list comes from; without both, the recorded rules stand in.
     mcp_tools: McpToolLister | None = None
     fernet: MultiFernet | None = None
+    # The deployment's own MCP server, listed with a short token minted for the viewer.
+    own_server: OwnMcpServer | None = None
     # Names a channel the store has not seen, where the deployment can ask its platform.
     channel_lookup: ChannelLookup | None = None
 
@@ -674,26 +704,142 @@ async def _named_places(
     return replace(places, channel_names={**places.channel_names, **found.labels()})
 
 
+async def _tools_of(
+    lister: McpToolLister,
+    server: ContextServer,
+    *,
+    agent_id: str,
+    cache_as: tuple[str, str] | None = None,
+) -> tuple[ListedTool, ...] | None:
+    try:
+        return await lister.list_tools(server, cache_as=cache_as)
+    except McpToolListingError as err:
+        # An unreachable server must not break the agent's page: it shows as not listed.
+        cause = err.__cause__
+        log.warning(
+            "agent_view.tools_unlisted",
+            agent_id=agent_id,
+            server=server.name,
+            error=type(cause).__name__ if cause is not None else type(err).__name__,
+        )
+        return None
+
+
+async def _own_server_tools(
+    deps: AgentViewDeps,
+    own: OwnMcpServer,
+    lister: McpToolLister,
+    *,
+    name: str,
+    tenant_id: uuid.UUID,
+    agent: BetaManagedAgentsAgent,
+    account_id: uuid.UUID,
+) -> tuple[ListedTool, ...] | None:
+    """The deployment's own server's tools as ``account_id`` sees them on ``agent``."""
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+    key = (canonical_mcp_url(own.url), f"viewer:{account_id}:{agent_uuid}")
+    known = lister.cache.recall(key)
+    if known is not None:
+        return known
+    async with deps.session_factory.begin() as db:
+        token = await mint_agent_mcp_token(
+            db,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            label="web-tool-list",
+            secret=own.secret,
+            now=own.now(),
+            ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
+            chat_execution=True,
+        )
+    try:
+        return await _tools_of(
+            lister, ContextServer(name, own.url, token), agent_id=agent.id, cache_as=key
+        )
+    finally:
+        async with deps.session_factory.begin() as db:
+            await revoke_mcp_token(db, jti=token_jti(token), now=own.now())
+
+
 async def _listed_tools(
-    deps: AgentViewDeps, *, tenant_id: uuid.UUID, agent: BetaManagedAgentsAgent
+    deps: AgentViewDeps,
+    *,
+    tenant_id: uuid.UUID,
+    agent: BetaManagedAgentsAgent,
+    account_id: uuid.UUID,
 ) -> dict[str, tuple[ListedTool, ...]]:
-    """Each server's own tool list, for the servers the agent holds a shared token for."""
-    if deps.mcp_tools is None or deps.fernet is None or not agent.mcp_servers:
+    """Each server's own tool list where one can be read: with the agent's shared
+    token, or for the deployment's own server with a token minted for the viewer."""
+    lister = deps.mcp_tools
+    if lister is None or not agent.mcp_servers:
         return {}
-    credentials = await resolve_agent_mcp_credentials(
-        sessionmaker=deps.session_factory,
-        fernet=deps.fernet,
-        tenant_id=tenant_id,
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+    credentials = (
+        await resolve_agent_mcp_credentials(
+            sessionmaker=deps.session_factory,
+            fernet=deps.fernet,
+            tenant_id=tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+        )
+        if deps.fernet is not None
+        else ()
     )
     listed: dict[str, tuple[ListedTool, ...]] = {}
     for server in context_servers([(s.name, s.url) for s in agent.mcp_servers], credentials):
-        try:
-            listed[server.name] = await deps.mcp_tools.list_tools(server)
-        except McpToolListingError:
-            # An unreachable server must not break the agent's page: its recorded rules show.
-            log.warning("agent_view.tools_unlisted", agent_id=agent.id, server=server.name)
+        if (tools := await _tools_of(lister, server, agent_id=agent.id)) is not None:
+            listed[server.name] = tools
+    own = deps.own_server
+    for server in agent.mcp_servers:
+        # Only the configured URL gets a minted token, whatever the server is named.
+        if (
+            own is None
+            or server.name in listed
+            or canonical_mcp_url(server.url) != canonical_mcp_url(own.url)
+        ):
+            continue
+        tools = await _own_server_tools(
+            deps,
+            own,
+            lister,
+            name=server.name,
+            tenant_id=tenant_id,
+            agent=agent,
+            account_id=account_id,
+        )
+        if tools is not None:
+            listed[server.name] = tools
     return listed
+
+
+async def _sign_ins(
+    deps: AgentViewDeps, facts: AgentFacts, *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> dict[str, bool]:
+    """Of the agent's servers people sign in to one by one, whether ``account_id`` has."""
+    urls = {server.name: server.url for server in facts.agent.mcp_servers}
+    if not urls:
+        return {}
+    async with deps.session_factory() as session:
+        grants = await flows_store.list_completed_grants(
+            session, tenant_id=tenant_id, server_urls=urls.values()
+        )
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=facts.agent.id)
+    hidden = hidden_mcp_server_names(
+        grants,
+        agent_id=agent_uuid,
+        account_id=account_id,
+        shared_server_urls=facts.credential_urls,
+        server_urls=urls,
+    )
+    mine = {
+        canonical_mcp_url(grant.mcp_server_url)
+        for grant in grants
+        if grant.agent_id == agent_uuid and grant.account_id == account_id
+    }
+    return {
+        name: name not in hidden
+        for name, url in urls.items()
+        if name in hidden or canonical_mcp_url(url) in mine
+    }
 
 
 async def load_agent_facts(
@@ -703,12 +849,10 @@ async def load_agent_facts(
     agents: Sequence[BetaManagedAgentsAgent],
     month_start: datetime | None,
     updated_by: Mapping[str, uuid.UUID] | None = None,
-    with_tools: bool = False,
 ) -> list[AgentFacts]:
     """Read what each agent's view needs: owners, backend, rules, credentials, places, use.
 
     ``month_start=None`` skips use and spend, for callers that need only the config.
-    ``with_tools`` asks each connected server for its tool list (cached ten minutes).
     """
     titles, _truncated = await resolve_custom_skill_titles(
         deps.client, agents=agents, tenant_id=tenant_id
@@ -782,9 +926,6 @@ async def load_agent_facts(
                     agent=agent,
                     skill_titles=titles,
                     skill_descriptions=deps.skill_descriptions,
-                    mcp_tools=await _listed_tools(deps, tenant_id=tenant_id, agent=agent)
-                    if with_tools
-                    else {},
                     backend=backends.get(agent_uuid),
                     tool_rules=rules_by_agent.get(agent.id, []),
                     credential_urls=frozenset(
@@ -850,6 +991,17 @@ async def load_agent_view(
         agents=[agent],
         month_start=month_start,
         updated_by=updated_by,
-        with_tools=True,
     )
+    if sees_details(facts, viewer):
+        # Servers are asked for their tools (cached ten minutes) only for who sees them.
+        facts = replace(
+            facts,
+            mcp_tools=await _listed_tools(
+                deps, tenant_id=tenant_id, agent=agent, account_id=viewer.account_id
+            ),
+            tools_read=True,
+            sign_ins=await _sign_ins(
+                deps, facts, tenant_id=tenant_id, account_id=viewer.account_id
+            ),
+        )
     return build_agent_view(facts, viewer)

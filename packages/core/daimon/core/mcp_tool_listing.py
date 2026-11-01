@@ -70,9 +70,16 @@ class McpToolLister:
         default_factory=lambda: Expiring[tuple[str, str], tuple[ListedTool, ...]]()
     )
 
-    async def list_tools(self, server: ContextServer) -> tuple[ListedTool, ...]:
-        """The tools ``server`` offers to the holder of its token."""
-        known = self.cache.recall(server.key)
+    async def list_tools(
+        self, server: ContextServer, *, cache_as: tuple[str, str] | None = None
+    ) -> tuple[ListedTool, ...]:
+        """The tools ``server`` offers to the holder of its token.
+
+        ``cache_as`` keeps the list under a holder's key instead of the token's,
+        for a token minted afresh for each read.
+        """
+        key = cache_as or server.key
+        known = self.cache.recall(key)
         if known is not None:
             return known
         try:
@@ -87,7 +94,7 @@ class McpToolLister:
                 tools = await _read(http, server)
         except (httpx.HTTPError, ValueError, McpUrlError, TimeoutError) as err:
             raise McpToolListingError(f"{server.name} did not list its tools") from err
-        self.cache.remember(server.key, tools, for_s=REUSE_S)
+        self.cache.remember(key, tools, for_s=REUSE_S)
         return tools
 
 

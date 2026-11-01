@@ -31,7 +31,7 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
         </span>
         <div className="min-w-0">
           <div className="text-base font-semibold">{s.name}</div>
-          <div className="text-xs text-muted-foreground">{plural(s.tools.length, "tool")}, {writes.length} change data</div>
+          <div className="text-xs text-muted-foreground">{s.listed === false ? "Not listed" : `${plural(s.tools.length, "tool")}, ${writes.length} change data`}</div>
         </div>
       </div>
       <Section title="Connection">
@@ -46,7 +46,7 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
                   <span className="flex items-center gap-3">
                     {s.credential === "connected" ? <StatusDot status="healthy" label="Connected" />
                       : s.credential === "expired" ? <StatusDot status="failing" label="Expired" /> : <StatusDot status="setup" label="Not signed in" />}
-                    {!ro && s.credential !== "missing" && (
+                    {!ro && s.auth === "token" && (
                       <Button variant="outline" size="xs" className="ml-auto" disabled={token.remove.isPending} onClick={() => token.remove.mutate()}>
                         <Trash2 />Remove
                       </Button>
