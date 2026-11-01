@@ -3,7 +3,8 @@
 An app gets the access token of the provider it trusts. A person signed in with that
 provider gets their own; refresh tokens rotate, so refreshes are serialized per sign-in.
 Anyone acting as a chat account gets one by token exchange, where the app allows it.
-An app the person has no token for is left out of what the web app shows.
+An app the person has no token for is left out of what the web app shows; that is read
+from what is stored, and only a token request mints one.
 """
 
 from __future__ import annotations
@@ -22,12 +23,12 @@ from daimon.adapters.web.app_probe import AppStatus
 from daimon.adapters.web.caller import WebCaller, current_caller
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import web_oidc
-from daimon.core.config import EmbeddedAppSettings, WebSettings, origin_of
+from daimon.core.config import EmbeddedAppSettings, SignedIdentityServer, WebSettings, origin_of
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_oidc_tokens as tokens_store
 from daimon.core.stores import web_sessions as sessions_store
-from daimon.core.stores.domain import CHAT_PLATFORMS
+from daimon.core.stores.domain import CHAT_PLATFORMS, TenantRow, WebOidcTokenRow
 from daimon.core.web_identity import linked_identity
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -107,12 +108,86 @@ async def app_token(
 
 
 async def app_available(runtime: WebRuntime, caller: WebCaller, app: EmbeddedAppSettings) -> bool:
-    """Whether the web app shows `app` to the caller: never when it would open empty."""
-    return app.oidc_issuer is None or await app_token(runtime, caller, app) is not None
+    """Whether the web app shows `app` to the caller: never when it would open empty.
+
+    Read from stored state only, since every page load asks: the caller's own sign-in
+    token while it is fresh or can be refreshed, or an exchange the app allows and that
+    was not refused lately. No lock is taken and the provider is not asked.
+    """
+    issuer = app.oidc_issuer
+    if issuer is None:
+        return True
+    person, session, now = caller.person, caller.session, runtime.now()
+    server = _identity_server(runtime, app)
+    async with runtime.sessionmaker() as db:
+        if session.provider == "oidc" and session.issuer == issuer:
+            own = await tokens_store.get_oidc_token(db, person_id=person.id, issuer=issuer)
+            if own is not None and _usable(runtime, own, issuer, now):
+                return True
+        if server is None or not _exchange_ready(runtime) or _refused(runtime, person.id, app, now):
+            return False
+        platform, _ = await linked_identity(db, person)
+        tenant = await tenants_store.get_tenant(db, person.tenant_id)
+    workspace = chat_workspace(platform, tenant)
+    return workspace is not None and serves(server, workspace)
 
 
 async def available_apps(runtime: WebRuntime, caller: WebCaller) -> list[EmbeddedAppSettings]:
     return [app for app in runtime.web.apps if await app_available(runtime, caller, app)]
+
+
+def _usable(runtime: WebRuntime, row: WebOidcTokenRow, issuer: str, now: datetime) -> bool:
+    """Whether a stored sign-in token can be handed out, as it is or after a refresh."""
+    if row.expires_at - now > MIN_TOKEN_LEFT:
+        return True
+    oidc = runtime.web.oidc
+    return (
+        row.refresh_token_enc is not None
+        and runtime.oidc is not None
+        and oidc is not None
+        and oidc.issuer == issuer
+    )
+
+
+def _identity_server(runtime: WebRuntime, app: EmbeddedAppSettings) -> SignedIdentityServer | None:
+    return next(
+        (s for s in runtime.settings.mcp_identity.servers if s.name == app.identity_server), None
+    )
+
+
+def _exchange_ready(runtime: WebRuntime) -> bool:
+    return (
+        runtime.web.oidc is not None
+        and runtime.oidc is not None
+        and runtime.identity_key is not None
+    )
+
+
+def _refused(
+    runtime: WebRuntime, person_id: uuid.UUID, app: EmbeddedAppSettings, now: datetime
+) -> bool:
+    until = runtime.exchange_refused.get((person_id, app.key))
+    return until is not None and until > now
+
+
+def chat_workspace(platform: str, tenant: TenantRow | None) -> str | None:
+    """`<platform>:<workspace id>` of a chat account in its own workspace; None for anyone
+    else, who has no chat account to exchange."""
+    if platform not in CHAT_PLATFORMS or tenant is None or tenant.platform != platform:
+        return None
+    return f"{platform}:{tenant.external_id}"
+
+
+def serves(server: SignedIdentityServer, workspace: str) -> bool:
+    """Whether an identity server takes people of `workspace`; the MCP relay's limit too."""
+    return server.workspaces is None or workspace in server.workspaces
+
+
+def exchanged_token_key(issuer: str, server: str) -> str:
+    """Where an exchanged token is stored: per issuer and identity server, so two apps that
+    trust one provider but name different servers never share a token. OIDC issuers carry
+    no fragment, so the key never meets a sign-in's own row."""
+    return f"{issuer}#{server}"
 
 
 async def _signin_token(runtime: WebRuntime, caller: WebCaller, issuer: str) -> AppToken | None:
@@ -176,30 +251,26 @@ async def _exchanged_token(
     """A token for the chat account the caller acts as, by token exchange.
 
     Kept with the person's tokens and exchanged again when nearly spent. A refusal is
-    remembered for a while, so a page load does not ask the provider each time.
+    remembered for a while, so the app is hidden and the provider is not asked each time.
     """
     person, now = caller.person, runtime.now()
-    refused_key = (person.id, app.key)
-    if (until := runtime.exchange_refused.get(refused_key)) is not None and until > now:
+    if _refused(runtime, person.id, app, now):
         return None
     oidc, cache, key = runtime.web.oidc, runtime.oidc, runtime.identity_key
-    server = next(
-        (s for s in runtime.settings.mcp_identity.servers if s.name == app.identity_server), None
-    )
+    server = _identity_server(runtime, app)
     if oidc is None or cache is None or key is None or server is None:
         log.warning("web.app_token.exchange_unconfigured", app=app.key)
         return None
+    stored_key = exchanged_token_key(issuer, server.name)
     async with runtime.sessionmaker() as db:
-        stored = await tokens_store.get_oidc_token(db, person_id=person.id, issuer=issuer)
+        stored = await tokens_store.get_oidc_token(db, person_id=person.id, issuer=stored_key)
         platform, user_id = await linked_identity(db, person)
         tenant = await tenants_store.get_tenant(db, person.tenant_id)
-    if platform not in CHAT_PLATFORMS or tenant is None or tenant.platform != platform:
+    workspace = chat_workspace(platform, tenant)
+    if workspace is None:
         return None
-    workspace = f"{platform}:{tenant.external_id}"
-    # The same limit the MCP relay applies: a server open to some workspaces only signs
-    # for their people, here as there. Checked before the stored token too, so narrowing
-    # the list takes effect at once.
-    if server.workspaces is not None and workspace not in server.workspaces:
+    # Checked before the stored token too, so narrowing the list takes effect at once.
+    if not serves(server, workspace):
         log.info("web.app_token.workspace_not_allowed", app=app.key, server=server.name)
         return None
     try:
@@ -218,6 +289,7 @@ async def _exchanged_token(
         now=now,
         jti=uuid.uuid4().hex,
     )
+    refused_key = (person.id, app.key)
     try:
         tokens = await web_oidc.exchange_subject_token(
             runtime.http_client, await cache.metadata(), oidc, subject_token=subject
@@ -229,13 +301,12 @@ async def _exchanged_token(
     life = timedelta(seconds=tokens.expires_in) if tokens.expires_in > 0 else DEFAULT_TOKEN_LIFE
     expires_at = now + life
     async with runtime.sessionmaker() as db, db.begin():
-        # No refresh token: an exchanged token is exchanged again, and a sign-in's own
-        # refresh token, if any, stays.
+        # No refresh token: an exchanged token is exchanged again.
         await tokens_store.upsert_oidc_token(
             db,
             tenant_id=person.tenant_id,
             person_id=person.id,
-            issuer=issuer,
+            issuer=stored_key,
             access_token_enc=encrypt_token(runtime.fernet, tokens.access_token),
             refresh_token_enc=None,
             expires_at=expires_at,

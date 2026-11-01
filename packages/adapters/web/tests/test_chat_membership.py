@@ -144,20 +144,26 @@ class _Exchanging(FakeOidcProvider):
         return super().handler(request)
 
 
-def _settings(workspaces: list[str] | None = None) -> Settings:
-    """Settings naming the identity server; the runtime takes the key itself."""
-    server = {
-        "name": "hub",
-        "url": "https://hub.example.com/mcp",
-        "issuer": "daimon-test",
-        "audience": "hub",
+def _server(name: str, issuer: str, workspaces: list[str] | None = None) -> dict[str, object]:
+    server: dict[str, object] = {
+        "name": name,
+        "url": f"https://{name}.example.com/mcp",
+        "issuer": issuer,
+        "audience": name,
     }
     if workspaces is not None:
         server["workspaces"] = workspaces
+    return server
+
+
+def _settings(workspaces: list[str] | None = None) -> Settings:
+    """Settings naming the identity servers; the runtime takes the key itself."""
     return Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-        mcp_identity={"servers": [server]},  # pyright: ignore[reportArgumentType]
+        mcp_identity={  # pyright: ignore[reportArgumentType]
+            "servers": [_server("hub", "daimon-test", workspaces), _server("lab", "daimon-lab")]
+        },
     )
 
 
@@ -180,9 +186,11 @@ async def test_a_chat_sign_in_gets_an_app_token_by_exchange(
     ) as client:
         _cookie(client, token)
         me = await client.get("/api/me")
+        minted_by_me = list(provider.subject_tokens)
         got = await client.post("/api/apps/data/token")
 
     assert [a["key"] for a in me.json()["apps"]] == ["data"], me.text
+    assert minted_by_me == [], "showing the app mints nothing; only the token request does"
     assert got.status_code == 200 and got.json()["access_token"] == "exchanged", got.text
     assert len(provider.subject_tokens) == 1, "the stored token is reused until nearly spent"
     form = provider.token_requests[0]
@@ -221,11 +229,14 @@ async def test_a_refused_exchange_hides_the_app_and_is_not_retried_at_once(
         identity_key=key,
     ) as client:
         _cookie(client, token)
-        me = await client.get("/api/me")
+        before = await client.get("/api/me")
         got = await client.post("/api/apps/data/token")
+        after = await client.get("/api/me")
+        again = await client.post("/api/apps/data/token")
 
-    assert me.json()["apps"] == [], "no token, so no app nav"
-    assert got.status_code == 404, got.text
+    assert [a["key"] for a in before.json()["apps"]] == ["data"], "not refused yet, so shown"
+    assert got.status_code == 404 and again.status_code == 404, got.text
+    assert after.json()["apps"] == [], "a refused exchange hides the app"
     assert len(provider.subject_tokens) == 1, "a refusal is remembered for a while"
 
 
@@ -253,3 +264,36 @@ async def test_no_exchange_for_a_workspace_the_identity_server_does_not_serve(
 
     assert got.status_code == 404, got.text
     assert provider.subject_tokens == [], "nothing is signed for a workspace the server refuses"
+
+
+async def test_apps_naming_different_identity_servers_never_share_a_token(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two apps trusting one provider each get a token exchanged for their own server."""
+    person = await _guild_person(db_session, "888888888888888888")
+    await db_session.commit()
+    token = await _session(db_session_factory, person)
+    key, provider = Ed25519PrivateKey.generate(), _Exchanging()
+    lab = _APP.model_copy(update={"key": "lab", "identity_server": "lab"})
+    async with web_client(
+        web_settings(apps=(_APP, lab)),
+        sessionmaker=db_session_factory,
+        now=lambda: _NOW,
+        provider=provider,
+        settings=_settings(),
+        identity_key=key,
+    ) as client:
+        _cookie(client, token)
+        first = await client.post("/api/apps/data/token")
+        second = await client.post("/api/apps/lab/token")
+
+    assert first.status_code == 200 and second.status_code == 200, second.text
+    issuers = [
+        jwt.decode(t, key.public_key(), algorithms=["EdDSA"], options={"verify_signature": False})[
+            "iss"
+        ]
+        for t in provider.subject_tokens
+    ]
+    assert issuers == ["daimon-test", "daimon-lab"], "the second app's token is not the first's"
