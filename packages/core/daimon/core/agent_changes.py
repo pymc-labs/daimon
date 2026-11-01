@@ -870,7 +870,7 @@ async def _check_added_skills(
         is not None
     }
     # Whatever type the entry claims, a listed custom skill must be this workspace's own.
-    foreign = {row.id for row in rows if row.source != "anthropic"} - own
+    foreign = {row.id for row in rows if row.source == "custom"} - own
     if any(s.skill_id in foreign or (s.type == "custom" and s.skill_id not in own) for s in added):
         raise AgentEditError("That skill isn't available here.", kind="invalid")
 
