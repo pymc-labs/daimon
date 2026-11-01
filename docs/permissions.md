@@ -822,9 +822,13 @@ They mount the tenant's and caller's personal memory under ordinary private-turn
 rules. `dm_memory_read_only` keeps its false default; enabling it makes those mounts
 read-only, including when changed between admission and session preparation.
 Explicit server switching starts empty private history in a new scope and retires
-the old session mapping. Routine notifications do not select a tenant or become
-history in the active DM conversation. `/dm-me` remains the explicit channel-context
-move, with its source sealing and budget checks.
+the old session mapping. **New conversation** and `/new` do the same in the current
+server without a selector, after the same checks as a first cold DM: ready tenant,
+DMs enabled, a `dm_agent_name`, recipient policy, fresh verified membership and
+`START_TURN`. A refusal keeps the current conversation and does not say why.
+Routine notifications do not select a tenant or become history in the active DM
+conversation. `/dm-me` remains the explicit channel-context move, with its source
+sealing and budget checks.
 
 
 Private Discord delivery checks the answering agent's retained admission grant
