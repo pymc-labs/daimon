@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Annotated
 
@@ -332,26 +333,36 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 }
             )
         actor = actor_of(caller)
+
+        start: Callable[[str], Awaitable[None]] | None = None
+        if elsewhere is not None:
+            target = elsewhere
+
+            async def start_elsewhere(ma_agent_id: str) -> None:
+                made = await agent_editing.load_editable_agent(
+                    d.edit, actor=actor, ma_agent_id=ma_agent_id
+                )
+                await agent_changes.switch_provider(
+                    d, actor=actor, agent=made, provider=target.provider, model_id=target.id
+                )
+
+            start = start_elsewhere
+
         try:
+            # Not left on a model nobody picked: a failed switch archives the new agent.
             ma_agent_id = await agent_editing.create_agent(
-                d.edit, actor=actor, spec=spec, owner=True
+                d.edit,
+                actor=actor,
+                spec=spec,
+                owner=True,
+                start=start,
             )
-            if elsewhere is not None:
-                try:
-                    made = await agent_editing.load_editable_agent(
-                        d.edit, actor=actor, ma_agent_id=ma_agent_id
-                    )
-                    await agent_changes.switch_provider(
-                        d,
-                        actor=actor,
-                        agent=made,
-                        provider=elsewhere.provider,
-                        model_id=elsewhere.id,
-                    )
-                except AgentEditError:
-                    # Not left on a model nobody picked: the half-made agent goes.
-                    await agent_editing.discard_created(d.edit, actor, ma_agent_id)
-                    raise
+        except agent_editing.AgentDiscardFailedError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{spec.name} couldn't be set up, and removing it failed too. "
+                f"Ask an admin to archive {spec.name}.",
+            ) from exc
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
         finally:

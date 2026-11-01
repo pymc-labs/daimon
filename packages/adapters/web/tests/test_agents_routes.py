@@ -573,6 +573,42 @@ async def test_a_failed_later_step_leaves_the_provider_unchanged(
     ), "no half-switched agent: the provider is untouched"
 
 
+async def test_a_failed_provider_write_keeps_the_saved_change_and_says_so(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch is written last: when it fails the rest stays saved, the draft is
+    gone, and the editor is told the model did not change."""
+    agents, owner, _other = await _people(db_session)
+    await _admin(db_session_factory, owner)
+    settings = await _provider_choice(db_session_factory, owner, ("anthropic", "openai"))
+    token = await _token(db_session_factory, owner)
+
+    async def refuse(*_a: object, **_k: object) -> None:
+        raise AgentEditError("The model changed since your draft began", kind="stale")
+
+    monkeypatch.setattr(agent_changes, "write_provider_switch", refuse)
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, token, settings=settings
+    ) as client:
+        config = (await client.get("/api/agents/ag_w")).json()
+        before = config["model"]
+        config["system"] = "Be thorough."
+        config["model"] = {**config["model"], "id": "gpt-6-astra", "backend": "openai"}
+        await client.patch(
+            "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
+        )
+        applied = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
+        after = (await client.get("/api/agents/ag_w")).json()
+        draft = await client.get("/api/agents/ag_w/draft")
+    assert applied.status_code == 409, applied.text
+    assert applied.json()["detail"] == "Saved, but the model didn't change. Try again."
+    assert (agents.agent.system or "").endswith("Be thorough."), "the rest is saved"
+    assert after["model"]["backend"] == before["backend"], "the provider did not move"
+    assert draft.json() is None, "the saved draft is gone"
+
+
 async def test_a_draft_is_stale_once_the_provider_moved(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

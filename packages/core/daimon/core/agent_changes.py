@@ -548,10 +548,18 @@ def _provider_refusal(exc: AgentBackendRefused, provider: str) -> AgentEditError
     return AgentEditError(f"{text} Nothing was saved.", kind=kind)
 
 
+class ModelNotSwitchedError(AgentEditError):
+    """The change was saved, but writing its provider switch, the last step, failed."""
+
+    def __init__(self) -> None:
+        super().__init__("Saved, but the model didn't change. Try again.", kind="conflict")
+
+
 @dataclass(frozen=True)
 class ProviderSwitch:
     """A provider change checked and previewed, written by `write_provider_switch`."""
 
+    agent_id: str
     source: BackendAgent
     actor: BackendActor
     provider: Provider
@@ -610,6 +618,7 @@ async def check_provider_switch(
     except (AgentBackendRefused, BackendUnsupported) as exc:
         raise _refused_switch(exc, agent_id=agent.id, provider=provider) from exc
     return ProviderSwitch(
+        agent_id=agent.id,
         source=source,
         actor=backend_actor,
         provider=provider,
@@ -642,7 +651,7 @@ async def write_provider_switch(deps: AgentChangeDeps, switch: ProviderSwitch) -
                 model=switch.model,
             )
     except (AgentBackendRefused, BackendUnsupported) as exc:
-        raise _refused_switch(exc, agent_id=switch.source.name, provider=switch.provider) from exc
+        raise _refused_switch(exc, agent_id=switch.agent_id, provider=switch.provider) from exc
 
 
 async def switch_provider(
@@ -869,7 +878,8 @@ async def _write(
     await agent_editing.check_places(
         deps.edit, actor=actor, agent=agent, before=before, after=after
     )
-    # Checked before the first write, written after the agent: nothing half-switched.
+    # Checked before the first write, written last: the agent, its rules and its history
+    # agree whatever happens to the switch.
     switch = (
         await check_provider_switch(
             deps,
@@ -894,8 +904,6 @@ async def _write(
     await agent_editing.set_places(
         deps.edit, actor=actor, agent=written, before=before, after=after
     )
-    if switch is not None:
-        await write_provider_switch(deps, switch)
     servers = {server.key: server for server in target.mcp_servers}
     async with deps.edit.session_factory() as session:
         for server_key, tool in rules:
@@ -923,6 +931,12 @@ async def _write(
             config=_dump(target),
         )
         await session.commit()
+    if switch is not None:
+        try:
+            await write_provider_switch(deps, switch)
+        except AgentEditError as exc:
+            log.warning("agent_changes.provider_unswitched", agent_id=agent.id, kind=exc.kind)
+            raise ModelNotSwitchedError from exc
     return written
 
 
@@ -934,30 +948,35 @@ async def apply_draft(
     A draft is stale when the provider's version moved, and also when places or tool
     rules did, which move without a new version.
     """
-    async with _agent_edit_lock(deps, tenant_id=actor.tenant_id, agent_id=ma_agent_id):
-        agent = await agent_editing.load_editable_agent(
-            deps.edit, actor=actor, ma_agent_id=ma_agent_id
-        )
-        row = await _draft_row(deps, actor=actor, agent_id=agent.id)
-        if row is None:
-            raise AgentEditError("Nothing to apply", kind="conflict")
-        if row.base_version != agent.version:
-            raise _stale(agent)
-        base = AgentConfigDoc.model_validate(row.base_config)
-        facts = await _facts(deps, tenant_id=actor.tenant_id, agent=agent)
-        if db_state(base) != stored_db_state(base, facts):
-            raise _moved()
-        written = await _write(
-            deps,
-            actor=actor,
-            agent=agent,
-            base=base,
-            target=AgentConfigDoc.model_validate(row.config),
-            note=(note or "").strip() or None,
-            provider_revision=_provider_revision(facts),
-        )
-        await _drop_draft(deps, actor=actor, agent_id=agent.id)
-        return written
+    try:
+        async with _agent_edit_lock(deps, tenant_id=actor.tenant_id, agent_id=ma_agent_id):
+            agent = await agent_editing.load_editable_agent(
+                deps.edit, actor=actor, ma_agent_id=ma_agent_id
+            )
+            row = await _draft_row(deps, actor=actor, agent_id=agent.id)
+            if row is None:
+                raise AgentEditError("Nothing to apply", kind="conflict")
+            if row.base_version != agent.version:
+                raise _stale(agent)
+            base = AgentConfigDoc.model_validate(row.base_config)
+            facts = await _facts(deps, tenant_id=actor.tenant_id, agent=agent)
+            if db_state(base) != stored_db_state(base, facts):
+                raise _moved()
+            written = await _write(
+                deps,
+                actor=actor,
+                agent=agent,
+                base=base,
+                target=AgentConfigDoc.model_validate(row.config),
+                note=(note or "").strip() or None,
+                provider_revision=_provider_revision(facts),
+            )
+            await _drop_draft(deps, actor=actor, agent_id=agent.id)
+            return written
+    except ModelNotSwitchedError:
+        # The rest is saved, so the draft goes; dropped once the edit lock is let go.
+        await _drop_draft(deps, actor=actor, agent_id=ma_agent_id)
+        raise
 
 
 async def revert(
