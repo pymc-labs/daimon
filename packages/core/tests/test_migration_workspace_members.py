@@ -32,15 +32,20 @@ def test_the_migration_follows_the_web_oidc_tokens_migration() -> None:
 async def test_workspace_members_migration_down_up_matches_the_model(
     db_session: AsyncSession,
 ) -> None:
-    connection = await db_session.connection()
+    engine = db_session.bind.engine  # the session's schema, on a connection outside its transaction
     module = migration()
 
     def cycle(sync: Connection) -> None:
-        here = sync.scalar(text("SELECT current_schema()"))
-        with Operations.context(MigrationContext.configure(sync)):
-            module.downgrade()
+        # The index is built concurrently, which needs alembic to own each transaction.
+        context = MigrationContext.configure(sync, opts={"transaction_per_migration": True})
+        with Operations.context(context):
+            with context.begin_transaction(_per_migration=True):
+                module.downgrade()
+            here = sync.scalar(text("SELECT current_schema()"))
             assert not set(_TABLES) & set(inspect(sync).get_table_names(schema=here))
-            module.upgrade()
+            sync.commit()
+            with context.begin_transaction(_per_migration=True):
+                module.upgrade()
             inspector = inspect(sync)
             for table in _TABLES:
                 columns = [c["name"] for c in inspector.get_columns(table, schema=here)]
@@ -50,5 +55,7 @@ async def test_workspace_members_migration_down_up_matches_the_model(
             differences = compare_metadata(MigrationContext.configure(sync), Base.metadata)
             touched = (*_TABLES, "ix_platform_principals_account_id")
             assert not [d for d in differences if any(t in str(d) for t in touched)], differences
+            sync.commit()
 
-    await connection.run_sync(cycle)
+    async with engine.connect() as connection:
+        await connection.run_sync(cycle)
