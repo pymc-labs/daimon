@@ -100,6 +100,7 @@ class _Server:
     subject_tokens: list[str] = field(default_factory=list[str])
     # An OAuth error code the token endpoint answers with instead of a token.
     exchange_error: str | None = None
+    exchange_status: int = 400
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
@@ -107,7 +108,8 @@ class _Server:
             self.subject_tokens.append(parse_qs(request.content.decode())["subject_token"][0])
             if self.exchange_error is not None:
                 return httpx.Response(
-                    400, json={"error": self.exchange_error, "error_description": "secret"}
+                    self.exchange_status,
+                    json={"error": self.exchange_error, "error_description": "secret"},
                 )
             return httpx.Response(200, json={"access_token": "node-at", "expires_in": 600})
         assert request.headers["Authorization"] == "Bearer node-at", "calls carry the token"
@@ -408,19 +410,38 @@ async def test_a_refused_exchange_names_who_can_help_and_logs_the_error_code(
 ) -> None:
     """A server that will not exchange is not a passing problem: its admin can help."""
     agents, owner, _ = await _setup(db_session)
-    server = _Server(exchange_error="unauthorized_client")
+    server = _Server(exchange_error="unauthorized_client" + "x" * 100)
     with structlog.testing.capture_logs() as logs:
         async with _client(
             agents, server, db_session_factory, owner, key=generate_signing_key()
         ) as c:
             got = await c.get(f"{_BASE_PATH}/scopes")
     assert got.status_code == 403, got.text
-    label = re.fullmatch(r"(.+) refused access\. Ask a (.+) admin\.", got.json()["detail"])
+    label = re.fullmatch(r"(.+) refused access\. Ask your (.+) admin\.", got.json()["detail"])
     assert label and label[1] == label[2], "the refusal names who can help, not a retry"
     refused = [e for e in logs if e["event"] == "web.node_token.refused"]
-    assert [e["error"] for e in refused] == ["unauthorized_client"], (
-        "the log names the OAuth error code, never its description"
+    assert [e["error"] for e in refused] == [("unauthorized_client" + "x" * 100)[:64]], (
+        "the log names the OAuth error code, cut short, never its description"
     )
+
+
+async def test_a_failing_token_endpoint_is_unreachable_and_not_asked_again_at_once(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A 5xx is the server's trouble, not a refusal; it is held off for a short while."""
+    agents, owner, _ = await _setup(db_session)
+    server = _Server(exchange_error="temporarily_unavailable", exchange_status=503)
+    with structlog.testing.capture_logs() as logs:
+        async with _client(
+            agents, server, db_session_factory, owner, key=generate_signing_key()
+        ) as c:
+            first = await c.get(f"{_BASE_PATH}/scopes")
+            again = await c.get(f"{_BASE_PATH}/scopes")
+    assert (first.status_code, again.status_code) == (502, 502), first.text
+    assert len(server.subject_tokens) == 1, "the server is not asked again at once"
+    assert [e["event"] for e in logs if e["event"].startswith("web.node_token.")] == [
+        "web.node_token.unreachable"
+    ], "logged as unreachable, not refused"
 
 
 async def test_a_workspace_the_server_does_not_serve_gets_no_token(

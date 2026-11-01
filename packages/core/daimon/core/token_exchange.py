@@ -24,7 +24,14 @@ SUBJECT_TOKEN_TTL: Final = timedelta(seconds=120)
 
 
 class TokenExchangeError(DaimonError):
-    """The server refused the exchange, or answered without a token."""
+    """The server refused the exchange, or answered without a token.
+
+    ``status`` is the token endpoint's HTTP status, when it answered with an error.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +100,8 @@ async def exchange_subject_token(
     if response.is_error:
         # Only the error code: descriptions can echo request details.
         raise TokenExchangeError(
-            str(body.get("error") or f"token endpoint answered {response.status_code}")
+            str(body.get("error") or f"token endpoint answered {response.status_code}"),
+            status=response.status_code,
         )
     access_token = body.get("access_token")
     if not isinstance(access_token, str) or not access_token:

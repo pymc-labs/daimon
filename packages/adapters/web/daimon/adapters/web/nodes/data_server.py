@@ -52,7 +52,7 @@ log = structlog.get_logger(__name__)
 _ACCESS: dict[str, tuple[int, str]] = {
     "no_account": (403, "Sign in with your chat account to use {label}."),
     "not_served": (403, "{label} doesn't serve this workspace."),
-    "refused": (403, "{label} refused access. Ask a {label} admin."),
+    "refused": (403, "{label} refused access. Ask your {label} admin."),
     "unconfigured": (503, "{label} isn't set up here."),
     "unreachable": (502, "{label} didn't answer. Try again soon."),
 }

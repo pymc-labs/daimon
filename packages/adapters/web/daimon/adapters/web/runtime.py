@@ -78,9 +78,9 @@ class WebRuntime:
     agents: AgentDirectory = field(default_factory=AgentDirectory)
     # Signs who a chat sign-in is, for node token exchanges; None where no node is set.
     identity_key: Ed25519PrivateKey | None = None
-    # (person, node kind) whose exchange was refused, until when it is not tried again.
-    exchange_refused: dict[tuple[uuid.UUID, str], datetime] = field(
-        default_factory=dict[tuple[uuid.UUID, str], datetime]
+    # (person, node kind) whose exchange failed: until when it is not tried again, and why.
+    exchange_held: dict[tuple[uuid.UUID, str], tuple[datetime, str]] = field(
+        default_factory=dict[tuple[uuid.UUID, str], tuple[datetime, str]]
     )
 
 

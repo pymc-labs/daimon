@@ -2,8 +2,8 @@
 
 The web app signs who the person's chat account is and trades that at the server for
 a token, kept encrypted per person and server and exchanged again when nearly spent.
-Only chat accounts of a workspace the server serves get one. A refusal is remembered
-for a while, so the server is not asked on every call.
+Only chat accounts of a workspace the server serves get one. A refusal, or a server
+that cannot be reached, is remembered for a while, so it is not asked on every call.
 """
 
 from __future__ import annotations
@@ -40,6 +40,10 @@ log = structlog.get_logger(__name__)
 MIN_TOKEN_LEFT = timedelta(seconds=60)
 #: A refused exchange is not tried again for this long.
 EXCHANGE_BACKOFF = timedelta(minutes=5)
+#: Nor is a server that could not be reached, for this long.
+UNREACHABLE_BACKOFF = timedelta(seconds=60)
+#: A logged error code is cut to this many characters.
+_ERROR_CHARS = 64
 #: How long a token is taken to last when the server does not say.
 DEFAULT_TOKEN_LIFE = timedelta(minutes=5)
 #: Every request to a node's server gives up after this long.
@@ -100,16 +104,21 @@ async def node_http(
         yield http
 
 
-def _refused(runtime: WebRuntime, key: tuple[uuid.UUID, str], now: datetime) -> bool:
-    until = runtime.exchange_refused.get(key)
-    return until is not None and until > now
+def _held(runtime: WebRuntime, key: tuple[uuid.UUID, str], now: datetime) -> None:
+    """Raise the remembered failure while it holds."""
+    held = runtime.exchange_held.get(key)
+    if held is not None and held[0] > now:
+        raise NodeAccessError("unreachable" if held[1] == "unreachable" else "refused")
 
 
-def _remember_refusal(runtime: WebRuntime, key: tuple[uuid.UUID, str], until: datetime) -> None:
-    refused = runtime.exchange_refused
-    if len(refused) >= _MAX_REFUSALS:
-        del refused[next(iter(refused))]  # oldest first: insertion order
-    refused[key] = until
+def _hold(
+    runtime: WebRuntime, key: tuple[uuid.UUID, str], problem: NodeAccessProblem, until: datetime
+) -> NodeAccessError:
+    held = runtime.exchange_held
+    if len(held) >= _MAX_REFUSALS:
+        del held[next(iter(held))]  # oldest first: insertion order
+    held[key] = (until, problem)
+    return NodeAccessError(problem)
 
 
 async def node_token(
@@ -125,9 +134,8 @@ async def node_token(
     person, now, key = caller.person, runtime.now(), runtime.identity_key
     if key is None:
         raise NodeAccessError("unconfigured")
-    refused_key = (person.id, kind)
-    if _refused(runtime, refused_key, now):
-        raise NodeAccessError("refused")
+    held_key = (person.id, kind)
+    _held(runtime, held_key, now)
     token_key = node_token_key(server)
     async with runtime.sessionmaker() as db:
         stored = await tokens_store.get_node_token(db, person_id=person.id, token_key=token_key)
@@ -159,12 +167,15 @@ async def node_token(
         )
     except httpx.HTTPError as err:
         log.warning("web.node_token.unreachable", kind=kind, err_type=type(err).__name__)
-        raise NodeAccessError("unreachable") from err
+        raise _hold(runtime, held_key, "unreachable", now + UNREACHABLE_BACKOFF) from err
     except TokenExchangeError as err:
         # Its text is only the OAuth error code (`invalid_grant`), never the description.
-        log.warning("web.node_token.refused", kind=kind, error=str(err))
-        _remember_refusal(runtime, refused_key, now + EXCHANGE_BACKOFF)
-        raise NodeAccessError("refused") from err
+        error = str(err)[:_ERROR_CHARS]
+        if err.status is not None and err.status >= 500:
+            log.warning("web.node_token.unreachable", kind=kind, error=error)
+            raise _hold(runtime, held_key, "unreachable", now + UNREACHABLE_BACKOFF) from err
+        log.warning("web.node_token.refused", kind=kind, error=error)
+        raise _hold(runtime, held_key, "refused", now + EXCHANGE_BACKOFF) from err
     life = timedelta(seconds=got.expires_in) if got.expires_in > 0 else DEFAULT_TOKEN_LIFE
     async with runtime.sessionmaker.begin() as db:
         await tokens_store.upsert_node_token(
@@ -175,7 +186,7 @@ async def node_token(
             access_token_enc=encrypt_token(runtime.fernet, got.access_token),
             expires_at=now + life,
         )
-    runtime.exchange_refused.pop(refused_key, None)
+    runtime.exchange_held.pop(held_key, None)
     log.info("web.node_token.exchanged", kind=kind, platform=platform)
     return got.access_token
 
