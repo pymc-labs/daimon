@@ -194,6 +194,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
 ### Fixed
 
+- **Web agent editor fixes.** Deleted channels no longer show as "Unnamed channel" (they
+  leave the pickers, or read "Deleted channel"; DMs read "Direct message"). The model picker
+  offers every enabled provider's models with prices, and saving one switches the agent's
+  provider. A data server that refuses access names who can help. MCP servers list their
+  real tools for owners and admins, including the deployment's own server, or say "Not
+  listed". Skill files open with a workspace key. Agent spend covers the last 30 days and
+  includes sessions settled after the turn.
+
 - Discord MCP posts from self-hosted agents use their local name and avatar when agent identity is enabled, without an Anthropic lookup.
 
 - Scheduled routines refuse thread destinations with an unknown parent channel and check retained thread backends before resolving Anthropic agents.
