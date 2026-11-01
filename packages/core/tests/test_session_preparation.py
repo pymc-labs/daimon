@@ -933,6 +933,7 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
             model_id=snapshot.model_id,
             markup=self.markup,
             channel_id=self.channel_id,
+            agent_id=snapshot.ma_agent_id,
         )
         observation.note_usage(event, metered=True)
         await recorder(event=event)
@@ -3189,7 +3190,9 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
-        client=client, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=client,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
     )
     auth = AuthIdentity(
         account_id=first.admission.account_id,
@@ -3391,7 +3394,9 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     runtime = SimpleNamespace(
-        client=deps.anthropic, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=deps.anthropic,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
     )
     recheck = _admission_recheck(
         auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
@@ -3566,7 +3571,9 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     runtime = SimpleNamespace(
-        client=deps.anthropic, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=deps.anthropic,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
     )
     recheck = _admission_recheck(
         auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
@@ -4135,7 +4142,9 @@ async def test_old_session_cannot_be_written_after_successor_exists(db_session, 
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
-        client=client, session_factory=db_session_factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=client,
+        session_factory=db_session_factory,
+        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
     )
     auth = AuthIdentity(
         account_id=first.admission.account_id,
@@ -4435,7 +4444,9 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
-        client=client, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=client,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, billing=SimpleNamespace(markup=Decimal(1))),
     )
     auth = AuthIdentity(
         account_id=account.id,

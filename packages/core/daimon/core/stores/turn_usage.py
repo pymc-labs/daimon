@@ -277,12 +277,21 @@ class ChannelUsageRow(BaseModel):
 
 
 def _filters(
-    tenant_id: UUID, since: datetime, channel_id: str | None, origin: TurnContext | None
+    tenant_id: UUID,
+    since: datetime,
+    channel_id: str | None,
+    origin: TurnContext | None,
+    until: datetime | None = None,
+    account_id: UUID | None = None,
 ) -> list[ColumnElement[bool]]:
     filters: list[ColumnElement[bool]] = [
         TurnOutcome.tenant_id == tenant_id,
         TurnOutcome.started_at >= since,
     ]
+    if until is not None:
+        filters.append(TurnOutcome.started_at < until)
+    if account_id is not None:
+        filters.append(TurnOutcome.account_id == account_id)
     if channel_id is not None:
         filters.append(TurnOutcome.channel_id == channel_id)
     if origin is not None:
@@ -298,12 +307,17 @@ async def list_turn_usage(
     channel_id: str | None = None,
     origin: TurnContext | None = None,
     limit: int = 100,
+    account_id: UUID | None = None,
+    priced_only: bool = False,
 ) -> list[TurnUsageRow]:
+    """Recent turns, newest first; `account_id` narrows to one person's, `priced_only` to
+    those that recorded a cost."""
     if not 1 <= limit <= 1000:
         raise ValueError("limit must be between 1 and 1000")
+    extra = [TurnOutcome.cost_usd.is_not(None)] if priced_only else []
     stmt = (
         select(TurnOutcome.__table__)
-        .where(*_filters(tenant_id, since, channel_id, origin))
+        .where(*_filters(tenant_id, since, channel_id, origin, account_id=account_id), *extra)
         .order_by(TurnOutcome.started_at.desc(), TurnOutcome.id)
         .limit(limit)
     )
@@ -318,6 +332,7 @@ async def usage_by_channel(
     since: datetime,
     channel_id: str | None = None,
     origin: TurnContext | None = None,
+    until: datetime | None = None,
 ) -> list[ChannelUsageRow]:
     known_cost = func.coalesce(func.sum(TurnOutcome.cost_usd), 0)
     unknown_cost = func.count().filter(TurnOutcome.cost_usd.is_(None))
@@ -341,7 +356,7 @@ async def usage_by_channel(
             known_cost.label("known_cost_usd"),
             func.coalesce(func.sum(TurnOutcome.unpriced_calls), 0).label("unpriced_calls"),
         )
-        .where(*_filters(tenant_id, since, channel_id, origin))
+        .where(*_filters(tenant_id, since, channel_id, origin, until=until))
         .group_by(TurnOutcome.platform, TurnOutcome.channel_id, TurnOutcome.origin)
         .order_by(TurnOutcome.platform, TurnOutcome.channel_id, TurnOutcome.origin)
     )

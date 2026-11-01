@@ -1568,6 +1568,7 @@ async def run_prepared_turn_impl(
                 ma_session_id=new_session_id,
                 model_id=recovery.model_id,
                 channel_id=(recovery.admission or prepared.admission).budget_channel_id,
+                agent_id=(recovery.admission or prepared.admission).agent.id,
             )
 
             active_record_cell[0] = new_record

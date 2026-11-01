@@ -75,10 +75,12 @@ from daimon.core.stores.domain import (
     TenantUserCapRow,
     ThreadSessionRow,
     UsageEventRow,
+    WebPersonRow,
     WizardSessionRow,
 )
 from daimon.core.stores.security_audit import SecurityAuditRow
 from daimon.core.stores.tenant_ledger import insert_entry
+from daimon.core.stores.web_people import upsert_member
 from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.core.wizard.state import new_short_id
 from sqlalchemy import delete, select, update
@@ -218,6 +220,28 @@ async def mark_principal_foreign(
         .values(foreign_home_id=home_id)
     )
     await session.flush()
+
+
+async def make_web_person(
+    session: AsyncSession,
+    *,
+    tenant: TenantRow | None = None,
+    account: AccountRow | None = None,
+    display_name: str = "Test Person",
+    email: str | None = "person@example.com",
+) -> WebPersonRow:
+    """Create a member `web_people` row for `account` (a fresh one when omitted)."""
+    tenant = tenant or await make_tenant(session)
+    account = account or await make_account(session, tenant=tenant)
+    return await upsert_member(
+        session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        display_name=display_name,
+        workspace_name="Test Workspace",
+        email=email,
+        new_person_id=uuid.uuid4(),
+    )
 
 
 async def make_github_app_installation(
@@ -376,6 +400,7 @@ async def make_usage_event(
     cache_read_input_tokens: int = 0,
     event_id: str | None = None,
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> UsageEventRow:
     """Record a usage event via `usage_events.record`, wrapping raw token ints into
     the SDK-typed `BetaManagedAgentsSpanModelUsage` (constructed inline, no
@@ -403,6 +428,7 @@ async def make_usage_event(
         model_usage=model_usage,
         event_id=event_id,
         channel_id=channel_id,
+        agent_id=agent_id,
     )
     orm = (
         await session.execute(

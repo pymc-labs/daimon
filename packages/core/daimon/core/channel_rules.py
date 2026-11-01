@@ -45,6 +45,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.permissions import (
+    WEB_PLACE_ID,
     AgentRule,
     ChannelRule,
     RuleRefused,
@@ -366,7 +367,7 @@ async def _own_agent_refusal(
         return "managed_channel_agent"
     names = tuple(n for n in (name, *agent_pin_names(agent.name, agent.metadata)) if n)
     rules = () if replacing_rule else agent_permissions(policy, names).runs_in
-    if any(rule - {channel_id} for rule in rules):
+    if any(rule - {channel_id, WEB_PLACE_ID} for rule in rules):
         return "agent_runs_elsewhere"
     reach = await load_agent_reach(
         session,
@@ -962,10 +963,11 @@ async def set_agent_rule(
             raise ChannelRuleRefused("agent_not_found", agent_name=agent_name)
         # A missing agent has no channel of its own left to keep.
         home = agent_permissions(policy, names).home if agent is not None else None
-        if home is not None and target != (home,):
+        channels = tuple(c for c in target or () if c != WEB_PLACE_ID)
+        if home is not None and channels != (home,):
             raise ChannelRuleRefused("agent_has_home", agent_name=agent_name, channel_id=home)
-        own = [c for c in target or () if channel_rule(policy, c).readers == "own"]
-        if own and len(target or ()) > 1:
+        own = [c for c in channels if channel_rule(policy, c).readers == "own"]
+        if own and len(channels) > 1:
             raise ChannelRuleRefused("own_channel_alone", channel_id=own[0])
         if own and home is None and agent is not None:
             refusal = await _own_agent_refusal(

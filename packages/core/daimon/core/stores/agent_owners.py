@@ -151,6 +151,46 @@ async def is_owner(
     return await session.scalar(query) is not None
 
 
+async def owners_of_many(
+    session: AsyncSession, tenant_id: uuid.UUID, agent_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, uuid.UUID]:
+    """`owner_of` for many agents in one read; an agent without an owner is absent."""
+    if not agent_ids:
+        return {}
+    rows = await session.execute(
+        select(AgentOwner.agent_id, AgentOwner.owner_account_id)
+        .join(Account, Account.id == AgentOwner.owner_account_id)
+        .where(
+            AgentOwner.tenant_id == tenant_id,
+            AgentOwner.agent_id.in_(list(agent_ids)),
+            Account.tenant_id == tenant_id,
+        )
+    )
+    return {agent_id: owner for agent_id, owner in rows}
+
+
+async def co_owners_of_many(
+    session: AsyncSession, tenant_id: uuid.UUID, agent_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, list[uuid.UUID]]:
+    """`co_owners_of` for many agents in one read; an agent without any is absent."""
+    if not agent_ids:
+        return {}
+    rows = await session.execute(
+        select(AgentCoOwner.agent_id, AgentCoOwner.account_id)
+        .join(Account, Account.id == AgentCoOwner.account_id)
+        .where(
+            AgentCoOwner.tenant_id == tenant_id,
+            AgentCoOwner.agent_id.in_(list(agent_ids)),
+            Account.tenant_id == tenant_id,
+        )
+        .order_by(AgentCoOwner.added_at, AgentCoOwner.account_id)
+    )
+    out: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for agent_id, account_id in rows:
+        out.setdefault(agent_id, []).append(account_id)
+    return out
+
+
 async def co_owners_of(
     session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> list[uuid.UUID]:

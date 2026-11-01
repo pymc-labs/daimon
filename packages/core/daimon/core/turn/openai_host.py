@@ -501,6 +501,7 @@ async def _prepare_with_runtime(
             model_id=model_id,
             markup=request.deps.markup,
             channel_id=revision.channel.channel_id,
+            agent_id=current.agent.id,
         )
 
         if footer_cost is not None:

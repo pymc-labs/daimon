@@ -281,6 +281,7 @@ def _bind_checkpoint_recorder(
     model_id: str,
     markup: Decimal,
     channel_id: str | None,
+    agent_id: str | None,
 ) -> UsageRecorder:
     """Meter the checkpoint turn to the tenant, at the OLD session's model.
 
@@ -308,6 +309,7 @@ def _bind_checkpoint_recorder(
         pricing=pricing,
         reason="checkpoint_debit",
         channel_id=channel_id,
+        agent_id=agent_id,
     )
 
 
@@ -529,6 +531,7 @@ async def transfer_workspace(
                     model_id=old_snapshot.pricing_id,
                     markup=markup,
                     channel_id=channel_id,
+                    agent_id=old_snapshot.ma_agent_id,
                 )
             ),
             # Nobody is watching this turn, so a tool call waiting for approval

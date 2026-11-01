@@ -126,6 +126,8 @@ class AgentSpec(BaseModel):
       `dump_agent_spec(spec, mode="json")`) — that is correct rather than a
       gap, since the flag's only observable effects (no `mcp_servers`, no
       `mcp_toolset` tool) both participate in the hash directly.
+    - `template: bool` marks a file that is only a starting point for new agents
+      in the web app. It is never provisioned, so it never reaches a payload.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -143,6 +145,7 @@ class AgentSpec(BaseModel):
     skills: list[SkillRef] = Field(default_factory=list[SkillRef], exclude=True)
     skill_repos: list[SkillRepo] = Field(default_factory=list[SkillRepo], exclude=True)
     isolated: bool = Field(default=False, exclude=True)
+    template: bool = Field(default=False, exclude=True)
 
     @model_validator(mode="after")
     def _resolve_model_preset(self) -> AgentSpec:

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         make_tenant_user_cap,
         make_thread_session,
         make_usage_event,
+        make_web_person,
         make_wizard_session,
     )
     from daimon.testing.ma import (
@@ -65,6 +66,7 @@ _LAZY_MODULES_BY_NAME = {
     "make_tenant_user_cap": "daimon.testing.factories",
     "make_thread_session": "daimon.testing.factories",
     "make_usage_event": "daimon.testing.factories",
+    "make_web_person": "daimon.testing.factories",
     "make_wizard_session": "daimon.testing.factories",
     "ma_agent": "daimon.testing.ma_models",
     "ma_environment": "daimon.testing.ma_models",
@@ -130,6 +132,7 @@ __all__ = [
     "make_tenant_user_cap",
     "make_thread_session",
     "make_usage_event",
+    "make_web_person",
     "make_wizard_session",
     "mcp_session",
     "parse_jsonrpc_response",

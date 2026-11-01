@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
 from typing import Literal, NamedTuple
 
@@ -67,11 +67,15 @@ async def list_rules(
     *,
     tenant_id: uuid.UUID,
     agent_id: str | None = None,
+    agent_ids: Collection[str] | None = None,
     channel_id: str | None = None,
 ) -> list[AgentToolRule]:
+    """The tenant's rules, narrowed to one agent, to several, or to a channel."""
     query = select(AgentToolRuleRecord).where(AgentToolRuleRecord.tenant_id == tenant_id)
     if agent_id is not None:
         query = query.where(AgentToolRuleRecord.agent_id == agent_id)
+    if agent_ids is not None:
+        query = query.where(AgentToolRuleRecord.agent_id.in_(list(agent_ids)))
     if channel_id is not None:
         query = query.where(AgentToolRuleRecord.channel_id == channel_id)
     rows = (

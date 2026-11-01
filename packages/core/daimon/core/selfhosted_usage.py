@@ -190,6 +190,7 @@ async def record_selfhosted_usage(
     admission_key: str | None = None,
     markup: Decimal = Decimal("1"),
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> bool:
     """Record receipts using only durable admission, never current configuration.
 
@@ -360,6 +361,7 @@ async def record_selfhosted_usage(
             billing_grain="model_request",
             markup=markup,
             channel_id=channel_id,
+            agent_id=agent_id,
         )
         # Even an invalid snapshot must not prevent the native receipt write.
         # Database failures still propagate and roll back the entire transaction.

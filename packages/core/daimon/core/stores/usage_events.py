@@ -12,7 +12,7 @@ is dropped.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any, cast
 
@@ -45,8 +45,11 @@ async def record(
     observation: UsageObservation | None = None,
     event_id: str,
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
-    """Insert one usage row idempotently on (managed_session_id, event_id)."""
+    """Insert one usage row idempotently on (managed_session_id, event_id).
+
+    `agent_id` is the agent whose turn or tool call spent it; None when unknown."""
     if observation is not None:
         if model_usage is not None:
             raise ValueError("supply either an observation or legacy usage")
@@ -66,6 +69,7 @@ async def record(
             cache_read_input_tokens=model_usage.cache_read_input_tokens,
             event_id=event_id,
             channel_id=channel_id,
+            agent_id=agent_id,
         )
         .on_conflict_do_nothing(
             index_elements=["managed_session_id", "event_id"],
@@ -84,6 +88,7 @@ async def project_revision(
     initial: bool,
     channel_id: str | None,
     projected_tokens: UsageTokens | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """Project complete effective counts, preserving the original row identity.
 
@@ -154,6 +159,7 @@ async def project_revision(
             model=model,
             event_id=observation.id,
             channel_id=channel_id,
+            agent_id=agent_id,
             **values,
         )
         .on_conflict_do_nothing(index_elements=["managed_session_id", "event_id"])
@@ -280,12 +286,35 @@ async def cost_for_user_in_tenant_since(
     tenant_id: uuid.UUID,
     platform_user_id: str,
     since: datetime,
+    agent_id: str | None = None,
 ) -> float:
+    """One person's spend since `since`; with `agent_id`, only on that agent."""
+    agent_filter = [] if agent_id is None else [UsageEvent.agent_id == agent_id]
     return await _cost_since(
         session,
         UsageEvent.tenant_id == tenant_id,
         UsageEvent.platform_user_id == platform_user_id,
         UsageEvent.occurred_at >= since,
+        *agent_filter,
+    )
+
+
+async def cost_for_users_in_tenant_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform_user_ids: Collection[str],
+    since: datetime,
+    agent_id: str | None = None,
+) -> float:
+    """One person's spend since `since` across every id they spend under."""
+    agent_filter = [] if agent_id is None else [UsageEvent.agent_id == agent_id]
+    return await _cost_since(
+        session,
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.platform_user_id.in_(list(platform_user_ids)),
+        UsageEvent.occurred_at >= since,
+        *agent_filter,
     )
 
 
@@ -347,13 +376,24 @@ async def turn_count_for_tenant_since(
     return int((await session.execute(stmt)).scalar_one())
 
 
+def _window(since: datetime, until: datetime | None) -> list[ColumnElement[bool]]:
+    """`occurred_at` from `since`, up to but not including `until` when given."""
+    window = [UsageEvent.occurred_at >= since]
+    if until is not None:
+        window.append(UsageEvent.occurred_at < until)
+    return window
+
+
 async def costs_by_user_in_tenant_since(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
     since: datetime,
+    until: datetime | None = None,
 ) -> dict[str, float]:
-    """Per-user spend for a tenant since `since`. EXCLUDES NULL platform_user_id.
+    """Per-user spend for a tenant since `since` (before `until`, when given).
+
+    EXCLUDES NULL platform_user_id.
 
     GROUP BY (platform_user_id, model, long-prompt tier) so each bucket is
     repriced in Python at its own rates: summing first and pricing the total
@@ -377,7 +417,7 @@ async def costs_by_user_in_tenant_since(
         .where(
             UsageEvent.tenant_id == tenant_id,
             UsageEvent.platform_user_id.is_not(None),
-            UsageEvent.occurred_at >= since,
+            *_window(since, until),
         )
         .group_by(UsageEvent.platform_user_id, UsageEvent.model, long_prompt)
     )
@@ -403,8 +443,9 @@ async def turns_by_user_in_tenant_since(
     *,
     tenant_id: uuid.UUID,
     since: datetime,
+    until: datetime | None = None,
 ) -> dict[str, int]:
-    """Per-user distinct-session count for a tenant since `since`.
+    """Per-user distinct-session count for a tenant since `since` (before `until`).
 
     EXCLUDES NULL platform_user_id. GROUP BY platform_user_id ONLY (not by
     model) so sessions spanning multiple models stay collapsed to one turn.
@@ -417,7 +458,7 @@ async def turns_by_user_in_tenant_since(
         .where(
             UsageEvent.tenant_id == tenant_id,
             UsageEvent.platform_user_id.is_not(None),
-            UsageEvent.occurred_at >= since,
+            *_window(since, until),
         )
         .group_by(UsageEvent.platform_user_id)
     )
@@ -461,3 +502,126 @@ async def count_all(session: AsyncSession) -> int:
     code should prefer the tenant-scoped helpers above.
     """
     return int((await session.execute(select(func.count()).select_from(UsageEvent))).scalar_one())
+
+
+async def _costs_by_agent(
+    session: AsyncSession, *where: ColumnElement[bool]
+) -> dict[str | None, float]:
+    """Spend per agent for the matching rows, priced per (model, long-prompt tier) bucket.
+
+    Keyed by `agent_id`; the `None` key is spend no agent was recorded for (rows from
+    before attribution, tool calls with no live origin). Buckets are repriced one by one
+    for the reason `costs_by_user_in_tenant_since` gives.
+    """
+    long_prompt = _long_prompt()
+    stmt = (
+        select(
+            UsageEvent.agent_id,
+            UsageEvent.model,
+            long_prompt,
+            func.sum(UsageEvent.input_tokens).label("in_tok"),
+            func.sum(UsageEvent.output_tokens).label("out_tok"),
+            func.sum(UsageEvent.cache_creation_input_tokens).label("cw_tok"),
+            func.sum(UsageEvent.cache_read_input_tokens).label("cr_tok"),
+        )
+        .where(*where)
+        .group_by(UsageEvent.agent_id, UsageEvent.model, long_prompt)
+    )
+    per_agent: dict[str | None, float] = {}
+    for row in (await session.execute(stmt)).all():
+        usage = UsageTokens(
+            input_tokens=int(row.in_tok or 0),
+            output_tokens=int(row.out_tok or 0),
+            cache_creation_input_tokens=int(row.cw_tok or 0),
+            cache_read_input_tokens=int(row.cr_tok or 0),
+        )
+        cost = cost_of_bucket(
+            usage, MODEL_PRICING.get(row.model), long_prompt=bool(row.long_prompt)
+        )
+        per_agent[row.agent_id] = per_agent.get(row.agent_id, 0.0) + (cost or 0.0)
+    return per_agent
+
+
+async def costs_by_agent_for_user_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform_user_id: str,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[str | None, float]:
+    """One person's spend since `since`, by agent (provider cost, before markup)."""
+    return await _costs_by_agent(
+        session,
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.platform_user_id == platform_user_id,
+        *_window(since, until),
+    )
+
+
+async def costs_by_agent_in_tenant_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[str | None, float]:
+    """A tenant's spend since `since`, by agent (provider cost, before markup).
+
+    Excludes NULL platform_user_id rows like the other tenant totals, so the agents
+    add up to `cost_for_tenant_since`.
+    """
+    return await _costs_by_agent(
+        session,
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.platform_user_id.is_not(None),
+        *_window(since, until),
+    )
+
+
+async def _turns_by_agent(
+    session: AsyncSession, *where: ColumnElement[bool]
+) -> dict[str | None, int]:
+    """Distinct managed sessions per agent for the matching rows; None keys unattributed."""
+    stmt = (
+        select(
+            UsageEvent.agent_id,
+            func.count(func.distinct(UsageEvent.managed_session_id)).label("turns"),
+        )
+        .where(*where)
+        .group_by(UsageEvent.agent_id)
+    )
+    return {row.agent_id: int(row.turns) for row in (await session.execute(stmt)).all()}
+
+
+async def turns_by_agent_for_user_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform_user_id: str,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[str | None, int]:
+    """One person's turn count since `since`, by agent; pairs with the cost read."""
+    return await _turns_by_agent(
+        session,
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.platform_user_id == platform_user_id,
+        *_window(since, until),
+    )
+
+
+async def turns_by_agent_in_tenant_since(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    since: datetime,
+    until: datetime | None = None,
+) -> dict[str | None, int]:
+    """A tenant's turn count since `since`, by agent, leaving out NULL-user rows."""
+    return await _turns_by_agent(
+        session,
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.platform_user_id.is_not(None),
+        *_window(since, until),
+    )

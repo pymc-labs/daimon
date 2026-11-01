@@ -674,6 +674,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             markup=request.deps.markup,
             channel_id=revision.channel.channel_id,
             infrastructure_usd=deployment.infrastructure_usd,
+            agent_id=request.admission.agent.id,
         )
 
     async def finalize() -> None:

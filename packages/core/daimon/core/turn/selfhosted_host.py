@@ -481,6 +481,7 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
             model_id=runtime.model,
             markup=request.deps.markup,
             channel_id=revision.channel.channel_id,
+            agent_id=current.agent.id,
         )
 
     return PreparedTurn(

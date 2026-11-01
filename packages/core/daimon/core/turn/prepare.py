@@ -706,6 +706,7 @@ def bind_recorder(
     ma_session_id: str,
     model_id: str,
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> UsageRecorder:
     """Build the usage recorder bound to a specific session id and its model.
 
@@ -723,7 +724,8 @@ def bind_recorder(
     session id after a recreate, rather than reusing a stale binding.
 
     `channel_id` is `Admission.budget_channel_id`: the channel whose budget the
-    turn's spend counts toward.
+    turn's spend counts toward; `agent_id` is the agent that answers, stamped on
+    each usage row so spend can be read by agent.
     """
     if (observation := current_outcome.get()) is not None:
         observation.model_by_session[ma_session_id] = model_id
@@ -742,6 +744,7 @@ def bind_recorder(
         markup=deps.markup,
         pricing=pricing,
         channel_id=channel_id,
+        agent_id=agent_id,
     )
 
 
