@@ -68,6 +68,9 @@ Deliberate carve-outs:
   A `channel_budgets` row belongs to the tenant; erasure only nulls the
   `set_by_account_id` of the admin who set it, through ON DELETE SET NULL.
   Their `delete_all_for_user` helpers exist and are deliberately uncalled here.
+  `spend_allowances` rows belong to the tenant's configuration like the caps: they name a
+  person only by platform user id, and erasure nulls `created_by_account_id` of the admin
+  who set one, through ON DELETE SET NULL.
   `promo_redemptions` rows stay with the tenant too; account deletion only
   clears who redeemed the code, through ON DELETE SET NULL.
 - Uploaded MA skill files (user_skills rows) are our DB ledger: the DB row is
@@ -150,6 +153,8 @@ from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
+from daimon.core.stores import web_people as web_people_store
+from daimon.core.stores import web_roles as web_roles_store
 from daimon.core.stores import wizard_session as wizard_session_store
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
 from pydantic import BaseModel, ConfigDict, Field
@@ -192,6 +197,8 @@ class PurgeReport(BaseModel):
     platform_user_names: int = 0
     teams_messages: int = 0
     microsoft_user_tokens: int = 0
+    web_people: int = 0
+    web_admin_grants: int = 0
     # The account's private provider slots and what hangs off them (stores.mux_erasure).
     mux_slots: int = 0
     mux_binding_generations: int = 0
@@ -232,6 +239,8 @@ class PurgeReport(BaseModel):
             platform_user_names=self.platform_user_names + other.platform_user_names,
             teams_messages=self.teams_messages + other.teams_messages,
             microsoft_user_tokens=self.microsoft_user_tokens + other.microsoft_user_tokens,
+            web_people=self.web_people + other.web_people,
+            web_admin_grants=self.web_admin_grants + other.web_admin_grants,
             mux_slots=self.mux_slots + other.mux_slots,
             mux_binding_generations=self.mux_binding_generations + other.mux_binding_generations,
             mux_journal_sessions=self.mux_journal_sessions + other.mux_journal_sessions,
@@ -611,6 +620,12 @@ async def _purge_account_transaction(
     direct_message_count = await direct_messages_store.delete_conversations_for_account(
         session, account_id=account_id
     )
+    # The web app's people (identities, tokens and browser sessions go with them) and
+    # admin grants cascade from accounts.id; deleted here so the report counts them.
+    web_people_count = await web_people_store.delete_for_account(session, account_id=account_id)
+    web_admin_grants_count = await web_roles_store.delete_admin_grants_for_account(
+        session, account_id=account_id
+    )
     await github_issued_tokens_store.erase_requester_identity(session, account_id=account_id)
     account_count = await accounts_store.delete_account(session, account_id=account_id)
     github_user_links_count = (
@@ -645,6 +660,8 @@ async def _purge_account_transaction(
             github_user_links=github_user_links_count,
             slack_turn_contexts=slack_turn_contexts_count,
             direct_message_conversations=direct_message_count,
+            web_people=web_people_count,
+            web_admin_grants=web_admin_grants_count,
         )
     )
     return db_report, mux_retained, _queued_name_keys((*cli_list, *pp_list))

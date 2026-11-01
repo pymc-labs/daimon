@@ -13,6 +13,7 @@ GUARD_SITES = {
     "packages/adapters/slack/daimon/adapters/slack/here.py",
     "packages/adapters/teams/daimon/adapters/teams/app.py",
     "packages/adapters/teams/daimon/adapters/teams/here.py",
+    "packages/adapters/web/daimon/adapters/web/turns.py",
 }
 
 

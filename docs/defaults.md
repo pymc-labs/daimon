@@ -29,7 +29,9 @@ written:
 ### Agents
 
 An agent requires `name` and `model`. It accepts `description`, `system`,
-`tools`, `mcp_servers`, `multiagent`, `skills`, `skill_repos` and `isolated`.
+`tools`, `mcp_servers`, `multiagent`, `skills`, `skill_repos`, `isolated` and
+`template`. A file with `template: true` is a starting point for new agents in
+the web app and is never provisioned.
 `metadata` is not authorable, because Daimon sets it so that reconciliation
 recognises what it owns. Declaring `mcp_servers` without a matching
 `{type: mcp_toolset, mcp_server_name: ...}` entry in `tools` is rejected at

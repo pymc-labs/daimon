@@ -45,7 +45,6 @@ from daimon.core.authz import (
     build_subject,
     build_turn_place,
 )
-from daimon.core.billing import is_over_cap
 from daimon.core.channel_backend import (
     BackendUnsupported,
     backend_is_enabled,
@@ -54,7 +53,6 @@ from daimon.core.channel_backend import (
     current_backend_and_sharing,
 )
 from daimon.core.channel_backend import log_backend_unsupported as _log_backend_unsupported
-from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -79,6 +77,13 @@ from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
+from daimon.core.spend_gate import (
+    AFTER_QUEUE_CHECKS,
+    SpendPerson,
+    SpendRequest,
+    spend_gate,
+    spend_gate_in_new_session,
+)
 from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
@@ -94,7 +99,6 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
-from daimon.core.tenant_balance import is_over_balance
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
 from daimon.core.turn.deps import TurnDeps
@@ -107,6 +111,7 @@ from daimon.core.turn.errors import (
     SessionBusyError,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
+from daimon.core.turn.slots import register_spend_recheck
 from daimon.core.turn_hold import RequesterOrg, TurnHold
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
@@ -443,6 +448,9 @@ async def admit(
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    spend_person: SpendPerson | None = None,
+    surface: Surface | None = None,
+    principal_platform: str | None = None,
 ) -> Admission:
     """Admit a turn, or raise the typed reason it is refused.
 
@@ -452,6 +460,9 @@ async def admit(
     signal that the channel is shared with another organisation (None: no signal).
     A client (another organisation, unknown, or one already recorded as foreign) is
     held to the channel it asked in, as is anyone in a shared channel.
+    `surface` overrides the DM-or-channel surface (the web chat), and
+    `principal_platform` names the platform `external_user_id` belongs to when it
+    is not the one the turn runs on (a web person linked to a platform account).
     """
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -476,6 +487,9 @@ async def admit(
                 requester_org=requester_org,
                 requester_home_id=requester_home_id,
                 channel_shared=channel_shared,
+                spend_person=spend_person,
+                surface=surface,
+                principal_platform=principal_platform,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -539,6 +553,9 @@ async def admit_impl(
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    spend_person: SpendPerson | None = None,
+    surface: Surface | None = None,
+    principal_platform: str | None = None,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool.
 
@@ -565,6 +582,9 @@ async def admit_impl(
         requester_org=requester_org,
         requester_home_id=requester_home_id,
         channel_shared=channel_shared,
+        spend_person=spend_person,
+        surface=surface,
+        principal_platform=principal_platform,
     )
     followed: list[Slot] = []
     try:
@@ -593,6 +613,9 @@ async def _admit_gates(
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    spend_person: SpendPerson | None = None,
+    surface: Surface | None = None,
+    principal_platform: str | None = None,
     followed: list[Slot] | None = None,
     follow_switch: bool = True,
 ) -> Admission:
@@ -616,7 +639,7 @@ async def _admit_gates(
         principal = await get_or_create_platform_principal(
             session,
             tenant_id=tenant_id,
-            platform=platform,
+            platform=principal_platform or platform,
             external_id=external_user_id,
         )
         client = requester_org is not RequesterOrg.HOST or principal.foreign_home_id is not None
@@ -949,7 +972,7 @@ async def _admit_gates(
         # answer as the built-in Daimon (`get_setup_responder` asserts that), while
         # a thread whose task was handed to another agent answers as that agent,
         # which is an ordinary tenant-and-archive-checked retrieve.
-        if config.thread_binding_kind in ("handoff", "owner"):
+        if config.thread_binding_kind in ("handoff", "owner", "web"):
             agent = await get_setup_agent(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
         elif config.thread_binding_id is not None:
             agent = await get_setup_responder(
@@ -1015,7 +1038,7 @@ async def _admit_gates(
     grant = AdmissionGrant(
         tenant_id=tenant_id,
         subject=subject,
-        surface=Surface.DM if is_dm else Surface.CHANNEL,
+        surface=surface or (Surface.DM if is_dm else Surface.CHANNEL),
         turn_place=turn_place,
         agent=build_agent_ref(agent.name, agent.metadata, config.agent_name),
         run_place=Place()
@@ -1243,43 +1266,37 @@ async def _admit_gates(
     budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (
         dm_source_channel_id if is_dm else channel_id
     )
-    # The three independent billing decisions still run in their original
-    # order, under READ COMMITTED, but share one checked-out connection.
+    spend_request = SpendRequest(
+        tenant_id=tenant_id,
+        platform_user_id=external_user_id,
+        platform=platform,
+        channel_id=budget_channel_id,
+        agent_id=agent.id,
+        person=spend_person,
+    )
+    # One gate decides balance, cap, channel budget and allowance, in that order, on
+    # one checked-out connection under READ COMMITTED.
     async with deps.sessionmaker() as billing_session:
-        # --- Per-tenant balance -- independent of Stripe config ---
-        if await is_over_balance(
-            sessionmaker=deps.sessionmaker, tenant_id=tenant_id, session=billing_session
-        ):
+        block = await spend_gate(
+            billing_session,
+            billing_config=deps.billing_config,
+            request=spend_request,
+            markup=deps.markup,
+            now=now,
+        )
+        mark("spend_gate")
+        if block == "balance_depleted":
             from daimon.core.stores import tenant_ledger
 
             credited = await tenant_ledger.ever_credited(billing_session, tenant_id=tenant_id)
             raise AdmissionDenied(
                 reason="balance_depleted", cause=None if credited else "no_credit_yet"
             )
-        mark("balance")
-
-        # --- Monthly usage cap ---
-        if await is_over_cap(
-            billing_config=deps.billing_config,
-            sessionmaker=deps.sessionmaker,
-            tenant_id=tenant_id,
-            user_id=external_user_id,
-            now=now,
-            session=billing_session,
-        ):
+        if block == "cap_exceeded":
             raise AdmissionDenied(reason="cap_exceeded")
-        mark("user_cap")
-
-        # --- Channel budget, including the source of a DM or isolated agent ---
-        budget_exceeded = await is_over_channel_budget(
-            sessionmaker=deps.sessionmaker,
-            tenant_id=tenant_id,
-            platform=platform,
-            channel_id=budget_channel_id,
-            now=now,
-            session=billing_session,
-        )
-        mark("channel_budget")
+        if block == "allowance_exhausted":
+            raise AdmissionDenied(reason="allowance_exhausted")
+        budget_exceeded = block == "budget_exceeded"
         channel_skill_rows = (
             []
             if is_dm or budget_exceeded
@@ -1299,6 +1316,17 @@ async def _admit_gates(
                 server_admins=deps.server_admins,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
+
+    register_spend_recheck(
+        partial(
+            spend_gate_in_new_session,
+            deps.sessionmaker,
+            billing_config=deps.billing_config,
+            request=spend_request,
+            markup=deps.markup,
+            checks=AFTER_QUEUE_CHECKS,
+        )
+    )
 
     if selfhosted:
         # Self-hosted skills are record references, resolved by the harness's

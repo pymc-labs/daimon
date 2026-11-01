@@ -32,7 +32,7 @@ def debit_amount(cost: float | None, *, markup: Decimal) -> Decimal:
 
 async def is_over_balance(
     *,
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     tenant_id: uuid.UUID | None,
     session: AsyncSession | None = None,
 ) -> bool:
@@ -45,6 +45,8 @@ async def is_over_balance(
     if tenant_id is None:
         return False  # DMs have no tenant — mirror the cap DM exemption
     if session is None:
+        if sessionmaker is None:
+            raise ValueError("is_over_balance needs a session or a sessionmaker")
         async with sessionmaker() as opened:
             tenant = await tenants.get_tenant(opened, tenant_id)
             balance = await tenant_ledger.get_balance(opened, tenant_id=tenant_id)

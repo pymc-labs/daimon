@@ -137,7 +137,7 @@ def _no_view_fix(platform: Platform, *, foreign: bool = False) -> str:
 def render_here_card(card: HereCard) -> HereCardPresentation:
     """Choose the approved card copy from existing facts, in priority order."""
     name = " ".join((card.agent_name or "").split())[:100]
-    words = words_for("discord" if card.platform == "cli" else card.platform)
+    words = words_for("discord" if card.platform in ("cli", "web") else card.platform)
     setup = _setup_words(words, foreign=card.foreign)
     who = _who(words, foreign=card.foreign)
     if card.bot_can_view is False:

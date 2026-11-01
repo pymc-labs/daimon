@@ -258,6 +258,7 @@ class RecorderFactory(Protocol):
         ma_session_id: str,
         model_id: str,
         channel_id: str | None = None,
+        agent_id: str | None = None,
     ) -> UsageRecorder: ...
 
 
@@ -768,6 +769,7 @@ async def _prepare_session_for_turn_locked(
                 ma_session_id=ma_session_id,
                 model_id=model_id,
                 channel_id=current.budget_channel_id,
+                agent_id=current.agent.id,
             ),
             continuity=continuity,
         )

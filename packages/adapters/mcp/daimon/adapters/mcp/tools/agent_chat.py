@@ -82,7 +82,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
-    _refused,  # pyright: ignore[reportPrivateUsage]
+    _gate_origin_spend,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pagination import Page
 from daimon.adapters.mcp.tools._session_access import (
@@ -96,7 +96,6 @@ from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
-from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
@@ -776,27 +775,15 @@ async def _continue_turn_impl(
     )
     if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
         raise ToolError(_SEALED_SINCE_START_MSG)
-    if auth.platform_user_id is not None and await is_over_channel_budget(
+    await _gate_origin_spend(
+        auth,
         sessionmaker=runtime.session_factory,
-        tenant_id=auth.tenant_id,
-        platform=auth.platform or "",
+        markup=runtime.settings.billing.markup,
+        tool_name="continue_turn",
         channel_id=(session.metadata or {}).get(MA_METADATA_KEY_BUDGET_CHANNEL),
-        now=dt.datetime.now(dt.UTC),
-    ):
-        log.info(
-            "mcp.admission_denied",
-            tenant_id=str(auth.tenant_id),
-            platform_user_id=auth.platform_user_id,
-            tool="continue_turn",
-            gate="channel_budget",
-        )
-        _refused(
-            runtime.session_factory,
-            auth,
-            "continue_turn",
-            TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
-        )
-        raise ToolError(_CHANNEL_BUDGET_SPENT_MSG)
+        agent_id=session.agent.id,
+        budget_message=_CHANNEL_BUDGET_SPENT_MSG,
+    )
     turn_started_at = now()
     async with session_mutation_fence(runtime.session_factory, handle):
         # The fence may have waited behind a transfer or another send.
@@ -1379,6 +1366,7 @@ def register_agent_chat_tools(
             ctx,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
+            markup=runtime.settings.billing.markup,
             tool_name="start_turn",
             agent_names=pin_names,
         )
@@ -1401,6 +1389,7 @@ def register_agent_chat_tools(
             ctx,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
+            markup=runtime.settings.billing.markup,
             tool_name="ask",
             agent_names=pin_names,
         )
@@ -1431,6 +1420,7 @@ def register_agent_chat_tools(
             ctx,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
+            markup=runtime.settings.billing.markup,
             tool_name="continue_turn",
             agent_names=pin_names,
         )

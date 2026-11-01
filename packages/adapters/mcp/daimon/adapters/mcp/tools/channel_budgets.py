@@ -48,6 +48,7 @@ from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PLATFORMS = ("discord", "slack", "teams")
+_WEB = "web"
 _NEEDS_CHANNEL = (
     "channel_id is required: pass your origin_context_id, the id from "
     '<channel role="parent_channel">, or the channel the user named.'
@@ -148,37 +149,53 @@ def _is_dm_scope(thread_id: str) -> bool:
     return thread_id.startswith("dm:")
 
 
-async def origin_budget_channel(
+@dataclass(frozen=True)
+class OriginSpend:
+    """Where a tool call's spend is attributed: the channel and the agent that made it."""
+
+    channel_id: str | None = None
+    agent_id: str | None = None
+
+
+async def origin_spend(
     sessionmaker: async_sessionmaker[AsyncSession],
     auth: AuthIdentity,
     origin_context_id: str | None,
-) -> str | None:
-    """The channel a tool call's spend counts against: its turn's parent channel.
+) -> OriginSpend:
+    """The channel and agent a tool call's spend counts against: its turn's.
 
-    A DM counts toward the channel it was started from, and an agent key
-    minted in a channel toward that channel. None without a live origin of
-    this caller and responder, or in an older DM, so the call is simply not
-    attributed; tools that need a channel use `require_turn_origin` instead,
-    which explains the refusal.
+    The channel is the turn's parent channel. A DM counts toward the channel it was
+    started from, and an agent key minted in a channel toward that channel. Both are
+    None without a live origin of this caller and responder, or in an older DM, so the
+    call is simply not attributed; tools that need a channel use `require_turn_origin`
+    instead, which explains the refusal. The agent is the origin's responder, unknown
+    for a key bound to a channel since a key names its agent by a derived id only.
+
+    A web chat's turn is the same, on the `web` platform: its token names the platform
+    of the account it runs as, which may be a linked chat one.
     """
     bound = token_channel_id(auth)
     if bound is not None:
-        return bound
-    if not origin_context_id or auth.platform not in _PLATFORMS:
-        return None
+        return OriginSpend(channel_id=bound)
+    if not origin_context_id or auth.platform not in (*_PLATFORMS, _WEB):
+        return OriginSpend()
     try:
         origin_id = uuid.UUID(origin_context_id)
     except ValueError:
-        return None
+        return OriginSpend()
     async with sessionmaker() as session:
-        origin = await get_active_origin(
-            session,
-            origin_id=origin_id,
-            tenant_id=auth.tenant_id,
-            account_id=auth.account_id,
-            platform=cast(str, auth.platform),
-            now=datetime.now(UTC),
-        )
+        origin = None
+        for platform in dict.fromkeys((cast(str, auth.platform), _WEB)):
+            origin = await get_active_origin(
+                session,
+                origin_id=origin_id,
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                platform=platform,
+                now=datetime.now(UTC),
+            )
+            if origin is not None:
+                break
         # A chat turn's credential names its agent as chat_agent_id (`require_turn_origin`).
         executing_agent = auth.agent_id or auth.chat_agent_id
         if origin is None or (
@@ -186,12 +203,25 @@ async def origin_budget_channel(
             and executing_agent
             != derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
         ):
-            return None
+            return OriginSpend()
+        agent_id = origin.responder_ma_agent_id
         if _is_dm_scope(origin.thread_id):
-            return await get_source_channel(
-                session, tenant_id=auth.tenant_id, scope_id=origin.thread_id
+            return OriginSpend(
+                channel_id=await get_source_channel(
+                    session, tenant_id=auth.tenant_id, scope_id=origin.thread_id
+                ),
+                agent_id=agent_id,
             )
-    return origin.parent_channel_id
+    return OriginSpend(channel_id=origin.parent_channel_id, agent_id=agent_id)
+
+
+async def origin_budget_channel(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    auth: AuthIdentity,
+    origin_context_id: str | None,
+) -> str | None:
+    """The channel a tool call's spend counts against; see `origin_spend`."""
+    return (await origin_spend(sessionmaker, auth, origin_context_id)).channel_id
 
 
 async def _origin_channel(

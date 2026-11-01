@@ -22,6 +22,7 @@ nav:
   - Connect:
       - Slack: slack.md
       - Microsoft Teams: teams.md
+      - Web app: web.md
       - GitHub: github.md
       - MCP servers: mcp-servers.md
       - Claude Code plugin: plugin.md

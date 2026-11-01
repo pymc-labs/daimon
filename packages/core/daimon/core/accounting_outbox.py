@@ -80,6 +80,7 @@ async def apply_usage_outbox(
     billing_grain: BillingGrain = "model_request",
     provider_price: ProviderPrice | None = None,
     infrastructure_usd: Decimal | None = None,
+    agent_id: str | None = None,
 ) -> bool:
     """Claim, project and debit one durable revision atomically. True if claimed.
 
@@ -161,6 +162,7 @@ async def apply_usage_outbox(
         projected_tokens=provider_usage_tokens(projection, provider_price)
         if provider_price is not None
         else None,
+        agent_id=agent_id,
     )
     amount = (
         exact_amount
@@ -217,6 +219,7 @@ async def record_observation_usage(
     billing_grain: BillingGrain = "model_request",
     provider_price: ProviderPrice | None = None,
     infrastructure_usd: Decimal | None = None,
+    agent_id: str | None = None,
 ) -> bool:
     """Record neutral usage and apply its outbox in the same host transaction."""
     if tenant_id is None:
@@ -250,4 +253,5 @@ async def record_observation_usage(
         billing_grain=billing_grain,
         provider_price=provider_price,
         infrastructure_usd=infrastructure_usd,
+        agent_id=agent_id,
     )

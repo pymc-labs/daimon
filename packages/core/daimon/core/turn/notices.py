@@ -216,6 +216,7 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "balance_depleted": _COPY[TerminationReason.ADMISSION_BALANCE_DEPLETED],
     "cap_exceeded": _COPY[TerminationReason.ADMISSION_CAP_EXCEEDED],
     "channel_budget_exceeded": _COPY[TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED],
+    "allowance_exhausted": _Copy("You've used your Daimon credit.", "Ask an admin to add more."),
     "invoker_not_allowed": _Copy(
         "Daimon can't accept your request here.", "Ask an admin to add you."
     ),

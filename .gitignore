@@ -56,3 +56,6 @@ results/
 
 # Azure Developer CLI environment state may cache deployment inputs.
 /.azure/
+
+# The web adapter's SPA, built from web/ (Dockerfile stage `web`).
+packages/adapters/web/daimon/adapters/web/static/

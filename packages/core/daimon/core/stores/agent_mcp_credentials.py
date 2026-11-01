@@ -8,6 +8,7 @@ No try/except — DB exceptions propagate to the caller's boundary.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime
 
 from daimon.core._models import AgentMcpCredential
@@ -64,6 +65,26 @@ async def list_credentials(
         .order_by(AgentMcpCredential.created_at)
     )
     return tuple(AgentMcpCredentialRow.model_validate(orm) for orm in result.scalars())
+
+
+async def list_credentials_many(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, tuple[AgentMcpCredentialRow, ...]]:
+    """`list_credentials` for many agents in one read; an agent with none is absent."""
+    if not agent_ids:
+        return {}
+    result = await session.execute(
+        select(AgentMcpCredential)
+        .where(
+            AgentMcpCredential.tenant_id == tenant_id,
+            AgentMcpCredential.agent_id.in_(list(agent_ids)),
+        )
+        .order_by(AgentMcpCredential.created_at)
+    )
+    grouped: dict[uuid.UUID, list[AgentMcpCredentialRow]] = {}
+    for orm in result.scalars():
+        grouped.setdefault(orm.agent_id, []).append(AgentMcpCredentialRow.model_validate(orm))
+    return {agent_id: tuple(rows) for agent_id, rows in grouped.items()}
 
 
 async def list_credential_revisions(

@@ -536,8 +536,8 @@ def patched_admission() -> Iterator[None]:
     with (
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
         patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
-        patch("daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock) as balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as cap,
+        patch("daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock) as balance,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as create,
     ):
         agent.return_value = "agent_test_id"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -14,6 +15,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _admit,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.stores import spend_allowances
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
@@ -34,19 +36,27 @@ async def test_admit_denies_when_over_balance(
         account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform_user_id="u1"
     )
     with (
-        patch("daimon.adapters.mcp.tools._ctx.is_over_balance", new=AsyncMock(return_value=True)),
+        patch("daimon.core.spend_gate.is_over_balance", new=AsyncMock(return_value=True)),
         pytest.raises(ToolError, match="credit is depleted"),
     ):
-        await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+        )
 
 
 async def test_admit_skips_billing_for_internal_identity() -> None:
     auth = AuthIdentity(account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER)
     with patch(
-        "daimon.adapters.mcp.tools._ctx.is_over_balance",
+        "daimon.core.spend_gate.is_over_balance",
         new=AsyncMock(side_effect=AssertionError("must not check")),
     ):
-        result = await _admit(auth, sessionmaker=AsyncMock(), billing_config=None, tool_name="ask")
+        result = await _admit(
+            auth, sessionmaker=AsyncMock(), billing_config=None, markup=Decimal(1), tool_name="ask"
+        )
     assert result is auth
 
 
@@ -64,9 +74,7 @@ async def _member(
     )
 
 
-_BALANCE_OK = patch(
-    "daimon.adapters.mcp.tools._ctx.is_over_balance", new=AsyncMock(return_value=False)
-)
+_BALANCE_OK = patch("daimon.core.spend_gate.is_over_balance", new=AsyncMock(return_value=False))
 
 
 @pytest.mark.parametrize(
@@ -87,7 +95,11 @@ async def test_admit_passes_whoever_the_invoker_policy_allows(
     auth = await _member(db_session, policy=policy, role=role)
     with _BALANCE_OK:
         result = await _admit(
-            auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask"
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
         )
     assert result is auth, "an allowed caller must pass through to the billing gates"
 
@@ -98,12 +110,18 @@ async def test_admit_refuses_a_member_outside_the_allowlist_before_billing(
     auth = await _member(db_session, policy=TenantAccessPolicy(invoker_user_ids=("staff",)))
     with (
         patch(
-            "daimon.adapters.mcp.tools._ctx.is_over_balance",
+            "daimon.core.spend_gate.is_over_balance",
             new=AsyncMock(side_effect=AssertionError("policy runs before billing")),
         ),
         pytest.raises(ToolError, match="TERMINAL ERROR: You aren't on"),
     ):
-        await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+        )
 
 
 async def test_admit_refuses_when_the_policy_is_unreadable(
@@ -116,7 +134,13 @@ async def test_admit_refuses_when_the_policy_is_unreadable(
     )
     await db_session.commit()
     with _BALANCE_OK, pytest.raises(ToolError, match="TERMINAL ERROR: the access settings here"):
-        await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+        )
 
 
 _PINNED = TenantAccessPolicy(agent_channel_pins={"acme-project": ("c-acme",)})
@@ -134,7 +158,7 @@ async def test_admit_refuses_a_turn_on_a_pinned_agent(
 
     with (
         patch(
-            "daimon.adapters.mcp.tools._ctx.is_over_balance",
+            "daimon.core.spend_gate.is_over_balance",
             new=AsyncMock(side_effect=AssertionError("the pin runs before billing")),
         ),
         pytest.raises(
@@ -145,6 +169,7 @@ async def test_admit_refuses_a_turn_on_a_pinned_agent(
             auth,
             sessionmaker=db_session_factory,
             billing_config=None,
+            markup=Decimal(1),
             tool_name="start_turn",
             agent_names=names,
         )
@@ -163,6 +188,7 @@ async def test_admit_passes_an_unpinned_agent_on_a_tenant_with_pins(
             auth,
             sessionmaker=db_session_factory,
             billing_config=None,
+            markup=Decimal(1),
             tool_name="ask",
             agent_names=names,
         )
@@ -179,6 +205,7 @@ async def test_admit_skips_the_agent_lookup_when_nothing_is_pinned(
             auth,
             sessionmaker=db_session_factory,
             billing_config=None,
+            markup=Decimal(1),
             tool_name="ask",
             agent_names=names,
         )
@@ -207,6 +234,7 @@ async def test_admit_runs_a_bound_key_in_its_channel_under_the_pin(
                 auth,
                 sessionmaker=db_session_factory,
                 billing_config=None,
+                markup=Decimal(1),
                 tool_name="start_turn",
                 agent_names=_pinned_names,
             )
@@ -217,6 +245,7 @@ async def test_admit_runs_a_bound_key_in_its_channel_under_the_pin(
                 auth,
                 sessionmaker=db_session_factory,
                 billing_config=None,
+                markup=Decimal(1),
                 tool_name="start_turn",
                 agent_names=_pinned_names,
             )
@@ -232,11 +261,21 @@ async def test_admit_refuses_a_bound_key_over_its_channel_budget(
     await db_session.commit()
     bound = dataclasses.replace(_key(auth, bound="c-1"), platform=tenant.platform)
     with _BALANCE_OK, pytest.raises(ToolError, match="This channel has used its spending budget"):
-        await _admit(bound, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
+        await _admit(
+            bound,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+        )
     unbound = dataclasses.replace(_key(auth, bound=None), platform=tenant.platform)
     with _BALANCE_OK:
         result = await _admit(
-            unbound, sessionmaker=db_session_factory, billing_config=None, tool_name="ask"
+            unbound,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
         )
     assert result is unbound, "an unbound key runs in no channel, so no channel budget gates it"
 
@@ -287,6 +326,7 @@ async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_
             auth,
             sessionmaker=db_session_factory,
             billing_config=None,
+            markup=Decimal(1),
             tool_name="ask",
             agent_names=lambda: names("local"),
             pin_exempt=True,
@@ -297,6 +337,7 @@ async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_
                 auth,
                 sessionmaker=db_session_factory,
                 billing_config=None,
+                markup=Decimal(1),
                 tool_name="ask",
                 agent_names=lambda: names("daimon"),
                 pin_exempt=True,
@@ -333,6 +374,7 @@ async def test_a_refused_turn_records_which_gate_refused_it(
             auth,
             sessionmaker=sessionmaker,
             billing_config=None,
+            markup=Decimal(1),
             tool_name="start_turn",
             agent_names=names,
         )
@@ -350,10 +392,56 @@ async def test_admit_over_the_cap_says_the_cap_is_the_callers_and_an_operator_ra
     )
     with (
         _BALANCE_OK,
-        patch("daimon.adapters.mcp.tools._ctx.is_over_cap", new=AsyncMock(return_value=True)),
+        patch("daimon.core.spend_gate.is_over_cap", new=AsyncMock(return_value=True)),
         pytest.raises(ToolError) as refused,
     ):
-        await _admit(auth, sessionmaker=db_session_factory, billing_config=None, tool_name="ask")
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+        )
     assert str(refused.value) == (
         "TERMINAL ERROR: You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
     ), "the MCP refusal uses the shared cap wording"
+
+
+async def test_admit_with_an_exhausted_allowance_refuses_in_the_shared_words(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    auth = await _member(db_session, policy=None)
+    await spend_allowances.create_allowance(
+        db_session,
+        tenant_id=auth.tenant_id,
+        subject_kind="person",
+        subject_id="u1",
+        agent_id=None,
+        amount_usd=Decimal(0),
+        window="total",
+        starts_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    await db_session.commit()
+    with _BALANCE_OK, pytest.raises(ToolError) as refused:
+        await _admit(
+            auth,
+            sessionmaker=db_session_factory,
+            billing_config=None,
+            markup=Decimal(1),
+            tool_name="ask",
+        )
+    assert str(refused.value) == (
+        "TERMINAL ERROR: You've used your Daimon credit.\n\nAsk an admin to add more."
+    ), "the MCP refusal uses the shared allowance wording"
+    with _BALANCE_OK:
+        other = dataclasses.replace(auth, platform_user_id="u2")
+        assert (
+            await _admit(
+                other,
+                sessionmaker=db_session_factory,
+                billing_config=None,
+                markup=Decimal(1),
+                tool_name="ask",
+            )
+            is other
+        ), "another person has no allowance and is not limited"

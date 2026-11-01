@@ -3609,7 +3609,7 @@ async def test_run_thread_turn_when_over_balance_blocks_before_session_create(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
@@ -3689,9 +3689,9 @@ async def test_run_thread_turn_when_over_cap_blocks_before_session_create(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
     ):
@@ -3763,11 +3763,9 @@ async def test_run_thread_turn_when_over_channel_budget_blocks_before_session_cr
     with (
         patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock) as agent,
         patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock) as env,
-        patch("daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock) as balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as cap,
-        patch(
-            "daimon.core.turn.admission.is_over_channel_budget", new_callable=AsyncMock
-        ) as budget,
+        patch("daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock) as balance,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as cap,
+        patch("daimon.core.spend_gate.is_over_channel_budget", new_callable=AsyncMock) as budget,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
     ):
         agent.return_value = "agent_test_id"
@@ -3863,9 +3861,9 @@ async def test_run_thread_turn_when_unblocked_writes_usage_event_and_ledger_debi
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
@@ -3964,7 +3962,7 @@ async def test_run_thread_turn_reused_session_over_balance_blocks_and_skips_run_
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
@@ -4061,9 +4059,9 @@ async def test_run_thread_turn_reused_session_over_cap_blocks_and_skips_run_turn
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
     ):
@@ -4190,9 +4188,9 @@ async def test_run_thread_turn_reused_session_unblocked_writes_usage_event_and_l
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock) as mock_create,
         patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
     ):
@@ -4299,9 +4297,9 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
         ) as mock_create_session,
@@ -4399,9 +4397,9 @@ async def test_run_thread_turn_bind_phase_ceiling_does_not_escape_handle_app_men
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -4617,9 +4615,9 @@ async def test_bind_phase_failure_leaves_no_cancel_registry_entry(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -6464,7 +6462,7 @@ class TestPerTurnRoleUpsert:
                 "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
             ) as mock_resolve_env,
             patch(
-                "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+                "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
             ) as mock_over_balance,
             patch(
                 "daimon.core.turn.prepare.create_session", new_callable=AsyncMock

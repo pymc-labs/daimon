@@ -499,6 +499,134 @@ async def test_preview_and_purge_agree_on_microsoft_user_tokens(
     assert left == 0, "no refresh token may survive the purge"
 
 
+async def test_preview_and_purge_agree_on_web_people_and_their_sessions(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The web profile, its sign-in rows and admin grant are previewed and erased together."""
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.core.stores import web_identities as identities_store
+    from daimon.core.stores import web_oidc_tokens as oidc_tokens_store
+    from daimon.core.stores import web_roles as roles_store
+    from daimon.core.stores import web_sessions as sessions_store
+    from daimon.testing import make_web_person
+
+    tenant = await make_tenant(db_session, workspace_id="PV_WEB")
+    account = await make_account(db_session, tenant=tenant)
+    person = await make_web_person(db_session, tenant=tenant, account=account)
+    await identities_store.link_identity(
+        db_session,
+        tenant_id=tenant.id,
+        person_id=person.id,
+        provider="oidc",
+        issuer="https://id.example.com",
+        subject="sub-1",
+        label="Example",
+        groups=(),
+    )
+    await roles_store.set_workspace_role(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        role="owner",
+        granted_by_account_id=None,
+    )
+    await sessions_store.create_session(
+        db_session,
+        token_sha256=b"x" * 32,
+        provider="oidc",
+        issuer="https://id.example.com",
+        subject="sub-1",
+        people=[person],
+        ttl=timedelta(days=1),
+        now=datetime.now(tz=UTC),
+    )
+    await oidc_tokens_store.upsert_oidc_token(
+        db_session,
+        tenant_id=tenant.id,
+        person_id=person.id,
+        issuer="https://id.example.com",
+        access_token_enc=b"a",
+        refresh_token_enc=None,
+        expires_at=datetime.now(tz=UTC),
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.web_people.count == 1, "must count the web profile"
+    assert preview.web_admin_grants.count == 1, "must count the admin grant"
+    assert "1 web app profile" in summary_line(preview), "the privacy card must list it"
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+    assert report.db.web_people == 1, "purge must delete the profile it previewed"
+    assert report.db.web_admin_grants == 1, "purge must delete the grant it previewed"
+    async with db_session_factory() as session:
+        live = await sessions_store.get_live_session(
+            session, token_sha256=b"x" * 32, now=datetime.now(tz=UTC)
+        )
+        identities = await identities_store.find_identity(
+            session, provider="oidc", issuer="https://id.example.com", subject="sub-1"
+        )
+        token = await oidc_tokens_store.get_oidc_token(
+            session, person_id=person.id, issuer="https://id.example.com"
+        )
+    assert token is None, "the provider tokens must go with the person"
+    assert live is None, "the browser session must go with the person"
+    assert identities == [], "the sign-in identity must go with the person"
+
+
+async def test_purge_leaves_no_name_or_email_in_the_web_audit_trail(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Audit rows about an erased person or their invite stay, with no name or address."""
+    from daimon.core.stores import web_audit as audit_store
+    from daimon.core.stores import web_invites as invites_store
+    from daimon.testing import make_web_person
+
+    tenant = await make_tenant(db_session, workspace_id="PV_AUDIT")
+    account = await make_account(db_session, tenant=tenant)
+    person = await make_web_person(
+        db_session,
+        tenant=tenant,
+        account=account,
+        display_name="Grace Hopper",
+        email="g@example.com",
+    )
+    now = datetime.now(tz=UTC)
+    invite = await invites_store.create_invite(
+        db_session,
+        tenant_id=tenant.id,
+        token_sha256=b"i" * 32,
+        kind="invite",
+        expires_at=now + timedelta(days=1),
+        email="g@example.com",
+    )
+    await invites_store.set_accepted_by(db_session, invite_id=invite.id, person_id=person.id)
+    for action, kwargs in (
+        ("Suspended", {"target": "A person", "target_person_id": person.id}),
+        ("Created invite", {"target": "An invite", "target_invite_id": invite.id}),
+    ):
+        await audit_store.record(
+            db_session, tenant_id=tenant.id, actor_account_id=None, action=action, at=now, **kwargs
+        )
+    await db_session.commit()
+
+    await purge_account(sm=db_session_factory, account_id=account.id)
+
+    async with db_session_factory() as session:
+        rows = await audit_store.list_recent(session, tenant_id=tenant.id)
+    assert {r.action for r in rows} == {"Suspended", "Created invite"}, (
+        "the workspace keeps its record of what changed"
+    )
+    assert {r.target for r in rows} == {"A person", "An invite"}, "targets fall back to a label"
+    assert all(r.target_person_id is None and r.target_invite_id is None for r in rows), (
+        "the ids of erased people and invites are cleared"
+    )
+    text = " ".join(f"{r.target} {r.detail}" for r in rows)
+    assert "Grace" not in text and "example.com" not in text, "no name or email stays as text"
+
+
 async def test_collect_purge_preview_credential_requests_matches_purge_account(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -821,6 +949,8 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "platform_user_names": "platform_user_names",
         "teams_messages": "teams_messages",
         "microsoft_user_tokens": "microsoft_user_tokens",
+        "web_people": "web_people",
+        "web_admin_grants": "web_admin_grants",
         "mux_slots": "mux_slots",
         "mux_binding_generations": "mux_binding_generations",
         "mux_journal_sessions": "mux_journal_sessions",
@@ -877,6 +1007,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "message_feedback": "account_id FK -> accounts.id",
         "support_escalations": "account_id FK -> accounts.id",
         "direct_message_conversations": "account_id FK -> accounts.id",
+        # The web app: a person, with their identities, tokens and browser sessions, and
+        # the admin grants of the account.
+        "web_people": "account_id FK -> accounts.id",
+        "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "channel_admins": "user_ids + updated_by_account_id FK -> accounts.id",
         # Text account_id / principal_id with no FK: erased by `stores.mux_erasure`,
@@ -908,12 +1042,21 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # either account never leaves an identifier behind. Covered by
             # test_agent_co_owners.py.
             "agent_co_owners",
+            # A person's unsaved web edit of an agent: ON DELETE CASCADE with
+            # accounts.id, so erasing the account drops it.
+            "agent_drafts",
+            # The tenant agent's applied versions; the author is ON DELETE SET NULL.
+            "agent_versions",
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",
             # A tenant-wide channel budget; the only accounts.id FK is the admin
             # who set it, set_by_account_id with ON DELETE SET NULL.
             "channel_budgets",
+            # Same shape: a tenant-wide spend allowance (created_by_account_id) and a
+            # ledger entry (actor_account_id), each with ON DELETE SET NULL.
+            "spend_allowances",
+            "tenant_ledger",
             # A tenant-wide channel skill; the only accounts.id FK is the admin
             # who added it, added_by_account_id with ON DELETE SET NULL.
             "channel_skills",
@@ -974,6 +1117,14 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # A pending chat grant lives 15 minutes and both account references
             # are ON DELETE CASCADE, so erasing the account removes it.
             "github_grant_proposals",
+            # The web app's admin audit trail: the only accounts.id FK is the actor,
+            # actor_account_id with ON DELETE SET NULL, so erasure severs who acted while
+            # the workspace keeps its record of what changed. A person or invite it is
+            # about is an id that clears when they go; the text names no one.
+            "web_audit",
+            # A workspace's invite links: the only accounts.id FK is the admin who made
+            # one, ON DELETE SET NULL. An accepted invite cascades with its person.
+            "web_invites",
         }
     )
 

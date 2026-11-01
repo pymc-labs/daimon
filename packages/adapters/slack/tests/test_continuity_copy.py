@@ -222,9 +222,9 @@ async def test_session_preparation_failed_renders_copy_and_does_not_run_turn(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -311,9 +311,9 @@ async def test_responder_changed_without_handoff_renders_offer_and_does_not_run_
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -411,9 +411,9 @@ async def test_is_setup_is_false_for_a_handoff_binding(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -476,9 +476,9 @@ async def test_replaced_leaves_the_reply_as_the_agents_text(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -548,9 +548,9 @@ async def test_replaced_with_no_answer_posts_no_summary_message(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -622,9 +622,9 @@ async def test_outcome_replaced_after_loss_leaves_the_reply_as_the_agents_text(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -693,9 +693,9 @@ async def test_pending_posts_must_finish_copy_after_the_answer(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -767,9 +767,9 @@ async def test_session_busy_renders_must_finish_copy_and_does_not_run_turn(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -869,9 +869,9 @@ async def test_the_turn_marker_is_cleared_before_continuations_are_dispatched(
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -990,9 +990,9 @@ async def test_the_dispatcher_is_told_a_turn_is_running_when_the_row_still_says_
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,
@@ -1078,9 +1078,9 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
             "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
         ) as mock_resolve_env,
         patch(
-            "daimon.core.turn.admission.is_over_balance", new_callable=AsyncMock
+            "daimon.core.spend_gate.is_over_balance", new_callable=AsyncMock
         ) as mock_over_balance,
-        patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
+        patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock) as mock_over_cap,
         patch(
             "daimon.adapters.slack.app.bind_session", new_callable=AsyncMock
         ) as mock_bind_session,

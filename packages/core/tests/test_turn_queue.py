@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daimon.core.config import TurnQueueSettings
-from daimon.core.turn.slots import holding, release_turn_slot, wait_for_slot
+from daimon.core.turn.slots import (
+    holding,
+    register_spend_recheck,
+    release_turn_slot,
+    wait_for_slot,
+)
 from daimon.core.turn_queue import TurnQueue, TurnTicket, take_queue_window
 from structlog.testing import capture_logs
 
@@ -388,6 +393,46 @@ async def test_wait_for_slot_uses_the_held_ticket() -> None:
             over_balance.assert_awaited_once()  # it waited: the balance gate runs again
             assert queue.in_flight() == 1
     assert queue.in_flight() == 0  # holding released the slot
+
+
+@pytest.mark.parametrize(
+    ("block", "expected"),
+    [
+        (None, "started"),
+        ("balance_depleted", "balance_depleted"),
+        ("allowance_exhausted", "allowance_exhausted"),
+    ],
+)
+async def test_a_queued_turn_is_checked_by_admissions_recheck(
+    block: str | None, expected: str
+) -> None:
+    queue = make_queue(global_cap=1)
+    sm = MagicMock()
+    recheck = AsyncMock(return_value=block)
+    over_balance = AsyncMock(return_value=False)
+    with patch("daimon.core.turn.slots.is_over_balance", over_balance):
+        running = admit(queue, A)
+        waiting = admit(queue, A)
+        with holding(running):
+            register_spend_recheck(recheck)
+            with holding(waiting):
+                register_spend_recheck(recheck)
+                running.release()
+                result = await wait_for_slot(asyncio.Event(), sessionmaker=sm, tenant_id=A)
+    assert result == expected, "the recheck decides a turn that waited"
+    recheck.assert_awaited_once()
+    over_balance.assert_not_awaited()  # admission's recheck replaces the bare balance check
+    assert queue.in_flight() == 0, "a refused turn gives its slot back"
+
+
+async def test_a_turn_that_never_waited_is_not_rechecked() -> None:
+    queue = make_queue(global_cap=None)
+    recheck = AsyncMock(return_value="allowance_exhausted")
+    with holding(admit(queue, A)):
+        register_spend_recheck(recheck)
+        result = await wait_for_slot(asyncio.Event(), sessionmaker=MagicMock(), tenant_id=A)
+    assert result == "started", "admission's decision stands for a turn that ran at once"
+    recheck.assert_not_awaited()
 
 
 async def test_on_queued_runs_once_when_a_live_wait_begins() -> None:

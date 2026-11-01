@@ -21,6 +21,8 @@ AdmissionDenialReason = Literal[
     "balance_depleted",
     "cap_exceeded",
     "channel_budget_exceeded",
+    # The person's own spend allowance is used up (or a visitor has none).
+    "allowance_exhausted",
     "invoker_not_allowed",
     "writers_none",
     "runs_elsewhere",

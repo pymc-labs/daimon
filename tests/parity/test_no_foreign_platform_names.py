@@ -212,7 +212,6 @@ def test_participation_texts_name_the_platforms_own_word_for_the_workspace(
 #: its wording from the caller's platform (so a name appears only on that platform), or
 #: is operator-facing, or is the prompt source the Teams variant is cut from.
 _MAY_NAME: dict[str, frozenset[str]] = {
-    "packages/adapters/mcp/daimon/adapters/mcp/hub/slack_provider.py": frozenset({"slack"}),
     "packages/adapters/mcp/daimon/adapters/mcp/oauth_mcp.py": frozenset(_APPS),
     "packages/adapters/mcp/daimon/adapters/mcp/oauth_microsoft.py": frozenset({"teams"}),
     "packages/adapters/mcp/daimon/adapters/mcp/oauth_slack.py": frozenset({"slack"}),
@@ -226,6 +225,7 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/adapters/scheduler/daimon/adapters/scheduler/settings.py": frozenset({"discord"}),
     "packages/core/daimon/core/agent_guidance.py": frozenset(_APPS),
     "packages/core/daimon/core/platform_system.py": frozenset(_APPS),
+    "packages/core/daimon/core/platform_sign_in.py": frozenset({"discord", "slack"}),
     "packages/core/daimon/core/platform_words.py": frozenset(_APPS),
     "packages/core/daimon/core/microsoft_identity.py": frozenset({"teams"}),
     "packages/core/daimon/core/native_admins.py": frozenset({"discord"}),

@@ -49,7 +49,8 @@ def _load_yaml(path: Path) -> dict[str, object]:
     return cast(dict[str, object], loaded)
 
 
-def load_agent_specs(root: Path) -> list[AgentSpec]:
+def load_agent_specs(root: Path, *, templates: bool = False) -> list[AgentSpec]:
+    """The agents under ``root``; a ``template: true`` file is one only when ``templates``."""
     specs: list[AgentSpec] = []
     for path in sorted(root.glob("*.yaml")):
         data = _load_yaml(path)
@@ -61,8 +62,22 @@ def load_agent_specs(root: Path) -> list[AgentSpec]:
             raise DefaultsError(
                 f"{path}: filename stem {path.stem!r} must equal name {spec.name!r}"
             )
-        specs.append(spec)
+        if spec.template == templates:
+            specs.append(spec)
     return specs
+
+
+def load_agent_templates(root: Path) -> list[AgentSpec]:
+    """The ``template: true`` agents under ``root``: starting points, never provisioned."""
+    return load_agent_specs(root, templates=True)
+
+
+def load_skill_descriptions(root: Path) -> dict[str, str]:
+    """Each shipped skill's frontmatter description by name, from the skills under ``root``."""
+    return {
+        spec.name: spec.description
+        for spec, _body in (load_skill_spec(path) for path in load_skill_paths(root))
+    }
 
 
 def load_platform_skills(

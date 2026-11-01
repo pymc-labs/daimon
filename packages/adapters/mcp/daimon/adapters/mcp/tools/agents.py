@@ -10,9 +10,9 @@ from __future__ import annotations
 import contextlib
 import datetime
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, cast, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, cast
 
 import anthropic
 import anyio
@@ -21,7 +21,6 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
 from anthropic.types.beta.agent_create_params import Tool
-from anthropic.types.beta.beta_managed_agents_agent import Tool as MATool
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -54,30 +53,23 @@ from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     resolve_setup_agent,
 )
-from daimon.core import channel_backend
+from daimon.core import agent_editing, channel_backend
 from daimon.core.agent_fork import copy_agent
-from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
-from daimon.core.agent_ownership import agent_name_lock, member_copies_lock, record_agent_creator
-from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
+from daimon.core.agent_ownership import agent_name_lock, member_copies_lock
+from daimon.core.authz import Surface
+from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, list_agents_by_tenant
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import (
-    MA_METADATA_KEY_ACCOUNT,
-    MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_SETUP_HIDDEN,
 )
-from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agent
-from daimon.core.defaults.report import Action as ReconcileAction
 from daimon.core.defaults.skills import resolve_custom_skill_titles, resolve_skill_names
-from daimon.core.defaults.spec_merge import merge_mcp_servers_with_ma, merge_skills_with_ma
 from daimon.core.errors import DaimonError, DefaultsError
-from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import (
     McpServerReplaceRefusedError,
@@ -88,7 +80,7 @@ from daimon.core.mcp_attach import (
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.model_presets import ModelSelection, model_choice_id
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
+from daimon.core.mux_compat import archive_agent, retrieve_agent
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
 from daimon.core.specs import AgentSpec, SkillRepo, merge_default_agent_toolset
@@ -310,53 +302,10 @@ _DEFAULT_MCP_TOOLSET_CONFIG: Final[dict[str, Any]] = {
 }
 
 
-def _ma_tool_to_param(tool: MATool) -> Tool:
-    """Dump an MA response Tool to a Params dict suitable for the SDK update body."""
-    return cast(Tool, tool.model_dump(mode="json", exclude_none=True))
+_ma_tool_to_param = agent_editing.ma_tool_to_param
 
 
-def _union_tools(spec_tools: list[Tool], ma_agent: BetaManagedAgentsAgent) -> list[Tool]:
-    """Union caller's tools with MA's existing tools.
-
-    Caller wins on collision; MA-only entries are appended in MA order. Keying:
-
-    * `mcp_toolset`     — by `mcp_server_name`
-    * `agent_toolset_20260401` — singleton (MA allows only one)
-    * `custom`         — by `name`
-
-    The chat `update_agent` is an
-    additions surface (panel handles removals), so a per-field replace would
-    drop everything the user didn't explicitly resend. Mirror the panel,
-    which goes through `reconcile_agent`'s merge helpers.
-    """
-    spec_mcp_names: set[str] = set()
-    spec_custom_names: set[str] = set()
-    spec_has_agent_toolset = False
-    for tool in spec_tools:
-        ttype = tool.get("type")
-        if ttype == "mcp_toolset":
-            name = tool.get("mcp_server_name")
-            if isinstance(name, str):
-                spec_mcp_names.add(name)
-        elif ttype == "agent_toolset_20260401":
-            spec_has_agent_toolset = True
-        elif ttype == "custom":
-            name = tool.get("name")
-            if isinstance(name, str):
-                spec_custom_names.add(name)
-
-    extras: list[Tool] = []
-    for entry in ma_agent.tools:
-        if entry.type == "mcp_toolset":
-            if entry.mcp_server_name in spec_mcp_names:
-                continue
-        elif entry.type == "agent_toolset_20260401":
-            if spec_has_agent_toolset:
-                continue
-        elif entry.type == "custom" and entry.name in spec_custom_names:
-            continue
-        extras.append(_ma_tool_to_param(entry))
-    return list(spec_tools) + extras
+_union_tools = agent_editing.union_tools
 
 
 def _reject_system_agent(agent: BetaManagedAgentsAgent) -> None:
@@ -385,21 +334,7 @@ def _reject_system_agent(agent: BetaManagedAgentsAgent) -> None:
         raise ToolError(rejection)
 
 
-def _system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
-    """Return why chat tools cannot modify ``agent``, or ``None`` if they can."""
-    if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
-        return (
-            f"agent '{agent.name}' is managed by defaults; chat tools cannot modify it. "
-            "Anyone talking to it can make their own editable copy with fork_agent (an "
-            "admin can copy it from anywhere), or create_agent a new one."
-        )
-    if agent.metadata.get(MA_METADATA_KEY_ACCOUNT) is None:
-        return (
-            f"agent '{agent.name}' is a system agent; chat tools cannot modify it. "
-            "Anyone talking to it can make their own editable copy with fork_agent (an "
-            "admin can copy it from anywhere), or create_agent a new one."
-        )
-    return None
+_system_agent_rejection = agent_editing.system_agent_rejection
 
 
 def _setup_hidden(agent: BetaManagedAgentsAgent, auth: AuthIdentity) -> bool:
@@ -413,17 +348,41 @@ async def _reject_guild_name_collision(
     auth: AuthIdentity,
     name: str,
 ) -> None:
-    """Raise ToolError if any non-archived agent with this name already exists in the tenant.
-
-    Tenant-scoped name uniqueness matches the resolver's (daimon_tenant, daimon_name)
-    identity model exactly (ma_index keys on tenant+name only); legacy personal-stamped
-    agents now also block. Any non-empty match raises regardless of owner.
-    """
-    matches = await find_agents_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
-    if matches:
-        raise ToolError(
-            f"agent '{name}' already exists in this {space_noun(auth.platform)} — pick another name"
+    """Raise ToolError if any non-archived agent with this name already exists in the tenant."""
+    try:
+        await agent_editing.reject_name_taken(
+            _edit_deps(runtime), tenant_id=auth.tenant_id, name=name
         )
+    except agent_editing.AgentNameTakenError as exc:
+        raise ToolError(_name_taken(auth, name)) from exc
+
+
+def _name_taken(auth: AuthIdentity, name: str) -> str:
+    return f"agent '{name}' already exists in this {space_noun(auth.platform)} — pick another name"
+
+
+def _edit_deps(runtime: McpRuntime) -> agent_editing.AgentEditDeps:
+    """The shared edit service's dependencies, from this server's runtime."""
+    public_url = (
+        str(runtime.settings.mcp.public_url)
+        if runtime.settings.mcp.public_url is not None
+        else None
+    )
+    return agent_editing.AgentEditDeps(
+        client=runtime.client,
+        session_factory=runtime.session_factory,
+        public_url=public_url,
+        denied_tools=runtime.settings.tool_safety.denied,
+    )
+
+
+def _edit_actor(auth: AuthIdentity) -> agent_editing.AgentActor:
+    return agent_editing.AgentActor(
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        surface=Surface.CONFIG,
+    )
 
 
 async def _free_agent_name(runtime: McpRuntime, auth: AuthIdentity, name: str) -> str:
@@ -514,74 +473,16 @@ async def _get_agent_impl(
     return info.model_copy(update={"owned_by_you": owned, "owner": owner})
 
 
-#: The built-in tools an agent's toolset can turn on or off (Managed Agents' names).
-BuiltinToolName = Literal[
-    "bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"
-]
-_TOOLSET_TYPE: Final[str] = "agent_toolset_20260401"
+BuiltinToolName = agent_editing.BuiltinToolName
+_builtin_enabled = agent_editing.builtin_enabled
 
 
-def _builtin_enabled(tools: list[Tool], tool: str) -> bool | None:
-    """Whether any of the agent's toolsets turns `tool` on; None when it has none."""
-    found: bool | None = None
-    for entry in tools:
-        if not str(entry.get("type", "")).startswith("agent_toolset"):
-            continue
-        raw = cast(dict[str, Any], entry)
-        default = cast(dict[str, Any], raw.get("default_config") or {}).get("enabled")
-        on = default is not False
-        for config in raw.get("configs") or ():
-            if config.get("name") == tool:
-                enabled = config.get("enabled")
-                on = bool(enabled) if enabled is not None else default is not False
-                break
-        found = on or bool(found)
-    return found
-
-
-def _with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
-    """`tools` with `tool` turned on or off; any permission policy it had is kept.
-
-    An agent with no toolset gains one holding only `tool`, never the defaults.
-    """
-    if _builtin_enabled(tools, tool) is None:
-        only: Tool = cast(
-            Tool,
-            {
-                "type": _TOOLSET_TYPE,
-                "default_config": {"enabled": False},
-                "configs": [{"name": tool, "enabled": enabled}],
-            },
-        )
-        return [*tools, only]
-    updated: list[Tool] = []
-    for entry in tools:
-        if not str(entry.get("type", "")).startswith("agent_toolset"):
-            updated.append(entry)
-            continue
-        raw = dict(cast(dict[str, Any], entry))
-        configs = [dict(config) for config in raw.get("configs") or ()]
-        for config in configs:
-            if config.get("name") == tool:
-                config["enabled"] = enabled
-                break
-        else:
-            configs.append({"name": tool, "enabled": enabled})
-        raw["configs"] = configs
-        updated.append(cast(Tool, raw))
-    return updated
-
-
-_BUILTIN_NAMES: Final[tuple[str, ...]] = get_args(BuiltinToolName)
+_with_builtin = agent_editing.with_builtin
 
 
 def _denied_builtins(runtime: McpRuntime) -> frozenset[str]:
-    """Built-ins whoever runs Daimon forbids: ``builtin/<name>`` in tool-safety ``denied``.
-
-    Only that explicit form: a bare name there keeps meaning an MCP tool.
-    """
-    denied = runtime.settings.tool_safety.denied
-    return frozenset(name for name in _BUILTIN_NAMES if f"builtin/{name}" in denied)
+    """Built-ins whoever runs Daimon forbids: ``builtin/<name>`` in tool-safety ``denied``."""
+    return agent_editing.denied_builtins(runtime.settings.tool_safety.denied)
 
 
 def refuse_forbidden_builtins(runtime: McpRuntime, before: list[Tool], after: list[Tool]) -> None:
@@ -589,37 +490,17 @@ def refuse_forbidden_builtins(runtime: McpRuntime, before: list[Tool], after: li
 
     The one check create_agent, update_agent and set_agent_builtin_tool share.
     """
-    turned_on = sorted(
-        name
-        for name in _denied_builtins(runtime)
-        if _builtin_enabled(after, name) and not _builtin_enabled(before, name)
-    )
+    turned_on = agent_editing.forbidden_turned_on(_denied_builtins(runtime), before, after)
     if turned_on:
-        raise ToolError(
-            f"Whoever runs Daimon has turned {', '.join(turned_on)} off for every agent "
-            "here. Nothing changed."
-        )
+        raise ToolError(agent_editing.forbidden_builtins_message(turned_on))
 
 
-def _explicitly_on(tools: list[Tool], tool: str) -> bool:
-    """Whether a toolset in `tools` names `tool` and turns it on (not just by default)."""
-    for entry in tools:
-        if str(entry.get("type", "")).startswith("agent_toolset"):
-            for config in cast(dict[str, Any], entry).get("configs") or ():
-                if config.get("name") == tool and config.get("enabled") is True:
-                    return True
-    return False
+_explicitly_on = agent_editing.explicitly_on
 
 
 def _forbidden_builtins_off(runtime: McpRuntime, tools: list[Tool]) -> list[Tool]:
     """A new agent's default toolset with every forbidden built-in written as off."""
-    denied = _denied_builtins(runtime)
-    if not denied:
-        return tools
-    tools = merge_default_agent_toolset(tools)
-    for name in sorted(denied):
-        tools = _with_builtin(tools, name, False)
-    return tools
+    return agent_editing.forbidden_builtins_off(_denied_builtins(runtime), tools)
 
 
 async def _set_agent_builtin_tool_impl(
@@ -663,25 +544,16 @@ async def _set_agent_builtin_tool_impl(
             update={"applies": f"{tool} is already {state} for {name}{reason}. Nothing changed."}
         )
 
-    async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
-        tools = _with_builtin([_ma_tool_to_param(t) for t in fresh.tools], tool, enabled)
-        return await update_agent(
-            runtime.client,
-            fresh.id,
-            version=fresh.version,
-            payload={"tools": tools},
-            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
-        )
-
     try:
-        updated = await update_agent_with_version_retry(
-            runtime.client,
-            agent.id,
-            _apply,
-            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        updated = await agent_editing.write_builtin_tool(
+            _edit_deps(runtime),
+            actor=_edit_actor(auth),
+            ma_agent_id=agent.id,
+            tool=tool,
+            enabled=enabled,
         )
-    except anthropic.ConflictError as exc:
-        raise ToolError("the agent was modified concurrently — please retry the operation") from exc
+    except agent_editing.AgentEditError as exc:
+        raise ToolError(str(exc)) from exc
     info = await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
     if _setup_hidden(updated, auth):
         info = info.for_member()
@@ -698,19 +570,10 @@ async def _set_agent_builtin_tool_impl(
 
 
 def _reject_unknown_model(model: ModelSelection) -> None:
-    """Raise unless ``model`` is one this deployment meters and allows.
-
-    The panel paths have validated free-text model input against
-    ALLOWED_MODEL_IDS; the chat paths never did, so a typo or a
-    hallucinated id was accepted here and only surfaced later as a session that
-    would not start. An unpriced id is also invisible to cost accounting —
-    ``pricing.cost_of`` returns None for a model it has no rates for, so the
-    turn is billed by Anthropic and recorded as free by us.
-    """
-    choice_id = model_choice_id(model)
-    if choice_id not in ALLOWED_MODEL_IDS:
-        allowed = ", ".join(ALLOWED_MODEL_IDS)
-        raise ToolError(f"Model '{choice_id}' is not available. Choose one of: {allowed}")
+    """Raise unless ``model`` is one this deployment meters and allows."""
+    refusal = agent_editing.unknown_model_refusal(model)
+    if refusal is not None:
+        raise ToolError(refusal)
 
 
 async def _move_this_thread(
@@ -947,77 +810,41 @@ async def _create_agent_impl(
         # The toolset the create sends (the base one added if missing) turns none on.
         refuse_forbidden_builtins(runtime, [], merge_default_agent_toolset(spec.tools))
     owner = may_own(auth)
-    async with contextlib.AsyncExitStack() as stack:
-        if owner:
-            # Check and create under one lock, so a concurrent creator of the same
-            # name is refused instead of owning (or rewriting) this agent.
-            await stack.enter_async_context(
-                agent_name_lock(runtime.session_factory, tenant_id=auth.tenant_id, name=spec.name)
+
+    start: Callable[[], Awaitable[None]] | None = None
+    if backend is not None:
+        target, target_model = backend
+
+        async def start_there() -> None:
+            nonlocal started
+            started = await _start_on_backend(
+                runtime, auth, origin, spec.name, target, target_model
             )
-        await _reject_guild_name_collision(runtime, auth, spec.name)
-        public_url = (
-            str(runtime.settings.mcp.public_url)
-            if runtime.settings.mcp.public_url is not None
-            else None
+
+        start = start_there
+
+    # An agent on another provider exists only as the Claude record its definition is
+    # saved with: anything that stops it starting there removes it, so it never runs
+    # or bills on Claude.
+    try:
+        ma_agent_id = await agent_editing.create_agent(
+            _edit_deps(runtime),
+            actor=_edit_actor(auth),
+            spec=spec,
+            owner=owner,
+            start=start,
         )
-        try:
-            outcome = await reconcile_agent(
-                runtime.client,
-                spec,
-                tenant_id=auth.tenant_id,
-                dry_run=False,
-                account_id=derive_guild_account_uuid(auth.tenant_id),
-                public_url=public_url,
-                # New agents created from chat are user-owned, NOT seeded resources —
-                # managed=True would stamp daimon_managed=true and make them
-                # sweep-eligible, so the next defaults apply (every boot/deploy)
-                # archives them because they aren't in the seeded spec list.
-                managed=False,
-                references=runtime.session_factory,
-                # Never update an agent that took the name since the check above.
-                create_only=True,
-            )
-        except AgentNameTaken as exc:
-            raise ToolError(
-                f"agent '{spec.name}' already exists in this {space_noun(auth.platform)} "
-                "— pick another name"
-            ) from exc
-        if outcome.anthropic_id is None:
-            raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
-        created = outcome.action == ReconcileAction.CREATED
-        # From here on an agent on another provider exists only as the Claude record its
-        # definition is saved with: anything that stops it starting there (a refusal,
-        # an error, a cancellation) removes it, so it never runs or bills on Claude.
-        try:
-            if owner and created:
-                # The person who created it owns it: they may edit it without an admin.
-                await record_agent_creator(
-                    runtime.session_factory,
-                    tenant_id=auth.tenant_id,
-                    agent_id=derive_agent_uuid(
-                        tenant_id=auth.tenant_id, ma_agent_id=outcome.anthropic_id
-                    ),
-                    account_id=auth.account_id,
-                )
-            if backend is not None and created:
-                started = await _start_on_backend(
-                    runtime, auth, origin, spec.name, backend[0], backend[1]
-                )
-        except BaseException as exc:
-            if backend is None or not created:
-                raise
-            # Shielded: a cancellation (anyio's re-cancels every await) must not cancel
-            # the removal too; it completes, then the cancellation goes on.
-            removed = False
-            with anyio.CancelScope(shield=True):
-                removed = await _discard_created(runtime, auth, outcome.anthropic_id)
-            if not removed and isinstance(exc, Exception):
-                raise ToolError(
-                    f"{spec.name} couldn't start on {provider_name(backend[0])}, and removing "
-                    "it failed too, so it may still exist on Claude. Ask an admin to archive "
-                    f"{spec.name}."
-                ) from exc
-            raise
+    except agent_editing.AgentNameTakenError as exc:
+        raise ToolError(_name_taken(auth, spec.name)) from exc
+    except agent_editing.AgentDiscardFailedError as exc:
+        there = provider_name(backend[0]) if backend is not None else "its provider"
+        raise ToolError(
+            f"{spec.name} couldn't start on {there}, and removing "
+            "it failed too, so it may still exist on Claude. Ask an admin to archive "
+            f"{spec.name}."
+        ) from exc.__cause__
+    except agent_editing.AgentEditError as exc:
+        raise ToolError(str(exc)) from exc
     queue_agent_face(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -1027,7 +854,7 @@ async def _create_agent_impl(
     )
     ma_agent = await retrieve_agent(
         runtime.client,
-        outcome.anthropic_id,
+        ma_agent_id,
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
     )
     # agents.create succeeded — always return AgentInfo even if sync fails.
@@ -1135,52 +962,17 @@ async def start_copy_on_source_backend(
 
 
 async def _discard_created(runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str) -> bool:
-    """Archive an agent create_agent made in this call and couldn't finish; False when
-    the archive itself failed (logged at error: the agent may still be live)."""
-    try:
-        await archive_agent(
-            runtime.client,
-            ma_agent_id,
-            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
-        )
-    except Exception as exc:
-        log.error(
-            "create_agent.discard_failed",
-            agent_id=ma_agent_id,
-            error_type=type(exc).__name__,
-            exc_info=True,
-        )
-        return False
-    return True
+    """Archive an agent this call made and couldn't finish; False when that failed too."""
+    return await agent_editing.discard_created(_edit_deps(runtime), _edit_actor(auth), ma_agent_id)
 
 
 def _reject_reserved_servers(
     runtime: McpRuntime, mcp_servers: list[BetaManagedAgentsURLMCPServerParams]
 ) -> None:
-    """The same reserved-name guard `attach_mcp_server` applies, for `update_agent`.
-
-    Its merge replaces servers by name, so without this a caller could re-point
-    `daimon-mcp` at any URL. Re-sending the canonical entry unchanged (a
-    get_agent round trip) is allowed; anything else under the reserved name,
-    or the deployment's own URL under another name, is refused.
-    """
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    for server in mcp_servers:
-        name = str(server.get("name") or "")
-        url = str(server.get("url") or "")
-        if (
-            name == DAIMON_MCP_SERVER_NAME
-            and public_url is not None
-            and url.rstrip("/") == public_url.rstrip("/")
-        ):
-            continue
-        rejection = get_reserved_mcp_rejection(server_name=name, url=url, public_url=public_url)
-        if rejection is not None:
-            raise ToolError(f"update_agent: {rejection} Nothing was saved.")
+    """The same reserved-name guard `attach_mcp_server` applies, for `update_agent`."""
+    rejection = agent_editing.reserved_server_rejection(mcp_servers, _edit_deps(runtime).public_url)
+    if rejection is not None:
+        raise ToolError(f"update_agent: {rejection} Nothing was saved.")
 
 
 async def _update_agent_impl(
@@ -1259,118 +1051,24 @@ async def _update_agent_impl(
         except DefaultsError as exc:
             raise ToolError(str(exc)) from exc
 
-    # Build scalar patch outside the closure (scalars are caller-supplied, not
-    # derived from the agent's current state).
-    scalar_patch: dict[str, Any] = {k: v for k, v in scalars.items() if v is not None}
-    if "system" in scalar_patch:
-        scalar_patch["system"] = apply_credential_guidance(scalar_patch["system"])
-
-    # Version-retry closure. All agent-derived unions (skills, mcp_servers,
-    # tools) are recomputed from `fresh` on every attempt so a retry after a stale-
-    # version conflict picks up any concurrent mutations rather than re-applying a
-    # stale merge. MA treats list fields as per-field replaces; chat tools are an
-    # additions surface (dedicated removal tools handle removals), so union caller's values with
-    # MA's current state.
-    async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
-        patch: dict[str, Any] = dict(scalar_patch)
-        if resolved_skills is not None:
-            patch["skills"] = merge_skills_with_ma(resolved_skills, fresh)
-            merged_skill_count = len(patch["skills"])
-            if merged_skill_count > AGENT_SKILL_CAP:
-                raise ToolError(
-                    f"Cannot attach skills: the merged skill set ({merged_skill_count}) exceeds "
-                    f"this organization's per-agent skill limit ({AGENT_SKILL_CAP}). No skills "
-                    f"were changed on '{name}'. Attach fewer skills, "
-                    "or use remove_skill before adding more."
-                )
-        if mcp_servers is not None:
-            if not mcp_replace_allowed and any(
-                replaced_server_url(
-                    fresh, server_name=str(entry.get("name")), url=str(entry.get("url"))
-                )
-                for entry in mcp_servers
-            ):
-                # Attached under this name at another URL since the check above.
-                raise ToolError(
-                    f"'{name}' now has one of these server names at another URL; repointing "
-                    "it needs an admin. Nothing was changed."
-                )
-            patch["mcp_servers"] = merge_mcp_servers_with_ma(mcp_servers, fresh)
-            # merge_mcp_servers_with_ma's return type is `list | None` at the
-            # signature level (None only for a None input), but `mcp_servers`
-            # is guaranteed non-None in this branch, so the merged result is
-            # never actually None — `or []` only satisfies the static type.
-            merged_mcp_count = len(patch["mcp_servers"] or [])
-            if merged_mcp_count > AGENT_MCP_CAP:
-                raise ToolError(
-                    f"Cannot attach connections: the merged set ({merged_mcp_count}) "
-                    f"exceeds this organization's per-agent connection limit ({AGENT_MCP_CAP}). "
-                    f"Nothing was changed on '{name}'. Attach fewer, or use "
-                    "detach_mcp_server before adding more."
-                )
-        if tools is not None:
-            patch["tools"] = _union_tools(tools, fresh)
-        # Attaching skills to an agent that lacks agent_toolset_20260401 produces a
-        # skills-unusable hole — MA rejects session creation ("skills require the read tool").
-        # If this update includes skills, ensure the effective tools list carries the base toolset.
-        if "skills" in patch:
-            effective_tools: list[Tool] = patch.get("tools") or [
-                _ma_tool_to_param(t) for t in fresh.tools
-            ]
-            has_base_toolset = any(
-                entry.get("type") == "agent_toolset_20260401" for entry in effective_tools
-            )
-            if not has_base_toolset:
-                patch["tools"] = merge_default_agent_toolset(effective_tools)
-        if "tools" in patch:
-            # On the final tools: a skill's base toolset can turn built-ins on too.
-            refuse_forbidden_builtins(
-                runtime, [_ma_tool_to_param(t) for t in fresh.tools], patch["tools"]
-            )
-        return await update_agent(
-            runtime.client,
-            fresh.id,
-            version=fresh.version,
-            payload=patch,
-            scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
-        )
-
-    # An MCP server change is serialized with the token forms' attach-then-
-    # publish for this agent; other fields need no lock.
-    mcp_lock = (
-        agent_mcp_write_lock(
-            runtime.session_factory,
-            tenant_id=auth.tenant_id,
-            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id),
-        )
-        if mcp_servers is not None
-        else contextlib.nullcontext()
-    )
     try:
-        async with mcp_lock:
-            updated = await update_agent_with_version_retry(
-                runtime.client,
-                agent.id,
-                _apply,
-                scope=resource_scope(
-                    tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)
-                ),
-            )
-    except anthropic.ConflictError as exc:
-        # Residual conflict after the one retry — surface as a clean ToolError.
-        raise ToolError("the agent was modified concurrently — please retry the operation") from exc
-    except anthropic.BadRequestError as exc:
-        # MA caps skills-per-agent org-wide. When the merged skill set blows
-        # the cap, MA 400s and (before this) the raw pydantic/SDK error leaked
-        # to chat, prompting the model to silently drop skills. Surface a clear,
-        # actionable message instead — and leave the agent untouched.
-        if resolved_skills is not None and "exceeds maximum" in str(exc).lower():
-            raise ToolError(
-                "Cannot attach skills: the merged skill set exceeds this organization's "
-                "per-agent skill limit. No skills were changed. Attach fewer skills, or "
-                f"use remove_skill on '{name}' before adding more."
-            ) from exc
-        raise
+        updated = await agent_editing.write_agent_patch(
+            _edit_deps(runtime),
+            actor=_edit_actor(auth),
+            agent=agent,
+            patch=agent_editing.AgentPatch(
+                model=model,
+                description=description,
+                system=system,
+                tools=tools,
+                mcp_servers=mcp_servers,
+                skills=resolved_skills,
+            ),
+            label=name,
+            mcp_replace_allowed=mcp_replace_allowed,
+        )
+    except agent_editing.AgentEditError as exc:
+        raise ToolError(str(exc)) from exc
     result = await _build_agent_info(runtime.client, updated, tenant_id=auth.tenant_id)
     if _setup_hidden(updated, auth):
         # The owner's edit answers with capabilities only: never the inherited setup.

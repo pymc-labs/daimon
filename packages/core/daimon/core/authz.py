@@ -122,6 +122,7 @@ class Surface(StrEnum):
     ROUTINE = "routine"  # a scheduled run posting into a channel
     HANDOFF = "handoff"  # a task handed to another agent in a thread
     CONFIG = "config"  # a configuration write (request tool, form, OAuth, direct tool)
+    WEB = "web"  # the web app's chat: only the person sees it, but in no workspace channel
 
 
 #: Surfaces whose output reaches only the acting admin.
@@ -523,6 +524,12 @@ def _decide_shared_agent_change(req: Request) -> Decision:
     return _deny("admin_required")
 
 
+def _channel_bound(agent: AgentRef) -> bool:
+    """An agent ruled to channels without the web chat. Naming the web chat in every
+    rule lets it answer there, even as a channel's own agent."""
+    return agent.permissions.keeps_off_web
+
+
 def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.subject.client or req.hold is not None:
         # No administrator authority applies to a client or a held request.
@@ -550,6 +557,13 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.RUN_AGENT:
+        # A web chat is in no channel, so an agent kept to channels never answers there,
+        # whoever asks, unless every rule on it names the web chat.
+        if req.surface is Surface.WEB and agent.resolved:
+            if _channel_bound(agent):
+                return _deny("runs_elsewhere")
+            if agent.permissions.runs_in:
+                return ALLOW
         if (
             subject.is_admin
             and admin_only_surface

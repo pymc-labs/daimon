@@ -17,6 +17,7 @@ from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core import channel_backend
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.billing import credit_note_slug, manual_credit
 from daimon.core.config import load_settings
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -489,23 +490,17 @@ async def tenants_credit(
     request_id: str | None,
 ) -> None:
     amount = _usd(usd, positive=True)
-    if not note.strip():
-        raise typer.BadParameter("note must not be empty")
-    note_slug = re.sub(r"[_\W]+", "-", note.strip().lower()).strip("-")[:64].rstrip("-")
-    if not note_slug:
-        raise typer.BadParameter("note must contain letters or numbers")
+    try:
+        credit_note_slug(note)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=workspace_id)
-    request_id = request_id or str(uuid.uuid4())
-    key = f"manual:credit:{tenant_id}:{note_slug}:usd{amount:.2f}:{request_id}"
     async with rt.sessionmaker() as session, session.begin():
-        inserted = await tenant_ledger.insert_entry(
-            session,
-            tenant_id=tenant_id,
-            delta_usd=amount,
-            reason="manual_credit",
-            idempotency_key=key,
+        credit = await manual_credit(
+            session, tenant_id=tenant_id, amount=amount, note=note, request_id=request_id
         )
         balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
+    inserted, request_id, key = credit.inserted, credit.request_id, credit.key
     status = "credited" if inserted else "already credited"
     console.print(f"{platform}:{workspace_id} balance: ${balance:.2f} ({status})")
     console.print(f"credit id: {request_id}")

@@ -75,8 +75,11 @@ async def insert_entry(
     channel_id: str | None = None,
     occurred_at: datetime | None = None,
     estimate: LedgerEstimate | None = None,
+    actor_account_id: uuid.UUID | None = None,
 ) -> bool:
     """INSERT ... ON CONFLICT (idempotency_key) DO NOTHING. True iff a row was inserted.
+
+    `actor_account_id` is the person who made a manual credit from the web.
 
     `channel_id` is set on debits only: the channel whose budget the spend counts against.
     `estimate` marks a debit priced from incomplete provider counts.
@@ -102,6 +105,7 @@ async def insert_entry(
             payment_intent=payment_intent,
             channel_id=channel_id,
             estimate=estimate,
+            actor_account_id=actor_account_id,
             **dated,
         )
         .on_conflict_do_nothing(index_elements=["idempotency_key"])
@@ -242,6 +246,28 @@ async def list_for_tenant(
     stmt = select(TenantLedger).where(TenantLedger.tenant_id == tenant_id)
     result = await session.execute(stmt)
     return [TenantLedgerRow.model_validate(r, from_attributes=True) for r in result.scalars().all()]
+
+
+async def list_entries_excluding_reasons(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    reasons: Sequence[str],
+    limit: int,
+) -> list[TenantLedgerRow]:
+    """The tenant's newest ledger rows whose reason is not in `reasons`, newest first.
+
+    Pass the spend reasons to read what changed the balance other than model use:
+    top-ups, grants, clawbacks.
+    """
+    stmt = (
+        select(TenantLedger)
+        .where(TenantLedger.tenant_id == tenant_id, TenantLedger.reason.not_in(reasons))
+        .order_by(TenantLedger.occurred_at.desc(), TenantLedger.id)
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [TenantLedgerRow.model_validate(r, from_attributes=True) for r in rows]
 
 
 async def get_by_payment_intent(

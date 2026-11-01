@@ -9,10 +9,11 @@ import pytest
 import pytest_asyncio
 from daimon.core._models import UsageEvent
 from daimon.core.pricing import MODEL_PRICING, cost_of
-from daimon.core.stores import usage_events
+from daimon.core.stores import tenants, usage_events
+from daimon.core.stores.domain import TenantRow
 from daimon.testing.factories import make_tenant, make_usage_event
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -765,3 +766,150 @@ async def test_cost_aggregates_equal_the_per_row_priced_sum(db_session: AsyncSes
         "user aggregate must equal that user's per-row priced sum"
     )
     assert u1_total > 0 and tenant_total > u1_total, "fixture must exercise real costs"
+
+
+async def test_record_stores_agent_id_and_the_row_reads_it_back(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    await make_usage_event(db_session, tenant=None, agent_id="agent_1")
+    await usage_events.record(
+        db_session,
+        tenant_id=tenant_id,
+        platform_user_id="u1",
+        managed_session_id="s9",
+        model="claude-opus-4-7",
+        model_usage=ma_model_usage(input_tokens=1, output_tokens=1),
+        event_id="evt_9",
+        agent_id="agent_2",
+    )
+    rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant_id)
+    assert [r.agent_id for r in rows] == ["agent_2"], "the row model carries agent_id"
+
+
+async def _spend(
+    session: AsyncSession, tenant_id: uuid.UUID, *, user: str | None, agent: str | None, n: int
+) -> None:
+    """One $5 Opus call (a million input tokens) for `user` on `agent`."""
+    await usage_events.record(
+        session,
+        tenant_id=tenant_id,
+        platform_user_id=user,
+        managed_session_id=f"s{n}",
+        model="claude-opus-4-7",
+        model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=0),
+        event_id=f"evt_{n}",
+        agent_id=agent,
+    )
+
+
+async def test_costs_by_agent_for_user_since_splits_one_persons_spend_by_agent(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    await _spend(db_session, tenant_id, user="u1", agent="a1", n=1)
+    await _spend(db_session, tenant_id, user="u1", agent="a1", n=2)
+    await _spend(db_session, tenant_id, user="u1", agent=None, n=3)
+    await _spend(db_session, tenant_id, user="u2", agent="a2", n=4)
+    past = datetime.now(UTC) - timedelta(days=1)
+    by_agent = await usage_events.costs_by_agent_for_user_since(
+        db_session, tenant_id=tenant_id, platform_user_id="u1", since=past
+    )
+    assert by_agent == {"a1": 10.0, None: 5.0}, "u1's spend by agent, unattributed under None"
+    future = datetime.now(UTC) + timedelta(hours=1)
+    assert not await usage_events.costs_by_agent_for_user_since(
+        db_session, tenant_id=tenant_id, platform_user_id="u1", since=future
+    ), "the window excludes rows recorded before it"
+
+
+async def test_costs_by_agent_in_tenant_since_matches_the_tenant_total(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    await _spend(db_session, tenant_id, user="u1", agent="a1", n=1)
+    await _spend(db_session, tenant_id, user="u2", agent="a1", n=2)
+    await _spend(db_session, tenant_id, user="u2", agent="a2", n=3)
+    await _spend(db_session, tenant_id, user=None, agent="a2", n=4)
+    past = datetime.now(UTC) - timedelta(days=1)
+    by_agent = await usage_events.costs_by_agent_in_tenant_since(
+        db_session, tenant_id=tenant_id, since=past
+    )
+    total = await usage_events.cost_for_tenant_since(db_session, tenant_id=tenant_id, since=past)
+    assert by_agent == {"a1": 10.0, "a2": 5.0}, "unattributed-user rows are left out"
+    assert sum(by_agent.values()) == total, "the agents add up to the tenant total"
+
+
+async def test_cost_for_user_in_tenant_since_with_an_agent_counts_only_that_agent(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    await _spend(db_session, tenant_id, user="u1", agent="a1", n=1)
+    await _spend(db_session, tenant_id, user="u1", agent="a2", n=2)
+    past = datetime.now(UTC) - timedelta(days=1)
+    kwargs = {"tenant_id": tenant_id, "platform_user_id": "u1", "since": past}
+    only_a1 = await usage_events.cost_for_user_in_tenant_since(db_session, agent_id="a1", **kwargs)
+    everything = await usage_events.cost_for_user_in_tenant_since(db_session, **kwargs)
+    assert (only_a1, everything) == (5.0, 10.0), "agent_id narrows the window sum; None is all"
+
+
+async def test_agent_reads_split_cost_and_turns_and_honour_the_window(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    now = datetime.now(UTC)
+    for n, (user, agent, age) in enumerate(
+        [
+            ("ann", "ag_a", 1),
+            ("ann", "ag_a", 1),
+            ("ann", "ag_b", 1),
+            ("bob", None, 1),
+            ("ann", "ag_a", 40),
+            (None, "ag_a", 1),
+        ]
+    ):
+        tenant = await make_tenant_ref(db_session, tenant_id)
+        row = await make_usage_event(
+            db_session,
+            tenant=tenant,
+            platform_user_id=user,
+            managed_session_id=f"s{n}",
+            event_id=f"e{n}",
+            agent_id=agent,
+        )
+        await db_session.execute(
+            update(UsageEvent)
+            .where(UsageEvent.id == row.id)
+            .values(occurred_at=now - timedelta(days=age))
+        )
+    since, until = now - timedelta(days=30), now
+
+    own = await usage_events.turns_by_agent_for_user_since(
+        db_session, tenant_id=tenant_id, platform_user_id="ann", since=since
+    )
+    team = await usage_events.turns_by_agent_in_tenant_since(
+        db_session, tenant_id=tenant_id, since=since
+    )
+    old = await usage_events.turns_by_agent_for_user_since(
+        db_session,
+        tenant_id=tenant_id,
+        platform_user_id="ann",
+        since=now - timedelta(days=60),
+        until=since,
+    )
+    cost_own = await usage_events.costs_by_agent_for_user_since(
+        db_session, tenant_id=tenant_id, platform_user_id="ann", since=since, until=until
+    )
+    cost_team = await usage_events.costs_by_agent_in_tenant_since(
+        db_session, tenant_id=tenant_id, since=since
+    )
+
+    assert own == {"ag_a": 2, "ag_b": 1}, "one person's turns by agent, inside the window"
+    assert team == {"ag_a": 2, "ag_b": 1, None: 1}, "NULL-user rows are left out"
+    assert old == {"ag_a": 1}, "`until` closes the window"
+    assert set(cost_own) == {"ag_a", "ag_b"} and cost_own["ag_a"] == pytest.approx(
+        2 * cost_own["ag_b"]
+    )
+    assert set(cost_team) == {"ag_a", "ag_b", None}
+
+
+async def make_tenant_ref(db_session: AsyncSession, tenant_id: uuid.UUID) -> TenantRow:
+    """The row of a tenant the fixture created."""
+    tenant = await tenants.get_tenant(db_session, tenant_id)
+    assert tenant is not None
+    return tenant

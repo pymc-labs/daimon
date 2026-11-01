@@ -227,6 +227,31 @@ class TurnObservation:
                 metered,
             )
 
+    def _counted_samples(self) -> list[UsageSample]:
+        """The usage samples that count: of those a native session reports twice, the newest."""
+        samples = list(self._samples.values())
+        if any(
+            accounting_mode_for(sample.usage.session.provider).settles_natively
+            for sample in samples
+        ):
+            selected = disjoint_observations(sample.usage for sample in samples)
+            identities = {(usage.session, usage.id) for usage in selected}
+            samples = [
+                sample
+                for sample in samples
+                if (sample.usage.session, sample.usage.id) in identities
+            ]
+        return samples
+
+    def billed_cost(self, markup: Decimal) -> Decimal | None:
+        """What the turn has cost so far, with the markup; None when nothing was metered or
+        a call has no price. The sum of the samples the turn's outcome row will carry."""
+        samples = self._counted_samples()
+        if not samples or any(sample.cost is None for sample in samples):
+            return None
+        total = sum((sample.cost or Decimal(0) for sample in samples), Decimal(0))
+        return (total * markup).quantize(Decimal("0.000001"))
+
     def finish(
         self,
         *,
@@ -267,18 +292,7 @@ class TurnObservation:
                 turn_id=str(self.id),
                 tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
             )
-        samples = list(self._samples.values())
-        if any(
-            accounting_mode_for(sample.usage.session.provider).settles_natively
-            for sample in samples
-        ):
-            selected = disjoint_observations(sample.usage for sample in samples)
-            identities = {(usage.session, usage.id) for usage in selected}
-            samples = [
-                sample
-                for sample in samples
-                if (sample.usage.session, sample.usage.id) in identities
-            ]
+        samples = self._counted_samples()
 
         def total(getter: Callable[[UsageSample], int | None]) -> int | None:
             counts = [getter(sample) for sample in samples]

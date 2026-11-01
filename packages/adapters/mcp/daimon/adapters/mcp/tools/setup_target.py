@@ -58,6 +58,34 @@ async def require_turn_origin(
         raise ToolError(
             "The origin_context_id is unavailable or expired; retry in that conversation."
         )
+    return _held_by_caller(auth, origin)
+
+
+async def get_web_turn_origin(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> TurnOriginRow | None:
+    """The caller's live web chat origin by this id, or None when it names none.
+
+    A web turn runs as the person's linked chat account when they have one, so its
+    origin is looked up as `web` whatever the caller's platform.
+    """
+    try:
+        origin_id = uuid.UUID(origin_context_id or "")
+    except ValueError:
+        return None
+    async with runtime.session_factory() as session:
+        origin = await get_active_origin(
+            session,
+            origin_id=origin_id,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform="web",
+            now=datetime.now(UTC),
+        )
+    return None if origin is None else _held_by_caller(auth, origin)
+
+
+def _held_by_caller(auth: AuthIdentity, origin: TurnOriginRow) -> TurnOriginRow:
     # A chat turn's credential names its agent as chat_agent_id, as
     # `get_verified_origin` reads it: it may claim only its own responder's origin.
     executing_agent = auth.agent_id or auth.chat_agent_id

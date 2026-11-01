@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from daimon.core.access_policy import (
     OPEN_RULE,
@@ -34,6 +34,13 @@ from daimon.core.access_policy import (
 from daimon.core.errors import DaimonError
 
 Recipients = Literal["any", "requester", "none"]
+
+WEB_PLACE_ID: Final[str] = "web"
+"""The place id of the web chat. An agent rule names it like a channel, and it lets the
+agent answer in web chat; it is no channel, so it never makes a home."""
+
+WEB_PLACE_PREFIX: Final[str] = "web:"
+"""A person's web chats are in the place `web:<person>`; a rule names it `web`."""
 
 Refusal = Literal["writers_none", "runs_elsewhere", "own_agents_only"]
 """Why an agent may not run or post at a place: the channel's writers are
@@ -141,10 +148,14 @@ def without_agent_rules(policy: TenantAccessPolicy, names: Iterable[str]) -> Ten
 
 
 def runs_only_in(policy: TenantAccessPolicy, channel_id: str) -> tuple[str, ...]:
-    """Names whose rule runs them in `channel_id` alone, sorted: its own agents
-    while its readers are own."""
+    """Names whose rule runs them in `channel_id` alone (the web chat aside), sorted:
+    its own agents while its readers are own."""
     rules = policy.agent_rules.items()
-    return tuple(sorted(name for name, rule in rules if set(rule.runs_in or ()) == {channel_id}))
+    return tuple(
+        sorted(
+            name for name, rule in rules if set(rule.runs_in or ()) - {WEB_PLACE_ID} == {channel_id}
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -350,6 +361,11 @@ class AgentPermissions:
     home: str | None = None
     """The channel kept to its own agents it is one of the own agents of."""
 
+    @property
+    def keeps_off_web(self) -> bool:
+        """Whether some rule on it leaves the web chat out, so it never answers there."""
+        return any(WEB_PLACE_ID not in rule for rule in self.runs_in)
+
     def direct_messages(self, origin: ChannelPermissions | None = None) -> Recipients:
         """Whom a call running as it, from a turn at `origin`, may send a direct message."""
         if held_to(self, origin) is not None:
@@ -398,7 +414,7 @@ def agent_permissions(
         for name in agent_names
         if name is not None and name in policy.agent_rules
     )
-    channels = {channel for rule in rules for channel in rule}
+    channels = {channel for rule in rules for channel in rule if channel != WEB_PLACE_ID}
     home = None
     if len(channels) == 1:
         (channel,) = channels
@@ -406,14 +422,22 @@ def agent_permissions(
     return AgentPermissions(runs_in=rules, home=home)
 
 
+def rule_token(place_id: str | None) -> str | None:
+    """The id an agent rule names for a place: `web` for any person's web chat place."""
+    if place_id is not None and place_id.startswith(WEB_PLACE_PREFIX):
+        return WEB_PLACE_ID
+    return place_id
+
+
 def outside_runs_in(
     agent: AgentPermissions, channel_id: str | None, parent_channel_id: str | None = None
 ) -> bool:
     """Whether some rule on the agent names neither the place nor its channel.
 
-    No channel (a DM, a headless call) is outside every rule.
+    No channel (a DM, a headless call) is outside every rule. A web chat place
+    (`web:<person>`) is the rule's `web`.
     """
-    place = {channel_id, parent_channel_id}
+    place = {rule_token(channel_id), rule_token(parent_channel_id)}
     return any(not (place & rule) for rule in agent.runs_in)
 
 
@@ -618,7 +642,9 @@ __all__ = [
     "limiting_ids_at",
     "listed_at",
     "memory_writable",
+    "WEB_PLACE_PREFIX",
     "outside_runs_in",
+    "rule_token",
     "own_reader_channels",
     "post_refusal",
     "posts_at",

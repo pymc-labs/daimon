@@ -35,6 +35,7 @@ typo is silent — check the spelling here.
 - [Mcp Context](#mcp-context)
 - [Slack](#slack)
 - [Teams](#teams)
+- [Web](#web)
 - [GitHub](#github)
 - [GitHub App](#github-app)
 - [Microsoft Accounts](#microsoft-accounts)
@@ -429,7 +430,9 @@ otherwise invalidate every issued login).
 `str | None` · optional · default unset
 
 Slack OAuth app client ID for the /slack/mcp login mount. Register &lt;hub
-origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url).
+origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url). Web
+app sign-in with Slack uses this app too: also register &lt;web public
+url&gt;/auth/slack/callback.
 
 ### `DAIMON_HUB__SLACK_CLIENT_SECRET`
 
@@ -443,6 +446,8 @@ Slack OAuth app client secret for the /slack/mcp login mount.
 
 Discord OAuth app client ID for the /discord/mcp login mount. Register &lt;hub
 origin&gt;/discord/auth/callback as a redirect URI on the Discord app (see public_url).
+Web app sign-in with Discord uses this app too: also register &lt;web public
+url&gt;/auth/discord/callback.
 
 ### `DAIMON_HUB__DISCORD_CLIENT_SECRET`
 
@@ -958,6 +963,154 @@ everyone's usage. Adding an admin means making them an owner of that team; no re
 The app must be installed in that team. To find the ID, open the team's ⋯ menu in Teams,
 choose Get link to team and copy the groupId parameter. Unset: nobody is an admin.
 
+## Web
+
+Read from `daimon.core.config.WebSettings`. Prefix `DAIMON_WEB__`.
+
+The web app: its server, sign-in providers and embedded apps.
+
+Optional so deployments without the web app boot unchanged; the block is ``None`` when
+no ``DAIMON_WEB__*`` variable is set.
+
+This whole block is optional: it stays unset until at least one of its variables is set,
+and the features that read it are inactive while it is.
+
+### `DAIMON_WEB__PUBLIC_URL`
+
+`HttpUrl` · **required**
+
+Address people open the web app at, with no path. Sign-in redirects and the origin check
+on writes use it. Must be https unless `dev` is on.
+
+### `DAIMON_WEB__PORT`
+
+`int` · optional · default `8780`
+
+Port the web process listens on.
+
+### `DAIMON_WEB__STATIC_DIR`
+
+`Path | None` · optional · default unset
+
+Folder holding the built web app. Unset: the `static` folder inside the web adapter
+package, where the image build puts it.
+
+### `DAIMON_WEB__MODULES`
+
+`tuple['chat' | 'agents' | 'credits' | 'admin', ...]` · optional · default `chat,agents,credits,admin`
+
+Sections of the web app that are on, comma-separated: chat, agents, credits, admin.
+
+### `DAIMON_WEB__PROVIDERS`
+
+`tuple['oidc' | 'discord' | 'slack' | 'microsoft', ...]` · optional · default `oidc`
+
+Sign-in methods offered, comma-separated: oidc, discord, slack, microsoft. A method also
+needs its own settings to appear.
+
+### `DAIMON_WEB__OIDC__ISSUER`
+
+`str` · **required**
+
+Issuer URL of the provider, exactly as it appears in its ID tokens' `iss` claim. Its
+discovery document is read from `&lt;issuer&gt;/.well-known/openid-configuration`.
+
+### `DAIMON_WEB__OIDC__CLIENT_ID`
+
+`str` · **required**
+
+Client ID registered with the provider. Its redirect URI is `&lt;public
+url&gt;/auth/oidc/callback`.
+
+### `DAIMON_WEB__OIDC__CLIENT_SECRET`
+
+`SecretStr` · **required** · secret
+
+Client secret for that client ID.
+
+### `DAIMON_WEB__OIDC__TENANT_ID`
+
+`UUID` · **required**
+
+Workspace (tenant id) every person who signs in with this provider joins. It must
+already be set up.
+
+### `DAIMON_WEB__OIDC__WORKSPACE_NAME`
+
+`str` · optional · default `Workspace`
+
+Name the web app shows for that workspace.
+
+### `DAIMON_WEB__OIDC__LABEL`
+
+`str` · optional · default `Single sign-on`
+
+Name on the sign-in button.
+
+### `DAIMON_WEB__OIDC__ICON`
+
+`str | None` · optional · default unset
+
+Icon shown on the sign-in button: a Lucide name, or a `data:image/svg+xml;base64,` or
+`data:image/png;base64,` URI up to 16 KB.
+
+### `DAIMON_WEB__OIDC__SCOPES`
+
+`tuple[str, ...]` · optional · default `openid,email,profile`
+
+Scopes requested at sign-in, comma-separated. Add `offline_access` or an API scope when
+the provider needs it. A refresh token is kept only if the provider returns one.
+
+### `DAIMON_WEB__OIDC__GROUPS_CLAIM`
+
+`str` · optional · default `groups`
+
+ID token claim that lists the person's groups, matched against group roles.
+
+### `DAIMON_WEB__OIDC__ALLOWED_DOMAINS`
+
+`tuple[str, ...]` · optional · default unset
+
+Email domains that may sign in, comma-separated. Only verified addresses count. Empty:
+the provider alone decides who may sign in.
+
+### `DAIMON_WEB__APPS`
+
+`tuple[EmbeddedAppSettings, ...]` · optional · default unset
+
+Embedded apps, as a JSON list.
+
+### `DAIMON_WEB__SESSION_TTL_DAYS`
+
+`int` · optional · default `30`
+
+Days a sign-in lasts, counted from sign-in; visits never extend it.
+
+### `DAIMON_WEB__RENDER_INTERVAL_S`
+
+`float` · optional · default `0.3`
+
+Seconds between updates while an answer streams in.
+
+### `DAIMON_WEB__MAX_CONCURRENT_TURNS_PER_TENANT`
+
+`int` · optional · default `3`
+
+Most web turns one workspace may run at once.
+
+### `DAIMON_WEB__MANUAL_TOPUP`
+
+`bool` · optional · default `False`
+
+Let admins add credit by hand instead of paying, for staging deployments.
+
+### `DAIMON_WEB__DEV`
+
+`bool` · optional · default `False`
+
+Local development only: serves the fake sign-in and dev routes. Refused unless the
+public URL is localhost or a loopback address.
+
 ## GitHub
 
 Read from `daimon.core.config.GithubSettings`. Prefix `DAIMON_GITHUB__`.
@@ -1037,7 +1190,8 @@ Inert until `client_id`, `client_secret` and `tenant_id` are all set.
 `str | None` · optional · default unset
 
 Application (client) ID of the Entra app registration people sign in to with Connect
-Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`.
+Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`; web
+app sign-in with Microsoft also needs `&lt;web public url&gt;/auth/microsoft/callback`.
 
 ### `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET`
 

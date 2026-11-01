@@ -15,6 +15,7 @@ from daimon.core.stores.identity import (
     get_teams_principal_for_account,
     list_cli_principals_for_account,
     list_platform_principals_for_account,
+    list_principals_by_external_ids,
 )
 from daimon.testing.factories import (
     link_principals,
@@ -537,3 +538,25 @@ async def test_get_teams_principal_for_account_returns_only_the_teams_external_i
     result = await get_teams_principal_for_account(db_session, account_id=account.id)
 
     assert result == entra_id, "the helper returns the account's Entra object id"
+
+
+async def test_list_principals_by_external_ids_is_scoped_to_the_tenant(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    other = await make_tenant(db_session, workspace_id="other")
+    mine = await make_platform_principal(
+        db_session, platform="discord", external_id="u1", tenant=tenant
+    )
+    await make_platform_principal(db_session, platform="discord", external_id="u2", tenant=tenant)
+    await make_platform_principal(db_session, platform="discord", external_id="u1", tenant=other)
+
+    found = await list_principals_by_external_ids(
+        db_session, tenant_id=tenant.id, external_ids=["u1", "missing"]
+    )
+
+    assert [p.id for p in found] == [mine.id], "only this tenant's matching principal"
+    assert (
+        await list_principals_by_external_ids(db_session, tenant_id=tenant.id, external_ids=[])
+        == []
+    ), "nothing asked, nothing read"

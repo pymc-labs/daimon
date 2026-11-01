@@ -278,6 +278,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             billing_grain="turn",
             markup=request.deps.markup,
             channel_id=current.budget_channel_id or current.origin_channel_id,
+            agent_id=current.agent.id,
         )
 
         if footer_cost is not None:

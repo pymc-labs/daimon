@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.config import CapabilityRequirement, ThreadMode
@@ -29,8 +29,10 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, field
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
-# ValidationError on read — keep in sync.
-Platform = Literal["discord", "cli", "slack", "teams"]
+# ValidationError on read — keep in sync. "web" is a principal platform only
+# (people who sign in to the web app with no chat account); it has no chat
+# conversations, so `ChatPlatform` below leaves it out.
+Platform = Literal["discord", "cli", "slack", "teams", "web"]
 # Platforms whose turns run in a conversation and carry a turn origin.
 ChatPlatform = Literal["discord", "slack", "teams"]
 CHAT_PLATFORMS: tuple[ChatPlatform, ...] = ("discord", "slack", "teams")
@@ -534,6 +536,7 @@ class UsageEventRow(BaseModel):
     event_id: str
     observation_revision: int | None = None
     channel_id: str | None = None
+    agent_id: str | None = None
 
 
 BudgetWindow = Literal["monthly", "total", "fixed"]
@@ -556,6 +559,28 @@ class ChannelBudgetRow(BaseModel):
     created_at: datetime
     updated_at: datetime
     exhausted_notice_key: str | None = None
+
+
+AllowanceSubjectKind = Literal["person", "group", "invite"]
+AllowanceWindow = Literal["month", "total"]
+
+
+class SpendAllowanceRow(BaseModel):
+    """One spend allowance: a per-person limit in billed dollars (see `SpendAllowance`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    subject_kind: AllowanceSubjectKind
+    subject_id: str
+    agent_id: str | None
+    amount_usd: Decimal
+    window: AllowanceWindow
+    starts_at: datetime
+    expires_at: datetime | None
+    created_by_account_id: uuid.UUID | None
+    created_at: datetime
 
 
 class TenantUserCapRow(BaseModel):
@@ -619,6 +644,7 @@ class TenantLedgerRow(BaseModel):
     occurred_at: datetime
     channel_id: str | None = None
     estimate: LedgerEstimate | None = None
+    actor_account_id: uuid.UUID | None = None
 
 
 # `credit` codes add credit that never expires; `timed` codes add credit that
@@ -1072,6 +1098,7 @@ class FileUploadRow(BaseModel):
 
     id: str
     tenant_id: uuid.UUID
+    person_id: uuid.UUID | None = None
     title: str
     display_filename: str
     content_type: str
@@ -1118,7 +1145,7 @@ class ThreadAgentBindingRow(BaseModel):
     platform: str
     parent_channel_id: str
     thread_id: str
-    kind: Literal["setup", "handoff", "owner"] = "setup"
+    kind: Literal["setup", "handoff", "owner", "web"] = "setup"
     responder_ma_agent_id: str
     responder_name: str
     configuration_target_ma_agent_id: str | None
@@ -1276,3 +1303,261 @@ class CompatibilityPreview(_BackendConsentFacts):
     target_settings: dict[str, JsonValue] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+
+WebPersonKind = Literal["member", "visitor"]
+WebPersonStatus = Literal["active", "suspended"]
+WebRoleGrant = Literal["owner", "admin"]
+WebGroupRoleName = Literal["admin", "member"]
+
+
+class WebPersonRow(BaseModel):
+    """One person in one workspace, as the web app knows them."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    kind: WebPersonKind
+    display_name: str
+    workspace_name: str
+    email: str | None
+    status: WebPersonStatus
+    invite_id: uuid.UUID | None
+    invited_by_account_id: uuid.UUID | None
+    last_seen_at: datetime
+    created_at: datetime
+
+
+class WebIdentityRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    person_id: uuid.UUID
+    provider: str
+    issuer: str
+    subject: str
+    label: str
+    groups: tuple[str, ...]
+    linked_at: datetime
+
+    @field_validator("groups", mode="before")
+    @classmethod
+    def _groups_tuple(cls, value: object) -> object:
+        return tuple(cast("list[str]", value)) if isinstance(value, list) else value
+
+
+class WebSessionRow(BaseModel):
+    """A live browser sign-in. The cookie token itself is never stored."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    provider: str
+    issuer: str
+    subject: str
+    current_person_id: uuid.UUID
+    tenant_id: uuid.UUID
+    created_at: datetime
+    last_seen_at: datetime
+    expires_at: datetime
+    roles_checked_at: datetime
+
+
+class WebOidcTokenRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    person_id: uuid.UUID
+    issuer: str
+    tenant_id: uuid.UUID
+    access_token_enc: bytes
+    refresh_token_enc: bytes | None
+    expires_at: datetime
+
+
+WebInviteKind = Literal["invite", "sign_in", "owner"]
+WebInviteRole = Literal["visitor", "member"]
+WebAgentWho = Literal["everyone", "groups", "invites"]
+
+
+class WebInviteRow(BaseModel):
+    """A link into a workspace (see `WebInvite`), with the agents it opens."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    kind: WebInviteKind
+    email: str
+    role: WebInviteRole
+    credit_usd: Decimal
+    person_id: uuid.UUID | None
+    created_by_account_id: uuid.UUID | None
+    created_at: datetime
+    expires_at: datetime
+    accepted_at: datetime | None
+    accepted_by_person_id: uuid.UUID | None
+    revoked_at: datetime | None
+    agent_ids: tuple[str, ...] = ()
+
+
+class WebAgentGrantRow(BaseModel):
+    """Whether an agent chats on the web and with whom (see `WebAgentGrant`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_id: str
+    web: bool = True
+    who: WebAgentWho = "everyone"
+    groups: tuple[str, ...] = ()
+
+
+class WebWorkspaceSettingsRow(BaseModel):
+    """A workspace's web app choices (see `WebWorkspaceSettings`); defaults when unset."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    modules_off: tuple[str, ...] = ()
+    signin_off: tuple[str, ...] = ()
+    default_agent: str | None = None
+
+
+class WebAuditRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    at: datetime
+    actor_account_id: uuid.UUID | None
+    action: str
+    target: str
+    target_person_id: uuid.UUID | None
+    target_invite_id: uuid.UUID | None
+    detail: str | None
+
+
+class WebStep(BaseModel):
+    """One tool call of a reply, as the web chat lists it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    label: str
+    detail: str | None = None
+    status: Literal["running", "done", "error"]
+    ms: int | None = None
+
+
+class WebAttachment(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    size: int
+
+
+class WebOutputFile(BaseModel):
+    """A file a turn made, kept as a `file_uploads` row; `kind` picks its icon."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    size: int
+    kind: Literal["csv", "xlsx", "pdf", "png"]
+
+
+class WebApprovalCard(BaseModel):
+    """A write waiting on its requester's approval."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    kind: Literal["approval"] = "approval"
+    # An expired or stopped card reads as denied; its footer says why.
+    state: Literal["pending", "approved", "always", "denied"]
+    title: str
+    consequence: str | None = None
+    details: tuple[str, ...] = ()
+    footer: str | None = None
+    always_allowed: bool = False
+
+
+class WebRefusalCard(BaseModel):
+    """Why a turn did not run, and who can help."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    kind: Literal["refusal"] = "refusal"
+    title: str
+    body: str
+    help: str
+
+
+class WebCredentialCard(BaseModel):
+    """A key an agent asked its requester for; the value goes to the vault only."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str  # the credential request's idempotency key, never its token
+    kind: Literal["credential"] = "credential"
+    state: Literal["pending", "saved", "skipped"]
+    headline: str
+    fact: str
+    key: str
+
+
+WebCard = Annotated[
+    WebApprovalCard | WebCredentialCard | WebRefusalCard, Field(discriminator="kind")
+]
+
+
+class WebMessageBlocks(BaseModel):
+    """What a web message carries beside its text (`web_messages.blocks`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    steps: tuple[WebStep, ...] = ()
+    files: tuple[WebOutputFile, ...] = ()
+    attachments: tuple[WebAttachment, ...] = ()
+    card: WebCard | None = None
+
+
+WebMessageStatus = Literal["running", "done", "stopped", "interrupted"]
+
+
+class WebThreadRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    person_id: uuid.UUID
+    agent_id: str
+    agent_name: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None
+
+
+class WebMessageRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    thread_id: uuid.UUID
+    role: Literal["user", "assistant"]
+    content: str
+    blocks: WebMessageBlocks
+    turn_id: uuid.UUID | None
+    status: WebMessageStatus
+    cost_usd: Decimal | None
+    duration_ms: int | None
+    feedback: Literal["up", "down"] | None
+    seq: int
+    created_at: datetime

@@ -82,7 +82,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     # The sharded legs of one suite select the same paths, or a shard would skip tests.
     for suite in {leg["suite"] for leg in legs + discord_legs}:
         assert len({leg["paths"] for leg in legs + discord_legs if leg["suite"] == suite}) == 1
-    assert {leg["suite"] for leg in legs} == {"core", "mcp", "slack", "teams", "parity"}
+    assert {leg["suite"] for leg in legs} == {"core", "mcp", "slack", "teams", "web", "parity"}
     assert {leg["suite"] for leg in discord_legs} == {"discord"}
     for name in ("pytest-db", "pytest-discord"):
         shard_options = [

@@ -241,7 +241,7 @@ async def get_channel_budget_status(
 
 async def is_over_channel_budget(
     *,
-    sessionmaker: async_sessionmaker[AsyncSession],
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
     tenant_id: uuid.UUID,
     platform: str,
     channel_id: str | None,
@@ -256,6 +256,8 @@ async def is_over_channel_budget(
     if channel_id is None:
         return False
     if session is None:
+        if sessionmaker is None:
+            raise ValueError("is_over_channel_budget needs a session or a sessionmaker")
         async with sessionmaker() as opened:
             status = await get_channel_budget_status(
                 opened, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now

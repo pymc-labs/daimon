@@ -62,6 +62,13 @@ async def resolve(
             parent_channel_id=context.channel_id,
             thread_id=context.thread_id,
         )
+        if (
+            binding is not None
+            and binding.kind == "web"
+            and (context.account_id is None or context.account_id != binding.creator_account_id)
+        ):
+            # A web chat answers only the person who started it.
+            raise UserFacingError("This chat belongs to someone else. Start a new chat.")
         if binding is not None and binding.kind == "owner":
             if context.account_id is None:
                 # No requester to check: never route to a private copy (fail closed);

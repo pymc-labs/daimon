@@ -28,7 +28,7 @@ async def create_binding(
     configuration_target_ma_agent_id: str | None = None,
     configuration_target_name: str | None = None,
     creator_account_id: uuid.UUID | None = None,
-    kind: Literal["setup", "handoff", "owner"] = "setup",
+    kind: Literal["setup", "handoff", "owner", "web"] = "setup",
 ) -> ThreadAgentBindingRow:
     """Bind a thread to a responder.
 

@@ -164,6 +164,7 @@ async def record_root_usage(
     markup: Decimal = Decimal("1"),
     reason: TurnLedgerReason = "turn_debit",
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> tuple[bool, ...]:
     """Atomically persist/settle all root and child observations, then capture.
 
@@ -242,6 +243,7 @@ async def record_root_usage(
                     markup=markup,
                     reason=reason,
                     channel_id=channel_id,
+                    agent_id=agent_id,
                 )
             )
     if outcome is not None:

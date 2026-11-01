@@ -51,7 +51,6 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_channel
-from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
@@ -112,6 +111,7 @@ from daimon.core.session_ports_compat import retrieve_session_record, session_sc
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
+from daimon.core.spend_gate import SpendBlock, SpendRequest, spend_gate_in_new_session
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role, RoutineRow, ThreadSessionRow
@@ -141,7 +141,6 @@ from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refresh
-from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -212,6 +211,34 @@ class _CapsAdapter:
             user_id=user_id,
             now=datetime.now(UTC),
         )
+
+
+async def _blocked(
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    row: RoutineRow,
+    *,
+    platform: str,
+    check: SpendBlock,
+    agent_id: str | None = None,
+) -> bool:
+    """Whether one check of the spend gate stops this routine's fire."""
+    return (
+        await spend_gate_in_new_session(
+            sm,
+            billing_config=None,
+            request=SpendRequest(
+                tenant_id=row.tenant_id,
+                platform_user_id=row.created_by_user_id,
+                platform=platform,
+                channel_id=row.channel_id,
+                agent_id=agent_id,
+            ),
+            markup=settings.billing.markup,
+            checks=frozenset({check}),
+        )
+        == check
+    )
 
 
 async def _build_fire(
@@ -398,7 +425,7 @@ async def _build_fire(
 
         # Admission gate: per-tenant balance — independent of Stripe config.
         # Keys on row.tenant_id (NOT NULL). Mirror run_one_tick's cap_exceeded skip.
-        if await is_over_balance(sessionmaker=sm, tenant_id=row.tenant_id):
+        if await _blocked(sm, settings, row, platform=platform, check="balance_depleted"):
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.ADMISSION_BALANCE_DEPLETED)
             log.info(
@@ -432,6 +459,7 @@ async def _build_fire(
                 markup=settings.billing.markup,
                 pricing=MODEL_PRICING.get(model_id),
                 channel_id=row.channel_id,
+                agent_id=resolved_agent_id,
             )
 
         # Resolve agent + environment by daimon-tag at fire time,
@@ -504,13 +532,7 @@ async def _build_fire(
         # Admission gate: the routine's channel budget, after the cap (run_one_tick),
         # balance and pin gates. Keyed on `row.channel_id`, the channel the fire is
         # billed to (the destination's parent, else where the routine was made).
-        if await is_over_channel_budget(
-            sessionmaker=sm,
-            tenant_id=row.tenant_id,
-            platform=platform,
-            channel_id=row.channel_id,
-            now=datetime.now(UTC),
-        ):
+        if await _blocked(sm, settings, row, platform=platform, check="budget_exceeded"):
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
             log.info(
@@ -525,6 +547,30 @@ async def _build_fire(
                     row.id,
                     error="channel_budget_exceeded",
                     reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+                )
+            return
+        # The creator's spend allowance, last, on the agent the fire resolved.
+        if await _blocked(
+            sm,
+            settings,
+            row,
+            platform=platform,
+            check="allowance_exhausted",
+            agent_id=resolved_agent_id,
+        ):
+            if (observation := current_outcome.get()) is not None:
+                observation.finish(reason=TerminationReason.ADMISSION_DENIED)
+            log.info(
+                "routine.skipped.allowance_exhausted",
+                routine_id=str(row.id),
+                tenant_id=str(row.tenant_id),
+            )
+            async with sm() as s, s.begin():
+                await record_failure(
+                    s,
+                    row.id,
+                    error="allowance_exhausted",
+                    reason=TerminationReason.ADMISSION_DENIED,
                 )
             return
         if resolved_agent_id != row.agent_id:

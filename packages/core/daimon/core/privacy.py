@@ -48,6 +48,8 @@ from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
+from daimon.core.stores import web_people as web_people_store
+from daimon.core.stores import web_roles as web_roles_store
 from daimon.core.stores import wizard_session as wizard_session_store
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
 from pydantic import BaseModel, ConfigDict
@@ -99,6 +101,8 @@ class PurgePreview(BaseModel):
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     microsoft_user_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    web_people: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    web_admin_grants: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # Provider-neutral conversation state erased with the account (stores.mux_erasure),
     # one row per PurgeReport mux field.
     mux_slots: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -136,6 +140,8 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.platform_user_names, "remembered name"),
         (preview.teams_messages, "message record"),
         (preview.microsoft_user_tokens, "saved Microsoft account"),
+        (preview.web_people, "web app profile"),
+        (preview.web_admin_grants, "web app admin role"),
         (preview.mux_slots, "saved conversation"),
         (preview.mux_journal_events, "saved conversation message"),
     )
@@ -469,6 +475,10 @@ async def collect_purge_preview(
                         session, tenant_id=pp.tenant_id, user_id=pp.external_id
                     )
                 )
+        web_people_total = await web_people_store.count_for_account(session, account_id=account_id)
+        web_admin_grants_total = await web_roles_store.count_admin_grants_for_account(
+            session, account_id=account_id
+        )
         mux = await mux_erasure_store.inventory(
             session, account_id=account_id, principal_ids=[p.id for p in (*cli_list, *pp_list)]
         )
@@ -511,6 +521,8 @@ async def collect_purge_preview(
         platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
         teams_messages=PurgePreviewRow(count=teams_messages_total, example=None),
         microsoft_user_tokens=PurgePreviewRow(count=microsoft_user_tokens_total, example=None),
+        web_people=PurgePreviewRow(count=web_people_total, example=None),
+        web_admin_grants=PurgePreviewRow(count=web_admin_grants_total, example=None),
         mux_slots=PurgePreviewRow(count=mux.erased.slots, example=None),
         mux_binding_generations=PurgePreviewRow(count=mux.erased.binding_generations, example=None),
         mux_journal_sessions=PurgePreviewRow(count=mux.erased.journal_sessions, example=None),

@@ -74,6 +74,7 @@ async def record_turn_usage(
     pricing: ModelRates | None = None,
     reason: TurnLedgerReason = "turn_debit",
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> Decimal | None:
     """Write one usage_events row and one debit ledger row.
 
@@ -96,6 +97,7 @@ async def record_turn_usage(
 
     `channel_id` is the turn's parent channel, stamped on both rows so the
     channel's budget counts the debit; None leaves the spend unattributed.
+    `agent_id` stamps the usage row with the agent that answered, for per-agent spend.
 
     tenant_id=None is the DM signal — no tenant, no usage row, no ledger row.
     """
@@ -148,6 +150,7 @@ async def record_turn_usage(
             model_usage=tokens,
             event_id=observation.id,
             channel_id=channel_id,
+            agent_id=agent_id,
         )
         cost = cost_of(observation, pricing)
         debit = debit_amount(cost, markup=markup)
@@ -181,6 +184,7 @@ async def record_provider_usage(
     markup: Decimal = Decimal("1"),
     reason: TurnLedgerReason = "turn_debit",
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> bool:
     """Persist real provider usage and settle verified actual cost atomically.
 
@@ -225,6 +229,7 @@ async def record_provider_usage(
             markup=markup,
             reason=reason,
             channel_id=channel_id,
+            agent_id=agent_id,
         )
     if (outcome := current_outcome.get()) is not None:
         outcome.note_usage(
@@ -253,6 +258,7 @@ async def _record_tool_model_usage(
     session_prefix: str,
     idempotency_prefix: str,
     channel_id: str | None,
+    agent_id: str | None = None,
 ) -> None:
     """One usage_events row plus one debit ledger row for a model call made outside a turn.
 
@@ -303,6 +309,7 @@ async def _record_tool_model_usage(
             model_usage=tokens,
             event_id=event_id,
             channel_id=channel_id,
+            agent_id=agent_id,
         )
         cost = cost_of(observation, pricing)
         debit = debit_amount(cost, markup=markup)
@@ -330,6 +337,7 @@ async def record_media_usage(
     markup: Decimal = Decimal("1.0"),
     pricing: ModelRates | None = None,
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """Gemini media spend from the MCP media tools. `daimon.core` never imports `google-genai`."""
     await _record_tool_model_usage(
@@ -348,6 +356,7 @@ async def record_media_usage(
         session_prefix="gemini",
         idempotency_prefix="media",
         channel_id=channel_id,
+        agent_id=agent_id,
     )
 
 
@@ -363,6 +372,7 @@ async def record_classifier_usage(
     markup: Decimal = Decimal("1.0"),
     pricing: ModelRates | None = None,
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """The thread-participation classifier call, metered to the tenant like any model spend."""
     await _record_tool_model_usage(
@@ -381,6 +391,7 @@ async def record_classifier_usage(
         session_prefix="classifier",
         idempotency_prefix="classifier",
         channel_id=channel_id,
+        agent_id=agent_id,
     )
 
 
@@ -398,6 +409,7 @@ async def record_thread_naming_usage(
     markup: Decimal = Decimal("1.0"),
     pricing: ModelRates | None = None,
     channel_id: str | None = None,
+    agent_id: str | None = None,
 ) -> None:
     """The Haiku call behind an automatic thread title, billed to the message's author."""
     await _record_tool_model_usage(
@@ -416,4 +428,5 @@ async def record_thread_naming_usage(
         session_prefix="thread-naming",
         idempotency_prefix="thread-naming",
         channel_id=channel_id,
+        agent_id=agent_id,
     )
