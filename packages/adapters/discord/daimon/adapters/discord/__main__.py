@@ -18,6 +18,7 @@ from daimon.core.health import start_liveness_responder
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.observability import init_sentry
 from daimon.core.runtime_health import runtime_health
+from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.worker_ownership import OWNER_HARD_EXIT_S
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -48,7 +49,8 @@ async def connect_gateway(bot: DaimonBot, token: str) -> None:
     the application has not enabled it.
 
     Member lists then stay unloaded, so web access falls back to what each sign-in
-    proves, as it does before a list first loads. A missing Message Content intent is
+    proves, as it does before a list first loads. Lists loaded while the intent was on
+    are cleared, since no event would keep them current. A missing Message Content intent is
     still fatal: the bot cannot read mentions without it.
     """
     try:
@@ -59,6 +61,8 @@ async def connect_gateway(bot: DaimonBot, token: str) -> None:
         log.warning("discord.members_intent_missing")
         intents = bot.intents
         intents.members = False
+        async with bot.runtime.sessionmaker.begin() as session:
+            await members_store.clear_platform_lists(session, platform="discord")
         # discord.py has no setter, and a new client would lose this one's wiring.
         bot._connection._intents = intents  # pyright: ignore[reportPrivateUsage]
         await bot.connect()

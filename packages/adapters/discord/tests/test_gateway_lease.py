@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from secrets import randbits
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
@@ -22,6 +22,7 @@ from daimon.core.stores.discord_gateway_lease import GatewayLease
 from daimon.core.stores.worker_ownership import OWNER_LOSS_GRACE_S
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.turn_fakes import deps_for
+from discord.ext import commands
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, async_sessionmaker
 
@@ -592,9 +593,17 @@ async def test_without_the_members_intent_the_bot_connects_without_it() -> None:
     and member lists stay unloaded."""
     bot = _intents_bot(members=True)
 
-    await connect_gateway(bot, "token")
+    with patch(
+        "daimon.adapters.discord.__main__.members_store.clear_platform_lists", AsyncMock()
+    ) as clear:
+        await connect_gateway(bot, "token")
 
     bot.connect.assert_awaited_once()
+    clear.assert_awaited_once()
+    assert clear.await_args is not None
+    assert clear.await_args.kwargs == {"platform": "discord"}, (
+        "lists loaded while the intent was on are cleared, so sign-ins decide again"
+    )
     assert bot._connection._intents.members is False, "identifies again without members"
     assert bot._connection._intents.message_content == bot.intents.message_content
 
