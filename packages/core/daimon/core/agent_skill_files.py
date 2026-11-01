@@ -57,10 +57,11 @@ def _refused(exc: Exception) -> AgentEditError:
 async def _attached_skill(
     deps: AgentEditDeps, *, actor: AgentActor, agent: BetaManagedAgentsAgent, skill_id: str
 ) -> str:
-    """The version of ``skill_id`` the agent pins, else the one the actor's draft pins."""
-    for skill in agent.skills:
-        if skill.skill_id == skill_id:
-            return skill.version or ""
+    """The version of ``skill_id`` the actor's draft pins, else the one the agent pins.
+
+    The draft wins because the editor works on it: a save pins its new version there, and the
+    live agent keeps the older pin until the draft is applied.
+    """
     async with deps.session_factory() as session:
         row = await drafts_store.get_draft(
             session, tenant_id=actor.tenant_id, agent_id=agent.id, account_id=actor.account_id
@@ -69,7 +70,23 @@ async def _attached_skill(
         for drafted in AgentConfigDoc.model_validate(row.config).skills:
             if drafted.skill_id == skill_id:
                 return drafted.version
+    for skill in agent.skills:
+        if skill.skill_id == skill_id:
+            return skill.version or ""
     raise AgentEditError("This skill is not on the agent.", kind="not_found")
+
+
+async def _download_files(
+    deps: AgentEditDeps, *, actor: AgentActor, skill_id: str, version: str
+) -> dict[str, bytes]:
+    """The files of one version of ``skill_id``; a version of another skill is not found."""
+    if not version or version == "latest":
+        raise AgentEditError("This skill has no version to read.", kind="invalid")
+    try:
+        data = await download_skill_version(deps.client, skill_id, version, scope=actor.scope())
+        return retained_archive_files(data)
+    except (anthropic.APIStatusError, ScopeViolation, SkillIngestError) as exc:
+        raise AgentEditError("This skill's files can't be read.", kind="not_found") from exc
 
 
 async def read_skill_files(
@@ -84,13 +101,7 @@ async def read_skill_files(
     agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
     pinned = await _attached_skill(deps, actor=actor, agent=agent, skill_id=skill_id)
     held = version or pinned
-    if not held or held == "latest":
-        raise AgentEditError("This skill has no version to read.", kind="invalid")
-    try:
-        data = await download_skill_version(deps.client, skill_id, held, scope=actor.scope())
-        files = retained_archive_files(data)
-    except (anthropic.APIStatusError, ScopeViolation, SkillIngestError) as exc:
-        raise AgentEditError("This skill's files can't be read.", kind="not_found") from exc
+    files = await _download_files(deps, actor=actor, skill_id=skill_id, version=held)
     out: list[SkillFileDoc] = []
     for path in sorted(files, key=lambda p: (p != "SKILL.md", p)):
         body = files[path]
@@ -111,31 +122,35 @@ async def save_skill_files(
     ma_agent_id: str,
     skill_id: str | None,
     files: dict[str, str | None],
+    version: str | None = None,
 ) -> SkillDoc:
     """Publish ``files`` as a new version of the agent's skill, or as a new skill.
 
-    A file with None content keeps the bytes of the version being replaced. The agent is
-    not written; the caller pins the returned version in its draft. A SKILL.md that names
-    another skill creates that one instead.
+    A file with None content keeps its bytes from ``version``, the one the editor loaded
+    (else the version the actor's draft pins), so a second save never rebuilds a file from an
+    older version than the first save wrote. The agent is not written; the caller pins the
+    returned version in its draft. A SKILL.md that names another skill creates that one instead.
     """
     agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
     kept = {path for path, body in files.items() if body is None}
     bodies: dict[str, bytes] = {
         path: body.encode("utf-8") for path, body in files.items() if body is not None
     }
+    too_big = sorted(path for path, body in bodies.items() if len(body) > MAX_EDIT_BYTES)
+    if too_big:
+        raise AgentEditError(
+            f"{too_big[0]} is over {MAX_EDIT_BYTES} bytes, the most the editor saves.",
+            kind="invalid",
+        )
     if kept:
         if skill_id is None:
             raise AgentEditError("A new skill has no files to keep.", kind="invalid")
-        current = await read_skill_files(
-            deps, actor=actor, ma_agent_id=ma_agent_id, skill_id=skill_id
+        pinned = await _attached_skill(deps, actor=actor, agent=agent, skill_id=skill_id)
+        original = await _download_files(
+            deps, actor=actor, skill_id=skill_id, version=version or pinned
         )
-        held = {f.path for f in current.files}
-        if not kept <= held:
+        if not kept <= original.keys():
             raise AgentEditError("A kept file is not in the skill.", kind="invalid")
-        data = await download_skill_version(
-            deps.client, skill_id, current.version, scope=actor.scope()
-        )
-        original = retained_archive_files(data)
         bodies |= {path: original[path] for path in kept}
     try:
         bundle = bundle_from_files(bodies)

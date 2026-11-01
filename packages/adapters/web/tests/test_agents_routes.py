@@ -15,6 +15,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.web.app import create_app
 from daimon.adapters.web.cookies import new_session_token, token_sha256
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core import agent_skill_files
 from daimon.core.config import EmbeddedAppSettings, Settings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
@@ -470,3 +471,55 @@ async def test_a_member_who_cannot_edit_cannot_store_a_token(
             "/api/agents/ag_w/mcp/notes/token", json={"token": "x"}, headers=_OWN
         )
     assert refused.status_code in (403, 404), refused.text
+
+
+_SKILL_MD = "---\nname: notes\ndescription: Take notes.\n---\nWrite them down.\n"
+
+
+async def test_a_member_who_cannot_edit_the_agent_cannot_read_or_save_its_skill_files(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, other = await _people(db_session)
+    token = await _token(db_session_factory, other)
+    async with _client(agents, owner.tenant_id, db_session_factory, token) as client:
+        read = await client.get("/api/agents/ag_w/skills/sk_1/files?version=1")
+        save = await client.post(
+            "/api/agents/ag_w/skills",
+            json={"skill_id": None, "files": {"SKILL.md": _SKILL_MD}},
+            headers=_OWN,
+        )
+    assert (read.status_code, save.status_code) == (403, 403), "skill files follow edit rights"
+
+
+async def test_saving_a_skill_with_a_path_outside_the_skill_is_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, _other = await _people(db_session)
+    token = await _token(db_session_factory, owner)
+    async with _client(agents, owner.tenant_id, db_session_factory, token) as client:
+        refused = [
+            await client.post(
+                "/api/agents/ag_w/skills",
+                json={"skill_id": None, "files": {"SKILL.md": _SKILL_MD, path: "x"}},
+                headers=_OWN,
+            )
+            for path in ("../evil.md", "/etc/passwd", "refs/../../evil.md")
+        ]
+    assert [r.status_code for r in refused] == [422, 422, 422], "a path that escapes is refused"
+    assert agents.updates == [], "nothing is written to the agent"
+
+
+async def test_saving_a_skill_file_over_the_size_limit_is_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, _other = await _people(db_session)
+    token = await _token(db_session_factory, owner)
+    big = "x" * (agent_skill_files.MAX_EDIT_BYTES + 1)
+    async with _client(agents, owner.tenant_id, db_session_factory, token) as client:
+        refused = await client.post(
+            "/api/agents/ag_w/skills",
+            json={"skill_id": None, "files": {"SKILL.md": _SKILL_MD, "big.md": big}},
+            headers=_OWN,
+        )
+    assert refused.status_code == 422, "an oversize body is refused"
+    assert agents.updates == [], "nothing is written to the agent"
