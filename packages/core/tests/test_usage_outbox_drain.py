@@ -6,11 +6,11 @@ from uuid import UUID
 
 import pytest
 from daimon.core import usage_outbox_drain
-from daimon.core.stores import usage_events
+from daimon.core.stores import thread_sessions, usage_events
 from daimon.core.usage_outbox_drain import drain_pending_usage
 from sqlalchemy import text
 
-from .native_usage_support import pending_usage
+from .native_usage_support import pending_usage, seed_binding
 from .native_usage_support import sm as sm
 
 
@@ -45,11 +45,7 @@ async def test_pending_gemini_usage_is_debited_once_when_drained(sm):
     assert await _debited(sm) == -usd
 
 
-async def test_drained_usage_shows_as_spent_at_what_it_debited(sm):
-    """The drain records no person; the workspace and per-agent spend still count the row,
-    priced at the dated tariff its debit used."""
-    binding = await pending_usage(sm)
-    _, usd = await drain_pending_usage(sm, markup=Decimal(1))
+async def _spend(sm, binding):
     tenant_id, since = UUID(binding.thread.channel.tenant_id), datetime.now(UTC) - timedelta(1)
     async with sm() as db:
         rows = await usage_events.list_for_tenant(db, tenant_id=tenant_id)
@@ -57,9 +53,55 @@ async def test_drained_usage_shows_as_spent_at_what_it_debited(sm):
         by_agent = await usage_events.costs_by_agent_in_tenant_since(
             db, tenant_id=tenant_id, since=since
         )
+    return rows, total, by_agent
+
+
+async def _seat_agent(sm, binding, agent_id, *, owner=None):
+    """A thread session for `binding`'s thread id, in `owner`'s tenant when given."""
+    owner = owner or binding
+    async with sm.begin() as db:
+        await thread_sessions.create_thread_session(
+            db,
+            tenant_id=UUID(owner.thread.channel.tenant_id),
+            platform=binding.thread.channel.platform,
+            thread_id=binding.thread.thread_id,
+            account_id=UUID(owner.legacy_account_id),
+            ma_session_id="ma-" + binding.thread.thread_id,
+            ma_agent_id=agent_id,
+        )
+
+
+async def test_drained_usage_shows_as_spent_on_the_agent_of_its_thread(sm):
+    """The drain records no person; the workspace and per-agent spend still count the row,
+    on the agent whose thread produced it, priced at the dated tariff its debit used."""
+    binding = await pending_usage(sm)
+    await _seat_agent(sm, binding, "ag_drained")
+    _, usd = await drain_pending_usage(sm, markup=Decimal(1))
+    rows, total, by_agent = await _spend(sm, binding)
     assert [r.platform_user_id for r in rows] == [None], "a drained row has no person"
     assert usd > 0 and total == pytest.approx(float(usd)), "spent equals the debit"
-    assert by_agent == {None: pytest.approx(float(usd))}, "the agents add up to the total"
+    assert by_agent == {"ag_drained": pytest.approx(float(usd))}, (
+        "the agent card counts the drained row"
+    )
+
+
+async def test_drained_usage_stays_unattributed_when_no_agent_is_known(sm):
+    """No other usage row and no thread session: the row counts in the total, not an agent."""
+    binding = await pending_usage(sm)
+    _, usd = await drain_pending_usage(sm, markup=Decimal(1))
+    _, total, by_agent = await _spend(sm, binding)
+    assert by_agent == {None: pytest.approx(float(usd))}, "unknown agent stays None"
+    assert total == pytest.approx(float(usd)), "and still adds up to the total"
+
+
+async def test_drained_usage_ignores_an_agent_of_another_tenant(sm):
+    """A thread with the same id in another tenant never lends its agent."""
+    binding = await pending_usage(sm)
+    other = await seed_binding(sm)
+    await _seat_agent(sm, binding, "ag_other_tenant", owner=other)
+    await drain_pending_usage(sm, markup=Decimal(1))
+    _, _, by_agent = await _spend(sm, binding)
+    assert set(by_agent) == {None}, "attribution is tenant-scoped"
 
 
 async def test_the_drain_leaves_a_profile_with_unknown_infrastructure_pending(sm):

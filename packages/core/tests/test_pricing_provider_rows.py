@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
+from daimon.core import pricing
 from daimon.core.pricing import (
     MODEL_PRICING,
     PROVIDER_PRICED_INPUT_LIMITS,
@@ -13,6 +14,7 @@ from daimon.core.pricing import (
     provider_cost_of,
     provider_cost_of_bucket,
     provider_price_on,
+    provider_prices,
     provider_usage_tokens,
 )
 from mux.contracts.ids import ModelRef, ResourceRef
@@ -21,7 +23,7 @@ from mux.contracts.usage import UsageObservation
 ON = date(2026, 10, 25)
 
 
-def _observation(price: ProviderPrice, **counts: int | None) -> UsageObservation:
+def _observation(price: ProviderPrice, **counts: int | datetime | None) -> UsageObservation:
     fields: dict[str, object] = dict(
         id="usage",
         revision=1,
@@ -109,4 +111,66 @@ def test_provider_and_list_priced_model_ids_are_distinct() -> None:
     """Stored rows name only the model, so one id must never mean two tariffs."""
     assert not set(PROVIDER_PRICED_INPUT_LIMITS) & set(MODEL_PRICING), (
         "a model id is either list-priced or provider-priced"
+    )
+
+
+def _tariff(model: str, checked: date, rate: str, before: date | None = None) -> ProviderPrice:
+    return ProviderPrice(
+        "gemini",
+        model,
+        checked,
+        Decimal(rate),
+        Decimal(rate),
+        Decimal(rate),
+        Decimal(rate),
+        valid_before=before,
+    )
+
+
+def test_one_model_is_displayed_at_the_tariff_of_each_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model repriced mid-life: usage of each day shows what that day's debit charged."""
+    monkeypatch.setattr(
+        pricing,
+        "_PROVIDER_PRICING",
+        {
+            "gemini.inline_reuse": (
+                _tariff("gemini-x", date(2026, 10, 1), "1.00", date(2026, 11, 1)),
+                _tariff("gemini-x", date(2026, 11, 1), "2.00"),
+            )
+        },
+    )
+    october, december = date(2026, 10, 25), date(2026, 12, 5)
+    old, new = provider_price_on("gemini-x", october), provider_price_on("gemini-x", december)
+    assert old is not None and old.input == Decimal("1.00"), "October rows use the old tariff"
+    assert new is not None and new.input == Decimal("2.00"), "December rows use the new tariff"
+    for day, price in ((october, old), (december, new)):
+        observation = _observation(
+            price,
+            input_tokens=1_000_000,
+            input_cached_tokens=0,
+            observed_at=datetime(day.year, day.month, day.day, 12, tzinfo=UTC),
+        )
+        assert provider_cost_of(observation, price, infrastructure_usd=Decimal(0)) == (
+            Decimal(1_010_000) / Decimal(1_000_000) * price.input
+        ), "cost is token counts times that day's rates"
+
+
+def test_display_and_settlement_pick_the_same_row_when_tariffs_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two rows in force at once: the selector debit settles at is the one display shows."""
+    profile = "gemini.inline_reuse"
+    monkeypatch.setattr(
+        pricing,
+        "_PROVIDER_PRICING",
+        {
+            profile: (
+                _tariff("gemini-x", date(2020, 1, 1), "1.00"),
+                _tariff("gemini-x", date(2021, 1, 1), "2.00"),
+            )
+        },
+    )
+    settled = provider_prices(profile)[("gemini", "gemini-x")]
+    assert provider_price_on("gemini-x", datetime.now(UTC).date()) == settled, (
+        "display reads the row settlement charges"
     )

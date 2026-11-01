@@ -960,3 +960,40 @@ async def test_provider_model_rows_are_priced_at_their_dated_tariff(
         "a_claude": pytest.approx(5.0),
     }, "dated tariffs, per-row tiers; argon before its tariff's checked date costs nothing"
     assert by_user == {"u1": pytest.approx(11.55)}, "the per-person read leaves out no-person rows"
+
+
+async def test_per_user_cap_read_counts_openai_and_gemini_spend_of_that_person(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    """The cap compares a person's spend across providers; another person's rows and rows
+    with no person stay out of it."""
+    day = datetime(2026, 10, 25, 12, tzinfo=UTC)
+    rows = [
+        # (user, model, uncached input, output, cache read)
+        ("u1", "gpt-6-astra", 100_000, 10_000, 100_000),  # $1.60
+        ("u1", "gemini-3.8-flash", 1_000_000, 100_000, 200_000),  # $1.14
+        ("u2", "gpt-6-astra", 100_000, 10_000, 100_000),
+        (None, "gemini-3.8-flash", 1_000_000, 100_000, 200_000),
+    ]
+    for n, (user, model, inp, out, cache_read) in enumerate(rows):
+        await usage_events.record(
+            db_session,
+            tenant_id=tenant_id,
+            platform_user_id=user,
+            managed_session_id=f"cap{n}",
+            model=model,
+            model_usage=ma_model_usage(
+                input_tokens=inp, output_tokens=out, cache_read_input_tokens=cache_read
+            ),
+            event_id=f"cap_evt_{n}",
+        )
+        await db_session.execute(
+            update(UsageEvent).where(UsageEvent.event_id == f"cap_evt_{n}").values(occurred_at=day)
+        )
+    since = datetime(2026, 10, 1, tzinfo=UTC)
+
+    spent = await usage_events.cost_for_user_in_tenant_since(
+        db_session, tenant_id=tenant_id, platform_user_id="u1", since=since
+    )
+
+    assert spent == pytest.approx(2.74), "u1's OpenAI and Gemini rows both count toward the cap"

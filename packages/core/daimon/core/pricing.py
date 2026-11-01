@@ -10,7 +10,7 @@ Per `guideline:architecture` "Functional core, imperative shell".
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
@@ -687,6 +687,14 @@ def provider_price_expired_on(profile: str, provider: str, model: str) -> date |
     return max(price.valid_before for price in rows if price.valid_before) - timedelta(days=1)
 
 
+def _current_price(rows: Iterable[ProviderPrice], on: date) -> dict[tuple[str, str], ProviderPrice]:
+    """The row in force on `on` for each (provider, model); a later row wins an overlap.
+
+    The one selector for settlement and for display, so both always pick the same row.
+    """
+    return {(price.provider, price.model): price for price in rows if price.current_on(on)}
+
+
 def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     """Cold immutable native tariffs, shared by admission and usage owners.
 
@@ -696,13 +704,7 @@ def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     on = datetime.now(UTC).date()
     if profile == CONVERSATION_ONLY.profile_id:
         profile = PERSISTENT_WORKSPACE.profile_id
-    return MappingProxyType(
-        {
-            (price.provider, price.model): price
-            for price in _PROVIDER_PRICING.get(profile, ())
-            if price.current_on(on)
-        }
-    )
+    return MappingProxyType(_current_price(_PROVIDER_PRICING.get(profile, ()), on))
 
 
 def provider_price_on(model: str, on: date) -> ProviderPrice | None:
@@ -710,11 +712,9 @@ def provider_price_on(model: str, on: date) -> ProviderPrice | None:
 
     Stored usage rows name only the model, and provider model ids are distinct.
     """
-    for rows in _PROVIDER_PRICING.values():
-        for price in rows:
-            if price.model == model and price.current_on(on):
-                return price
-    return None
+    rows = (price for profile in _PROVIDER_PRICING.values() for price in profile)
+    current = _current_price((price for price in rows if price.model == model), on)
+    return next(reversed(current.values()), None)
 
 
 def _priced_input_limits() -> Mapping[str, int | None]:

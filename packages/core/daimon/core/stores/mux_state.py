@@ -46,6 +46,7 @@ from daimon.core._models import (
     ProviderBindingSlot,
     ThreadLease,
     ThreadSession,
+    UsageEvent,
     UsageObservation,
 )
 from daimon.core.stores import agent_backends, mux_erasure, read_persisted_columns
@@ -895,6 +896,51 @@ async def pending_outbox_for_profiles(
         )
         for row, tenant_id, profile_name, channel in rows
     ]
+
+
+async def agent_of_usage_session(
+    session: AsyncSession, *, tenant_id: uuid.UUID, binding_id: str, managed_session_id: str
+) -> str | None:
+    """The one agent a pending usage row's session belongs to, in this tenant; else None.
+
+    As migration 0158 attributed older rows: the session's other usage rows first, then
+    the thread sessions of the binding's thread. Several agents, or none, leave it None.
+    """
+    recorded = (
+        select(UsageEvent.agent_id)
+        .where(
+            UsageEvent.tenant_id == tenant_id,
+            UsageEvent.managed_session_id == managed_session_id,
+            UsageEvent.agent_id.is_not(None),
+        )
+        .distinct()
+        .limit(2)
+    )
+    threaded = (
+        select(ThreadSession.ma_agent_id)
+        .join(
+            ProviderBindingSlot,
+            and_(
+                ProviderBindingSlot.tenant_id == ThreadSession.tenant_id,
+                ProviderBindingSlot.platform == ThreadSession.platform,
+                ProviderBindingSlot.thread_id == ThreadSession.thread_id,
+            ),
+        )
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ProviderBindingSlot.binding_id == binding_id,
+            ThreadSession.ma_agent_id.is_not(None),
+        )
+        .distinct()
+        .limit(2)
+    )
+    for statement in (recorded, threaded):
+        agents = (await session.scalars(statement)).all()
+        if len(agents) == 1:
+            return agents[0]
+        if agents:
+            return None  # ambiguous: never guess between agents
+    return None
 
 
 async def mark_outbox_applied(session: AsyncSession, row: OutboxRow) -> bool:
