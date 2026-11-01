@@ -100,21 +100,22 @@ def test_no_node_is_configured_by_default(monkeypatch: pytest.MonkeyPatch) -> No
     assert web is not None and web.nodes.configured() == {}, "nodes are opt-in"
 
 
-@pytest.mark.parametrize(
-    ("node", "key", "match"),
-    [
-        ({**_NODE, "IDENTITY_SERVER": "missing"}, True, "DAIMON_MCP_IDENTITY__SERVERS"),
-        (_NODE, False, "SIGNING_KEY"),
-        ({"DAIMON_WEB__NODES__OTHER__CLIENT_ID": "c"}, True, "other"),
-        ({k: v for k, v in _NODE.items() if k != "CLIENT_SECRET"}, True, "client_secret"),
-    ],
-    ids=["unknown-server", "no-signing-key", "unknown-kind", "no-secret"],
-)
-def test_a_node_without_what_it_needs_is_refused(
-    monkeypatch: pytest.MonkeyPatch, node: dict[str, str], key: bool, match: str
-) -> None:
-    _node_env(monkeypatch, node=node, key=key)
-    with pytest.raises(ValidationError, match=match):
+def test_a_node_block_with_only_some_fields_loads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every process parses the web block, but only the web service gets all its node variables."""
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://web.example.com")
+    monkeypatch.setenv(_NODE_PREFIX + "CLIENT_SECRET", "s")
+    web = load_settings(_env_file=None).web
+    assert web is not None, "the web block should load"
+    node = web.nodes.data_server
+    assert node is not None and node.client_secret is not None, "the secret alone is a node block"
+    assert node.identity_server is None and node.client_id is None, (
+        "the rest is left to the web app"
+    )
+
+
+def test_a_node_of_an_unknown_kind_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _node_env(monkeypatch, node={"DAIMON_WEB__NODES__OTHER__CLIENT_ID": "c"})
+    with pytest.raises(ValidationError, match="other"):
         load_settings(_env_file=None)
 
 

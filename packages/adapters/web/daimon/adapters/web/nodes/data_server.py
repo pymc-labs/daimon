@@ -15,14 +15,17 @@ from typing import Literal, cast
 
 import httpx
 import structlog
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.agent_access import (
     Editor,
     Viewer,
     actor_of,
     change_deps,
     edit_refusal,
+    viewer_of,
 )
 from daimon.adapters.web.caller import WebCaller
+from daimon.adapters.web.nodes.base import NodeConfigError
 from daimon.adapters.web.nodes.exchange import (
     NODE_TIMEOUT_S,
     NodeAccessError,
@@ -35,14 +38,15 @@ from daimon.adapters.web.nodes.exchange import (
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import agent_changes, agent_editing
 from daimon.core.agent_editing import AgentEditError
-from daimon.core.agent_view import AgentConfigDoc, McpServer, fetch_tenant_agent
+from daimon.core.agent_view import AgentConfigDoc, McpServer, load_agent_view
+from daimon.core.billing import month_start
 from daimon.core.config import DataServerNodeSettings, Settings, SignedIdentityServer
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import relay_url
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.token_exchange import ExchangeClient
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr
 
 log = structlog.get_logger(__name__)
 
@@ -93,25 +97,53 @@ class DataServerToolChange(BaseModel):
 
 @dataclass(frozen=True)
 class DataServerNode:
-    config: DataServerNodeSettings
+    label: str
+    scope: str
+    client_id: str
+    client_secret: SecretStr
     server: SignedIdentityServer
     # Where agents reach the server's MCP endpoint; None without a public MCP URL.
     relay: str | None
 
     @classmethod
     def from_settings(cls, config: DataServerNodeSettings, settings: Settings) -> DataServerNode:
-        server = next(s for s in settings.mcp_identity.servers if s.name == config.identity_server)
+        """The node, or a `NodeConfigError` naming what the web service lacks."""
+        env = "DAIMON_WEB__NODES__DATA_SERVER"
+        if (
+            config.identity_server is None
+            or config.client_id is None
+            or config.client_secret is None
+        ):
+            missing = [
+                f"{env}__{name.upper()}"
+                for name in ("identity_server", "client_id", "client_secret")
+                if getattr(config, name) is None
+            ]
+            raise NodeConfigError(f"{env} needs {', '.join(missing)}")
+        server = next(
+            (s for s in settings.mcp_identity.servers if s.name == config.identity_server), None
+        )
+        if server is None:
+            raise NodeConfigError(
+                f"{env}__IDENTITY_SERVER names {config.identity_server!r}, "
+                "which DAIMON_MCP_IDENTITY__SERVERS lacks"
+            )
+        if settings.mcp_identity.signing_key is None:
+            raise NodeConfigError(f"{env} needs DAIMON_MCP_IDENTITY__SIGNING_KEY")
         public = settings.mcp.public_url
         relay = None if public is None else relay_url(str(public), server.name)
-        return cls(config=config, server=server, relay=relay)
+        return cls(
+            label=config.label,
+            scope=config.scope,
+            client_id=config.client_id,
+            client_secret=config.client_secret,
+            server=server,
+            relay=relay,
+        )
 
     @property
     def kind(self) -> str:
         return "data_server"
-
-    @property
-    def label(self) -> str:
-        return self.config.label
 
     def claims(self, server_url: str) -> bool:
         ours = {canonical_mcp_url(self.server.url)}
@@ -125,9 +157,9 @@ class DataServerNode:
     def _client(self) -> ExchangeClient:
         return ExchangeClient(
             token_url=f"{server_base(self.server)}/oauth/token",
-            client_id=self.config.client_id,
-            client_secret=self.config.client_secret.get_secret_value(),
-            scope=self.config.scope,
+            client_id=self.client_id,
+            client_secret=self.client_secret.get_secret_value(),
+            scope=self.scope,
         )
 
     def _access_refusal(self, err: NodeAccessError) -> HTTPException:
@@ -240,15 +272,33 @@ class DataServerNode:
             )
         return server_id
 
+    async def _editable(
+        self, runtime: WebRuntime, caller: WebCaller, agent_id: str
+    ) -> BetaManagedAgentsAgent:
+        """The Daimon agent, refused unless the caller may change it."""
+        try:
+            return await agent_editing.load_editable_agent(
+                change_deps(runtime).edit, actor=actor_of(caller), ma_agent_id=agent_id
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+
     async def status(
         self, runtime: WebRuntime, caller: WebCaller, agent_id: str
     ) -> DataServerStatus:
-        agent = await fetch_tenant_agent(
-            change_deps(runtime).view, tenant_id=caller.person.tenant_id, ma_agent_id=agent_id
+        view = await load_agent_view(
+            change_deps(runtime).view,
+            tenant_id=caller.person.tenant_id,
+            ma_agent_id=agent_id,
+            viewer=viewer_of(caller),
+            month_start=month_start(runtime.now()),
         )
-        if agent is None:
+        if view is None:
             raise HTTPException(status_code=404, detail="No such agent.")
-        attached = any(self.claims(s.url) for s in agent.mcp_servers)
+        if not view.can_view_details:
+            # The view hides attached servers from this viewer; so does this route.
+            raise HTTPException(status_code=403, detail="You can't see this agent's connections.")
+        attached = any(self.claims(s.url) for s in view.mcp_servers)
         try:
             server_id = await self._server_agent_id(runtime, caller, agent_id)
         except HTTPException as exc:
@@ -270,9 +320,21 @@ class DataServerNode:
             open_url=f"{server_base(self.server)}/agents?agent={server_id}",
         )
 
-    async def _manages(self, runtime: WebRuntime, caller: WebCaller, server_id: str) -> bool:
+    async def _can_manage(self, runtime: WebRuntime, caller: WebCaller, server_id: str) -> bool:
         found = await self._json(runtime, caller, "GET", f"/agents/{server_id}")
         return isinstance(found, dict) and found.get("can_manage") is True
+
+    async def _managed(self, runtime: WebRuntime, caller: WebCaller, server_id: str) -> bool:
+        """Whether the server's agent has a manager the caller acts as or may override.
+
+        `can_manage` alone is also true for server admins on an agent nobody manages.
+        """
+        found = await self._json(runtime, caller, "GET", f"/agents/{server_id}")
+        return (
+            isinstance(found, dict)
+            and found.get("can_manage") is True
+            and found.get("managed_by") is not None
+        )
 
     async def connect(
         self, runtime: WebRuntime, caller: WebCaller, agent_id: str
@@ -286,21 +348,23 @@ class DataServerNode:
         if relay is None:
             raise HTTPException(status_code=503, detail=f"{self.label} isn't set up here.")
         deps, actor = change_deps(runtime), actor_of(caller)
-        try:
-            agent = await agent_editing.load_editable_agent(
-                deps.edit, actor=actor, ma_agent_id=agent_id
-            )
-        except AgentEditError as exc:
-            raise edit_refusal(exc) from exc
+        agent = await self._editable(runtime, caller, agent_id)
         server_id = await self._server_agent_id(runtime, caller, agent_id)
-        if server_id is None or not await self._manages(runtime, caller, server_id):
-            await self._json(
-                runtime,
-                caller,
-                "POST",
-                "/agents",
-                body={"name": agent.name, "external_id": self._external_id(caller, agent_id)},
-            )
+        if server_id is None or not await self._managed(runtime, caller, server_id):
+            try:
+                await self._json(
+                    runtime,
+                    caller,
+                    "POST",
+                    "/agents",
+                    body={"name": agent.name, "external_id": self._external_id(caller, agent_id)},
+                )
+            except HTTPException as exc:
+                # Someone else manages it: fine for an admin, who may manage it anyway.
+                if exc.status_code != 409 or not (
+                    server_id is not None and await self._can_manage(runtime, caller, server_id)
+                ):
+                    raise
             log.info("web.node_agent.linked", kind=self.kind)
         if not any(self.claims(s.url) for s in agent.mcp_servers):
             try:
@@ -308,7 +372,7 @@ class DataServerNode:
                     deps,
                     actor=actor,
                     ma_agent_id=agent_id,
-                    change=lambda config: _with_server(config, self.server.name, relay),
+                    change=lambda config: self._with_relay(config, relay),
                     note=f"Connected {self.label}",
                 )
             except AgentEditError as exc:
@@ -340,6 +404,12 @@ class DataServerNode:
             raise edit_refusal(exc) from exc
         return await self.status(runtime, caller, agent_id)
 
+    def _with_relay(self, config: AgentConfigDoc, relay: str) -> AgentConfigDoc:
+        """`config` with the relay attached; unchanged when a concurrent connect did it. Pure."""
+        if any(self.claims(s.url) for s in config.mcp_servers):
+            return config
+        return _with_server(config, self.server.name, relay)
+
     def _without_servers(self, config: AgentConfigDoc) -> AgentConfigDoc:
         kept = [s for s in config.mcp_servers if not self.claims(s.url)]
         return config.model_copy(update={"mcp_servers": kept})
@@ -362,8 +432,9 @@ class DataServerNode:
 
         @router.patch("/agent")
         async def change_agent(  # pyright: ignore[reportUnusedFunction]
-            caller: Viewer, agent_id: str, body: DataServerAgentChange
+            caller: Editor, agent_id: str, body: DataServerAgentChange
         ) -> JsonValue:
+            await self._editable(runtime, caller, agent_id)
             server_id = await self._require_server_agent(runtime, caller, agent_id)
             change = cast("JsonValue", body.model_dump(exclude_unset=True))
             return await self._json(runtime, caller, "PATCH", f"/agents/{server_id}", body=change)
@@ -375,8 +446,9 @@ class DataServerNode:
 
         @router.put("/tools")
         async def set_tool(  # pyright: ignore[reportUnusedFunction]
-            caller: Viewer, agent_id: str, body: DataServerToolChange
+            caller: Editor, agent_id: str, body: DataServerToolChange
         ) -> JsonValue:
+            await self._editable(runtime, caller, agent_id)
             server_id = await self._require_server_agent(runtime, caller, agent_id)
             change = cast("JsonValue", body.model_dump())
             return await self._json(
@@ -385,8 +457,9 @@ class DataServerNode:
 
         @router.delete("/tokens/{token_id}")
         async def revoke_token(  # pyright: ignore[reportUnusedFunction]
-            caller: Viewer, agent_id: str, token_id: uuid.UUID
+            caller: Editor, agent_id: str, token_id: uuid.UUID
         ) -> None:
+            await self._editable(runtime, caller, agent_id)
             server_id = await self._require_server_agent(runtime, caller, agent_id)
             found = await self._json(runtime, caller, "GET", f"/agents/{server_id}")
             if str(token_id) not in _token_ids(found):

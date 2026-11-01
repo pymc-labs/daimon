@@ -19,7 +19,10 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.adapters.web.app import create_app
 from daimon.adapters.web.cookies import new_session_token, token_sha256
+from daimon.adapters.web.nodes import NodeConfigError
+from daimon.adapters.web.nodes.data_server import DataServerNode
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core.agent_view import AgentConfigDoc, McpServer, ModelChoice
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
@@ -89,6 +92,7 @@ class _Server:
     status: int = 200
     agents: dict[str, str] = field(default_factory=dict[str, str])  # external id -> id
     manages: bool = True
+    admin: bool = False
     link_status: int = 200
     calls: list[tuple[str, str, Any]] = field(default_factory=list[tuple[str, str, Any]])
     subject_tokens: list[str] = field(default_factory=list[str])
@@ -113,12 +117,18 @@ class _Server:
             self.manages = True
             return httpx.Response(200, json={"id": "sa-1", "name": body["name"]})
         if path == "/api/agents/sa-1":
-            agent = {"id": "sa-1", "name": "helper", "can_manage": self.manages}
+            # An admin may manage any agent; only a manager is its `managed_by`.
+            agent = {
+                "id": "sa-1",
+                "name": "helper",
+                "can_manage": self.manages or self.admin,
+                "managed_by": "p-1" if self.manages else None,
+            }
             return httpx.Response(200, json={**agent, "tokens": [{"id": _TOKEN}], **(body or {})})
         if path == "/api/agents/sa-1/tools":
             return httpx.Response(200, json=[{"connection_id": "c", "allow": True}])
         if path == "/api/me":
-            return httpx.Response(200, json={"is_admin": False})
+            return httpx.Response(200, json={"is_admin": self.admin})
         if path == "/api/scopes/visible":
             return httpx.Response(200, json=[{"id": "sales", "kind": "team", "name": "Sales"}])
         if (method, path) == ("DELETE", f"/api/tokens/{_TOKEN}"):
@@ -181,7 +191,15 @@ async def _token(factory: async_sessionmaker[AsyncSession], person: WebPersonRow
     return token
 
 
-def _settings(key: Ed25519PrivateKey, *, workspaces: list[str] | None = None) -> Settings:
+_NODE: dict[str, str] = {"identity_server": "data", "client_id": "c", "client_secret": "s"}
+
+
+def _settings(
+    key: Ed25519PrivateKey | None,
+    *,
+    workspaces: list[str] | None = None,
+    node: dict[str, str] = _NODE,
+) -> Settings:
     server: dict[str, object] = {
         "name": "data",
         "url": f"{_BASE}/mcp",
@@ -194,12 +212,13 @@ def _settings(key: Ed25519PrivateKey, *, workspaces: list[str] | None = None) ->
         _env_file=None,  # pyright: ignore[reportCallIssue]
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
         mcp={"public_url": "https://daimon.example.com/mcp"},  # pyright: ignore[reportArgumentType]
-        mcp_identity={"signing_key": encode_seed(key), "servers": [server]},  # pyright: ignore[reportArgumentType]
+        mcp_identity={  # pyright: ignore[reportArgumentType]
+            "signing_key": None if key is None else encode_seed(key),
+            "servers": [server],
+        },
         web={  # pyright: ignore[reportArgumentType]
             "public_url": PUBLIC_URL,
-            "nodes": {
-                "data_server": {"identity_server": "data", "client_id": "c", "client_secret": "s"}
-            },
+            "nodes": {"data_server": node},
         },
     )
 
@@ -213,11 +232,12 @@ async def _client(
     *,
     key: Ed25519PrivateKey,
     workspaces: list[str] | None = None,
+    settings: Settings | None = None,
 ) -> AsyncIterator[httpx.AsyncClient]:
     token = await _token(factory, person)
     async with httpx.AsyncClient(transport=httpx.MockTransport(server.handler)) as http:
         runtime = WebRuntime(
-            settings=_settings(key, workspaces=workspaces),
+            settings=settings or _settings(key, workspaces=workspaces),
             web=web_settings(),
             sessionmaker=factory,
             http_client=http,
@@ -414,3 +434,132 @@ async def test_only_the_agents_own_tokens_are_revoked_and_none_are_made(
     assert ("DELETE", f"/api/tokens/{other}", None) not in server.calls, "never sent on"
     assert made.status_code in (404, 405), "exchanged tokens cannot make tokens: no route"
     assert scopes.json() == [{"id": "sales", "kind": "team", "name": "Sales"}], scopes.text
+
+
+async def test_connect_links_an_unmanaged_agent_for_a_server_admin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An admin passes `can_manage` on an agent nobody manages, which still needs linking."""
+    agents, owner, _ = await _setup(db_session)
+    external = str(derive_agent_uuid(tenant_id=owner.tenant_id, ma_agent_id="ag_w"))
+    server = _Server(agents={external: "sa-1"}, manages=False, admin=True)
+    async with _client(agents, server, db_session_factory, owner, key=generate_signing_key()) as c:
+        connected = await c.post(f"{_BASE_PATH}/connect", headers=_OWN)
+    assert connected.status_code == 200, connected.text
+    assert any(m == "POST" for m, _p, _b in server.calls), "linked despite can_manage"
+    assert connected.json()["agent"]["managed_by"] == "p-1", "the agent has a manager now"
+
+
+async def test_connect_skips_linking_an_agent_the_caller_manages(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, _ = await _setup(db_session)
+    external = str(derive_agent_uuid(tenant_id=owner.tenant_id, ma_agent_id="ag_w"))
+    server = _Server(agents={external: "sa-1"}, manages=True)
+    async with _client(agents, server, db_session_factory, owner, key=generate_signing_key()) as c:
+        connected = await c.post(f"{_BASE_PATH}/connect", headers=_OWN)
+    assert connected.status_code == 200, connected.text
+    assert not any(m == "POST" for m, _p, _b in server.calls), "nothing to link"
+
+
+async def test_connect_tolerates_a_manager_conflict_for_an_admin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The race: another person took the agent between the lookup and the link."""
+    agents, owner, _ = await _setup(db_session)
+    external = str(derive_agent_uuid(tenant_id=owner.tenant_id, ma_agent_id="ag_w"))
+    server = _Server(agents={external: "sa-1"}, manages=False, admin=True, link_status=409)
+    async with _client(agents, server, db_session_factory, owner, key=generate_signing_key()) as c:
+        connected = await c.post(f"{_BASE_PATH}/connect", headers=_OWN)
+    assert connected.status_code == 200, connected.text
+    assert [s.url for s in agents.agent.mcp_servers] == [_RELAY], "the relay is attached"
+
+
+async def test_proxied_writes_need_edit_rights_on_the_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, other = await _setup(db_session)
+    external = str(derive_agent_uuid(tenant_id=owner.tenant_id, ma_agent_id="ag_w"))
+    server = _Server(agents={external: "sa-1"})
+    async with _client(agents, server, db_session_factory, other, key=generate_signing_key()) as c:
+        patched = await c.patch(f"{_BASE_PATH}/agent", json={"name": "x"}, headers=_OWN)
+        tool = await c.put(
+            f"{_BASE_PATH}/tools", json={"connection_id": "c", "allow": False}, headers=_OWN
+        )
+        revoked = await c.delete(f"{_BASE_PATH}/tokens/{_TOKEN}", headers=_OWN)
+    assert (patched.status_code, tool.status_code, revoked.status_code) == (403, 403, 403), (
+        "a viewer of the agent changes nothing on the server"
+    )
+    assert server.calls == [], "the server is never asked"
+
+
+async def test_status_of_an_agent_whose_connections_the_viewer_cannot_see_is_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A member's view hides attached servers, so `attached` must not tell."""
+    agents, owner, other = await _setup(db_session)
+    server = _Server()
+    async with _client(agents, server, db_session_factory, other, key=generate_signing_key()) as c:
+        status = await c.get(_BASE_PATH)
+        detail = await c.get("/api/agents/ag_w")
+    assert status.status_code == 403, status.text
+    assert server.calls == [], "the server is never asked"
+    assert detail.json()["nodes"] == [], "a node is not offered where its state is hidden"
+
+
+def test_attaching_the_relay_twice_changes_nothing() -> None:
+    """Two connects at once both reach the change; the second finds the relay there."""
+    settings = _settings(generate_signing_key())
+    node = DataServerNode.from_settings(
+        settings.web.nodes.data_server,  # pyright: ignore[reportOptionalMemberAccess,reportArgumentType]
+        settings,
+    )
+    empty = AgentConfigDoc(
+        name="helper",
+        purpose="",
+        avatar="",
+        model=ModelChoice(
+            id="claude-sonnet-4-6", backend="anthropic", speed="standard", effort="high"
+        ),
+        system=None,
+        skills=[],
+        tools=[],
+        mcp_servers=[],
+        places=None,
+    )
+    once = node._with_relay(empty, _RELAY)  # pyright: ignore[reportPrivateUsage]
+    twice = node._with_relay(once, _RELAY)  # pyright: ignore[reportPrivateUsage]
+    assert len(once.mcp_servers) == 1, "the first attaches"
+    assert twice == once, "the second leaves the config as it is"
+    assert isinstance(once.mcp_servers[0], McpServer), "an MCP server entry"
+
+
+@pytest.mark.parametrize(
+    ("node", "key", "match"),
+    [
+        ({"identity_server": "data", "client_id": "c"}, True, "CLIENT_SECRET"),
+        ({"client_secret": "s"}, True, "IDENTITY_SERVER, .*CLIENT_ID"),
+        ({**_NODE, "identity_server": "missing"}, True, "IDENTITY_SERVER names 'missing'"),
+        (_NODE, False, "SIGNING_KEY"),
+    ],
+    ids=["no-secret", "secret-only", "unknown-server", "no-signing-key"],
+)
+async def test_the_web_app_refuses_to_start_with_an_incomplete_node(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    node: dict[str, str],
+    key: bool,
+    match: str,
+) -> None:
+    agents, owner, _ = await _setup(db_session)
+    signing = generate_signing_key() if key else None
+    with pytest.raises(NodeConfigError, match=match):
+        async with _client(
+            agents,
+            _Server(),
+            db_session_factory,
+            owner,
+            key=generate_signing_key(),
+            settings=_settings(signing, node=node),
+        ):
+            pass

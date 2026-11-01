@@ -11,7 +11,7 @@ from daimon.adapters.web.faces import avatar_base_url
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.agent_changes import AgentChangeDeps
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
-from daimon.core.agent_view import AgentViewDeps
+from daimon.core.agent_view import AgentViewDeps, AgentViewer
 from daimon.core.authz import Subject, Surface
 from fastapi import Depends, HTTPException
 
@@ -58,6 +58,14 @@ def change_deps(runtime: WebRuntime) -> AgentChangeDeps:
             fernet=runtime.fernet,
             channel_lookup=channel_lookup_of(runtime),
         ),
+    )
+
+
+def viewer_of(caller: WebCaller) -> AgentViewer:
+    return AgentViewer(
+        account_id=caller.person.account_id,
+        is_admin=is_admin(caller.role),
+        may_edit="agents.edit" in caller.capabilities,
     )
 
 

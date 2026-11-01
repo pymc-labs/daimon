@@ -20,8 +20,9 @@ import type { NodeCardProps, NodePanelProps } from "./registry"
 
 type State = "connected" | "not_linked" | "unreachable"
 
+// An agent the platform registered with no manager is not linked, even to an admin who may manage it.
 const stateOf = (s: DataServerStatus): State =>
-  !s.reachable ? "unreachable" : s.agent?.can_manage ? "connected" : "not_linked"
+  !s.reachable ? "unreachable" : s.agent?.can_manage && s.agent.managed_by ? "connected" : "not_linked"
 
 const STATE: Record<State, { dot: "healthy" | "setup" | "failing"; label: string }> = {
   connected: { dot: "healthy", label: "Connected" },

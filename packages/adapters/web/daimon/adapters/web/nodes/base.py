@@ -16,6 +16,10 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 
+class NodeConfigError(ValueError):
+    """A configured node the web app cannot run; the message names the variables to set."""
+
+
 class AgentNode(BaseModel):
     """A node kind on an agent: `server` is the MCP server key it claims, None if addable."""
 

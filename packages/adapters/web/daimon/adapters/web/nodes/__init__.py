@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from daimon.adapters.web.agent_access import Viewer
-from daimon.adapters.web.nodes.base import AgentNode, ConnectionNode, agent_nodes
+from daimon.adapters.web.nodes.base import AgentNode, ConnectionNode, NodeConfigError, agent_nodes
 from daimon.adapters.web.nodes.exchange import tenant_workspace
 from daimon.adapters.web.nodes.kinds import build_nodes
 from daimon.adapters.web.runtime import WebRuntime
@@ -13,6 +13,7 @@ from pydantic import JsonValue
 __all__ = [
     "AgentNode",
     "ConnectionNode",
+    "NodeConfigError",
     "agent_nodes",
     "build_nodes",
     "nodes_router",

@@ -14,6 +14,7 @@ from daimon.adapters.web.boot_sweep import (
     sweep_orphaned_web_turns,
     sweep_stale_web_uploads_forever,
 )
+from daimon.adapters.web.nodes import NodeConfigError, build_nodes
 from daimon.adapters.web.owner_link import owner_link
 from daimon.adapters.web.runtime import build_runtime
 from daimon.adapters.web.single_process import WebProcessAlreadyRunning
@@ -60,6 +61,11 @@ async def main() -> None:
             "web.signin.unconfigured",
             hint="set DAIMON_HUB__DISCORD_CLIENT_ID and DAIMON_HUB__DISCORD_CLIENT_SECRET",
         )
+        sys.exit(1)
+    try:
+        build_nodes(settings)
+    except NodeConfigError as exc:
+        log.error("web.nodes.misconfigured", error=str(exc))
         sys.exit(1)
     init_sentry(
         dsn=settings.sentry.dsn.get_secret_value() if settings.sentry.dsn else None,

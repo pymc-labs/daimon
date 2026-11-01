@@ -8,7 +8,9 @@ from daimon.core.config import Settings
 
 
 def build_nodes(settings: Settings) -> tuple[ConnectionNode, ...]:
-    """Each configured node; settings validation already checked their servers.
+    """Each configured node, or a `NodeConfigError` for one the web service cannot run.
+
+    Settings leave a node's fields optional, since other processes parse them too.
 
     A new kind adds its block to `WebNodesSettings` and its node here.
     """

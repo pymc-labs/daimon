@@ -1099,20 +1099,31 @@ def _is_loopback_host(host: str | None) -> bool:
 
 
 class DataServerNodeSettings(BaseModel):
-    """A data server the agent editor manages an agent in, as the signed-in person."""
+    """A data server the agent editor manages an agent in, as the signed-in person.
+
+    Every field is optional here because each process parses the web block while
+    only the web service gets all of them; the web service refuses to start without
+    `identity_server`, `client_id` and `client_secret`.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
-    identity_server: str = Field(
+    identity_server: str | None = Field(
+        default=None,
         description=(
             "Name of the `DAIMON_MCP_IDENTITY__SERVERS` entry for the server. Its MCP relay "
             "is what a connected agent gets; its audience is the server's base URL, which "
-            "serves the API and `/oauth/token`."
+            "serves the API and `/oauth/token`. Required by the web service."
         ),
     )
     label: str = Field(default="Data server", description="Name the agent editor shows.")
-    client_id: str = Field(description="OAuth client the web app exchanges tokens as.")
-    client_secret: SecretStr = Field(description="Secret of that client.")
+    client_id: str | None = Field(
+        default=None,
+        description="OAuth client the web app exchanges tokens as. Required by the web service.",
+    )
+    client_secret: SecretStr | None = Field(
+        default=None, description="Secret of that client. Required by the web service."
+    )
     scope: str = Field(default="openid", description="Scopes asked for in the token exchange.")
 
 
@@ -2537,22 +2548,6 @@ class Settings(BaseSettings):
         they need no crypto keys or public URL to agree.
         """
         return self.microsoft_accounts.touched and not self.microsoft_accounts_missing()
-
-    @model_validator(mode="after")
-    def _web_nodes_have_servers(self) -> Settings:
-        """Each web node names a signed-identity server, and the key that signs for it."""
-        nodes = {} if self.web is None else self.web.nodes.configured()
-        servers = {server.name for server in self.mcp_identity.servers}
-        for kind, node in nodes.items():
-            env = f"DAIMON_WEB__NODES__{kind.upper()}"
-            if node.identity_server not in servers:
-                raise ValueError(
-                    f"{env}__IDENTITY_SERVER names {node.identity_server!r}, "
-                    "which DAIMON_MCP_IDENTITY__SERVERS lacks"
-                )
-            if self.mcp_identity.signing_key is None:
-                raise ValueError(f"{env} needs DAIMON_MCP_IDENTITY__SIGNING_KEY")
-        return self
 
     @model_validator(mode="after")
     def _private_channel_messages_need_a_public_url(self) -> Settings:

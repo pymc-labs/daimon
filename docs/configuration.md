@@ -1002,11 +1002,11 @@ Sections of the web app that are on, comma-separated: chat, agents, credits, adm
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__IDENTITY_SERVER`
 
-`str` · **required**
+`str | None` · optional · default unset
 
 Name of the `DAIMON_MCP_IDENTITY__SERVERS` entry for the server. Its MCP relay is what a
 connected agent gets; its audience is the server's base URL, which serves the API and
-`/oauth/token`.
+`/oauth/token`. Required by the web service.
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__LABEL`
 
@@ -1016,15 +1016,15 @@ Name the agent editor shows.
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__CLIENT_ID`
 
-`str` · **required**
+`str | None` · optional · default unset
 
-OAuth client the web app exchanges tokens as.
+OAuth client the web app exchanges tokens as. Required by the web service.
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__CLIENT_SECRET`
 
-`SecretStr` · **required** · secret
+`SecretStr | None` · optional · default unset · secret
 
-Secret of that client.
+Secret of that client. Required by the web service.
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__SCOPE`
 

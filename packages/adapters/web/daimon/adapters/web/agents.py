@@ -14,6 +14,7 @@ from daimon.adapters.web.agent_access import (
     actor_of,
     change_deps,
     edit_refusal,
+    viewer_of,
 )
 from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.channel_names import channel_names
@@ -28,7 +29,6 @@ from daimon.core.agent_view import (
     AgentConfigDoc,
     AgentSummary,
     AgentView,
-    AgentViewer,
     PersonRef,
     SkillDoc,
 )
@@ -163,13 +163,6 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
     def deps() -> AgentChangeDeps:
         return change_deps(runtime)
 
-    def viewer_of(caller: WebCaller) -> AgentViewer:
-        return AgentViewer(
-            account_id=caller.person.account_id,
-            is_admin=is_admin(caller.role),
-            may_edit="agents.edit" in caller.capabilities,
-        )
-
     async def editors(tenant_id: uuid.UUID, agent_ids: list[str]) -> dict[str, uuid.UUID]:
         """Who wrote each agent's current recorded version, where the web app wrote it."""
         async with runtime.sessionmaker() as session:
@@ -193,10 +186,15 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
             raise HTTPException(status_code=404, detail="No such agent.")
         async with runtime.sessionmaker() as db:
             tenant = await tenants_store.get_tenant(db, tenant_id)
-        found = agent_nodes(
-            nodes,
-            server_urls={s.key: s.url for s in view.mcp_servers},
-            workspace=tenant_workspace(tenant),
+        # Without details the view hides attached servers, so no node is known to be addable.
+        found = (
+            agent_nodes(
+                nodes,
+                server_urls={s.key: s.url for s in view.mcp_servers},
+                workspace=tenant_workspace(tenant),
+            )
+            if view.can_view_details
+            else []
         )
         return AgentDetail(**dict(view), nodes=found)
 
