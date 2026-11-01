@@ -138,7 +138,9 @@ async def real_dm(db_engine, db_clean):
     bot.draining = False
     bot.runtime.sessionmaker = factory
     bot.runtime.settings = SimpleNamespace(
-        direct_message_policies={}, ops=SimpleNamespace(alert_webhook_url=None)
+        direct_message_policies={},
+        ops=SimpleNamespace(alert_webhook_url=None),
+        table_rendering={},
     )
     bot.runtime.turn_deps = replace(
         deps_for(provider.client, factory),
@@ -171,11 +173,19 @@ async def active(harness):
 
 
 def answers(msg):
-    return [
+    """Answers the person saw: a text send, or the progress card edited into the answer."""
+    sent = [
         call.args[0]
         for call in msg.channel.send.await_args_list
         if call.args and call.args[0] == "private answer"
     ]
+    card = msg.channel.send.return_value
+    edited = [
+        call.kwargs["content"]
+        for call in getattr(getattr(card, "edit", None), "await_args_list", [])
+        if call.kwargs.get("content") == "private answer"
+    ]
+    return sent + edited
 
 
 def model_prompts(provider):

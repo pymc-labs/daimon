@@ -537,7 +537,9 @@ marker, boot card recovery leaves the card alone too. Once both have expired,
 the next process's orphan sweep delivers the answer if the session has
 finished, or edits the card to the restart notice and interrupts the session
 (above). Until then the session keeps running. A queued turn's card intent stays unresolved, so boot
-recovery shows the restart notice on it. A DM has no card or marker: its
+recovery shows the restart notice on it. A Discord DM turn shows the same progress
+card as a thread, but records no card intent or marker, so a restart leaves that
+card at its last update with a Stop button that no longer works. Its
 cleanup sends the session one interrupt, bounded to three seconds, while its
 delivery still holds the conversation's claim. If that interrupt is not
 confirmed, it marks the mapping dead so the next DM starts a fresh session.
@@ -647,7 +649,8 @@ gets a slot raises `TurnNotStarted` to its dispatcher: a full queue or the max
 wait puts the row back to pending, and Stop settles it not delivered, never
 as delivered. Only a full queue (50 per tenant, 500 in total) refuses, with the plain
 capacity notice and the existing `turn.skipped.*concurrency_shed` logs, now
-with a `reason`. Discord DMs have no card and wait under the typing indicator;
+with a `reason`. A Discord DM waits for its slot under the typing indicator, and its
+progress card appears once the turn starts;
 Slack DMs are not limited. Unprompted replies and Teams continuation wakes
 never queue: they take a free slot or keep their silent refusal or retry. The
 queue is in memory, so a restart drops it; queued turns' card intents are

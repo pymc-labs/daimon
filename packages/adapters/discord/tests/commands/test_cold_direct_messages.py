@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -14,6 +15,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import AgentRef, Place, Surface, build_subject
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.direct_messages import DirectMessageReply
+from daimon.core.errors import DaimonError
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores.access_policy import set_access_policy
@@ -92,7 +94,10 @@ async def setup(db_session_factory, monkeypatch, count=1):
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
     bot.runtime.settings = SimpleNamespace(
-        direct_message_policies={}, ops=SimpleNamespace(alert_webhook_url=None), discord=None
+        direct_message_policies={},
+        ops=SimpleNamespace(alert_webhook_url=None),
+        discord=None,
+        table_rendering={},
     )
     bot.runtime.turn_deps = replace(
         deps_for(None, db_session_factory), membership_resolver=resolver
@@ -558,3 +563,131 @@ async def test_selector_recheck_operational_failure_is_generic_and_consumes_sele
         reply.assert_not_awaited()
     finally:
         await cog.cog_unload()
+
+
+async def _card_from_turn(cog, msg, reply, admission):
+    await cog.on_message(msg)
+    card_for = reply.await_args.kwargs["card_for"]
+    return card_for(admission, asyncio.Event())
+
+
+async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
+    db_session_factory, monkeypatch
+):
+    from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+    from daimon.core.direct_messages import DirectMessageAccessRevoked
+
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    delivery = AsyncMock()
+    monkeypatch.setattr(module, "require_dm_delivery", delivery)
+    await cog.on_message(message())
+    row_reply = private_reply(await conversation(db_session_factory))
+    admission = SimpleNamespace(
+        grant=row_reply.grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, message(102), reply, admission)
+    assert isinstance(card, DiscordTurnLifecycle), "a DM turn gets the thread's progress card"
+    delivery.reset_mock()
+    await card.check_output()
+    delivery.assert_awaited_once()
+    delivery.side_effect = DirectMessageAccessRevoked("delivery_access_revoked", message="gone")
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+    delivery.side_effect = None
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+    assert delivery.await_count == 2, "a proved refusal closes the card for the rest of the turn"
+
+
+async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monkeypatch):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    delivery = AsyncMock()
+    monkeypatch.setattr(module, "require_dm_delivery", delivery)
+    await cog.on_message(message())
+    grant = private_reply(await conversation(db_session_factory)).grant
+    admission = SimpleNamespace(
+        grant=grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, message(102), reply, admission)
+    cog.bot.runtime.settings.direct_message_policies = {
+        tenants[0].id: DirectMessagePolicy(mode="disabled")
+    }
+    delivery.reset_mock()
+    with pytest.raises(AdmissionDenied):
+        await card.check_output()
+    delivery.assert_not_awaited()
+
+
+class _AnsweredCard:
+    def __init__(self, *, answered: bool, ended: bool) -> None:
+        self.was_answered = answered
+        self.ended = ended
+
+    def set_output_authorization(self, authorization) -> None:
+        self.authorization = authorization
+
+
+@pytest.mark.parametrize("answered", [True, False], ids=["card-answered", "recovered"])
+async def test_answer_is_sent_as_text_only_when_the_card_did_not_answer(
+    db_session_factory, monkeypatch, answered
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    monkeypatch.setattr(
+        module,
+        "DiscordTurnLifecycle",
+        lambda **kwargs: _AnsweredCard(answered=answered, ended=answered),
+    )
+
+    async def answer(deps, **kwargs):
+        kwargs["card_for"](
+            SimpleNamespace(
+                grant=None,
+                agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
+                is_admin=False,
+                budget_channel_id=None,
+            ),
+            asyncio.Event(),
+        )
+        return private_reply(await conversation(db_session_factory), text="the answer")
+
+    reply.side_effect = answer
+    msg = message(102)
+    await cog.on_message(msg)
+    sent = [call.args[0] for call in msg.channel.send.await_args_list if call.args]
+    assert ("the answer" in sent) is not answered, (
+        "the card delivers its own answer; text goes out only when it did not"
+    )
+
+
+async def test_failed_turn_adds_no_second_error_under_an_ended_card(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    monkeypatch.setattr(
+        module, "DiscordTurnLifecycle", lambda **kwargs: _AnsweredCard(answered=False, ended=True)
+    )
+
+    async def fail(deps, **kwargs):
+        kwargs["card_for"](
+            SimpleNamespace(
+                grant=None,
+                agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
+                is_admin=False,
+                budget_channel_id=None,
+            ),
+            asyncio.Event(),
+        )
+        raise DaimonError("boom")
+
+    reply.side_effect = fail
+    msg = message(102)
+    await cog.on_message(msg)
+    msg.channel.send.assert_not_awaited()
