@@ -60,7 +60,8 @@ export const duration = (ms: number) => {
 }
 
 const money = new Intl.NumberFormat("en", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 })
-export const usd = (n: number | null | undefined) => (n == null ? "–" : money.format(n))
+// Spend under half a cent would round to $0.00 and read as unused.
+export const usd = (n: number | null | undefined) => (n == null ? "–" : n > 0 && n < 0.005 ? "<$0.01" : money.format(n))
 
 const UNNAMED_CHANNEL = "Unnamed channel"
 // Labels the server sends for a channel with no name of its own; they never get a "#".
