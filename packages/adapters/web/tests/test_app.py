@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+from daimon.adapters.web.app import _Compress  # pyright: ignore[reportPrivateUsage]
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.responses import PlainTextResponse
+from starlette.types import Receive, Scope, Send
 
 from .conftest import WebClientFactory, web_settings
 
@@ -49,6 +53,22 @@ async def test_large_answers_are_compressed_for_clients_that_accept_it(
     assert big.headers.get("content-encoding") == "gzip", "a large answer is gzipped"
     assert big.text == "let a = 1;\n" * 500, "and decodes to the same bytes"
     assert "content-encoding" not in small.headers, "a small answer is sent as it is"
+
+
+async def test_downloads_and_avatars_are_sent_as_they_are() -> None:
+    async def big(scope: Scope, receive: Receive, send: Send) -> None:
+        await PlainTextResponse("x" * 5000)(scope, receive, send)
+
+    transport = httpx.ASGITransport(app=_Compress(big))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        gzip = {"Accept-Encoding": "gzip"}
+        api = await client.get("/api/admin/skills/s1/files", headers=gzip)
+        plain = [
+            await client.get(path, headers=gzip)
+            for path in ("/api/chat/files/f1", "/api/chat/attachments/a1", "/avatars/t/abc.png")
+        ]
+    assert api.headers.get("content-encoding") == "gzip"
+    assert all("content-encoding" not in res.headers for res in plain), "already packed"
 
 
 async def test_unknown_api_and_auth_paths_are_404_not_the_app(

@@ -406,6 +406,8 @@ _MISS_TTL_S = 3600.0
 # A deleted channel or a direct message stays that way: remembered for a day.
 _STATUS_TTL_S = 86_400.0
 _LOOKUP_TIMEOUT_S = 3.0
+# A lookup cut off by the timeout is asked again after this long.
+_TIMEOUT_RETRY_S = 60.0
 # At most this many platform calls per lookup, this many at once: a page that lists many
 # unnamed channels must not turn into a burst of requests to the platform.
 _MAX_LOOKUPS = 20
@@ -428,7 +430,7 @@ async def lookup_channel_names(
     Only for ids the stored names missed, at most `_MAX_LOOKUPS` per call (the rest wait for
     a later call). A channel the platform could not name is not asked again for an hour; one
     it called gone or a direct message is answered from memory for a day. One it did not
-    answer in time is asked again on the next call.
+    answer in time is asked again after a minute.
     Never raises and never waits past a few seconds.
     """
     now = time.monotonic()
@@ -460,15 +462,16 @@ async def lookup_channel_names(
         task.cancel()
     found: dict[str, str] = {}
     for task, channel_id in tasks.items():
-        if task not in done or task.cancelled():
-            continue  # no answer in time: asked again on the next call
-        answer = task.result()
+        answered = task in done and not task.cancelled()
+        answer = task.result() if answered else None
         if isinstance(answer, str) and not isinstance(answer, ChannelStatus):
             found[channel_id] = answer
             continue
         if answer is not None:
             statuses[channel_id] = answer
-        _missed[(tenant_id, platform, channel_id)] = (now, answer)
+        # No answer in time: a miss that ends after `_TIMEOUT_RETRY_S`, not an hour.
+        at = now if answered else now - _MISS_TTL_S + _TIMEOUT_RETRY_S
+        _missed[(tenant_id, platform, channel_id)] = (at, answer)
         _missed.move_to_end((tenant_id, platform, channel_id))
         while len(_missed) > _MISS_MEMO_SIZE:
             _missed.popitem(last=False)

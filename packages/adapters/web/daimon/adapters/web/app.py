@@ -22,6 +22,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 
 def _health_router(runtime: WebRuntime) -> APIRouter:
@@ -55,6 +56,27 @@ async def _provider_unreachable(request: Request, exc: anthropic.APIConnectionEr
     return JSONResponse({"detail": detail}, status_code=503)
 
 
+# Files people download and avatars: already packed, so gzip would only stall the event loop.
+_UNCOMPRESSED = ("/api/chat/attachments/", "/api/chat/files/", "/avatars/")
+
+
+class _Compress:
+    """Gzip answers over 1 KB: a skill's files or the page bundle run to megabytes.
+
+    Event streams pass as they are (Starlette never compresses them), and so does
+    `_UNCOMPRESSED`. A GET must never return a token or link beside text a caller
+    chose, or compressed sizes could leak it.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._plain = app
+        self._gzip = GZipMiddleware(app, minimum_size=1024, compresslevel=6)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        plain = scope["type"] == "http" and str(scope["path"]).startswith(_UNCOMPRESSED)
+        await (self._plain if plain else self._gzip)(scope, receive, send)
+
+
 def create_app(runtime: WebRuntime) -> FastAPI:
     """Build the app. Routes before the page catch-all; no I/O until a request arrives."""
     app = FastAPI(title="Daimon web", docs_url=None, redoc_url=None, openapi_url=None)
@@ -63,8 +85,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.add_exception_handler(anthropic.APIConnectionError, _provider_unreachable)  # pyright: ignore[reportArgumentType]
     app.add_middleware(UploadLimitMiddleware)
     app.add_middleware(SecurityMiddleware, web=runtime.web)
-    # A skill's files or the page bundle run to megabytes; event streams are never compressed.
-    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+    app.add_middleware(_Compress)
     app.include_router(_health_router(runtime))
     app.include_router(auth_router(runtime))
     app.include_router(avatars_router(runtime))
