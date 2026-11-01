@@ -1,14 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { render } from "@testing-library/react"
-import { MemoryRouter, Route, Routes, useLocation } from "react-router"
+import { MemoryRouter, Route, Routes } from "react-router"
 
 import { ApiError } from "@/lib/api"
+
+import { Where } from "./Where"
 
 export const newClient = () => new QueryClient({
   defaultOptions: { queries: { retry: (n, e) => !(e instanceof ApiError && e.status < 500) && n < 1, retryDelay: 1 } },
 })
-
-const Where = () => <div data-testid="where">{useLocation().pathname + useLocation().search}</div>
 
 /** Render a page at a route inside a fresh query client; `where` shows the current location. */
 export function renderAt(path: string, routePath: string, element: React.ReactNode, client = newClient()) {

@@ -14,7 +14,8 @@ import { cn } from "@/lib/utils"
 import { Dot, Locked } from "../bits"
 import { RULE } from "../lib"
 import type { McpServer, ToolRule } from "../types"
-import { Field, Section, useLocal, type Props } from "./parts"
+import { Field, Section, type Props } from "./parts"
+import { useLocal } from "./useLocal"
 
 const AUTH = { oauth: "OAuth", token: "Token", none: "None" }
 

@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -7,10 +7,14 @@ import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
 import type { ChatSession } from "@/lib/types"
 
+/** Keyed by session, so the draft title starts from that session's title each time it opens. */
 export function RenameDialog({ session, onClose }: { session: ChatSession | null; onClose: () => void }) {
-  const [title, setTitle] = useState("")
+  return <RenameForm key={session?.id} session={session} onClose={onClose} />
+}
+
+function RenameForm({ session, onClose }: { session: ChatSession | null; onClose: () => void }) {
+  const [title, setTitle] = useState(session?.title ?? "")
   const qc = useQueryClient()
-  useEffect(() => setTitle(session?.title ?? ""), [session])
   const save = useMutation({
     mutationFn: () => api.patch(`/api/chat/sessions/${session!.id}`, { title: title.trim() }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["chat"] }); onClose() },

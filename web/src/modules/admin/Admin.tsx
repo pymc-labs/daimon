@@ -1,6 +1,6 @@
 import { Plus } from "lucide-react"
 import { Navigate, Route, Routes, useLocation } from "react-router"
-import { useParam } from "@/components/filters"
+import { useParam } from "@/lib/filters"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
 import { AgentAccessView } from "./AgentAccess"

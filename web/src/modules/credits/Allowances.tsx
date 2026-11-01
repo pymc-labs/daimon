@@ -3,7 +3,7 @@ import { Check, ChevronDown, MoreHorizontal, Ticket, Users, UserRound } from "lu
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { AgentAvatar } from "@/components/common"
-import { useConfirm } from "@/components/confirm"
+import { useConfirm } from "@/lib/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
 import { QueryState } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"

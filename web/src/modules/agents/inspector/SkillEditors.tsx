@@ -4,10 +4,11 @@ import { Mono } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { cn } from "@/lib/utils"
-import { pressProps } from "@/components/filters"
+import { pressProps } from "@/lib/filters"
 import { Dot, Pill } from "../bits"
 import type { Skill } from "../types"
-import { Section, useLocal, type Props } from "./parts"
+import { Section, type Props } from "./parts"
+import { useLocal } from "./useLocal"
 
 export function SkillsEditor({ config, catalog, ro, update, select, changed }: Props) {
   const have = new Set(config.skills.map((s) => s.skill_id))

@@ -2,13 +2,13 @@ import { Database, MessageSquare, Monitor, Moon, Plus, Sun } from "lucide-react"
 import { useDeferredValue, useState } from "react"
 import { useNavigate } from "react-router"
 
-import { APP_ICONS } from "@/components/brand"
+import { APP_ICONS } from "@/lib/app-icons"
 import { AgentAvatar, Kbd } from "@/components/common"
 import {
   Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList,
 } from "@/components/ui/command"
 import { useChatAgents, useMe, useSessions } from "@/lib/hooks"
-import { useTheme } from "@/lib/theme"
+import { useTheme } from "@/lib/theme-context"
 import { actionsFor, navFor } from "@/modules/registry"
 
 type Row = { key: string; label: string; icon: React.ReactNode; run: () => void; hint?: string }

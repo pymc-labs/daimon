@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { json, renderAt } from "@/test/render"
-import { InviteLanding, landingOf } from "./Invite"
+import { InviteLanding } from "./Invite"
+import { landingOf } from "./landing"
 
 const invite = (over: object) => ({
   workspace: "Fernhill Labs", from: "Maya", email: "priya@fernhill.example", kind: "invite",
