@@ -9,11 +9,14 @@ from typing import Annotated
 from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.apps import AgentApp, agent_apps, available_apps
 from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.channel_names import channel_lookup_of, channel_names
+from daimon.adapters.web.faces import avatar_base_url
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core import agent_catalog, agent_changes, agent_editing, agent_view
+from daimon.core import agent_catalog, agent_changes, agent_editing, agent_skill_files, agent_view
 from daimon.core.agent_changes import AgentChangeDeps, Change, Draft
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_identity import queue_agent_face
+from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.agent_view import (
     AgentConfigDoc,
     AgentSummary,
@@ -33,14 +36,13 @@ from daimon.core.model_presets import ModelSelection
 from daimon.core.pricing import AGENT_MODEL_PRICING
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_drafts as drafts_store
-from daimon.core.stores import platform_names
+from daimon.core.stores import agent_mcp_credentials as credentials_store
 from daimon.core.stores import web_people as people_store
-from daimon.core.stores.tenants import get_tenant
 from daimon.core.tenant_summary import load_tenant_summary
 from fastapi import APIRouter, Depends, HTTPException
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 Viewer = Annotated[WebCaller, Depends(requires("agents.view"))]
 Editor = Annotated[WebCaller, Depends(requires("agents.edit"))]
@@ -119,6 +121,17 @@ class RevertBody(BaseModel):
     version: int
 
 
+class SkillFilesBody(BaseModel):
+    """The whole file set of a skill. None content keeps that file as the current version has it."""
+
+    skill_id: str | None = None
+    files: dict[str, str | None] = Field(min_length=1, max_length=100)
+
+
+class TokenBody(BaseModel):
+    token: str = Field(min_length=1, max_length=4096)
+
+
 _BLANK = Template(
     id="blank",
     name="Blank",
@@ -172,11 +185,12 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 client=runtime.anthropic,
                 session_factory=runtime.sessionmaker,
                 markup=runtime.settings.billing.markup,
-                avatar_base_url=base,
+                avatar_base_url=avatar_base_url(runtime),
                 deployment_default=runtime.deployment_default,
                 skill_descriptions=runtime.skill_descriptions,
                 mcp_tools=runtime.mcp_tool_lister,
                 fernet=runtime.fernet,
+                channel_lookup=channel_lookup_of(runtime),
             ),
         )
 
@@ -281,14 +295,9 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 default=runtime.deployment_default,
                 now=runtime.now(),
             )
-            tenant = await get_tenant(session, tenant_id)
-            platform = tenant.platform if tenant is not None else "discord"
-            names = await platform_names.get_channel_names(
-                session,
-                tenant_id=tenant_id,
-                platform=platform,
-                channel_ids={c.channel_id for c in summary.channels},
-            )
+        platform, names = await channel_names(
+            runtime, tenant_id, {c.channel_id for c in summary.channels}
+        )
         return Catalog(
             models=[
                 CatalogModel(
@@ -412,6 +421,84 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
             raise _refused(exc) from exc
         runtime.agents.forget(caller.person.tenant_id)
         return await view_of(caller, agent_id)
+
+    @router.get("/{agent_id}/skills/{skill_id}/files")
+    async def skill_files(  # pyright: ignore[reportUnusedFunction]
+        caller: Editor, agent_id: str, skill_id: str, version: str | None = None
+    ) -> agent_skill_files.SkillFilesDoc:
+        try:
+            return await agent_skill_files.read_skill_files(
+                deps().edit,
+                actor=actor_of(caller),
+                ma_agent_id=agent_id,
+                skill_id=skill_id,
+                version=version,
+            )
+        except AgentEditError as exc:
+            raise _refused(exc) from exc
+
+    @router.post("/{agent_id}/skills")
+    async def save_skill(  # pyright: ignore[reportUnusedFunction]
+        caller: Editor, agent_id: str, body: SkillFilesBody
+    ) -> SkillDoc:
+        try:
+            return await agent_skill_files.save_skill_files(
+                deps().edit,
+                actor=actor_of(caller),
+                ma_agent_id=agent_id,
+                skill_id=body.skill_id,
+                files=body.files,
+            )
+        except AgentEditError as exc:
+            raise _refused(exc) from exc
+
+    async def server_url(caller: WebCaller, agent_id: str, key: str) -> tuple[uuid.UUID, str]:
+        """The agent's id as the credential store keys it, and the URL of its server ``key``."""
+        d = deps()
+        agent = await agent_editing.load_editable_agent(
+            d.edit, actor=actor_of(caller), ma_agent_id=agent_id
+        )
+        server = next((s for s in agent.mcp_servers if s.name == key), None)
+        if server is None:
+            raise HTTPException(status_code=404, detail="No such server.")
+        return derive_agent_uuid(
+            tenant_id=caller.person.tenant_id, ma_agent_id=agent.id
+        ), server.url
+
+    @router.put("/{agent_id}/mcp/{key}/token")
+    async def save_token(  # pyright: ignore[reportUnusedFunction]
+        caller: Editor, agent_id: str, key: str, body: TokenBody
+    ) -> dict[str, bool]:
+        try:
+            owner_id, url = await server_url(caller, agent_id, key)
+        except AgentEditError as exc:
+            raise _refused(exc) from exc
+        await save_agent_mcp_credential(
+            sessionmaker=runtime.sessionmaker,
+            fernet=runtime.fernet,
+            tenant_id=caller.person.tenant_id,
+            agent_id=owner_id,
+            mcp_server_url=url,
+            plaintext_token=body.token.strip(),
+        )
+        return {"ok": True}
+
+    @router.delete("/{agent_id}/mcp/{key}/token")
+    async def remove_token(  # pyright: ignore[reportUnusedFunction]
+        caller: Editor, agent_id: str, key: str
+    ) -> dict[str, bool]:
+        try:
+            owner_id, url = await server_url(caller, agent_id, key)
+        except AgentEditError as exc:
+            raise _refused(exc) from exc
+        async with runtime.sessionmaker.begin() as session:
+            await credentials_store.delete_credential(
+                session,
+                tenant_id=caller.person.tenant_id,
+                agent_id=owner_id,
+                mcp_server_url=url,
+            )
+        return {"ok": True}
 
     @router.get("/{agent_id}/versions")
     async def versions(caller: Viewer, agent_id: str) -> list[AgentVersionDoc]:  # pyright: ignore[reportUnusedFunction]

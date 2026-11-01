@@ -32,7 +32,6 @@ export type Skill = {
   skill_id: string
   title: string
   description: string
-  content: string
   version: string
   platforms?: Platform[]
   /** MCP server keys the skill calls. */
@@ -107,6 +106,9 @@ export type Change = {
 export type Draft = { base_version: number; config: AgentConfig; changes: Change[]; stale: boolean }
 
 export type AgentVersion = { version: number; at: string; by: PersonRef; note: string | null; changes: Change[] }
+
+/** The files of a custom skill version; a null `content` is a binary or large file, kept as is. */
+export type SkillFiles = { skill_id: string; version: string; files: { path: string; size: number; content: string | null }[] }
 
 export type Template = { id: string; name: string; purpose: string; icon: string; skills: number; servers: number; model: string }
 

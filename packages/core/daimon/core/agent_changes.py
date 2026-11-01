@@ -223,8 +223,8 @@ def diff_config(a: AgentConfigDoc, b: AgentConfigDoc) -> list[Change]:
         label = f"{skill.title} skill"
         if old is None:
             add(f"skill:{skill_id}", "skills", label, "add")
-        elif old.version != skill.version or old.content != skill.content:
-            add(f"skill:{skill_id}", "skills", label, "edit", old.content, skill.content, text=True)
+        elif old.version != skill.version:
+            add(f"skill:{skill_id}", "skills", label, "edit", old.version, skill.version)
     for skill_id, skill in skills_a.items():
         if skill_id not in skills_b:
             add(f"skill:{skill_id}", "skills", f"{skill.title} skill", "remove")

@@ -20,6 +20,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.specs import AgentSpec
+from daimon.core.stores import agent_mcp_credentials as credentials_store
 from daimon.core.stores import agent_owners, platform_names
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_roles as roles_store
@@ -425,3 +426,47 @@ async def test_templates_are_blank_plus_the_marked_default_agents(
         )
     assert [(t["id"], t["purpose"]) for t in listed] == [("blank", ""), ("writer", "Drafts posts")]
     assert missing.status_code == 404, "an unknown template is refused"
+
+
+async def test_the_owner_stores_and_removes_a_servers_token(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    server = {"type": "url", "name": "notes", "url": "https://notes.example.com/mcp"}
+    agents, owner, _other = await _people(db_session, mcp_servers=[server])
+    token = await _token(db_session_factory, owner)
+    owner_id = derive_agent_uuid(tenant_id=owner.tenant_id, ma_agent_id="ag_w")
+
+    async def stored() -> list[str]:
+        async with db_session_factory() as db:
+            rows = await credentials_store.list_credentials(
+                db, tenant_id=owner.tenant_id, agent_id=owner_id
+            )
+        return [row.mcp_server_url for row in rows]
+
+    async with _client(agents, owner.tenant_id, db_session_factory, token) as client:
+        saved = await client.put(
+            "/api/agents/ag_w/mcp/notes/token", json={"token": " secret "}, headers=_OWN
+        )
+        after_save = await stored()
+        unknown = await client.put(
+            "/api/agents/ag_w/mcp/nope/token", json={"token": "x"}, headers=_OWN
+        )
+        removed = await client.delete("/api/agents/ag_w/mcp/notes/token", headers=_OWN)
+        after_remove = await stored()
+
+    assert saved.json() == {"ok": True} and after_save == ["https://notes.example.com/mcp"]
+    assert unknown.status_code == 404, "only a server the agent has can take a token"
+    assert removed.json() == {"ok": True} and after_remove == [], "removing it signs the agent out"
+
+
+async def test_a_member_who_cannot_edit_cannot_store_a_token(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    server = {"type": "url", "name": "notes", "url": "https://notes.example.com/mcp"}
+    agents, owner, other = await _people(db_session, mcp_servers=[server])
+    token = await _token(db_session_factory, other)
+    async with _client(agents, owner.tenant_id, db_session_factory, token) as client:
+        refused = await client.put(
+            "/api/agents/ag_w/mcp/notes/token", json={"token": "x"}, headers=_OWN
+        )
+    assert refused.status_code in (403, 404), refused.text
