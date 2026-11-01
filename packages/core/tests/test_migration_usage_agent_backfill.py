@@ -47,7 +47,8 @@ async def _outcome(db: AsyncSession, tenant_id: uuid.UUID, session_id: str, agen
     await db.execute(
         text(
             "INSERT INTO turn_outcomes (id, tenant_id, platform, agent_id, session_id, origin, reason, "
-            "started_at, ended_at) VALUES (:id, :t, 'discord', :a, :s, 'mention', 'completed', now(), now())"
+            "started_at, ended_at, duration_ms, recovered, release, usage_refs) VALUES (:id, :t, "
+            "'discord', :a, :s, 'chat', 'completed', now(), now(), 0, false, 'test', '[]'::jsonb)"
         ),
         {"id": uuid.uuid4(), "t": tenant_id, "s": session_id, "a": agent_id},
     )
