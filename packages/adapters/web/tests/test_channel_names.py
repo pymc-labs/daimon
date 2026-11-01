@@ -19,6 +19,7 @@ _CHANNELS = {
     "111": {"id": "111", "name": "general", "guild_id": "guild-1"},
     "222": {"id": "222", "name": "elsewhere", "guild_id": "guild-2"},
     "333": {"id": "333", "name": "direct"},
+    "444": {"id": "444", "type": 1, "recipients": []},
 }
 
 
@@ -28,8 +29,10 @@ def _runtime(
     def handle(request: httpx.Request) -> httpx.Response:
         channel_id = request.url.path.rsplit("/", 1)[-1]
         asked.append(channel_id)
-        if status != 200 or channel_id not in _CHANNELS:
-            return httpx.Response(status or 404, json={"message": "no"})
+        if status != 200:
+            return httpx.Response(status, json={"message": "no"})
+        if channel_id not in _CHANNELS:
+            return httpx.Response(404, json={"message": "Unknown Channel", "code": 10003})
         return httpx.Response(200, json=_CHANNELS[channel_id])
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handle))
@@ -75,8 +78,8 @@ async def test_a_foreign_channel_leaves_no_name_behind(
         platform, names = await channel_names(runtime, tenant.id, ["111", "222"])
         _, again = await channel_names(runtime, tenant.id, ["222"])
     assert platform == "discord", "the tenant's platform comes back"
-    assert names == {"111": "general"}, "only the tenant's own channel is named"
-    assert again == {}, "the foreign channel is still unnamed"
+    assert names.labels() == {"111": "general"}, "only the tenant's own channel is named"
+    assert again.labels() == {}, "the foreign channel is still unnamed"
     assert asked.count("222") == 1, "a refused channel is not asked about again for a while"
 
 
@@ -89,3 +92,23 @@ async def test_lookup_failures_name_nothing_and_raise_nothing(
     async with http:
         refused = await lookup("guild-1", "111")
     assert refused is None, "a 403 names nothing"
+
+
+async def test_a_deleted_channel_and_a_direct_message_are_labelled_not_unnamed(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Discord's Unknown Channel means gone; a direct message is one, not a foreign channel."""
+    platform_names.forget_all()
+    tenant = await make_tenant(db_session, workspace_id="guild-1")
+    await db_session.commit()
+    asked: list[str] = []
+    runtime, http = _runtime(db_session_factory, asked)
+    async with http:
+        _, found = await channel_names(runtime, tenant.id, ["999", "444"])
+        _, again = await channel_names(runtime, tenant.id, ["999", "444"])
+    assert found.labels() == {"999": "Deleted channel", "444": "Direct message"}, (
+        "a deleted channel and a direct message get their own labels"
+    )
+    assert found.gone == {"999"}, "the deleted channel is gone; the direct message is not"
+    assert again.labels() == found.labels(), "the answer is remembered"
+    assert sorted(asked) == ["444", "999"], "Discord is asked once per channel"

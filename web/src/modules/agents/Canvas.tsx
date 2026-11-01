@@ -109,8 +109,8 @@ function AgentNode() {
           <Avatar name={agent.owner.name} className="size-4 text-[8px]" /><span className="truncate">{agent.owner.name}</span>
           {agent.co_owners.length > 0 && <span className="text-faint">+{agent.co_owners.length}</span>}
         </span>
-        <span className="text-muted-foreground">This month</span>
-        <Money usd={agent.month_usd} />
+        <span className="text-muted-foreground">Last 30 days</span>
+        <Money usd={agent.spend_usd} />
         <span className="text-muted-foreground">Last used</span>
         <Ago iso={agent.last_used_at} />
       </div>
@@ -141,13 +141,13 @@ const PROVIDER = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google", s
 
 function ModelNode() {
   const { config, catalog } = useCanvas()
-  const c = catalog?.models.find((x) => x.id === config.model.id)
+  const c = catalog?.models.find((x) => x.id === config.model.id && x.backend === config.model.backend)
   return (
     <Card id="model" icon={<Cpu />} title="Model">
       <div className="space-y-1 p-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{c?.label ?? config.model.id}{config.model.speed === "fast" && " Fast"}</span>
-          <Pill>{EFFORT_LABEL[config.model.effort]}</Pill>
+          {config.model.backend === "anthropic" && <Pill>{EFFORT_LABEL[config.model.effort]}</Pill>}
         </div>
         <div className="text-xs text-muted-foreground">
           {PROVIDER[config.model.backend]}{c && <span className="text-faint">, ${c.in_usd} in / ${c.out_usd} out per million</span>}
@@ -227,7 +227,7 @@ function McpNode({ id }: { id: string }) {
       className="w-64"
       icon={<Plug />}
       title={s.name}
-      count={s.tools.length}
+      count={s.listed === false ? "Not listed" : s.tools.length}
       action={cred && <Tooltip><TooltipTrigger asChild><span className="flex items-center">{cred}</span></TooltipTrigger><TooltipContent>Sign in again</TooltipContent></Tooltip>}
     >
       <div className="py-1">

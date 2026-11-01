@@ -61,7 +61,7 @@ export function AgentList() {
                 <TableHead className="max-md:hidden">Model</TableHead>
                 <TableHead>Channels</TableHead>
                 <TableHead className="max-lg:hidden">Owner</TableHead>
-                <TableHead className="text-right max-sm:hidden">This month</TableHead>
+                <TableHead className="text-right max-sm:hidden">Last 30 days</TableHead>
                 <TableHead className="pr-4 text-right lg:pr-6">Edited</TableHead>
               </TableRow>
             </TableHeader>
@@ -98,7 +98,7 @@ export function AgentList() {
                   <TableCell className="max-lg:hidden">
                     <span className="flex items-center gap-2"><Avatar name={a.owner.name} className="size-5 text-[9px]" /><span className="truncate">{a.owner.name}</span></span>
                   </TableCell>
-                  <TableCell className="text-right text-muted-foreground max-sm:hidden"><Money usd={a.month_usd} /></TableCell>
+                  <TableCell className="text-right text-muted-foreground max-sm:hidden"><Money usd={a.spend_usd} /></TableCell>
                   <TableCell className="pr-4 text-right text-muted-foreground lg:pr-6">
                     <span className="inline-flex items-center gap-1.5">
                       <span className="max-xl:hidden">{a.updated_by.name.split(" ")[0]}</span><Ago iso={a.updated_at} />

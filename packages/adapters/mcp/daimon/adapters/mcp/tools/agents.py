@@ -811,11 +811,11 @@ async def _create_agent_impl(
         refuse_forbidden_builtins(runtime, [], merge_default_agent_toolset(spec.tools))
     owner = may_own(auth)
 
-    start: Callable[[], Awaitable[None]] | None = None
+    start: Callable[[str], Awaitable[None]] | None = None
     if backend is not None:
         target, target_model = backend
 
-        async def start_there() -> None:
+        async def start_there(_ma_agent_id: str) -> None:
             nonlocal started
             started = await _start_on_backend(
                 runtime, auth, origin, spec.name, target, target_model

@@ -40,6 +40,7 @@ from daimon.core.billing import (
     month_start,
 )
 from daimon.core.ma_resolver import retrieve_agent_cached
+from daimon.core.platform_names import UNNAMED_CHANNEL
 from daimon.core.spend_gate import (
     SpendRequest,
     person_verdict,
@@ -645,7 +646,7 @@ def _channel_row(spend: credit_views.ChannelSpend, names: dict[tuple[str, str], 
         row_id, name, kind = "web", "Web", "web"
     else:
         row_id = f"{spend.platform}:{spend.channel_id}"
-        name = names.get((spend.platform, spend.channel_id or ""), "Unnamed channel")
+        name = names.get((spend.platform, spend.channel_id or ""), UNNAMED_CHANNEL)
         kind = spend.platform
     return SpendRow(id=row_id, name=name, kind=kind, turns=spend.turns, usd=_usd(spend.usd))
 

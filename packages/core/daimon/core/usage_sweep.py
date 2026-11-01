@@ -301,6 +301,8 @@ class SessionBilling:
     model_id: str
     channel_id: str | None
     exempt_reason: str | None
+    # The agent the session runs, so settled spend counts toward it.
+    agent_id: str | None = None
 
     @property
     def pricing(self) -> ModelRates | None:
@@ -331,6 +333,7 @@ class SessionBilling:
             markup=markup,
             pricing=self.pricing,
             channel_id=self.channel_id,
+            agent_id=self.agent_id,
         )
 
 
@@ -365,6 +368,7 @@ async def session_billing(
         model_id=model_choice_id(session.agent.model),
         channel_id=session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL),
         exempt_reason=session.metadata.get(MA_METADATA_KEY_BILLING_EXEMPT),
+        agent_id=session.agent.id,
     )
 
 

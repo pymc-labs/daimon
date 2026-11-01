@@ -22,6 +22,7 @@ from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 _TS = "2026-04-21T00:00:00Z"
 _SKILL_MD = "---\nname: notes\ndescription: Take notes.\n---\nWrite them down.\n"
@@ -113,8 +114,14 @@ class _FakeSkills:
         )
         return httpx.Response(200, json=created.model_dump(mode="json"))
 
-    def _content(self, _r: httpx.Request, match: re.Match[str]) -> httpx.Response:
-        version = match["version"]
+    def _content(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        # As the real endpoint: a workspace key sent with the skills beta header is
+        # refused, and without it a version is named by its id.
+        if "skills-2025-10-02" in request.headers.get("anthropic-beta", ""):
+            return httpx.Response(
+                403, json={"type": "error", "error": {"type": "permission_error"}}
+            )
+        version = match["version"].removeprefix("ver_")
         self.downloads.append(version)
         if version not in self.versions:
             return httpx.Response(404, json={"type": "error", "error": {"type": "not_found_error"}})
@@ -245,7 +252,7 @@ async def test_a_base_version_the_skill_does_not_have_is_refused(
     """A version belongs to its skill: one that skill never published reads as not found."""
     fake, deps, actor = await _setup(db_session, db_session_factory, live_pin="1")
 
-    with pytest.raises(AgentEditError) as refused:
+    with capture_logs() as logs, pytest.raises(AgentEditError) as refused:
         await agent_skill_files.save_skill_files(
             deps,
             actor=actor,
@@ -256,6 +263,10 @@ async def test_a_base_version_the_skill_does_not_have_is_refused(
         )
 
     assert refused.value.kind == "not_found", "an unknown version is not found"
+    failed = [e for e in logs if e["event"] == "agent_skill_files.read_failed"]
+    assert [(e["step"], e["error"]) for e in failed] == [("download", "ProviderError")], (
+        "the cause behind the refusal is logged"
+    )
     assert sorted(fake.versions) == ["1", "2"], "nothing was published"
 
 

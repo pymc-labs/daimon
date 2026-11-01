@@ -194,6 +194,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
 ### Fixed
 
+- **Web agent editor fixes.** Deleted channels no longer show as "Unnamed channel" (they
+  leave the pickers, or read "Deleted channel"; DMs read "Direct message"). The model picker
+  offers every enabled provider's models with prices, and saving one switches the agent's
+  provider. A data server that refuses access names who can help. MCP servers list their
+  real tools for owners and admins, including the deployment's own server, or say "Not
+  listed". Skill files open with a workspace key. Agent spend includes sessions settled
+  after the turn.
+
 - Discord MCP posts from self-hosted agents use their local name and avatar when agent identity is enabled, without an Anthropic lookup.
 
 - Scheduled routines refuse thread destinations with an unknown parent channel and check retained thread backends before resolving Anthropic agents.
@@ -238,6 +246,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A standalone Azure OpenAI harness runs local agent tools, MCP connections and skills, with durable event replay, approval decisions and cancellation. It supports direct HTTP and Foundry invocation envelopes; deployment details are in `apps/harness/README.md`.
 
 ### Changed
+
+- The web agent API's `month_usd` and `month_start` are now `spend_usd` and `spend_since`:
+  an agent's spend over the last 30 days, not the calendar month.
 
 - On the mux turn path, a turn that reaches a thread whose lease another running turn holds now waits for that turn instead of failing with `LeaseBusy`. The wait ends at the turn's own ceiling, honors Stop, and a holder that dies frees the thread when its lease expires. A turn whose session the holder replaced adopts the replacement.
 

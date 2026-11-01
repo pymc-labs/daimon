@@ -117,12 +117,20 @@ def test_a_new_skill_version_is_an_edit_of_the_pinned_version() -> None:
     assert not change.text, "a skill's files are not diffed as one text"
 
 
-def test_model_backend_switch_is_threads_and_unsupported() -> None:
+def test_model_backend_switch_reaches_new_threads_as_a_provider_setting() -> None:
+    """A provider switch applies from the web, as the provider setting, not the MA model."""
     a = _config()
     b = _config(model=ModelChoice(id="gpt-5.5", backend="openai", speed="standard", effort="high"))
     (change,) = agent_changes.diff_config(a, b)
     assert change.effect == "threads", "a backend switch reaches new threads"
-    assert agent_changes.unsupported([change], a=a, b=b) is not None, "not from the web yet"
+    assert agent_changes.unsupported([change], a=a, b=b) is None, "the web may switch providers"
+    assert agent_changes.provider_moved(a, b), "the switch writes the provider setting"
+    patch = agent_changes.patch_for(ma_agent(id="ag_x", name="helper"), [change], b)
+    assert patch.model is None, "another provider's model is not the Managed Agents model"
+    effort = b.model_copy(update={"model": b.model.model_copy(update={"effort": "low"})})
+    assert (
+        agent_changes.unsupported(agent_changes.diff_config(b, effort), a=b, b=effort) is not None
+    ), "effort on another provider is not saved as if it applied"
 
 
 def test_patch_for_writes_only_what_changed() -> None:
@@ -274,7 +282,7 @@ def test_a_copy_read_without_details_is_not_an_edit_of_what_it_hid() -> None:
     )
 
 
-def test_db_state_moves_with_places_and_tool_rules_only() -> None:
+def test_db_state_moves_with_places_tool_rules_and_provider_only() -> None:
     base = _config(places=[_GENERAL])
     server = base.mcp_servers[0]
     denied = server.model_copy(
@@ -292,6 +300,10 @@ def test_db_state_moves_with_places_and_tool_rules_only() -> None:
     assert agent_changes.db_state(base) == agent_changes.db_state(
         _config(places=[_GENERAL], system="x")
     ), "the prompt, which lives in the provider's agent, does not"
+    elsewhere = base.model.model_copy(update={"backend": "openai", "id": "gpt-6-astra"})
+    assert agent_changes.db_state(base) != agent_changes.db_state(
+        _config(places=[_GENERAL], model=elsewhere)
+    ), "a provider switch moves it"
 
 
 def _stored_rule(tool: str, rule: str) -> AgentToolRule:

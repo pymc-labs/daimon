@@ -209,7 +209,7 @@ export function diffConfig(a: AgentConfig, b: AgentConfig): Change[] {
 
 type VersionRec = { version: number; at: string; by: string; note: string | null; config: AgentConfig }
 type Rec = {
-  id: string; owner: string; co_owners: string[]; last_used_at: string | null; month_usd: number
+  id: string; owner: string; co_owners: string[]; last_used_at: string | null; spend_usd: number
   versions: VersionRec[]; drafts: Record<string, { base_version: number; config: AgentConfig }>
 }
 
@@ -313,7 +313,7 @@ function seed(): Rec[] {
     skills: [skill("triage")], tools: toolset("read"), mcp_servers: [server("linear")], places: [place("support", { default: true })],
   }, "p_jonas", 500, [[30, "p_jonas", "Comments need approval", (c) => { c.mcp_servers[0]!.tools[3]!.rule = "ask" }]])
   const rec = (id: string, owner: string, co: string[], versions: VersionRec[], used: number | null, usd: number): Rec => ({
-    id, owner, co_owners: co, versions, last_used_at: used == null ? null : ago(used), month_usd: usd, drafts: {},
+    id, owner, co_owners: co, versions, last_used_at: used == null ? null : ago(used), spend_usd: usd, drafts: {},
   })
   return [
     rec("ag_daimon", "p_maya", ["p_jonas"], daimon, 0.2, 412.6),
@@ -358,7 +358,7 @@ function view(r: Rec, v: Viewer): Agent {
   const full = details(r, v)
   return {
     id: r.id, version: cur.version, ...redact(cur.config, full), owner: ref(r.owner), co_owners: r.co_owners.map(ref),
-    updated_at: cur.at, updated_by: ref(cur.by), last_used_at: r.last_used_at, month_usd: r.month_usd,
+    updated_at: cur.at, updated_by: ref(cur.by), last_used_at: r.last_used_at, spend_usd: r.spend_usd,
     can_edit: full && v.edit, can_view_details: full, nodes: full ? [{ kind: "data_server", label: "Data server", server: attached.has(r.id) ? "data" : null }] : [],
   }
 }
@@ -370,7 +370,7 @@ function summary(r: Rec, v: Viewer): AgentSummary {
   for (const p of c.places ?? []) runs.add(p.kind === "channel" ? (p.platform as "discord") : p.kind)
   return {
     id: a.id, name: a.name, purpose: a.purpose, avatar: a.avatar, version: a.version, owner: a.owner, updated_at: a.updated_at,
-    updated_by: a.updated_by, last_used_at: a.last_used_at, month_usd: a.month_usd, can_edit: a.can_edit, co_owners: a.co_owners,
+    updated_by: a.updated_by, last_used_at: a.last_used_at, spend_usd: a.spend_usd, can_edit: a.can_edit, co_owners: a.co_owners,
     draft_changes: draftView(r, v.id)?.changes.length ?? 0,
     model_label: MODELS.find((x) => x.id === c.model.id)?.label ?? c.model.id, backend: c.model.backend,
     runs_in: (["discord", "slack", "teams", "dm", "web"] as const).filter((k) => runs.has(k)),
@@ -499,7 +499,7 @@ export const agentsHandlers = [
     if (model) config.model = m(model, config.model.effort)
     const id = `ag_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")}_${Date.now().toString(36).slice(-4)}`
     DB.push({
-      id, owner: v.id, co_owners: [], last_used_at: null, month_usd: 0, drafts: {},
+      id, owner: v.id, co_owners: [], last_used_at: null, spend_usd: 0, drafts: {},
       versions: [{ version: 1, at: new Date().toISOString(), by: v.id, note: t.id === "blank" ? "Created" : `Created from ${t.name}`, config }],
     })
     save()

@@ -30,6 +30,8 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Literal
 
 import structlog
@@ -43,7 +45,11 @@ __all__ = [
     "KnownName",
     "LiveLookup",
     "UserKey",
+    "CHANNEL_STATUS_LABELS",
+    "UNNAMED_CHANNEL",
     "ChannelLookup",
+    "ChannelStatus",
+    "LookedUpChannels",
     "defer_writes",
     "forget_all",
     "lookup_channel_names",
@@ -358,22 +364,54 @@ async def resolve_names(
     return labels, found
 
 
-ChannelLookup = Callable[[str, str], Awaitable[str | None]]
-"""A platform lookup by (workspace external id, channel id): the name, or None.
+class ChannelStatus(StrEnum):
+    """A channel the platform answered for that has no name to show."""
+
+    GONE = "gone"  # deleted on the platform
+    DIRECT = "direct"  # a direct message, not a workspace channel
+
+
+UNNAMED_CHANNEL = "Unnamed channel"
+CHANNEL_STATUS_LABELS: Mapping[ChannelStatus, str] = {
+    ChannelStatus.GONE: "Deleted channel",
+    ChannelStatus.DIRECT: "Direct message",
+}
+
+ChannelLookup = Callable[[str, str], Awaitable[str | ChannelStatus | None]]
+"""A platform lookup by (workspace external id, channel id): the name, a status, or None.
 
 None also means the channel belongs to another workspace than the one named.
 """
 
-# How long a channel the platform could not name is left alone, so a deleted channel is
-# asked about once an hour, not on every page.
+
+@dataclass(frozen=True)
+class LookedUpChannels:
+    """What the platform said: names it gave, and channels that are gone or direct messages."""
+
+    names: dict[str, str] = field(default_factory=dict[str, str])
+    statuses: dict[str, ChannelStatus] = field(default_factory=dict[str, ChannelStatus])
+
+    @property
+    def gone(self) -> frozenset[str]:
+        return frozenset(c for c, s in self.statuses.items() if s is ChannelStatus.GONE)
+
+    def labels(self) -> dict[str, str]:
+        """Every answered channel's label: its name, else what its status says."""
+        return {cid: CHANNEL_STATUS_LABELS[s] for cid, s in self.statuses.items()} | self.names
+
+
+# How long a channel the platform could not name is left alone, so a channel it failed to
+# answer for is asked about once an hour, not on every page.
 _MISS_TTL_S = 3600.0
+# A deleted channel or a direct message stays that way: remembered for a day.
+_STATUS_TTL_S = 86_400.0
 _LOOKUP_TIMEOUT_S = 3.0
 # At most this many platform calls per lookup, this many at once: a page that lists many
 # unnamed channels must not turn into a burst of requests to the platform.
 _MAX_LOOKUPS = 20
 _LOOKUP_CONCURRENCY = 5
 _MISS_MEMO_SIZE = 5_000
-_missed: OrderedDict[tuple[uuid.UUID, str, str], float] = OrderedDict()
+_missed: OrderedDict[tuple[uuid.UUID, str, str], tuple[float, ChannelStatus | None]] = OrderedDict()
 
 
 async def lookup_channel_names(
@@ -384,30 +422,36 @@ async def lookup_channel_names(
     external_id: str,
     channel_ids: Collection[str],
     lookup: ChannelLookup,
-) -> dict[str, str]:
+) -> LookedUpChannels:
     """Ask the platform for channels the store has no name for, and remember what it says.
 
     Only for ids the stored names missed, at most `_MAX_LOOKUPS` per call (the rest wait for
-    a later call). A channel the platform could not name is not asked again for an hour.
+    a later call). A channel the platform could not name is not asked again for an hour; one
+    it called gone or a direct message is answered from memory for a day.
     Never raises and never waits past a few seconds.
     """
     now = time.monotonic()
-    ids = [
-        cid
-        for cid in dict.fromkeys(channel_ids)
-        if now - _missed.get((tenant_id, platform, cid), -_MISS_TTL_S) >= _MISS_TTL_S
-    ][:_MAX_LOOKUPS]
+    statuses: dict[str, ChannelStatus] = {}
+    ids: list[str] = []
+    for cid in dict.fromkeys(channel_ids):
+        at, status = _missed.get((tenant_id, platform, cid), (-_STATUS_TTL_S, None))
+        if status is not None and now - at < _STATUS_TTL_S:
+            statuses[cid] = status
+        elif status is not None or now - at >= _MISS_TTL_S:
+            ids.append(cid)
+    ids = ids[:_MAX_LOOKUPS]
     if not ids:
-        return {}
+        return LookedUpChannels(statuses=statuses)
     gate = asyncio.Semaphore(_LOOKUP_CONCURRENCY)
 
-    async def one(channel_id: str) -> str | None:
+    async def one(channel_id: str) -> str | ChannelStatus | None:
         async with gate:
             try:
-                return _clean(await lookup(external_id, channel_id))
+                answer = await lookup(external_id, channel_id)
             except Exception:
                 # Boundary: the lookup is the caller's network call; a name is optional.
                 return None
+            return answer if isinstance(answer, ChannelStatus) else _clean(answer)
 
     tasks = {asyncio.create_task(one(cid)): cid for cid in ids}
     done, pending = await asyncio.wait(tasks, timeout=_LOOKUP_TIMEOUT_S)
@@ -415,13 +459,16 @@ async def lookup_channel_names(
         task.cancel()
     found: dict[str, str] = {}
     for task, channel_id in tasks.items():
-        name = task.result() if task in done and not task.cancelled() else None
-        if name:
-            found[channel_id] = name
-        else:
-            _missed[(tenant_id, platform, channel_id)] = now
-            while len(_missed) > _MISS_MEMO_SIZE:
-                _missed.popitem(last=False)
+        answer = task.result() if task in done and not task.cancelled() else None
+        if isinstance(answer, str) and not isinstance(answer, ChannelStatus):
+            found[channel_id] = answer
+            continue
+        if answer is not None:
+            statuses[channel_id] = answer
+        _missed[(tenant_id, platform, channel_id)] = (now, answer)
+        _missed.move_to_end((tenant_id, platform, channel_id))
+        while len(_missed) > _MISS_MEMO_SIZE:
+            _missed.popitem(last=False)
     if found:
         remember_channel_names(sessionmaker, tenant_id=tenant_id, platform=platform, names=found)
-    return found
+    return LookedUpChannels(names=found, statuses=statuses)

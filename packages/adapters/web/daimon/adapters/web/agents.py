@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Annotated
 
@@ -20,7 +21,15 @@ from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.nodes import AgentNode, agent_nodes, build_nodes, tenant_workspace
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core import agent_catalog, agent_changes, agent_editing, agent_skill_files, agent_view
+from daimon.core import (
+    agent_catalog,
+    agent_changes,
+    agent_editing,
+    agent_model_names,
+    agent_skill_files,
+    agent_view,
+)
+from daimon.core.agent_catalog import CatalogModel
 from daimon.core.agent_changes import AgentChangeDeps, Change, Draft
 from daimon.core.agent_editing import AgentEditError
 from daimon.core.agent_identity import queue_agent_face
@@ -32,13 +41,12 @@ from daimon.core.agent_view import (
     PersonRef,
     SkillDoc,
 )
-from daimon.core.billing import month_start
+from daimon.core.channel_backend import make_backend_service
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL, MODEL_DISPLAY_NAMES
 from daimon.core.defaults.ma_index import list_skills_lenient
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import list_skills_lenient_cached
 from daimon.core.model_presets import ModelSelection
-from daimon.core.pricing import AGENT_MODEL_PRICING
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_drafts as drafts_store
 from daimon.core.stores import agent_mcp_credentials as credentials_store
@@ -49,14 +57,6 @@ from fastapi import APIRouter, HTTPException
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
 from pydantic import BaseModel, Field, StringConstraints, ValidationError
-
-
-class CatalogModel(BaseModel):
-    id: str
-    label: str
-    backend: Provider = DEFAULT_BACKEND
-    in_usd: float
-    out_usd: float
 
 
 class ToolLabel(BaseModel):
@@ -179,7 +179,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
             tenant_id=tenant_id,
             ma_agent_id=ma_agent_id,
             viewer=viewer_of(caller),
-            month_start=month_start(runtime.now()),
+            spend_since=runtime.now() - agent_view.SPEND_WINDOW,
             updated_by=await editors(tenant_id, [ma_agent_id]),
         )
         if view is None:
@@ -207,7 +207,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
             d.view,
             tenant_id=tenant_id,
             agents=agents,
-            month_start=month_start(runtime.now()),
+            spend_since=runtime.now() - agent_view.SPEND_WINDOW,
             updated_by=await editors(tenant_id, [a.id for a in agents]),
         )
         async with runtime.sessionmaker() as session:
@@ -254,26 +254,25 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 default=runtime.deployment_default,
                 now=runtime.now(),
             )
-        platform, names = await channel_names(
+        backends = make_backend_service(runtime.sessionmaker, runtime.settings.turn)
+        providers: tuple[Provider, ...] = (DEFAULT_BACKEND,)
+        if backends.enabled:
+            providers += (await backends.tenant_policy(tenant_id)).enabled_backends
+        platform, found = await channel_names(
             runtime, tenant_id, {c.channel_id for c in summary.channels}
         )
         return Catalog(
-            models=[
-                CatalogModel(
-                    id=model,
-                    label=MODEL_DISPLAY_NAMES.get(model, model),
-                    in_usd=AGENT_MODEL_PRICING[model].input,
-                    out_usd=AGENT_MODEL_PRICING[model].output,
-                )
-                for model in ALLOWED_MODEL_IDS
-            ],
+            models=agent_catalog.models_of(
+                agent_model_names.agent_catalog(), providers=providers, priced=ALLOWED_MODEL_IDS
+            ),
             skills=agent_catalog.skills_of(
                 rows, tenant_id=tenant_id, descriptions=runtime.skill_descriptions
             ),
             channels=agent_catalog.channels_of(
                 summary.channels,
                 platform=platform,
-                names=names,
+                names=found.labels(),
+                gone=found.gone,
                 is_admin=is_admin(caller.role),
             ),
             tools=[ToolLabel(name=name, label=name) for name in agent_editing.BUILTIN_NAMES],
@@ -289,7 +288,23 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         if chosen is None and body.template != _BLANK.id:
             raise HTTPException(status_code=404, detail="No such template.")
         d = deps()
-        selection: ModelSelection = body.model or (
+        # Another provider's model: the agent is made on the default model, then switched.
+        elsewhere = next(
+            (
+                entry.model
+                for entry in agent_model_names.agent_catalog()
+                if entry.model.id == body.model and entry.model.provider != DEFAULT_BACKEND
+            ),
+            None,
+        )
+        if elsewhere is not None and (
+            d.backends is None
+            or not d.backends.enabled
+            or elsewhere.provider
+            not in (await d.backends.tenant_policy(caller.person.tenant_id)).enabled_backends
+        ):
+            raise HTTPException(status_code=403, detail="That model isn't allowed here.")
+        selection: ModelSelection = (body.model if elsewhere is None else None) or (
             chosen.model if chosen is not None else DEFAULT_AGENT_MODEL
         )
         refusal = agent_editing.unknown_model_refusal(selection)
@@ -317,13 +332,41 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                     "skill_repos": chosen.skill_repos,
                 }
             )
+        actor = actor_of(caller)
+
+        start: Callable[[str], Awaitable[None]] | None = None
+        if elsewhere is not None:
+            target = elsewhere
+
+            async def start_elsewhere(ma_agent_id: str) -> None:
+                made = await agent_editing.load_editable_agent(
+                    d.edit, actor=actor, ma_agent_id=ma_agent_id
+                )
+                await agent_changes.switch_provider(
+                    d, actor=actor, agent=made, provider=target.provider, model_id=target.id
+                )
+
+            start = start_elsewhere
+
         try:
+            # Not left on a model nobody picked: a failed switch archives the new agent.
             ma_agent_id = await agent_editing.create_agent(
-                d.edit, actor=actor_of(caller), spec=spec, owner=True
+                d.edit,
+                actor=actor,
+                spec=spec,
+                owner=True,
+                start=start,
             )
+        except agent_editing.AgentDiscardFailedError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{spec.name} couldn't be set up, and removing it failed too. "
+                f"Ask an admin to archive {spec.name}.",
+            ) from exc
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
-        runtime.agents.forget(caller.person.tenant_id)
+        finally:
+            runtime.agents.forget(caller.person.tenant_id)
         queue_agent_face(
             runtime.sessionmaker,
             tenant_id=caller.person.tenant_id,

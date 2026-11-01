@@ -844,14 +844,14 @@ async def create_agent(
     actor: AgentActor,
     spec: AgentSpec,
     owner: bool,
-    start: Callable[[], Awaitable[object]] | None = None,
+    start: Callable[[str], Awaitable[object]] | None = None,
 ) -> str:
     """Create ``spec`` as a user-owned agent and return its MA id.
 
     With ``owner`` the actor is recorded as its owner, checked and created under one
     name lock so a concurrent creator of the same name is refused. ``start`` runs
-    once the agent exists (a backend move); if it or the owner record fails, the new
-    agent is archived so it never runs half-made.
+    with the new agent's MA id once it exists (a backend move); if it or the owner
+    record fails, the new agent is archived so it never runs half-made.
     """
     async with contextlib.AsyncExitStack() as stack:
         if owner:
@@ -893,7 +893,7 @@ async def create_agent(
                     account_id=actor.account_id,
                 )
             if start is not None and created:
-                await start()
+                await start(outcome.anthropic_id)
         except BaseException as exc:
             if start is None or not created:
                 raise

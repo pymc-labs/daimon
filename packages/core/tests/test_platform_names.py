@@ -658,9 +658,50 @@ async def test_a_channel_name_is_asked_for_once_and_remembered(
         lookup=lookup,
     )
 
-    assert first == {"c1": "general"} and remembered == [{"c1": "general"}]
+    assert first.names == {"c1": "general"} and remembered == [{"c1": "general"}]
     assert asked == ["c1", "c2"], "a channel the platform could not name is not asked again"
-    assert again == {}
+    assert again.labels() == {}, "an unanswered channel stays unnamed"
+
+
+async def test_a_deleted_channel_is_answered_from_memory_and_never_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A channel the platform calls gone keeps its label without asking again."""
+    remembered: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        platform_names,
+        "remember_channel_names",
+        lambda _sm, *, tenant_id, platform, names: remembered.append(names),  # type: ignore[reportUnknownLambdaType]
+    )
+    platform_names.forget_all()
+    tenant, asked = uuid.uuid4(), list[str]()
+
+    async def lookup(_guild: str, channel_id: str) -> str | platform_names.ChannelStatus | None:
+        asked.append(channel_id)
+        return {
+            "gone": platform_names.ChannelStatus.GONE,
+            "dm": platform_names.ChannelStatus.DIRECT,
+        }.get(channel_id)
+
+    async def ask() -> platform_names.LookedUpChannels:
+        return await platform_names.lookup_channel_names(
+            MagicMock(),
+            tenant_id=tenant,
+            platform="discord",
+            external_id="g1",
+            channel_ids=["gone", "dm"],
+            lookup=lookup,
+        )
+
+    first, again = await ask(), await ask()
+
+    for found in (first, again):
+        assert found.labels() == {"gone": "Deleted channel", "dm": "Direct message"}, (
+            "a deleted channel and a direct message are labelled, on every load"
+        )
+        assert found.gone == {"gone"}, "only the deleted channel counts as gone"
+    assert asked == ["gone", "dm"], "the platform is asked once"
+    assert remembered == [], "a status is not stored as a name"
 
 
 async def test_a_channel_lookup_that_raises_names_nothing() -> None:
@@ -677,7 +718,7 @@ async def test_a_channel_lookup_that_raises_names_nothing() -> None:
         channel_ids=["c1"],
         lookup=broken,
     )
-    assert found == {}
+    assert found.labels() == {}, "a failed lookup names nothing"
 
 
 # ---- the migration ----

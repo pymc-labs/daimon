@@ -62,6 +62,7 @@ from daimon.core.stores.domain import UserSkillRow
 from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.resources import Agent
+from mux.errors import ProviderError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _FORK_COPY_FIELDS = frozenset(
@@ -197,7 +198,7 @@ async def _copy_own_skills(
                 added_by_account_id=skill.upload.added_by_account_id if skill.upload else None,
                 recheck=_no_recheck,
             )
-        except (DaimonError, APIError) as exc:
+        except (DaimonError, APIError, ProviderError) as exc:
             _log.warning(
                 "agent_fork.skill_copy_failed",
                 tenant_id=str(tenant_id),

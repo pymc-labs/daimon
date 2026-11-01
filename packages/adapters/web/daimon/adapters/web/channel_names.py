@@ -9,13 +9,22 @@ from typing import Any, cast
 import httpx
 import structlog
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core.platform_names import ChannelLookup, lookup_channel_names
+from daimon.core.platform_names import (
+    ChannelLookup,
+    ChannelStatus,
+    LookedUpChannels,
+    lookup_channel_names,
+)
 from daimon.core.stores import platform_names
 from daimon.core.stores.tenants import get_tenant
 
 log = structlog.get_logger(__name__)
 
 _DISCORD_API = "https://discord.com/api/v10"
+# Discord's "Unknown Channel": the channel was deleted.
+_UNKNOWN_CHANNEL = 10003
+# Discord channel types for a direct message and a group direct message.
+_DIRECT_TYPES = (1, 3)
 
 
 def channel_lookup_of(runtime: WebRuntime) -> ChannelLookup | None:
@@ -29,7 +38,7 @@ def channel_lookup_of(runtime: WebRuntime) -> ChannelLookup | None:
         return None
     headers = {"Authorization": f"Bot {discord.bot_token.get_secret_value()}"}
 
-    async def lookup(guild_id: str, channel_id: str) -> str | None:
+    async def lookup(guild_id: str, channel_id: str) -> str | ChannelStatus | None:
         if not channel_id.isdigit():
             return None
         try:
@@ -39,13 +48,14 @@ def channel_lookup_of(runtime: WebRuntime) -> ChannelLookup | None:
         except httpx.HTTPError as exc:
             log.info("web.channel_lookup_failed", error=type(exc).__name__)
             return None
+        fields = _json_fields(response)
+        if response.status_code == 404 and fields.get("code") == _UNKNOWN_CHANNEL:
+            return ChannelStatus.GONE
         if response.status_code != 200:
             log.info("web.channel_lookup_refused", status=response.status_code)
             return None
-        body: Any = response.json()
-        if not isinstance(body, dict):
-            return None
-        fields = cast("dict[str, Any]", body)
+        if fields.get("guild_id") is None and fields.get("type") in _DIRECT_TYPES:
+            return ChannelStatus.DIRECT
         # The bot sits in many servers; a channel of another one is not this tenant's to name.
         if fields.get("guild_id") != guild_id:
             log.info("web.channel_lookup_foreign")
@@ -56,10 +66,21 @@ def channel_lookup_of(runtime: WebRuntime) -> ChannelLookup | None:
     return lookup
 
 
+def _json_fields(response: httpx.Response) -> dict[str, Any]:
+    try:
+        body: Any = response.json()
+    except ValueError:
+        return {}
+    return cast("dict[str, Any]", body) if isinstance(body, dict) else {}
+
+
 async def channel_names(
     runtime: WebRuntime, tenant_id: uuid.UUID, channel_ids: Collection[str]
-) -> tuple[str, dict[str, str]]:
-    """The tenant's platform and each of `channel_ids` that has a name: stored, else asked once."""
+) -> tuple[str, LookedUpChannels]:
+    """The tenant's platform and what each of `channel_ids` is called: stored, else asked once.
+
+    The platform's answer also says which channels are gone or direct messages.
+    """
     async with runtime.sessionmaker() as db:
         tenant = await get_tenant(db, tenant_id)
         platform = tenant.platform if tenant is not None else "discord"
@@ -74,7 +95,7 @@ async def channel_names(
         and external_id
         and (missing := set(channel_ids) - names.keys())
     ):
-        names |= await lookup_channel_names(
+        found = await lookup_channel_names(
             runtime.sessionmaker,
             tenant_id=tenant_id,
             platform=platform,
@@ -82,7 +103,8 @@ async def channel_names(
             channel_ids=missing,
             lookup=lookup,
         )
-    return platform, names
+        return platform, LookedUpChannels(names=names | found.names, statuses=found.statuses)
+    return platform, LookedUpChannels(names=names)
 
 
 async def named_spend_channels(
@@ -91,7 +113,10 @@ async def named_spend_channels(
     names: dict[tuple[str, str], str],
     channels: Collection[tuple[str, str]],
 ) -> dict[tuple[str, str], str]:
-    """`names` plus Discord channels among `channels` that the store had no name for."""
+    """`names` plus labels for Discord channels among `channels` that the store had no name for.
+
+    A deleted channel or a direct message gets the label its status says.
+    """
     lookup = channel_lookup_of(runtime)
     missing = {cid for platform, cid in channels if platform == "discord" and cid} - {
         cid for platform, cid in names if platform == "discord"
@@ -110,4 +135,4 @@ async def named_spend_channels(
         channel_ids=missing,
         lookup=lookup,
     )
-    return names | {("discord", cid): name for cid, name in found.items()}
+    return names | {("discord", cid): name for cid, name in found.labels().items()}

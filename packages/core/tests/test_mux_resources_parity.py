@@ -420,7 +420,7 @@ class SkillTransport:
 async def test_skill_multipart_version_walk_and_cleanup_match(operation):
     import io
 
-    from anthropic import APIStatusError
+    from anthropic import APIStatusError, omit
     from daimon.core.ma import delete_skill_and_versions
     from daimon.core.mux_compat import (
         create_skill,
@@ -453,7 +453,16 @@ async def test_skill_multipart_version_walk_and_cleanup_match(operation):
             )
             assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
         elif operation == "download":
-            response = await before.beta.skills.versions.download("v1", skill_id="skill1")
+            # The beta header gets a workspace key refused: the version's id is looked up
+            # and its content read without the header.
+            version_id = ""
+            async for row in before.beta.skills.versions.list(skill_id="skill1", limit=100):
+                if row.version == "v1":
+                    version_id = row.id
+                    break
+            response = await before.beta.skills.versions.download(
+                version_id, skill_id="skill1", extra_headers={"anthropic-beta": omit}
+            )
             try:
                 expected = await response.read()
             finally:
