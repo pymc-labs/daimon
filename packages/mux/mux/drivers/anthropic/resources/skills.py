@@ -181,12 +181,18 @@ class AnthropicSkillVersions:
             yield chunk
 
     async def _version_id(self, skill_id: str, version: str) -> str:
+        """The id of ``version``; "latest" is the newest one."""
+        newest: VersionListResponse | None = None
         async for item in provider_iter(
             self._client.beta.skills.versions.list(skill_id=skill_id, limit=100)
         ):
             if item.version == version:
                 return item.id
-        raise ProviderError("not_found", retryable=False)
+            if version == "latest" and (newest is None or item.created_at > newest.created_at):
+                newest = item
+        if newest is None:
+            raise ProviderError("not_found", retryable=False)
+        return newest.id
 
     async def walk_native(self, scope: Scope, skill_id: str) -> AsyncIterator[dict[str, JsonValue]]:
         """Preserve main's lazy list and partial native version rows."""
