@@ -23,9 +23,9 @@ export const useSkillFiles = (agentId: string, skill: Skill, enabled: boolean) =
     retry: false,
   })
 
-/** Publish `files` as a new version of the skill (or a new skill when `skillId` is null); a null body keeps that file. */
-export const saveSkillFiles = (agentId: string, skillId: string | null, files: Record<string, string | null>) =>
-  api.post<Skill>(`/api/agents/${agentId}/skills`, { skill_id: skillId, files })
+/** Publish `files` as a new version of the skill (or a new skill when `skillId` is null); a null body keeps that file as `version` has it. */
+export const saveSkillFiles = (agentId: string, skillId: string | null, files: Record<string, string | null>, version?: string) =>
+  api.post<Skill>(`/api/agents/${agentId}/skills`, { skill_id: skillId, files, version })
 
 /** Store or remove the token an agent's MCP server is called with. */
 export function useServerToken(agentId: string, key: string) {

@@ -123,7 +123,7 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
     setBusy(true)
     try {
       const body = Object.fromEntries(names.map((n) => [n, edits[n] ?? (added.includes(n) ? "" : null)]))
-      const saved = await saveSkillFiles(agent.id, skill.skill_id, body)
+      const saved = await saveSkillFiles(agent.id, skill.skill_id, body, skill.version)
       update((c) => {
         const i = c.skills.findIndex((x) => x.skill_id === skill.skill_id)
         if (saved.skill_id === skill.skill_id && i >= 0) c.skills[i] = { ...c.skills[i]!, ...saved }

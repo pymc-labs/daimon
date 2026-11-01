@@ -529,8 +529,8 @@ export const agentsHandlers = [
   http.post("/api/agents/:id/skills", async ({ request }) => {
     await wait(400)
     if (!viewer()) return unauthorized()
-    const { skill_id, files } = (await request.json()) as { skill_id: string | null; files: Record<string, string | null> }
-    const base = skill_id ? FILES.get(`${skill_id}@${latestVersion(skill_id)}`) ?? {} : {}
+    const { skill_id, files, version: held } = (await request.json()) as { skill_id: string | null; files: Record<string, string | null>; version?: string }
+    const base = skill_id ? FILES.get(`${skill_id}@${held ?? latestVersion(skill_id)}`) ?? {} : {}
     const next: Record<string, string> = {}
     for (const [path, body] of Object.entries(files)) next[path] = body ?? base[path] ?? ""
     const doc = next["SKILL.md"]
