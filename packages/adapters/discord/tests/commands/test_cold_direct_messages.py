@@ -865,3 +865,77 @@ async def test_failed_turn_adds_no_second_error_under_an_ended_card(
     msg = message(102)
     await cog.on_message(msg)
     msg.channel.send.assert_not_awaited()
+
+
+async def test_dm_turn_files_are_swept_into_the_dm_and_gated_by_dm_access(
+    db_session_factory, monkeypatch
+):
+    from daimon.core.direct_messages import DirectMessageAccessRevoked
+
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+
+    async def answer(deps, **kwargs):
+        row = await conversation(db_session_factory)
+        return replace(private_reply(row), session_id="sesn_files")
+
+    reply.side_effect = answer
+    delivery = AsyncMock()
+    monkeypatch.setattr(module, "require_dm_delivery", delivery)
+    msg = message(102)
+    await cog.on_message(msg)
+
+    schedule = cog.bot.schedule_dm_output_sweep
+    schedule.assert_called_once()
+    assert schedule.call_args.args == (msg.channel, "sesn_files")
+    may_post = schedule.call_args.kwargs["may_post"]
+    assert await may_post() is True
+    delivery.side_effect = DirectMessageAccessRevoked("delivery_access_revoked", message="gone")
+    assert await may_post() is False, "a revoked grant stops the next file"
+    delivery.side_effect = None
+    cog.bot.runtime.settings.direct_message_policies = {
+        tenants[0].id: DirectMessagePolicy(mode="disabled")
+    }
+    assert await may_post() is False, "a recipient policy change stops the next file"
+
+
+async def test_dm_turn_without_a_managed_agents_session_sends_no_files(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    await cog.on_message(message(102))
+    cog.bot.schedule_dm_output_sweep.assert_not_called()
+
+
+async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    built: dict[str, object] = {}
+
+    def lifecycle(**kwargs):
+        built.update(kwargs)
+        return _AnsweredCard(answered=True, ended=True)
+
+    monkeypatch.setattr(module, "DiscordTurnLifecycle", lifecycle)
+
+    async def answer(deps, **kwargs):
+        kwargs["card_for"](
+            SimpleNamespace(
+                grant=None,
+                agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
+                is_admin=False,
+                budget_channel_id=None,
+            ),
+            asyncio.Event(),
+        )
+        return private_reply(await conversation(db_session_factory))
+
+    reply.side_effect = answer
+    await cog.on_message(message(102))
+    sent = MagicMock()
+    sent.edit = AsyncMock()
+    await built["edit"](sent, content="x", _allow_replacement=False)
+    sent.edit.assert_awaited_once_with(content="x")

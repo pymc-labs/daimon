@@ -5,6 +5,7 @@ and the vote emoji. Each file is added by editing that message, so the answer
 stays the turn's last word. A file that cannot go there (the message is full,
 or the edit fails) is posted on its own, as a reply to the turn that made it.
 A file over the guild's upload limit is kept in the session and announced once.
+A DM takes the same delivery, under Discord's default upload limit.
 """
 
 from __future__ import annotations
@@ -35,6 +36,9 @@ log = structlog.get_logger(__name__)
 MAX_ATTACHMENTS_PER_MESSAGE = 10
 # Discord's upload limit where the destination's own is unknown (a DM, or no guild).
 DEFAULT_MAX_BYTES_PER_FILE = 10 * 1024 * 1024
+
+# Where a turn's files go: its thread, or the DM it ran in.
+type Conversation = discord.Thread | discord.DMChannel
 _ATTACH_NOTICE = (
     "I couldn't attach the generated file. This bot needs the Attach Files "
     "permission in this thread."
@@ -66,7 +70,7 @@ class AnswerMessage:
 
 
 def _attribution(
-    thread: discord.Thread, *, requester_id: int | None, reply_to: int | None
+    thread: Conversation, *, requester_id: int | None, reply_to: int | None
 ) -> tuple[str | None, dict[str, Any]]:
     """The mention, and the send kwargs, that tie a post to the turn that made it.
 
@@ -81,7 +85,7 @@ def _attribution(
         kwargs["reference"] = discord.MessageReference(
             message_id=reply_to,
             channel_id=thread.id,
-            guild_id=thread.guild.id,
+            guild_id=thread.guild.id if thread.guild is not None else None,
             fail_if_not_exists=False,
         )
     return mention, kwargs
@@ -89,7 +93,7 @@ def _attribution(
 
 async def deliver_session_outputs(
     anthropic_client: AsyncAnthropic,
-    thread: discord.Thread,
+    thread: Conversation,
     *,
     session_id: str,
     may_post: Callable[[], Awaitable[bool]],
@@ -184,10 +188,15 @@ async def deliver_session_outputs(
         log.warning(
             "discord.output_delivery.unavailable",
             session_id=session_id,
-            guild_id=thread.guild.id,
+            guild_id=thread.guild.id if thread.guild is not None else None,
             reason=reason,
         )
-        if reason != "attach_files_forbidden" or thread.id in notice_thread_ids:
+        # A DM has no Attach Files permission to ask for.
+        if (
+            reason != "attach_files_forbidden"
+            or isinstance(thread, discord.DMChannel)
+            or thread.id in notice_thread_ids
+        ):
             return
         if not await may_post():
             return
@@ -250,7 +259,7 @@ class _AnswerTarget:
     """
 
     def __init__(
-        self, thread: discord.Thread, answer: AnswerMessage | None, *, session_id: str
+        self, thread: Conversation, answer: AnswerMessage | None, *, session_id: str
     ) -> None:
         self._thread = thread
         self._answer = answer
@@ -376,12 +385,12 @@ async def _same_bytes(candidates: list[discord.Attachment], content: bytes) -> b
 
 
 async def _own_attachments(
-    thread: discord.Thread, *, window: tuple[int, int] | None
+    thread: Conversation, *, window: tuple[int, int] | None
 ) -> dict[tuple[str, int], list[discord.Attachment]]:
     """Each file Daimon attached in the thread inside ``window``, by name and size."""
     if window is None:
         return {}
-    me = thread.guild.me.id
+    me = thread.me.id if isinstance(thread, discord.DMChannel) else thread.guild.me.id
     found: dict[tuple[str, int], list[discord.Attachment]] = {}
     after, before = window
     try:
