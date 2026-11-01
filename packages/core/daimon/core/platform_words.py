@@ -166,7 +166,7 @@ class PlatformWords:
         return said
 
 
-# Discord registers every command but /privacy as guild-only.
+# Discord registers every command but /privacy and /new as guild-only; /new is DM-only.
 _DISCORD: Mapping[Action, Command] = MappingProxyType(
     {
         "here": Command("/here", "space"),
@@ -179,6 +179,7 @@ _DISCORD: Mapping[Action, Command] = MappingProxyType(
         "billing": Command("/billing", "space"),
         "cost_footer": Command("/cost-footer", "space"),
         "privacy": Command("/privacy"),
+        "new": Command("/new", "chat"),
         "help": Command("/help", "space"),
     }
 )
