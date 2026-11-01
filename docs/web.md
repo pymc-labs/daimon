@@ -79,6 +79,12 @@ and spend allowances can name a group. Add `offline_access` to
 [`DAIMON_WEB__OIDC__SCOPES`](configuration.md#daimon_web__oidc__scopes) when
 embedded apps need the person's token for longer than one access token lasts.
 
+A provider that verifies people's chat accounts can list them in a
+`chat_accounts` claim. With
+[`DAIMON_WEB__OIDC__TRUST_CHAT_ACCOUNTS`](configuration.md#daimon_web__oidc__trust_chat_accounts)
+on, a person also reaches each chat workspace those accounts are in, as that
+account, the same as signing in with Discord, Slack or Microsoft.
+
 ### Discord, Slack and Microsoft
 
 These reuse the deployment's existing login apps, so there is nothing new to
@@ -91,8 +97,12 @@ create. Add the redirect URI to each app you offer:
 - Microsoft: the app registration in
   [`DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`](configuration.md#daimon_microsoft_accounts__client_id).
 
-People who sign in this way reach the workspaces their chat account already
-uses. Their spend and memory are the same as in chat.
+People who sign in this way reach every workspace with Daimon installed where
+their chat account is a member. Their spend and memory are the same as in
+chat. Someone who leaves a Discord server or Slack workspace loses it in the
+web app at once. Discord needs the Server Members intent and Slack the
+`team_join` and `user_change` events for this; until a list loads, the sign-in
+itself decides.
 
 ## Become the owner
 
@@ -139,11 +149,19 @@ DAIMON_WEB__APPS='[{"key": "notes", "name": "Notes", "icon": "plug",
 | `connections_path` | Page where people manage the connections the app serves to agents. |
 | `panels.agent` | The app's view of one agent: `embed`, the path shown in a drawer, and `page`, the same view as a full page. Both are paths starting with `/` that contain `{agent_id}`. |
 | `oidc_issuer` | Issuer whose access tokens the app accepts. Set it only for an app you trust with the person's token. |
+| `identity_server` | A [`DAIMON_MCP_IDENTITY__SERVERS`](configuration.md#daimon_mcp_identity__servers) entry. People signed in with a chat account then get a token by token exchange at `oidc_issuer`, which must be the web sign-in provider. |
 
 The sign-in button's icon, `DAIMON_WEB__OIDC__ICON`, takes the same forms.
 
 The app must allow framing by your public URL, in its own
 `frame-ancestors` policy.
+
+The provider must accept the exchange: an RFC 8693 request from the web client
+whose `subject_token` is a JWT signed with
+[`DAIMON_MCP_IDENTITY__SIGNING_KEY`](configuration.md#daimon_mcp_identity__signing_key).
+Its `iss` is the entry's `issuer` and `aud` the `oidc_issuer`. `sub` is the chat
+account and `ws` the workspace, each a platform and id such as
+`discord:123`. A refused exchange is tried again after five minutes.
 
 ### Agent panels
 
@@ -163,9 +181,10 @@ app's exact origin is answered.
 - **Token.** The frame sends `{embed: 1, type: "token"}`. The web app answers
   `{embed: 1, type: "token", token}`. `token` is the person's own access token
   from the `oidc_issuer` provider, refreshed when nearly spent. It is valid
-  wherever Daimon's client tokens are accepted, and `null` when the person
-  signed in another way. Check its signature against the issuer, and check
-  `aud` and `azp` are what you expect.
+  wherever Daimon's client tokens are accepted. With `identity_server`, someone
+  signed in another way gets one by token exchange instead. Check its signature
+  against the issuer, and check `aud` and `azp` are what you expect. A person
+  with no token does not see the app.
 - **From the frame.** `navigate` with `path` records where a page frame is, so
   reloads and links return there. `title` with `title` sets the browser tab.
   `open-nav` opens the sidebar on small screens. `keys` with `key` and `mod`
@@ -190,4 +209,4 @@ app's exact origin is answered.
 | The provider reports a redirect URI mismatch | Register the exact URI from the table above. |
 | Sign-in works but writes fail with "Cross-site request refused." | `DAIMON_WEB__PUBLIC_URL` must match the address in the browser exactly. |
 | An app shows Error in **Admin** > **Settings** | `<origin>/embed/manifest` did not answer with success within 3 seconds. |
-| An app asks people to sign in again | They signed in another way, or their token lapsed. Add `offline_access` to the scopes. |
+| An app is missing for some people | They have no token for it: they signed in another way, or their token lapsed. Add `offline_access` to the scopes, or set `identity_server`. |

@@ -1154,9 +1154,9 @@ class WebOidcSettings(BaseModel):
     trust_chat_accounts: bool = Field(
         default=False,
         description=(
-            "Trust the provider's `chat_accounts` ID token claim: a list of "
-            "`discord:<user id>`, `slack:<team id>:<user id>` and "
-            "`teams:<tenant id>:<user object id>`. A person then also signs in to every "
+            "Trust the provider's chat_accounts ID token claim: a list of "
+            '"discord:<user id>", "slack:<team id>:<user id>" and '
+            '"teams:<tenant id>:<user object id>". A person then also signs in to every '
             "chat workspace where one of those accounts is a member, acting as it. Turn on "
             "only for a provider that verifies those accounts itself."
         ),
