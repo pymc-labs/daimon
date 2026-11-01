@@ -297,3 +297,88 @@ async def test_apps_naming_different_identity_servers_never_share_a_token(
         for t in provider.subject_tokens
     ]
     assert issuers == ["daimon-test", "daimon-lab"], "the second app's token is not the first's"
+
+
+async def test_a_chat_admin_is_a_web_admin_until_the_flag_clears(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _guild_person(db_session, "121212121212121212")
+    await _listing(db_session, person, {_USER: True})
+    await db_session.commit()
+    token = await _session(db_session_factory, person)
+    async with web_client(
+        web_settings(), sessionmaker=db_session_factory, now=lambda: _NOW
+    ) as client:
+        _cookie(client, token)
+        admin = await client.get("/api/me")
+        async with db_session_factory.begin() as db:
+            await members_store.update_admin_flags(
+                db, tenant_id=person.tenant_id, flags={_USER: False}, now=_NOW
+            )
+        member = await client.get("/api/me")
+        settings = await client.get("/api/admin/settings")
+
+    assert admin.json()["role"] == "admin", "a chat admin is a web admin"
+    assert member.json()["role"] == "member", "and stops being one with the chat role"
+    assert settings.status_code == 403, "admin pages close at once"
+
+
+async def test_switching_into_a_workspace_the_person_left_is_refused(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    kept = await _guild_person(db_session, "131313131313131313")
+    gone = await _guild_person(db_session, "141414141414141414")
+    await _listing(db_session, kept, {_USER: False})
+    await _listing(db_session, gone, {})
+    await db_session.commit()
+    token = await _session(db_session_factory, kept, gone)
+    async with web_client(
+        web_settings(), sessionmaker=db_session_factory, now=lambda: _NOW
+    ) as client:
+        _cookie(client, token)
+        start = (await client.get("/api/me")).json()["workspace"]["id"]
+        switched = await client.post("/api/workspaces/switch", json={"id": str(gone.tenant_id)})
+        after = await client.get("/api/me")
+
+    assert start == str(kept.tenant_id), start
+    assert switched.status_code == 403, switched.text
+    assert after.json()["workspace"]["id"] == str(kept.tenant_id), "the session stays put"
+
+
+async def test_before_the_first_full_load_the_sign_in_decides_and_event_rows_count(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A join or role event can write a row before the list first loads in full: that row's
+    admin flag counts, and nobody is refused for missing from a list never loaded."""
+    admin = await _guild_person(db_session, "151515151515151515")
+    async with db_session_factory.begin() as db:
+        await members_store.upsert_member(
+            db, tenant_id=admin.tenant_id, platform_user_id=_USER, is_admin=True, now=_NOW
+        )
+    unlisted = await _guild_person(db_session, "161616161616161616")
+    await db_session.commit()
+    admin_token = await _session(db_session_factory, admin)
+    unlisted_token = await _session(db_session_factory, unlisted)
+    async with web_client(
+        web_settings(), sessionmaker=db_session_factory, now=lambda: _NOW
+    ) as client:
+        _cookie(client, admin_token)
+        as_admin = await client.get("/api/me")
+        _cookie(client, unlisted_token)
+        as_unlisted = await client.get("/api/me")
+        async with db_session_factory.begin() as db:
+            await members_store.replace_members(
+                db, tenant_id=unlisted.tenant_id, members={}, workspace_name="G", now=_NOW
+            )
+        after_load = await client.get("/api/me")
+
+    assert as_admin.status_code == 200 and as_admin.json()["role"] == "admin", as_admin.text
+    assert as_unlisted.status_code == 200, "an unloaded list refuses nobody"
+    assert as_unlisted.json()["role"] == "member", "and makes nobody admin without a row"
+    assert after_load.status_code == 403, "once loaded in full, the list decides"
