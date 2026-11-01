@@ -492,3 +492,66 @@ async def test_dm_turn_uses_the_adapters_confirmation_hook(
         assert built == [admission], "the hook is built for the admitted turn"
     else:
         assert seen["confirm_write"] is None, "without a card surface approvals stay refused"
+
+
+@pytest.mark.parametrize("with_card", [True, False], ids=["card", "collect"])
+async def test_dm_turn_renders_through_the_adapters_card(
+    db_session_factory, monkeypatch, with_card
+):
+    from types import SimpleNamespace
+
+    from daimon.core import direct_messages
+    from daimon.core.direct_messages import reply_to_dm_result
+
+    tenant, admission, deps = await seed(db_session_factory)
+    row = await start_cold_dm(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        workspace_id=tenant.external_id,
+        route_key="555",
+        external_user_id="999",
+    )
+    monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
+    monkeypatch.setattr(
+        direct_messages,
+        "bind_session",
+        AsyncMock(return_value=SimpleNamespace(admission=admission)),
+    )
+    seen: dict[str, object] = {}
+
+    class Stop(Exception):
+        pass
+
+    async def run(deps, prepared, **kwargs):
+        seen.update(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
+    card = object()
+    built: list[tuple[Admission, asyncio.Event]] = []
+
+    def card_for(admitted, cancel):
+        built.append((admitted, cancel))
+        return card
+
+    with pytest.raises(Stop):
+        await reply_to_dm_result(
+            deps,
+            platform="discord",
+            route_key="555",
+            external_user_id="999",
+            message_id="101",
+            expected_scope_id=row.scope_id,
+            text="hello",
+            role=Role.USER,
+            verified_membership=True,
+            card_for=card_for if with_card else None,
+        )
+    if with_card:
+        ((admitted, cancel),) = built
+        assert seen["lifecycle"] is card, "the DM turn renders through the adapter's card"
+        assert admitted is admission
+        assert seen["cancel"] is cancel, "the card's Stop button cancels this turn"
+    else:
+        assert type(seen["lifecycle"]).__name__ == "_CollectReply", "no card renders nothing"
