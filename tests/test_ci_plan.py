@@ -211,11 +211,11 @@ def test_deploy_yml_inline_full_plan_matches() -> None:
     ("paths", "expected"),
     [
         (["docs/x.md", "packages/core/tests/test_x.py", "tests/parity/test_y.py"], {
-            "daimon_image": "false", "workers": "", "smoke": "false", "ssh": "false",
+            "daimon_image": "false", "workers": "", "smoke": "false", "notebook_vm": "false",
         }),
         (["packages/adapters/web/daimon/adapters/web/app.py", "web/src/App.tsx"], {
             "daimon_image": "true", "migrate": "false", "mcp": "false", "workers": "web",
-            "reconcile": "", "smoke": "false", "ssh": "true",
+            "reconcile": "", "smoke": "false",
         }),
         (["packages/adapters/slack/daimon/adapters/slack/app.py"], {
             "workers": "slack", "reconcile": "slack", "smoke": "true", "notebook_vm": "false",

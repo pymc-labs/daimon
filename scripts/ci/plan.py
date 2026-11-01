@@ -290,7 +290,6 @@ def plan_deploy(paths: Iterable[str] | None) -> dict[str, str]:
         "reconcile": " ".join(s for s in ("discord", "slack", "teams") if s in refreshed),
         "smoke": flag(turn),
         "notebook_vm": flag(notebook_vm),
-        "ssh": flag(refreshed or notebook_vm or turn),
     }
 
 

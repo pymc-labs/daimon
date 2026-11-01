@@ -149,9 +149,9 @@ jobs:
       # deploy recorded its commit (scripts/ci/plan.py). Planned again here, not
       # taken from the candidate job: another deploy may have moved that record
       # since. Manual and production deploys refresh everything, inline, because
-      # a rollback checks out an old SHA that may not have the planner. A secret
-      # or worker config change applies with the next worker refresh, or at once
-      # through a manual deploy.
+      # a rollback checks out an old SHA that may not have the planner. Every
+      # deploy refreshes both VMs' env from Secret Manager, and recreates their
+      # services when a secret or config changed.
       - name: Plan the components to refresh
         if: steps.fresh.outputs.superseded != 'true'
         id: plan
@@ -164,12 +164,12 @@ jobs:
           else
             printf '%s\n' full=true daimon_image=true notebook_image=true report_image=true \
               migrate=true mcp=true workers=all "reconcile=discord slack teams" smoke=true \
-              notebook_vm=true ssh=true | tee -a "$GITHUB_OUTPUT"
+              notebook_vm=true | tee -a "$GITHUB_OUTPUT"
           fi
 
       # gcloud's IAP tunnel warns, and runs slower, without NumPy.
       - name: Give the IAP tunnel NumPy
-        if: (steps.plan.outputs.ssh == 'true') && steps.fresh.outputs.superseded != 'true'
+        if: steps.fresh.outputs.superseded != 'true'
         run: |
           py="$RUNNER_TEMP/gcloud-python"
           if python3 -m venv "$py" && "$py/bin/pip" install --quiet --disable-pip-version-check numpy; then
@@ -241,7 +241,7 @@ jobs:
           echo "prebuilt=true" >> "$GITHUB_OUTPUT"
 
       - name: Start staging IAP SSH key registration
-        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true' && steps.plan.outputs.ssh == 'true') && steps.fresh.outputs.superseded != 'true'
+        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           REPO_NAME: ${{ vars.GCP_AR_REPO }}
           IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
@@ -388,7 +388,7 @@ jobs:
           echo "url=$URL/mcp" >> "$GITHUB_OUTPUT"
 
       - name: Wait for staging IAP SSH key registration
-        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true' && steps.plan.outputs.ssh == 'true') && steps.fresh.outputs.superseded != 'true'
+        if: (inputs.environment == 'staging' && steps.images.outputs.prebuilt == 'true') && steps.fresh.outputs.superseded != 'true'
         env:
           IAP_SSH_STATE: ${{ runner.temp }}/iap-ssh-key
         run: scripts/ci/iap-ssh-key.sh wait "$IAP_SSH_STATE" 190
@@ -421,7 +421,7 @@ jobs:
           fi
 
       - name: Start notebook-host VM refresh (in the background)
-        if: (steps.plan.outputs.notebook_vm == 'true') && steps.fresh.outputs.superseded != 'true'
+        if: steps.fresh.outputs.superseded != 'true'
         id: notebook_refresh
         run: |
           # Runs alongside the worker refresh below; the two VMs share nothing.
@@ -460,12 +460,18 @@ jobs:
                 # permission or transient Secret Manager failure, failing the
                 # deploy — intended: a config the pipeline cannot assemble must
                 # not read green.
+                config() { sudo cat /etc/daimon/daimon.env /etc/daimon/compose.notebook.yml /etc/daimon/Caddyfile 2>/dev/null | sha256sum || true; }
+                before=$(config)
                 sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
                 sudo chmod 755 /usr/local/bin/daimon-refresh-env
                 sudo /usr/local/bin/daimon-refresh-env
                 sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.notebook.yml /etc/daimon/compose.notebook.yml
                 caddyfile_before=$(sudo sha256sum /etc/daimon/Caddyfile 2>/dev/null || true)
                 sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/Caddyfile /etc/daimon/Caddyfile
+                if [ "${{ steps.plan.outputs.notebook_vm }}" != true ] && [ "$(config)" = "$before" ]; then
+                  echo "notebook config unchanged: nothing to recreate"
+                  exit 0
+                fi
                 cd /etc/daimon
                 sudo -E docker compose -f compose.notebook.yml pull
                 sudo -E docker compose -f compose.notebook.yml up -d --remove-orphans
@@ -506,7 +512,7 @@ jobs:
           ) > "$RUNNER_TEMP/notebook-refresh.log" 2>&1 < /dev/null &
 
       - name: Refresh worker VM containers (recreate in place)
-        if: (steps.plan.outputs.workers != '') && steps.fresh.outputs.superseded != 'true'
+        if: steps.fresh.outputs.superseded != 'true'
         id: refresh
         run: |
           set -o pipefail
@@ -555,8 +561,6 @@ jobs:
                   | sudo tee -a /etc/daimon/daimon.env >/dev/null
               fi
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.worker.yml /etc/daimon/compose.worker.yml
-              cd /etc/daimon
-              sudo -E docker compose -f compose.worker.yml pull
               # Main CI recreates only the services whose files changed; the rest
               # keep running. "all" is every service in the compose file.
               services="${{ steps.plan.outputs.workers }}"
@@ -565,6 +569,12 @@ jobs:
                 echo "config changed: recreating every service"
                 services=all
               fi
+              if [ -z "$services" ]; then
+                echo "worker config unchanged: nothing to recreate"
+                exit 0
+              fi
+              cd /etc/daimon
+              sudo -E docker compose -f compose.worker.yml pull
               wants() { case " $services " in *" all "*|*" $1 "*) return 0 ;; esac; return 1; }
               # --timeout exceeds the 90s stop_grace_period in the worker asset.
               # The adapters drain in-flight turns for up to 60s
@@ -692,6 +702,10 @@ jobs:
               # breaks IAP SSH key writes (breaking this very refresh step).
               sudo docker image prune -af || true
             ' | tee "$RUNNER_TEMP/workers-refresh.log"
+          # Nothing restarted: no reconcile to wait for, no minters refreshed.
+          if grep -q "^worker config unchanged" "$RUNNER_TEMP/workers-refresh.log"; then
+            exit 0
+          fi
           # Every service restarted, so the checks after this cover them all.
           if grep -q "^config changed: recreating every service" "$RUNNER_TEMP/workers-refresh.log"; then
             printf '%s\n' "reconcile=discord slack teams" smoke=true >> "$GITHUB_OUTPUT"

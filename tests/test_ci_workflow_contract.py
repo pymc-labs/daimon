@@ -866,6 +866,25 @@ def test_staging_forgets_its_deployed_commit_before_any_change(
     assert (state.read_text() == "") is removable
 
 
+@pytest.mark.parametrize(
+    ("name", "planned", "marker"),
+    [
+        ("Refresh worker VM containers (recreate in place)", "workers", "worker"),
+        ("Start notebook-host VM refresh (in the background)", "notebook_vm", "notebook"),
+    ],
+)
+def test_every_deploy_refreshes_vm_env_and_recreates_only_on_change(
+    name: str, planned: str, marker: str
+) -> None:
+    """A secret change reaches both VMs with the next deploy, whatever it changed."""
+    steps = {step.get("name"): step for step in _workflow("deploy.yml")["jobs"]["deploy"]["steps"]}
+    assert steps[name]["if"] == "steps.fresh.outputs.superseded != 'true'"
+    run = steps[name]["run"]
+    skip = run.index(f'echo "{marker} config unchanged: nothing to recreate"')
+    assert run.index("before=$(config)") < run.index("daimon-refresh-env") < skip
+    assert run.index(f"steps.plan.outputs.{planned}") < skip < run.index(".yml pull")
+
+
 def test_a_config_change_recreates_and_checks_every_worker() -> None:
     steps = {step.get("name"): step for step in _workflow("deploy.yml")["jobs"]["deploy"]["steps"]}
     run = steps["Refresh worker VM containers (recreate in place)"]["run"]
