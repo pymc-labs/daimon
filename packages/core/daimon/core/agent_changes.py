@@ -858,7 +858,7 @@ async def _check_added_skills(
 ) -> None:
     """Refuse an added custom skill this workspace does not own; Managed Agents takes any id."""
     known = {skill.skill_id for skill in base.skills}
-    added = {s.skill_id for s in target.skills if s.type == "custom" and s.skill_id not in known}
+    added = [skill for skill in target.skills if skill.skill_id not in known]
     if not added:
         return
     rows, _truncated = await list_skills_lenient(deps.edit.client)
@@ -869,7 +869,9 @@ async def _check_added_skills(
         and strip_tenant_prefix(tenant_id=actor.tenant_id, display_title=row.display_title)
         is not None
     }
-    if not added <= own:
+    # Whatever type the entry claims, a listed custom skill must be this workspace's own.
+    foreign = {row.id for row in rows if row.source != "anthropic"} - own
+    if any(s.skill_id in foreign or (s.type == "custom" and s.skill_id not in own) for s in added):
         raise AgentEditError("That skill isn't available here.", kind="invalid")
 
 

@@ -278,9 +278,13 @@ async def test_applying_another_workspaces_skill_is_refused(
     async with _client(agents, owner.tenant_id, db_session_factory, token) as client:
         config = (await client.get("/api/agents/ag_w")).json()
         statuses: list[int] = []
-        for skill_id in ("skill_theirs", "skill_own"):
+        for kind, skill_id in (
+            ("custom", "skill_theirs"),
+            ("anthropic", "skill_theirs"),
+            ("custom", "skill_own"),
+        ):
             config["skills"] = [
-                {"type": "custom", "skill_id": skill_id, "title": "notes", "version": "latest"}
+                {"type": kind, "skill_id": skill_id, "title": "notes", "version": "latest"}
             ]
             draft = await client.patch(
                 "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
@@ -289,7 +293,7 @@ async def test_applying_another_workspaces_skill_is_refused(
             statuses.append(
                 (await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)).status_code
             )
-    assert statuses == [422, 200], "only this workspace's own skills can be added"
+    assert statuses == [422, 422, 200], "only this workspace's own skills can be added"
 
 
 async def test_apply_after_the_agent_moved_is_409(
