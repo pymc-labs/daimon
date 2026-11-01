@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Discord DMs have a **New conversation** button under each reply, next to **Switch server**, and a `/new` command in DMs. Both start an empty private conversation with the same server and its DM agent, so a person picks up an agent's changed credentials or tools without choosing a server again. Access is checked as for a first DM, and a button from an older conversation refuses. On dev lanes, where commands are registered per server, `/new` does not show in DMs; use the button.
+
 - A Discord member who may not use Daimon and DMs it is told they don't have permission to DM Daimon, instead of being sent to `/dm-me`, which would refuse them too. This applies when the server's invoker policy or the DM agent's role requirement refuses them. Someone who isn't a member of any of Daimon's servers still gets the `/dm-me` guidance, so the reply never confirms a server they aren't in.
 
 - A Discord DM can approve a write. A tool call that needs approval used to be refused in a DM straight away, because a DM had nowhere to show the confirmation card, so a DM agent could never publish an artifact or run any other gated write. The card is now posted in the DM, only the person who sent the message can answer it, and it times out as in a thread. Slack and Teams DMs still refuse such writes.

@@ -12,6 +12,7 @@ import discord
 
 SelectServer = Callable[[discord.Interaction, str], Awaitable[None]]
 SwitchServer = Callable[[discord.Interaction], Awaitable[None]]
+RestartConversation = Callable[[discord.Interaction], Awaitable[None]]
 SWITCH_VIEW_SECONDS = 900
 
 
@@ -128,7 +129,13 @@ class ServerSwitch(_PrivateControl):
     noun = "control"
 
     def __init__(
-        self, *, user_id: int, route_id: int, switch: SwitchServer, expire: Callable[[], None]
+        self,
+        *,
+        user_id: int,
+        route_id: int,
+        switch: SwitchServer,
+        restart: RestartConversation,
+        expire: Callable[[], None],
     ) -> None:
         super().__init__(timeout=SWITCH_VIEW_SECONDS)
         self.expire = expire
@@ -146,6 +153,15 @@ class ServerSwitch(_PrivateControl):
 
         button.callback = clicked
         self.add_item(button)
+        fresh = discord.ui.Button[ServerSwitch](
+            label="New conversation", style=discord.ButtonStyle.secondary
+        )
+
+        async def restarted(interaction: discord.Interaction) -> None:
+            await restart(interaction)
+
+        fresh.callback = restarted
+        self.add_item(fresh)
 
     def stop(self) -> None:
         self._expiry.cancel()
