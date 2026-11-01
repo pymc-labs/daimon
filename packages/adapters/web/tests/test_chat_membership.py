@@ -98,6 +98,7 @@ async def test_leaving_a_workspace_closes_it_and_the_app_moves_on(
         back = await client.post("/api/workspaces/switch", json={"id": str(gone.tenant_id)})
 
     assert len(before["workspaces"]) == 2, before
+    assert {w["platform"] for w in before["workspaces"]} == {"discord"}, "the chat app it lives in"
     assert refused.status_code == 403, refused.text
     assert refused.json()["detail"] == "You're no longer in this workspace."
     assert me.status_code == 200, me.text

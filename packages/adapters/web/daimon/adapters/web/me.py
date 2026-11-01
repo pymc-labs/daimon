@@ -25,10 +25,11 @@ from daimon.adapters.web.caller import (
 from daimon.adapters.web.credits import CreditMeter, credit_meter
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.config import EmbeddedAppSettings, WebModuleKey
+from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_sessions as sessions_store
-from daimon.core.stores.domain import WebIdentityRow, WebPersonRow
+from daimon.core.stores.domain import CHAT_PLATFORMS, Platform, WebIdentityRow, WebPersonRow
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -37,10 +38,13 @@ def _omit_none(value: object) -> bool:
     return value is None
 
 
+ShownPlatform = Literal["discord", "slack", "teams", "web"]
+
+
 class Workspace(BaseModel):
     id: str
     name: str
-    platform: Literal["discord", "slack", "teams", "web"]
+    platform: ShownPlatform
     role: Role
     members: int
 
@@ -124,6 +128,11 @@ def _workspace_name(runtime: WebRuntime, person: WebPersonRow) -> str:
     return person.workspace_name
 
 
+def _shown_platform(platform: Platform | None) -> ShownPlatform:
+    """The chat app a workspace lives in; a web or CLI one shows as the web app's own."""
+    return platform if platform in CHAT_PLATFORMS else "web"
+
+
 async def _workspaces(runtime: WebRuntime, caller: WebCaller) -> list[Workspace]:
     """Every workspace this sign-in reaches and the person is still in, in a few reads
     however many there are."""
@@ -135,11 +144,12 @@ async def _workspaces(runtime: WebRuntime, caller: WebCaller) -> list[Workspace]
         identities = await identities_store.list_for_people(db, person_ids=[p.id for p in people])
         roles = await roles_of(db, people, identities, standings)
         members = await people_store.count_by_tenant(db, tenant_ids={p.tenant_id for p in people})
+        platforms = await tenants_store.list_platforms(db, {p.tenant_id for p in people})
     return [
         Workspace(
             id=str(p.tenant_id),
             name=_workspace_name(runtime, p),
-            platform="web",
+            platform=_shown_platform(platforms.get(p.tenant_id)),
             role=roles[p.id],
             members=members.get(p.tenant_id, 0),
         )
