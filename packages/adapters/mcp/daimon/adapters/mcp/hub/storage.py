@@ -21,6 +21,8 @@ exhausted the connection slots and the new revision failed its startup probe.
 
 from __future__ import annotations
 
+import warnings
+
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 from cryptography.fernet import MultiFernet
 from daimon.core.stores.domain import Platform
@@ -56,7 +58,13 @@ def build_hub_kv_base(
     The store comes back alongside its wrapper because only it can close the
     asyncpg pool; the wrappers do not expose it.
     """
-    store = _HubKVStore(url=database_url, table_name=HUB_KV_TABLE, auto_create=False)
+    # PostgreSQLStore takes no `stable_api` argument, so its unconditional
+    # stability UserWarning is silenced here, for this one construction only.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="A configured store is unstable", category=UserWarning
+        )
+        store = _HubKVStore(url=database_url, table_name=HUB_KV_TABLE, auto_create=False)
     return store, FernetEncryptionWrapper(store, fernet=fernet, raise_on_decryption_error=False)
 
 
