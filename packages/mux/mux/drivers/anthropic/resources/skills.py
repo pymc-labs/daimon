@@ -187,7 +187,10 @@ class AnthropicSkillVersions:
         async for item in provider_iter(
             self._client.beta.skills.versions.list(skill_id=skill_id, limit=100)
         ):
-            if version in (item.version, item.id):
+            if version == item.version or (
+                # An agent names a version "skver_<id>"; the list names it "skill_version_<id>".
+                "_" in version and version.rsplit("_", 1)[1] == item.id.rsplit("_", 1)[1]
+            ):
                 return item.id
             made = datetime.fromisoformat(item.created_at)
             if version == "latest" and (newest is None or made > newest[0]):

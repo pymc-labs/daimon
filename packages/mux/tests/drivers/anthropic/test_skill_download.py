@@ -61,7 +61,7 @@ async def test_a_version_pinned_by_id_downloads_that_version() -> None:
             "GET", "/v1/skills/s/versions/ver_1/content", httpx.Response(200, content=b"ZIP")
         )
     )
-    assert await download(sdk, "ver_1") == b"ZIP", "agents pin a version by its id"
+    assert await download(sdk, "skver_1") == b"ZIP", "an agent's skver_ id names the listed ver_ id"
     assert not sdk.violations, sdk.violations
 
 
