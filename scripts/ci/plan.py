@@ -32,7 +32,8 @@ FILES: dict[str, str] = {
     "docs/teams-app-manifest.yaml": "teams-manifest",
     "docker-compose.yml": "docs",
     "LICENSE": "docs",
-    ".gitignore": "docs",
+    # Ruff and the wheel builds lint runs honour it.
+    ".gitignore": "tooling",
     ".pre-commit-config.yaml": "tooling",
     "azure.yaml": "repo",
     ".github/workflows/ci.yml": "all",
@@ -42,11 +43,13 @@ FILES: dict[str, str] = {
 }
 #: Prose no test or image reads; code trees keep their own (skills, fixtures).
 _PROSE = re.compile(r"^(?!defaults/|packages/|tests/|qa/)\S*\.md$")
+#: Prose lint still scans for private material (TREES in scripts/lint_designators.sh).
+_LINTED_PROSE = re.compile(r"^(?:apps|scripts|\.github)/\S*\.md$")
 #: First match wins, so narrower prefixes come first.
 RULES: tuple[tuple[str, str], ...] = (
     ("docs/", "docs"),
     ("mkdocs.yml", "docs"),
-    (".github/ISSUE_TEMPLATE/", "docs"),
+    (".github/ISSUE_TEMPLATE/", "tooling"),
     ("typings/", "tooling"),
     # Read only by the repo tests (tests/test_*.py), which run in the core suite.
     (".github/workflows/", "repo"),
@@ -232,6 +235,8 @@ _JOURNEY = re.compile(r"(^|/)test_j[0-9]+_[^/]*\.py$")
 def area(path: str) -> str:
     if path in FILES:
         return FILES[path]
+    if _LINTED_PROSE.match(path):
+        return "tooling"
     if _PROSE.match(path):
         return "docs"
     return next((name for prefix, name in RULES if path.startswith(prefix)), "all")
