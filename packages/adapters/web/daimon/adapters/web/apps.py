@@ -193,6 +193,15 @@ async def _exchanged_token(
         stored = await tokens_store.get_oidc_token(db, person_id=person.id, issuer=issuer)
         platform, user_id = await linked_identity(db, person)
         tenant = await tenants_store.get_tenant(db, person.tenant_id)
+    if platform not in CHAT_PLATFORMS or tenant is None or tenant.platform != platform:
+        return None
+    workspace = f"{platform}:{tenant.external_id}"
+    # The same limit the MCP relay applies: a server open to some workspaces only signs
+    # for their people, here as there. Checked before the stored token too, so narrowing
+    # the list takes effect at once.
+    if server.workspaces is not None and workspace not in server.workspaces:
+        log.info("web.app_token.workspace_not_allowed", app=app.key, server=server.name)
+        return None
     try:
         if stored is not None and stored.expires_at - now > MIN_TOKEN_LEFT:
             return AppToken(
@@ -200,14 +209,12 @@ async def _exchanged_token(
             )
     except InvalidToken:
         log.warning("web.app_token.unreadable")
-    if platform not in CHAT_PLATFORMS or tenant is None or tenant.platform != platform:
-        return None
     subject = web_oidc.sign_subject_token(
         key=key,
         issuer=server.issuer,
         audience=issuer,
         subject=f"{platform}:{user_id}",
-        workspace=f"{platform}:{tenant.external_id}",
+        workspace=workspace,
         now=now,
         jti=uuid.uuid4().hex,
     )

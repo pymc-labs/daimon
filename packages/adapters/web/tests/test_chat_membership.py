@@ -144,21 +144,20 @@ class _Exchanging(FakeOidcProvider):
         return super().handler(request)
 
 
-def _settings() -> Settings:
+def _settings(workspaces: list[str] | None = None) -> Settings:
     """Settings naming the identity server; the runtime takes the key itself."""
+    server = {
+        "name": "hub",
+        "url": "https://hub.example.com/mcp",
+        "issuer": "daimon-test",
+        "audience": "hub",
+    }
+    if workspaces is not None:
+        server["workspaces"] = workspaces
     return Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-        mcp_identity={  # pyright: ignore[reportArgumentType]
-            "servers": [
-                {
-                    "name": "hub",
-                    "url": "https://hub.example.com/mcp",
-                    "issuer": "daimon-test",
-                    "audience": "hub",
-                }
-            ]
-        },
+        mcp_identity={"servers": [server]},  # pyright: ignore[reportArgumentType]
     )
 
 
@@ -228,3 +227,29 @@ async def test_a_refused_exchange_hides_the_app_and_is_not_retried_at_once(
     assert me.json()["apps"] == [], "no token, so no app nav"
     assert got.status_code == 404, got.text
     assert len(provider.subject_tokens) == 1, "a refusal is remembered for a while"
+
+
+async def test_no_exchange_for_a_workspace_the_identity_server_does_not_serve(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A server limited to some workspaces gets no subject token for anyone else's people,
+    the same limit the MCP relay applies."""
+    person = await _guild_person(db_session, "666666666666666666")
+    await db_session.commit()
+    token = await _session(db_session_factory, person)
+    provider = _Exchanging()
+    async with web_client(
+        web_settings(apps=(_APP,)),
+        sessionmaker=db_session_factory,
+        now=lambda: _NOW,
+        provider=provider,
+        settings=_settings(workspaces=["discord:777777777777777777"]),
+        identity_key=Ed25519PrivateKey.generate(),
+    ) as client:
+        _cookie(client, token)
+        got = await client.post("/api/apps/data/token")
+
+    assert got.status_code == 404, got.text
+    assert provider.subject_tokens == [], "nothing is signed for a workspace the server refuses"
