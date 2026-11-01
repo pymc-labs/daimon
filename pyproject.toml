@@ -14,6 +14,7 @@ dependencies = [
     "daimon-adapter-scheduler",
     "daimon-adapter-slack",
     "daimon-adapter-teams",
+    "daimon-adapter-web",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +36,7 @@ daimon-adapter-discord = { workspace = true }
 daimon-adapter-scheduler = { workspace = true }
 daimon-adapter-slack = { workspace = true }
 daimon-adapter-teams = { workspace = true }
+daimon-adapter-web = { workspace = true }
 daimon-testing = { workspace = true }
 daimon-mux = { workspace = true }
 daimon-harness = { workspace = true }
@@ -58,7 +60,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "PGH", "ANN401", "RUF100"]
 
 [tool.pyright]
 exclude = ["qa/live/tests"]
-include = ["qa/live", "packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host", "apps/harness/src/daimon_harness"]
+include = ["qa/live", "packages/core/daimon", "packages/adapters/cli/daimon", "packages/adapters/mcp/daimon", "packages/adapters/discord/daimon", "packages/adapters/scheduler/daimon", "packages/adapters/slack/daimon", "packages/adapters/teams/daimon", "packages/adapters/web/daimon", "packages/testing/daimon", "packages/mux/mux", "apps/notebook-host/src/notebook_host", "apps/report-host/src/report_host", "apps/harness/src/daimon_harness"]
 stubPath = "typings"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
@@ -137,7 +139,7 @@ forbidden_modules = ["daimon.adapters"]
 [[tool.importlinter.contracts]]
 name = "Adapters must not import each other"
 type = "independence"
-modules = ["daimon.adapters.cli", "daimon.adapters.mcp", "daimon.adapters.discord", "daimon.adapters.scheduler", "daimon.adapters.slack", "daimon.adapters.teams"]
+modules = ["daimon.adapters.cli", "daimon.adapters.mcp", "daimon.adapters.discord", "daimon.adapters.scheduler", "daimon.adapters.slack", "daimon.adapters.teams", "daimon.adapters.web"]
 
 [[tool.importlinter.contracts]]
 name = "ORM module is private to stores and defaults"
@@ -198,6 +200,7 @@ source_modules = [
     "daimon.core.credential_submit",
     "daimon.core.cron",
     "daimon.core.cron_words",
+    "daimon.core.cursor",
     "daimon.core.db",
     "daimon.core.env_file",
     "daimon.core.direct_messages",
@@ -361,10 +364,22 @@ source_modules = [
     "daimon.core.caller_resources",
     "daimon.core.usage_outbox_drain",
     "daimon.core.infrastructure_cost",
+    "daimon.core.web_identity",
+    "daimon.core.web_oidc",
     "daimon.core.wizard",
     "daimon.core.wizard_sweep",
     "daimon.core.workspace_transfer",
     "daimon.core.workspace_ports_compat",
+    "daimon.core.agent_catalog",
+    "daimon.core.agent_changes",
+    "daimon.core.agent_editing",
+    "daimon.core.agent_view",
+    "daimon.core.allowances",
+    "daimon.core.credit_views",
+    "daimon.core.mcp_tool_listing",
+    "daimon.core.platform_sign_in",
+    "daimon.core.spend_gate",
+    "daimon.core.web_access",
 ]
 forbidden_modules = ["daimon.core._models"]
 # Stores are the sanctioned abstraction layer between adapters and the ORM.
@@ -455,7 +470,7 @@ pythonpath = [".", "tests/golden"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["qa/live/tests", "packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests", "apps/harness/tests"]
+testpaths = ["qa/live/tests", "packages/core/tests", "packages/adapters/cli/tests", "packages/adapters/mcp/tests", "packages/adapters/discord/tests", "packages/adapters/scheduler/tests", "packages/adapters/slack/tests", "packages/adapters/teams/tests", "packages/adapters/web/tests", "packages/testing/tests", "packages/mux/tests", "tests", "apps/notebook-host/tests", "apps/report-host/tests", "apps/harness/tests"]
 addopts = "--import-mode=importlib -p daimon.testing.stop_leg_default -m 'not contract and not slow and not judge and not platform_contract'"
 markers = [
     "judge: manual Codex subscription transcript judge -- excluded by default",
