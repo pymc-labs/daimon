@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
-from typing import Literal
+from typing import Any, Literal
 from weakref import WeakValueDictionary
 
 import anthropic
@@ -24,13 +24,18 @@ from daimon.adapters.discord.checks import (
     require_registered_guild,
 )
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
+from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+from daimon.adapters.discord.tables import tables_enabled
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
+from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
     ColdDmNotices,
     DirectMessageAccessRevoked,
+    DirectMessageReply,
+    DmTurnCard,
     admit_cold_dm,
     cold_dm_text,
     dm_permission_text,
@@ -63,6 +68,7 @@ from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
+from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.exc import SQLAlchemyError
@@ -768,11 +774,75 @@ class DirectMessageCog(commands.Cog):
             self._cold_dm_notices.forget(person)
             log.warning("discord.dm.cold_notice_failed", error_type=type(exc).__name__)
 
+    def _turn_card(
+        self,
+        message: discord.Message | _DmRequest,
+        conversation: DirectMessageRow,
+        cards: list[DiscordTurnLifecycle],
+    ) -> DmTurnCard:
+        """Build the same progress card a thread gets, gated like a DM answer.
+
+        Every write to the card first rechecks what delivering the answer checks:
+        the recipient policy, then `require_dm_delivery` against the admitted
+        grant. One proved refusal closes the card for the rest of the turn, so
+        someone who loses access mid-turn sees no more of it.
+        """
+        runtime = self.bot.runtime
+        channel = message.channel
+        person = str(message.author.id)
+
+        def build(admission: Admission, cancel: asyncio.Event) -> DiscordTurnLifecycle:
+            grant = admission.grant
+
+            async def still_allowed() -> None:
+                policy = runtime.settings.direct_message_policies.get(
+                    conversation.tenant_id, DirectMessagePolicy()
+                )
+                if grant is None or not policy.allows(person):
+                    self._suppress(message, "delivery_recipient_revoked")
+                    raise AdmissionDenied(reason="invoker_not_allowed")
+                try:
+                    await require_dm_delivery(
+                        runtime.turn_deps,
+                        DirectMessageReply(text="", conversation=conversation, grant=grant),
+                    )
+                except DirectMessageAccessRevoked as exc:
+                    self._suppress(message, exc.reason)
+                    raise AdmissionDenied(reason="invoker_not_allowed") from exc
+
+            async def edit(sent: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
+                return await sent.edit(**kwargs)
+
+            card = DiscordTurnLifecycle(
+                send=channel.send,
+                edit=edit,
+                agent_name=admission.agent.name,
+                model_id=admission.agent.model.id,
+                markup=runtime.turn_deps.markup,
+                cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel),
+                requester_id=message.author.id,
+                requester_is_admin=admission.is_admin,
+                in_dm=True,
+                render_tables=tables_enabled(
+                    runtime.settings.table_rendering, conversation.tenant_id
+                ),
+                sessionmaker=runtime.sessionmaker,
+                tenant_id=conversation.tenant_id,
+                budget_channel_id=admission.budget_channel_id,
+                alert_webhook_url=runtime.settings.ops.alert_webhook_url,
+            )
+            card.set_output_authorization(OutputAuthorization(still_allowed))
+            cards.append(card)
+            return card
+
+        return build
+
     async def _reply(
         self, message: discord.Message | _DmRequest, *, expected_scope_id: str | None = None
     ) -> None:
         assert isinstance(message.channel, discord.DMChannel)
         runtime = self.bot.runtime
+        cards: list[DiscordTurnLifecycle] = []
         async with runtime.sessionmaker() as session:
             conversation = await get_conversation(
                 session,
@@ -859,10 +929,12 @@ class DirectMessageCog(commands.Cog):
                             account_id=admission.account_id,
                             admission=admission,
                         ),
+                        card_for=self._turn_card(message, conversation, cards),
                     )
             finally:
                 ticket.release()
-            if reply is not None:
+            if reply is not None and not (cards and cards[-1].was_answered):
+                # The card answered unless a recovery replaced it; then the text goes here.
                 answer = reply.text
                 for start in range(0, len(answer), 1900):
                     # Each transport await is another opportunity for revocation.
@@ -890,6 +962,8 @@ class DirectMessageCog(commands.Cog):
             if isinstance(exc, AdmissionDenied) and exc.reason in _ACCESS_DENIALS:
                 self._suppress(message, exc.reason)
                 return
+            if cards and cards[-1].ended:
+                return  # the card already shows how the turn ended
             error = _error_text(
                 exc,
                 "Couldn't verify or complete this private conversation. Please retry.",

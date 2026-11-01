@@ -833,6 +833,11 @@ conversation. `/dm-me` remains the explicit channel-context move, with its sourc
 sealing and budget checks.
 
 
+A Discord DM turn shows the thread's progress card. Every write to that card runs
+the same check as delivering the answer (recipient policy, then the retained grant
+against current access); the first proved refusal closes the card for the rest of
+the turn, so a person who loses access mid-turn sees no further progress or answer.
+
 Private Discord delivery checks the answering agent's retained admission grant
 against the current `RUN_AGENT` and `DIRECT_MESSAGE` rules before every output
 chunk, with no admin exemption for agent pins or isolation. This applies to moved

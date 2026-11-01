@@ -525,6 +525,11 @@ async def start_cold_dm(
     return conversation
 
 
+#: Builds the progress card for an admitted DM turn from its admission and the
+#: turn's cancel event (the card's Stop button sets it).
+DmTurnCard = Callable[[Admission, asyncio.Event], TurnLifecycle]
+
+
 class _CollectReply(TurnLifecycle):
     async def on_render(self, state: TurnState) -> None:
         pass
@@ -584,14 +589,18 @@ async def _run_admitted_dm_turn(
     origin: TurnContext = "chat",
     watch_row: TaskContinuationRow | None = None,
     confirm_write: ConfirmationHook | None = None,
+    card_for: DmTurnCard | None = None,
 ) -> tuple[str, str]:
     """Run one admitted, bound private turn and return its final text and session.
 
     Shared by live DM replies, DM routines and DM watch reports (`watch_row`,
     which runs under watch posture). `on_sealed` runs when the DM's source was
-    sealed during the turn (it may raise its own refusal). Nothing is rendered
-    while the turn runs; the caller delivers the answer. Without `confirm_write`
-    a write that needs approval is refused, as on any surface with no card.
+    sealed during the turn (it may raise its own refusal). Without `card_for`
+    nothing is rendered while the turn runs and the caller delivers the answer;
+    with it, the adapter's lifecycle shows progress and may deliver the answer
+    itself. A recovery after a dead session renders nothing either way. Without
+    `confirm_write` a write that needs approval is refused, as on any surface with
+    no card.
     """
     async with (
         destination if destination is not None else nullcontext(),
@@ -618,6 +627,10 @@ async def _run_admitted_dm_turn(
         async def reseed() -> str:
             return user_message
 
+        cancel = asyncio.Event()
+        lifecycle = (
+            card_for(prepared.admission, cancel) if card_for is not None else _CollectReply()
+        )
         try:
             outcome = await run_prepared_turn(
                 deps,
@@ -627,8 +640,8 @@ async def _run_admitted_dm_turn(
                 thread_id=scope_id,
                 external_user_id=external_user_id,
                 user_message=user_message,
-                lifecycle=_CollectReply(),
-                cancel=asyncio.Event(),
+                lifecycle=lifecycle,
+                cancel=cancel,
                 reseed_user_message=reseed,
                 recovery_lifecycle=lambda _: _CollectReply(),
                 origin=origin,
@@ -698,6 +711,7 @@ async def reply_to_dm_result(
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
     confirmation_for: Callable[[Admission], ConfirmationHook] | None = None,
+    card_for: DmTurnCard | None = None,
 ) -> DirectMessageReply | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
@@ -706,6 +720,8 @@ async def reply_to_dm_result(
     authorize a private turn. Platform API errors must fail that check closed.
     `confirmation_for` builds the approval-card hook for the admitted turn; an
     adapter that cannot show a card in a DM omits it and approvals are refused.
+    `card_for` shows the turn's progress; the card must recheck delivery access
+    before each write, as the adapter does before sending the answer.
     """
     async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True):
         now = datetime.now(UTC)
@@ -834,6 +850,7 @@ async def reply_to_dm_result(
                 confirm_write=(
                     confirmation_for(prepared.admission) if confirmation_for is not None else None
                 ),
+                card_for=card_for,
             )
             turns = bounded_turns(
                 [
