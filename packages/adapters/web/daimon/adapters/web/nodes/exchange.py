@@ -42,6 +42,8 @@ MIN_TOKEN_LEFT = timedelta(seconds=60)
 EXCHANGE_BACKOFF = timedelta(minutes=5)
 #: Nor is a server that could not be reached, for this long.
 UNREACHABLE_BACKOFF = timedelta(seconds=60)
+#: Token endpoint answers that mean "not now" (timeout, rate limit), held like a 5xx.
+_BUSY = frozenset({408, 429})
 #: A logged error code is cut to this many characters.
 _ERROR_CHARS = 64
 #: How long a token is taken to last when the server does not say.
@@ -108,7 +110,7 @@ def _held(runtime: WebRuntime, key: tuple[uuid.UUID, str], now: datetime) -> Non
     """Raise the remembered failure while it holds."""
     held = runtime.exchange_held.get(key)
     if held is not None and held[0] > now:
-        raise NodeAccessError("unreachable" if held[1] == "unreachable" else "refused")
+        raise NodeAccessError(held[1])
 
 
 def _hold(
@@ -171,7 +173,7 @@ async def node_token(
     except TokenExchangeError as err:
         # Its text is only the OAuth error code (`invalid_grant`), never the description.
         error = str(err)[:_ERROR_CHARS]
-        if err.status is not None and err.status >= 500:
+        if err.status is not None and (err.status >= 500 or err.status in _BUSY):
             log.warning("web.node_token.unreachable", kind=kind, error=error)
             raise _hold(runtime, held_key, "unreachable", now + UNREACHABLE_BACKOFF) from err
         log.warning("web.node_token.refused", kind=kind, error=error)

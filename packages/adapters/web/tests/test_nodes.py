@@ -425,12 +425,13 @@ async def test_a_refused_exchange_names_who_can_help_and_logs_the_error_code(
     )
 
 
+@pytest.mark.parametrize("status", [503, 429, 408])
 async def test_a_failing_token_endpoint_is_unreachable_and_not_asked_again_at_once(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], status: int
 ) -> None:
-    """A 5xx is the server's trouble, not a refusal; it is held off for a short while."""
+    """A 5xx, rate limit or timeout is not a refusal; it is held off for a short while."""
     agents, owner, _ = await _setup(db_session)
-    server = _Server(exchange_error="temporarily_unavailable", exchange_status=503)
+    server = _Server(exchange_error="temporarily_unavailable", exchange_status=status)
     with structlog.testing.capture_logs() as logs:
         async with _client(
             agents, server, db_session_factory, owner, key=generate_signing_key()

@@ -40,9 +40,14 @@ from daimon.core.turn.outcomes import drain_outcomes
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.adapters.web.nodes.exchange import NodeAccessProblem
     from stripe import StripeClient
 
 log = structlog.get_logger(__name__)
+
+
+def _no_holds() -> dict[tuple[uuid.UUID, str], tuple[datetime, NodeAccessProblem]]:
+    return {}
 
 
 def _utcnow() -> datetime:
@@ -79,8 +84,8 @@ class WebRuntime:
     # Signs who a chat sign-in is, for node token exchanges; None where no node is set.
     identity_key: Ed25519PrivateKey | None = None
     # (person, node kind) whose exchange failed: until when it is not tried again, and why.
-    exchange_held: dict[tuple[uuid.UUID, str], tuple[datetime, str]] = field(
-        default_factory=dict[tuple[uuid.UUID, str], tuple[datetime, str]]
+    exchange_held: dict[tuple[uuid.UUID, str], tuple[datetime, NodeAccessProblem]] = field(
+        default_factory=_no_holds
     )
 
 
