@@ -622,6 +622,49 @@ async def test_a_lookup_that_raises_falls_back_to_the_stored_name() -> None:
     assert labels == {"a": "Ann"} and found == {}
 
 
+# ---- channel names asked for once ----
+
+
+async def test_a_channel_name_is_asked_for_once_and_remembered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remembered: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        platform_names,
+        "remember_channel_names",
+        lambda _sm, *, tenant_id, platform, names: remembered.append(names),  # type: ignore[reportUnknownLambdaType]
+    )
+    platform_names.forget_all()
+    tenant, asked = uuid.uuid4(), list[str]()
+
+    async def lookup(channel_id: str) -> str | None:
+        asked.append(channel_id)
+        return {"c1": " general "}.get(channel_id)
+
+    first = await platform_names.lookup_channel_names(
+        MagicMock(), tenant_id=tenant, platform="discord", channel_ids=["c1", "c2"], lookup=lookup
+    )
+    again = await platform_names.lookup_channel_names(
+        MagicMock(), tenant_id=tenant, platform="discord", channel_ids=["c2"], lookup=lookup
+    )
+
+    assert first == {"c1": "general"} and remembered == [{"c1": "general"}]
+    assert asked == ["c1", "c2"], "a channel the platform could not name is not asked again"
+    assert again == {}
+
+
+async def test_a_channel_lookup_that_raises_names_nothing() -> None:
+    platform_names.forget_all()
+
+    async def broken(_channel_id: str) -> str | None:
+        raise RuntimeError("boom")
+
+    found = await platform_names.lookup_channel_names(
+        MagicMock(), tenant_id=uuid.uuid4(), platform="discord", channel_ids=["c1"], lookup=broken
+    )
+    assert found == {}
+
+
 # ---- the migration ----
 
 

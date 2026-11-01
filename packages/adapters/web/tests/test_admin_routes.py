@@ -14,7 +14,7 @@ import httpx
 import pytest
 from daimon.adapters.web import directory
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
-from daimon.core.stores import web_audit
+from daimon.core.stores import platform_names, web_audit
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
@@ -286,6 +286,7 @@ async def test_turning_web_chat_off_hides_the_agent_from_members(
         "who": "everyone",
         "groups": [],
         "fixed_to": None,
+        "fixed_name": None,
     }, "an agent nobody configured is on for everyone"
     assert changed.json()["web"] is False, changed.text
     assert agents == [], "a member no longer sees it"
@@ -308,12 +309,19 @@ async def test_an_agent_kept_to_a_channel_cannot_be_opened_on_the_web(
                     agent_rules={DEFAULT_AGENT_NAME: AgentRule(runs_in=("c-1",))}
                 ),
             )
+        [unnamed] = (await admin.client.get("/api/admin/agent-access")).json()
+        async with db_session_factory.begin() as db:
+            await platform_names.upsert_channel_names(
+                db, tenant_id=admin.ws.tenant_id, platform="discord", names={"c-1": "support"}
+            )
         [row] = (await admin.client.get("/api/admin/agent-access")).json()
         changed = await admin.client.patch(
             f"/api/admin/agent-access/{AGENT_ID}", json={"web": True}
         )
 
     assert (row["web"], row["fixed_to"]) == (False, "c-1"), "it shows where it is kept"
+    assert unnamed["fixed_name"] == "Unnamed channel", "a channel nobody named says so"
+    assert row["fixed_name"] == "support", "and a named one shows its name"
     assert changed.status_code == 403, "and its web switch cannot be turned on"
     assert await admin.trail(db_session_factory) == []
 

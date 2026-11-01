@@ -52,7 +52,7 @@ from daimon.adapters.discord.lifecycle import (
     edit_recovered_card,
 )
 from daimon.adapters.discord.member_sync import MemberSync
-from daimon.adapters.discord.names import remember_guild_user
+from daimon.adapters.discord.names import remember_guild_channels, remember_guild_user
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
@@ -2048,6 +2048,11 @@ class DaimonBot(commands.Bot):
         )
         if non_production and not command_guild_ids:
             log.warning("discord_command_allowlist_empty", environment=environment_name)
+        for guild in self.guilds:
+            if self._allows_guild(guild.id):
+                remember_guild_channels(
+                    self.runtime.sessionmaker, guild_id=guild.id, channels=guild.channels
+                )
         await self._retire_orphaned_turns()
         # Every ready: events missed while disconnected are not replayed.
         if self._member_reload is None or self._member_reload.done():
@@ -2813,6 +2818,9 @@ class DaimonBot(commands.Bot):
         remember_guild_user(
             self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
         )
+        remember_guild_channels(
+            self.runtime.sessionmaker, guild_id=interaction.guild_id, channels=[interaction.channel]
+        )
 
     async def _notice_writers_none(self, message: discord.Message, tenant_id: uuid.UUID) -> None:
         """Opted-in, non-content host signal; never authorizes a post or a turn."""
@@ -3019,6 +3027,9 @@ class DaimonBot(commands.Bot):
         bot_display_name = _resolve_bot_display_name(self.runtime.settings)
         # For /billing's top spenders; in the background, never failing the turn.
         remember_guild_user(self.runtime.sessionmaker, guild_id=guild.id, user=message.author)
+        remember_guild_channels(
+            self.runtime.sessionmaker, guild_id=guild.id, channels=[message.channel]
+        )
 
         # --- Unified non-ready self-heal gate through turn completion,
         # guarded end-to-end. A DB hiccup or an unclassified bug
@@ -4431,6 +4442,9 @@ class DaimonBot(commands.Bot):
     ) -> None:
         if not self._allows_guild(after.guild.id):
             return
+        remember_guild_channels(
+            self.runtime.sessionmaker, guild_id=after.guild.id, channels=[after]
+        )
         if before.overwrites != after.overwrites:
             clear_webhook_backoff(after.guild)
 

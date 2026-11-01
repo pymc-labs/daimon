@@ -9,11 +9,22 @@ it never delays or fails the event.
 
 from __future__ import annotations
 
-from typing import Any, cast
+import time
+from typing import TYPE_CHECKING, Any, cast
 
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.platform_names import remember_user_name
+from daimon.core.platform_names import remember_channel_names, remember_user_name
+from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.adapters.slack.runtime import SlackRuntime
+
+#: How long a channel looked up once is left alone; a rename reaches us on the next lookup.
+_LOOKUP_TTL_S = 6 * 3600
+#: (team id, channel id) -> when it was last looked up, so a busy channel is asked once.
+_looked_up: dict[tuple[str, str], float] = {}
+_LOOKUP_MEMO_SIZE = 5_000
 
 
 def _text(value: object) -> str | None:
@@ -58,3 +69,47 @@ def remember_payload_names(
         display_name=display,
         handle=handle,
     )
+
+
+def event_channel(payload: dict[str, Any]) -> tuple[str, str]:
+    """(team id, channel id) of a message event in a public or private channel, else blanks."""
+    event = _dict(payload.get("event"))
+    channel = _text(event.get("channel")) or ""
+    team = _text(payload.get("team_id")) or _text(event.get("team")) or ""
+    if event.get("type") not in {"message", "app_mention"} or channel[:1] not in {"C", "G"}:
+        return "", ""
+    return team, channel
+
+
+async def remember_event_channel(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
+    """Store the name of the channel an event came from, asking Slack once per channel.
+
+    Slack events carry the channel id only. Best-effort: a failed lookup is retried after
+    the TTL, never raised.
+    """
+    from daimon.adapters.slack.interactions import resolve_web_client
+
+    team_id, channel_id = event_channel(payload)
+    if not team_id or not channel_id:
+        return
+    key, now = (team_id, channel_id), time.monotonic()
+    if now - _looked_up.get(key, -_LOOKUP_TTL_S) < _LOOKUP_TTL_S:
+        return
+    if len(_looked_up) >= _LOOKUP_MEMO_SIZE:
+        _looked_up.clear()
+    _looked_up[key] = now
+    try:
+        client = await resolve_web_client(runtime, team_id=team_id)
+        if client is None:
+            return
+        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+    except SlackApiError:
+        return
+    name = _text(_dict(info.get("channel")).get("name"))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+    if name:
+        remember_channel_names(
+            runtime.sessionmaker,
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+            platform="slack",
+            names={channel_id: name},
+        )

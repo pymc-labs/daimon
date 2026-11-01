@@ -8,6 +8,7 @@ from typing import Any
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.admin_common import WorkspaceAdmin, listed_agents
 from daimon.adapters.web.audit import audit
+from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.chat_json import agent_json
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
@@ -35,15 +36,25 @@ def access_router(runtime: WebRuntime) -> APIRouter:
             policy = await load_access_policy(db, tenant_id=tenant_id)
             grants = await web_agent_grants.list_grants(db, tenant_id=tenant_id)
         avatars = await avatars_of(runtime, tenant_id, agents)
-        rows: list[dict[str, Any]] = []
+        fixed_to: dict[str, str] = {}
         for agent in agents:
             permissions = agent_permissions(
                 policy, build_agent_ref(agent.name, agent.metadata).names
             )
             channels = sorted(c for rule in permissions.runs_in for c in rule)
-            fixed = permissions.home or (channels[0] if channels else None)
-            rows.append(_access_json(agent, grants.get(agent.id), fixed, avatars.get(agent.id, "")))
-        return rows
+            if fixed := permissions.home or (channels[0] if channels else None):
+                fixed_to[agent.id] = fixed
+        _, names = await channel_names(runtime, tenant_id, set(fixed_to.values()))
+        return [
+            _access_json(
+                agent,
+                grants.get(agent.id),
+                fixed_to.get(agent.id),
+                names,
+                avatars.get(agent.id, ""),
+            )
+            for agent in agents
+        ]
 
     @router.get("/agent-access")
     async def agent_access(caller: WorkspaceAdmin) -> list[dict[str, Any]]:  # pyright: ignore[reportUnusedFunction]
@@ -99,6 +110,7 @@ def _access_json(
     agent: BetaManagedAgentsAgent,
     grant: WebAgentGrantRow | None,
     fixed_to: str | None,
+    names: dict[str, str],
     avatar: str,
 ) -> dict[str, Any]:
     return {
@@ -107,4 +119,5 @@ def _access_json(
         "who": "everyone" if grant is None else grant.who,
         "groups": [] if grant is None else list(grant.groups),
         "fixed_to": fixed_to,
+        "fixed_name": None if fixed_to is None else names.get(fixed_to, "Unnamed channel"),
     }

@@ -27,6 +27,7 @@ from daimon.adapters.web.audit import (
     usd,
 )
 from daimon.adapters.web.caller import WebCaller, current_caller, groups_of, requires
+from daimon.adapters.web.channel_names import named_spend_channels
 from daimon.adapters.web.chat_json import AgentRef, agent_ref
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
@@ -371,18 +372,26 @@ def credits_router(runtime: WebRuntime) -> APIRouter:
     ) -> list[SpendRow]:
         tenant_id = caller.person.tenant_id
         since, until = credit_views.period_window(period, now=runtime.now())
+        if by == "channel":
+            async with runtime.sessionmaker() as db:
+                channels = await credit_views.spend_by_channel(
+                    db, tenant_id=tenant_id, markup=markup, since=since, until=until
+                )
+                names = await credit_views.channel_names(db, tenant_id=tenant_id, rows=channels)
+            # Asked outside the read: a platform answer can take a few seconds.
+            names = await named_spend_channels(
+                runtime,
+                tenant_id,
+                names,
+                [(c.platform, c.channel_id) for c in channels if c.channel_id],
+            )
+            return spend_rows([_channel_row(c, names) for c in channels])
         async with runtime.sessionmaker() as db:
             if by == "agent":
                 by_agent = await credit_views.spend_by_agent_in_tenant(
                     db, tenant_id=tenant_id, markup=markup, since=since, until=until
                 )
                 return await agent_rows(tenant_id, by_agent)
-            if by == "channel":
-                channels = await credit_views.spend_by_channel(
-                    db, tenant_id=tenant_id, markup=markup, since=since, until=until
-                )
-                names = await credit_views.channel_names(db, tenant_id=tenant_id, rows=channels)
-                return spend_rows([_channel_row(c, names) for c in channels])
             people = await credit_views.spend_by_person(
                 db, tenant_id=tenant_id, markup=markup, since=since, until=until
             )
