@@ -83,7 +83,11 @@ A provider that verifies people's chat accounts can list them in a
 `chat_accounts` claim. With
 [`DAIMON_WEB__OIDC__TRUST_CHAT_ACCOUNTS`](configuration.md#daimon_web__oidc__trust_chat_accounts)
 on, a person also reaches each chat workspace those accounts are in, as that
-account, the same as signing in with Discord, Slack or Microsoft.
+account, the same as signing in with Discord, Slack or Microsoft. Where the
+workspace's member list is loaded, the account must be on it; for Teams, and for
+a workspace whose list has not loaded yet, the claim alone is the proof. A chat
+account that already signs in with another account of the same provider is not
+linked again: the sign-in skips that workspace and the audit log records why.
 
 ### Discord, Slack and Microsoft
 

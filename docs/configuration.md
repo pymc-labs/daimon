@@ -1082,8 +1082,9 @@ the provider alone decides who may sign in.
 Trust the provider's chat_accounts ID token claim: a list of "discord:&lt;user id&gt;",
 "slack:&lt;team id&gt;:&lt;user id&gt;" and "teams:&lt;tenant id&gt;:&lt;user object
 id&gt;". A person then also signs in to every chat workspace where one of those accounts
-is a member, acting as it. Turn on only for a provider that verifies those accounts
-itself.
+is a member, acting as it. Membership is read from the workspace's member list; for
+Teams, and for a workspace whose list has not loaded yet, the claim alone is the proof.
+Turn on only for a provider that verifies those accounts itself.
 
 ### `DAIMON_WEB__APPS`
 

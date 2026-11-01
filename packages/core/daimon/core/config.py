@@ -1157,8 +1157,10 @@ class WebOidcSettings(BaseModel):
             "Trust the provider's chat_accounts ID token claim: a list of "
             '"discord:<user id>", "slack:<team id>:<user id>" and '
             '"teams:<tenant id>:<user object id>". A person then also signs in to every '
-            "chat workspace where one of those accounts is a member, acting as it. Turn on "
-            "only for a provider that verifies those accounts itself."
+            "chat workspace where one of those accounts is a member, acting as it. "
+            "Membership is read from the workspace's member list; for Teams, and for a "
+            "workspace whose list has not loaded yet, the claim alone is the proof. Turn "
+            "on only for a provider that verifies those accounts itself."
         ),
     )
 

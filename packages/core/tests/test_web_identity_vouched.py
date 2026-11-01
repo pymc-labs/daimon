@@ -5,13 +5,17 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
+import pytest
+from daimon.core import web_identity
 from daimon.core.chat_accounts import ChatAccount
 from daimon.core.config import WebOidcSettings, WebSettings
 from daimon.core.stores import web_audit
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores import web_identities as identities_store
+from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores import workspace_members as members_store
+from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.web_identity import VerifiedIdentity, resolve_web_people
 from daimon.testing.factories import (
@@ -41,11 +45,11 @@ def _settings(home: uuid.UUID, *, trust: bool = True) -> WebSettings:
     )
 
 
-def _identity() -> VerifiedIdentity:
+def _identity(subject: str = "sub-1") -> VerifiedIdentity:
     return VerifiedIdentity(
         provider="oidc",
         issuer=_ISSUER,
-        subject="sub-1",
+        subject=subject,
         display_name="Ada",
         email="ada@example.com",
         email_verified=True,
@@ -184,4 +188,98 @@ async def test_a_chat_person_already_there_takes_the_login_and_the_chats(
         moved = await chat_store.get_thread(session, thread_id=thread.id, person_id=chat_person.id)
         left = await identities_store.list_for_person(session, person_id=earlier.id)
     assert moved is not None, "the chats move over"
+    assert left == [], "the login leaves the earlier person"
+
+
+async def test_a_chat_person_signing_in_with_another_provider_account_is_not_merged(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Two provider accounts claiming one chat account: the first keeps it, the second is
+    refused there and the refusal is audited with both."""
+    home = await make_tenant(db_session, platform="web", workspace_id="home")
+    guild_id = await _guild_listing_the_user(db_session)
+    await db_session.commit()
+    settings = _settings(home.id)
+    first = await resolve_web_people(
+        db_session_factory, identity=_identity("sub-0"), settings=settings, clock=lambda: _NOW
+    )
+
+    second = await resolve_web_people(
+        db_session_factory, identity=_identity("sub-1"), settings=settings, clock=lambda: _NOW
+    )
+
+    chat_person = next(p for p in first if p.tenant_id == guild_id)
+    assert [p.tenant_id for p in second] == [home.id], "the guild is refused, home still works"
+    async with db_session_factory() as session:
+        linked = await identities_store.list_for_person(session, person_id=chat_person.id)
+        audit = await web_audit.list_recent(session, tenant_id=guild_id)
+    assert [i.subject for i in linked] == ["sub-0"], "the chat person keeps only its own login"
+    refused = [a for a in audit if a.action == "Refused vouched chat account"]
+    assert len(refused) == 1 and refused[0].target_person_id == chat_person.id, audit
+    assert refused[0].detail is not None and "sub-0" in refused[0].detail, refused[0].detail
+    assert "sub-1" in refused[0].detail, "both provider accounts are named"
+
+
+async def test_the_vouched_sign_in_is_audited_on_first_link_only(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    home = await make_tenant(db_session, platform="web", workspace_id="home")
+    guild_id = await _guild_listing_the_user(db_session)
+    await db_session.commit()
+
+    for _ in range(3):
+        await resolve_web_people(
+            db_session_factory, identity=_identity(), settings=_settings(home.id)
+        )
+
+    async with db_session_factory() as session:
+        audit = await web_audit.list_recent(session, tenant_id=guild_id)
+    assert [a.action for a in audit] == ["Signed in with vouched chat account"], (
+        "later sign-ins through the same link add nothing"
+    )
+
+
+async def test_a_chat_sign_in_racing_the_move_is_merged_into(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chat sign-in creates the chat person after the vouched sign-in looked for one and
+    before it moves the earlier person onto the account: the move gives way to a merge
+    instead of failing on the unique (workspace, account) row."""
+    guild_id = await _guild_listing_the_user(db_session)
+    await db_session.commit()
+    (earlier,) = await resolve_web_people(
+        db_session_factory, identity=_identity(), settings=_settings(guild_id, trust=False)
+    )
+    real = people_store.get_person_for_account
+    raced: list[uuid.UUID] = []
+
+    async def read_then_race(
+        session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
+    ) -> WebPersonRow | None:
+        found = await real(session, tenant_id=tenant_id, account_id=account_id)
+        if not raced:
+            # What the racing chat sign-in commits right after this read.
+            racer = await people_store.upsert_member(
+                session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                display_name="Chat",
+                workspace_name="Guild",
+                email=None,
+                new_person_id=uuid.uuid4(),
+            )
+            raced.append(racer.id)
+        return found
+
+    monkeypatch.setattr(web_identity.people_store, "get_person_for_account", read_then_race)
+
+    (person,) = await resolve_web_people(
+        db_session_factory, identity=_identity(), settings=_settings(guild_id)
+    )
+
+    assert person.id == raced[0], "the chat person that won the race takes the login"
+    async with db_session_factory() as session:
+        left = await identities_store.list_for_person(session, person_id=earlier.id)
     assert left == [], "the login leaves the earlier person"

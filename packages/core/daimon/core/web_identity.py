@@ -40,6 +40,7 @@ from daimon.core.stores.identity import (
     list_platform_principals_for_account,
 )
 from daimon.core.turn_hold import RequesterOrg
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -115,17 +116,18 @@ async def resolve_web_people(
     async with session_factory() as session, session.begin():
         people: list[WebPersonRow] = []
         for account, tenant in vouched:
-            if await _signin_on(session, tenant.tenant_id, "oidc"):
-                people.append(
-                    await _vouched_person(
-                        session,
-                        identity=identity,
-                        account=account,
-                        tenant=tenant,
-                        new_id=new_id,
-                        now=clock(),
-                    )
-                )
+            if not await _signin_on(session, tenant.tenant_id, "oidc"):
+                continue
+            person = await _vouched_person(
+                session,
+                identity=identity,
+                account=account,
+                tenant=tenant,
+                new_id=new_id,
+                now=clock(),
+            )
+            if person is not None:
+                people.append(person)
         if not any(p.tenant_id == oidc.tenant_id for p in people):
             try:
                 people.append(
@@ -171,7 +173,7 @@ async def _vouched_person(
     tenant: HubTenant,
     new_id: Callable[[], uuid.UUID],
     now: datetime,
-) -> WebPersonRow:
+) -> WebPersonRow | None:
     """The person a vouched chat account acts as in one workspace, carrying the OIDC login.
 
     Someone who signed in with this provider before vouching was on has a person of their
@@ -179,10 +181,28 @@ async def _vouched_person(
     their chats and role. When the chat account has a person too (a chat sign-in), that
     one wins: the chats, files and role move over, the login with them, and the old
     person's sign-ins end. Spend recorded under the old person's `web` id stays there.
+
+    None, audited, when the claim would merge two different people: the chat account's
+    person already signs in with another account of this provider, or this login already
+    runs as another chat account here.
     """
     chat_person = await people_store.get_person_for_account(
         session, tenant_id=tenant.tenant_id, account_id=tenant.account_id
     )
+    if chat_person is not None:
+        held = next(
+            (
+                row.subject
+                for row in await identities_store.list_for_person(session, person_id=chat_person.id)
+                if row.provider == "oidc"
+                and row.issuer == identity.issuer
+                and row.subject != identity.subject
+            ),
+            None,
+        )
+        if held is not None:
+            await _refuse_vouching(session, tenant, chat_person.id, held, identity.subject, now)
+            return None
     known = [
         row
         for row in await identities_store.find_identity(
@@ -198,15 +218,27 @@ async def _vouched_person(
         else None
     )
     if earlier is not None and earlier.account_id != tenant.account_id:
+        platform, user_id = await linked_identity(session, earlier)
+        if platform != "web":
+            # The login runs as another chat account here; moving it would hand that
+            # account's chats and role to this one.
+            await _refuse_vouching(
+                session,
+                tenant,
+                earlier.id,
+                f"{platform}:{user_id}",
+                f"{account.platform}:{account.user_id}",
+                now,
+            )
+            return None
         carried = await _carry_role(
             session, tenant.tenant_id, earlier.account_id, tenant.account_id
         )
-        if chat_person is None and earlier.kind == "member":
-            await people_store.update_person(
-                session, person_id=earlier.id, account_id=tenant.account_id
-            )
-        else:
-            target = chat_person or await _chat_member(session, identity, tenant, new_id)
+        moved = chat_person is None and earlier.kind == "member"
+        if moved:
+            moved = await _move_onto_account(session, earlier, tenant.account_id)
+        if not moved:
+            target = await _chat_member(session, identity, tenant, new_id)
             await chat_store.move_threads(
                 session, from_person_id=earlier.id, to_person_id=target.id
             )
@@ -239,17 +271,58 @@ async def _vouched_person(
         label=identity.email or identity.display_name,
         groups=identity.groups,
     )
+    # Recorded when the login first reaches the chat account, not on every sign-in.
+    if earlier is None or earlier.account_id != tenant.account_id:
+        await web_audit.record(
+            session,
+            tenant_id=tenant.tenant_id,
+            actor_account_id=tenant.account_id,
+            action="Signed in with vouched chat account",
+            target=web_audit.PERSON_LABEL,
+            target_person_id=person.id,
+            detail=account.platform.capitalize(),
+            at=now,
+        )
+    return person
+
+
+async def _move_onto_account(
+    session: AsyncSession, person: WebPersonRow, account_id: uuid.UUID
+) -> bool:
+    """Move the person onto the account in place; False when the account got a person of
+    its own meanwhile (a chat sign-in racing this one), which the caller then merges into.
+    """
+    try:
+        async with session.begin_nested():
+            await people_store.update_person(session, person_id=person.id, account_id=account_id)
+    except IntegrityError:
+        taken = await people_store.get_person_for_account(
+            session, tenant_id=person.tenant_id, account_id=account_id
+        )
+        if taken is None:
+            raise
+        return False
+    return True
+
+
+async def _refuse_vouching(
+    session: AsyncSession,
+    tenant: HubTenant,
+    person_id: uuid.UUID,
+    held: str,
+    claimed: str,
+    now: datetime,
+) -> None:
     await web_audit.record(
         session,
         tenant_id=tenant.tenant_id,
         actor_account_id=tenant.account_id,
-        action="Signed in with vouched chat account",
+        action="Refused vouched chat account",
         target=web_audit.PERSON_LABEL,
-        target_person_id=person.id,
-        detail=account.platform.capitalize(),
+        target_person_id=person_id,
+        detail=f"Already linked to {held}; refused {claimed}",
         at=now,
     )
-    return person
 
 
 async def _chat_member(
