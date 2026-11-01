@@ -12,9 +12,6 @@ export const coreHandlers = [
   }),
   http.get("/auth/providers", () => HttpResponse.json([
     { id: "discord", label: "Discord", kind: "dev" },
-    { id: "slack", label: "Slack", kind: "dev" },
-    { id: "microsoft", label: "Microsoft", kind: "dev" },
-    { id: "oidc", label: "Fernhill", kind: "dev" },
   ])),
   // Every provider signs in the same demo admin; the dev panel passes `email` to switch people.
   http.post("/auth/mock", async ({ request }) => {

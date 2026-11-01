@@ -112,7 +112,7 @@ async def _admin(
     owner_token = await signed_in(factory, ws.person)
     member_token = await signed_in(factory, member)
     turns = build_turns(factory, build_turn_router(str(ws.tenant_id)), tmp_path)
-    async with web_client(web_settings(ws.tenant_id), sessionmaker=factory, turns=turns) as client:
+    async with web_client(web_settings(), sessionmaker=factory, turns=turns) as client:
         client.headers.update(_OWN)
         client.cookies.set(_COOKIE, owner_token, domain="web.example.com")
         yield Admin(client, ws, member, member_token)
@@ -192,8 +192,8 @@ async def test_groups_and_people_fill_the_pickers(
                 db,
                 tenant_id=admin.ws.tenant_id,
                 person_id=admin.member.id,
-                provider="oidc",
-                issuer="https://id.example.com",
+                provider="discord",
+                issuer="",
                 subject="mia",
                 label="mia",
                 groups=["Leadership"],
@@ -336,17 +336,13 @@ async def test_settings_are_read_and_changed_with_an_audit_row(
         changed = await admin.client.patch(
             "/api/admin/settings", json={"modules": {"agents": False}}
         )
-        lockout = await admin.client.patch("/api/admin/settings", json={"signin": {"oidc": False}})
-        unknown = await admin.client.patch("/api/admin/settings", json={"signin": {"fax": True}})
         admin.as_member()
         me = (await admin.client.get("/api/me")).json()
 
-    assert set(before) == {"modules", "signin", "default_agent", "apps"}, before
+    assert set(before) == {"modules", "default_agent"}, before
     assert before["modules"] == {"chat": True, "agents": True, "credits": True}
-    assert [m["id"] for m in before["signin"]] == ["oidc"] and before["default_agent"] == AGENT_ID
+    assert before["default_agent"] == AGENT_ID, "the workspace default is offered"
     assert changed.json()["modules"]["agents"] is False, changed.text
-    assert lockout.status_code == 422, "the last way to sign in stays on"
-    assert unknown.status_code == 422, "only offered methods can be switched"
     assert "agents" not in me["modules"], "a module turned off is gone for the workspace"
     assert await admin.trail(db_session_factory) == [("Changed setting", "Modules", "Agents off")]
 

@@ -10,7 +10,6 @@ import uuid
 from typing import Annotated, Literal
 
 from daimon.adapters.web.access import Capability, Role
-from daimon.adapters.web.apps import available_apps
 from daimon.adapters.web.caller import (
     LEFT_WORKSPACE,
     WebCaller,
@@ -24,9 +23,8 @@ from daimon.adapters.web.caller import (
 )
 from daimon.adapters.web.credits import CreditMeter, credit_meter
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core.config import EmbeddedAppSettings, WebModuleKey
+from daimon.core.config import WebModuleKey
 from daimon.core.stores import tenants as tenants_store
-from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_sessions as sessions_store
 from daimon.core.stores.domain import CHAT_PLATFORMS, Platform, WebIdentityRow, WebPersonRow
@@ -47,21 +45,6 @@ class Workspace(BaseModel):
     platform: ShownPlatform
     role: Role
     members: int
-
-
-class NavItem(BaseModel):
-    label: str
-    path: str
-    icon: str
-
-
-class EmbeddedApp(BaseModel):
-    key: str
-    name: str
-    icon: str
-    origin: str
-    nav: list[NavItem]
-    connections_path: str | None
 
 
 class Identity(BaseModel):
@@ -85,7 +68,6 @@ class Me(BaseModel):
     identities: list[Identity]
     credit: CreditMeter | None = None
     invited_by: str | None = Field(default=None, exclude_if=_omit_none)
-    apps: list[EmbeddedApp]
     dev: bool
 
 
@@ -93,39 +75,16 @@ class SwitchBody(BaseModel):
     id: str
 
 
-_PROVIDER_LABELS = {"discord": "Discord", "slack": "Slack", "microsoft": "Microsoft"}
+_PROVIDER_LABELS = {"discord": "Discord"}
 
 
-def identity_json(runtime: WebRuntime, row: WebIdentityRow) -> Identity:
-    oidc = runtime.web.oidc
-    if row.provider == "oidc" and oidc is not None:
-        return Identity(provider="oidc", provider_label=oidc.label, label=row.label, icon=oidc.icon)
+def identity_json(row: WebIdentityRow) -> Identity:
     if row.provider == "invite":
         return Identity(
             provider="invite", provider_label="Invite link", label=row.label, icon="link"
         )
     label = _PROVIDER_LABELS.get(row.provider, row.provider.title())
     return Identity(provider=row.provider, provider_label=label, label=row.label)
-
-
-def _app(app: EmbeddedAppSettings) -> EmbeddedApp:
-    return EmbeddedApp(
-        key=app.key,
-        name=app.name,
-        icon=app.icon,
-        origin=app.origin,
-        nav=[NavItem(label=n.label, path=n.path, icon=n.icon) for n in app.nav],
-        connections_path=app.connections_path,
-    )
-
-
-def _workspace_name(runtime: WebRuntime, person: WebPersonRow) -> str:
-    """The sign-in provider's configured name for its workspace, else the name stored with
-    the person (what a chat platform called the workspace)."""
-    oidc = runtime.web.oidc
-    if oidc is not None and oidc.tenant_id == person.tenant_id:
-        return oidc.workspace_name
-    return person.workspace_name
 
 
 def _shown_platform(platform: Platform | None) -> ShownPlatform:
@@ -141,14 +100,13 @@ async def _workspaces(runtime: WebRuntime, caller: WebCaller) -> list[Workspace]
         everyone = await people_store.get_people(db, person_ids=ids)
         standings = await chat_standings(db, everyone)
         people = [p for p in everyone if not has_left(standings, p)]
-        identities = await identities_store.list_for_people(db, person_ids=[p.id for p in people])
-        roles = await roles_of(db, people, identities, standings)
+        roles = await roles_of(db, people, standings)
         members = await people_store.count_by_tenant(db, tenant_ids={p.tenant_id for p in people})
         platforms = await tenants_store.list_platforms(db, {p.tenant_id for p in people})
     return [
         Workspace(
             id=str(p.tenant_id),
-            name=_workspace_name(runtime, p),
+            name=p.workspace_name,
             platform=_shown_platform(platforms.get(p.tenant_id)),
             role=roles[p.id],
             members=members.get(p.tenant_id, 0),
@@ -175,13 +133,12 @@ async def _move_on(runtime: WebRuntime, caller: WebCaller) -> None:
         ids = await sessions_store.list_session_people(db, session_id=caller.session.id)
         people = await people_store.get_people(db, person_ids=ids)
         standings = await chat_standings(db, people)
-        provider = caller.session.provider
         for person in people:
             if (
                 person.id != caller.person.id
                 and person.status != "suspended"
                 and not has_left(standings, person)
-                and await signin_allowed_in(db, provider=provider, tenant_id=person.tenant_id)
+                and await signin_allowed_in(db, tenant_id=person.tenant_id)
             ):
                 await sessions_store.switch_person(
                     db, session_id=caller.session.id, tenant_id=person.tenant_id
@@ -213,10 +170,9 @@ def me_router(runtime: WebRuntime) -> APIRouter:
             role=caller.role,
             modules=list(caller.modules),
             capabilities=sorted(caller.capabilities),
-            identities=[identity_json(runtime, row) for row in caller.identities],
+            identities=[identity_json(row) for row in caller.identities],
             credit=await credit_meter(runtime, caller),
             invited_by=await _invited_by(runtime, caller.person),
-            apps=[_app(app) for app in await available_apps(runtime, caller)],
             dev=runtime.web.dev,
         )
 
@@ -234,9 +190,7 @@ def me_router(runtime: WebRuntime) -> APIRouter:
                 await sessions_store.switch_person(
                     db, session_id=caller.session.id, tenant_id=tenant_id
                 )
-                if await signin_allowed_in(
-                    db, provider=caller.session.provider, tenant_id=tenant_id
-                )
+                if await signin_allowed_in(db, tenant_id=tenant_id)
                 else None
             )
             if switched is not None:

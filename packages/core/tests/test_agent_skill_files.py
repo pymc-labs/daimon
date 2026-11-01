@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
-from anthropic.types.beta.skills import VersionCreateResponse
+from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from daimon.core import agent_skill_files
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.authz import Subject, Surface
@@ -60,6 +60,7 @@ class _FakeSkills:
         router.add("GET", r"/v1/skills$", lambda _r, _m: list_response([self._listed()]))
         router.add("GET", rf"/v1/agents/{self.agent.id}$", self._agent)
         router.add("GET", r"/v1/agents$", lambda _r, _m: list_response([self._agent_json()]))
+        router.add("GET", r"/v1/skills/sk_1/versions$", self._listed_versions)
         router.add("POST", r"/v1/skills/sk_1/versions$", self._publish)
         router.add("GET", r"/v1/skills/sk_1/versions/(?P<version>[^/]+)/content$", self._content)
         return router
@@ -74,6 +75,22 @@ class _FakeSkills:
             updated_at=_TS,
             source="custom",
         ).model_dump(mode="json")
+
+    def _listed_versions(self, _r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        rows = [
+            VersionListResponse(
+                id=f"ver_{version}",
+                skill_id="sk_1",
+                version=version,
+                type="skill_version",
+                name="SKILL.zip",
+                directory="/",
+                description="",
+                created_at=_TS,
+            ).model_dump(mode="json")
+            for version in self.versions
+        ]
+        return httpx.Response(200, json={"data": rows, "has_more": False, "next_page": None})
 
     def _agent_json(self) -> dict[str, Any]:
         return self.agent.model_dump(mode="json")
@@ -280,3 +297,30 @@ async def test_an_oversize_file_is_refused_before_anything_is_downloaded(
 
     assert refused.value.kind == "invalid", "an oversize body is invalid"
     assert fake.downloads == [] and sorted(fake.versions) == ["1", "2"], "nothing ran"
+
+
+async def test_files_of_a_skill_pinned_at_latest_come_from_its_newest_version(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Agents pin skills at "latest"; the editor reads, and saves against, the newest version."""
+    fake, deps, actor = await _setup(db_session, db_session_factory, live_pin="latest")
+    fake.versions["10"] = {"SKILL.md": _SKILL_MD.encode(), "new.md": b"newest"}
+
+    doc = await agent_skill_files.read_skill_files(
+        deps, actor=actor, ma_agent_id="ag_1", skill_id="sk_1"
+    )
+
+    assert doc.version == "10", "the newest version wins by number, not as text ('2' > '10')"
+    assert [f.path for f in doc.files] == ["SKILL.md", "new.md"], "the newest files are listed"
+    assert fake.downloads == ["10"], "latest itself is never downloaded"
+
+    saved = await agent_skill_files.save_skill_files(
+        deps,
+        actor=actor,
+        ma_agent_id="ag_1",
+        skill_id="sk_1",
+        files={"SKILL.md": _SKILL_MD + "More.\n", "new.md": None},
+    )
+
+    assert saved.version == "4", "a save publishes a new version"
+    assert fake.versions["4"]["new.md"] == b"newest", "kept files come from the newest version"

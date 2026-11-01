@@ -41,7 +41,7 @@ async def _client(
     ws: Workspace,
     turns: WebTurns,
 ) -> Any:
-    client = web_client(web_settings(ws.tenant_id), sessionmaker=factory, turns=turns)
+    client = web_client(web_settings(), sessionmaker=factory, turns=turns)
     return client
 
 

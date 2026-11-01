@@ -1,14 +1,11 @@
-import { ExternalLink, Trash2 } from "lucide-react"
+import { Trash2 } from "lucide-react"
 import { useState } from "react"
-import { Link } from "react-router"
 import { plural } from "@/lib/format"
 import { Mono, StatusDot } from "@/components/common"
-import { AppIcon } from "@/components/brand"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { useMe } from "@/lib/hooks"
 import { useServerToken } from "../api"
 import { cn } from "@/lib/utils"
 import { Dot, Locked } from "../bits"
@@ -22,8 +19,6 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
   const [url, setUrl] = useLocal(s.url, (v) => set((x) => { x.url = v }, 600))
   const hidden = !agent.can_view_details
   const writes = s.tools.filter((t) => t.effect === "write")
-  const app = useMe().data?.apps.find((a) => a.key === s.app)
-  const managed = !!s.app
   // A server added in this draft has nothing to sign in to until the draft is applied.
   const saved = agent.mcp_servers.some((x) => x.key === s.key)
   const token = useServerToken(agent.id, s.key)
@@ -32,7 +27,7 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
     <>
       <div className="flex items-center gap-3 px-5 py-4">
         <span className="flex size-9 items-center justify-center rounded-lg border bg-muted">
-          {app ? <AppIcon icon={app.icon} className="size-5" /> : <span className="text-sm font-semibold text-muted-foreground">{s.name[0]}</span>}
+          <span className="text-sm font-semibold text-muted-foreground">{s.name[0]}</span>
         </span>
         <div className="min-w-0">
           <div className="text-base font-semibold">{s.name}</div>
@@ -44,14 +39,14 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
           {hidden ? <Locked who={agent.owner.name} /> : (
             <>
               <Field label="URL" changed={changed.has(`mcp:${s.key}/url`)}>
-                <Input value={url} disabled={ro || managed} onChange={(e) => setUrl(e.target.value)} className="h-8 font-mono text-[12.5px]" />
+                <Input value={url} disabled={ro} onChange={(e) => setUrl(e.target.value)} className="h-8 font-mono text-[12.5px]" />
               </Field>
               {saved && (
                 <Field label="Credential">
                   <span className="flex items-center gap-3">
                     {s.credential === "connected" ? <StatusDot status="healthy" label="Connected" />
                       : s.credential === "expired" ? <StatusDot status="failing" label="Expired" /> : <StatusDot status="setup" label="Not signed in" />}
-                    {!ro && !managed && s.credential !== "missing" && (
+                    {!ro && s.credential !== "missing" && (
                       <Button variant="outline" size="xs" className="ml-auto" disabled={token.remove.isPending} onClick={() => token.remove.mutate()}>
                         <Trash2 />Remove
                       </Button>
@@ -59,19 +54,12 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
                   </span>
                 </Field>
               )}
-              {saved && !ro && !managed && (
+              {saved && !ro && (
                 <Field label="Token">
                   <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (secret.trim()) token.save.mutate(secret.trim(), { onSuccess: () => setSecret("") }) }}>
                     <Input type="password" autoComplete="off" value={secret} onChange={(e) => setSecret(e.target.value)} className="h-8 font-mono text-[12.5px]" />
                     <Button type="submit" variant="outline" size="sm" disabled={!secret.trim() || token.save.isPending}>Save</Button>
                   </form>
-                </Field>
-              )}
-              {app && (
-                <Field label="Managed in">
-                  <Button variant="outline" size="xs" className="w-fit" asChild>
-                    <Link to={`/apps/${app.key}${app.connections_path ?? ""}`}><AppIcon icon={app.icon} className="size-3.5" />{app.name}<ExternalLink /></Link>
-                  </Button>
                 </Field>
               )}
             </>

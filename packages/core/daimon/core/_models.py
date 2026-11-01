@@ -4419,20 +4419,23 @@ class WebSessionPerson(Base):
     )
 
 
-class WebOidcToken(Base):
-    """A person's provider tokens from their last sign-in, Fernet-encrypted."""
+class WebNodeToken(Base):
+    """A person's access token at a connection node's server, Fernet-encrypted.
 
-    __tablename__ = "web_oidc_tokens"
+    Got by token exchange and exchanged again once spent; `token_key` is
+    `<issuer>#<server>`.
+    """
+
+    __tablename__ = "web_node_tokens"
 
     person_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), primary_key=True
     )
-    issuer: Mapped[str] = mapped_column(Text, primary_key=True)
+    token_key: Mapped[str] = mapped_column(Text, primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
     access_token_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    refresh_token_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -4494,20 +4497,6 @@ class WorkspaceAdmin(Base):
     granted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-
-
-class WebGroupRole(Base):
-    """The role an OIDC group confers in a workspace."""
-
-    __tablename__ = "web_group_roles"
-    __table_args__ = (CheckConstraint("role IN ('admin', 'member')", name="ck_web_group_roles"),)
-
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    issuer: Mapped[str] = mapped_column(Text, primary_key=True)
-    group: Mapped[str] = mapped_column(Text, primary_key=True)
-    role: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class WebAudit(Base):
@@ -4631,9 +4620,6 @@ class WebWorkspaceSettings(Base):
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
     modules_off: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'")
-    )
-    signin_off: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'")
     )
     default_agent: Mapped[str | None] = mapped_column(Text, nullable=True)

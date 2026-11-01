@@ -74,7 +74,7 @@ export function NewChat() {
   const pick = (a: AgentRef) => setParams({ agent: a.id }, { replace: true })
 
   return (
-    <Page crumbs={[{ label: "Chat" }, { label: "New chat" }]} flush>
+    <Page crumbs={[{ label: "Chat" }, { label: "New thread" }]} flush>
       <div className="mx-auto flex h-full max-w-[720px] flex-col justify-center px-4 pb-[10vh]">
         <QueryState
           query={agents} empty="No agent is available to you. Ask an admin."
@@ -163,7 +163,7 @@ export function ChatView() {
     },
   })
   const remove = async () => {
-    if (!session || !(await confirm({ title: "Delete chat?", body: session.title, action: "Delete", destructive: true }))) return
+    if (!session || !(await confirm({ title: "Delete thread?", body: session.title, action: "Delete", destructive: true }))) return
     del.mutate(session)
   }
 
@@ -171,8 +171,8 @@ export function ChatView() {
     return (
       <Page crumbs={[{ label: "Chat", to: "/chat" }]}>
         <div className="flex flex-col items-center gap-3 py-24">
-          <div className="text-sm text-muted-foreground">Chat not found</div>
-          <Button variant="outline" size="sm" asChild><Link to="/chat"><Plus />New chat</Link></Button>
+          <div className="text-sm text-muted-foreground">Thread not found</div>
+          <Button variant="outline" size="sm" asChild><Link to="/chat"><Plus />New thread</Link></Button>
         </div>
       </Page>
     )
@@ -192,7 +192,7 @@ export function ChatView() {
           </span>
           {meter && <HeaderMeter meter={meter} />}
           <DropdownMenu>
-            <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Chat actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
+            <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Thread actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={() => setRenaming(session)}>Rename</DropdownMenuItem>
               <DropdownMenuItem variant="destructive" onSelect={remove}>Delete</DropdownMenuItem>

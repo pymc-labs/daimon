@@ -104,7 +104,6 @@ def has_left(standings: Mapping[uuid.UUID, ChatStandingRow], person: WebPersonRo
 async def roles_of(
     session: AsyncSession,
     people: Sequence[WebPersonRow],
-    identities: Mapping[uuid.UUID, Sequence[WebIdentityRow]],
     standings: Mapping[uuid.UUID, ChatStandingRow] | None = None,
 ) -> dict[uuid.UUID, Role]:
     """The role each person holds in their workspace, from grants held now rather than at
@@ -117,11 +116,6 @@ async def roles_of(
         by_tenant.setdefault(person.tenant_id, []).append(person)
     roles: dict[uuid.UUID, Role] = {}
     for tenant_id, members in by_tenant.items():
-        conferring = await roles_store.list_group_roles_for(
-            session,
-            tenant_id=tenant_id,
-            groups={(i.issuer, g) for p in members for i in identities[p.id] for g in i.groups},
-        )
         grants = await roles_store.list_workspace_roles(session, tenant_id=tenant_id)
         for person in members:
             roles[person.id] = role_for(
@@ -131,34 +125,23 @@ async def roles_of(
                 chat_admin=(standing := standings.get(person.id)) is not None
                 and standing.admitted
                 and standing.is_admin,
-                group_roles={
-                    conferring[(i.issuer, g)]
-                    for i in identities[person.id]
-                    for g in i.groups
-                    if (i.issuer, g) in conferring
-                },
             )
     return roles
 
 
-async def role_of(
-    session: AsyncSession, person: WebPersonRow, identities: Sequence[WebIdentityRow]
-) -> Role:
+async def role_of(session: AsyncSession, person: WebPersonRow) -> Role:
     """The person's role in their workspace."""
-    return (await roles_of(session, [person], {person.id: identities}))[person.id]
+    return (await roles_of(session, [person]))[person.id]
 
 
 def _unauthorized() -> HTTPException:
     return HTTPException(status_code=401, detail="Sign in to continue.")
 
 
-async def signin_allowed_in(db: AsyncSession, *, provider: str, tenant_id: uuid.UUID) -> bool:
-    """Whether a sign-in through `provider` may work in the workspace now."""
+async def signin_allowed_in(db: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Whether a sign-in may work in the workspace now: it is still there."""
     tenant = await tenants_store.get_tenant(db, tenant_id)
-    if tenant is None or tenant.archived_at is not None:
-        return False
-    chosen = await workspace_settings.get_settings(db, tenant_id=tenant_id)
-    return provider not in chosen.signin_off
+    return tenant is not None and tenant.archived_at is None
 
 
 #: What every refused capability reads as, whoever asks and whatever they asked for.
@@ -217,9 +200,7 @@ async def _caller(
         # The lifetime counts from sign-in, so lowering the setting also ends older sessions.
         ended = now >= live.created_at + ttl_of(runtime)
         if not ended and now - live.roles_checked_at >= _RECHECK_EVERY:
-            ended = not await signin_allowed_in(
-                db, provider=live.provider, tenant_id=live.tenant_id
-            )
+            ended = not await signin_allowed_in(db, tenant_id=live.tenant_id)
             if not ended:
                 await sessions_store.mark_checked(db, session_id=live.id, now=now)
         if not ended:
@@ -231,7 +212,7 @@ async def _caller(
             if left and not (allow_suspended if allow_left is None else allow_left):
                 raise HTTPException(status_code=403, detail=LEFT_WORKSPACE)
             identities = await identities_store.list_for_person(db, person_id=person.id)
-            role = (await roles_of(db, [person], {person.id: identities}, standings))[person.id]
+            role = (await roles_of(db, [person], standings))[person.id]
             # A workspace can turn a module off, never on; admin always stays.
             enabled: list[WebModuleKey] = [
                 m for m in runtime.web.modules if m not in chosen.modules_off

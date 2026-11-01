@@ -393,8 +393,8 @@ Read from `daimon.core.config.McpIdentitySettings`. Prefix `DAIMON_MCP_IDENTITY_
 Ed25519 private key that signs caller identities for the servers in
 DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte seed.
 Generate one with `daimon mcp identity-keygen`, which also prints the public key to
-register with each server. Read by the mcp service, and by the web service when an
-embedded app sets identity_server.
+register with each server. Read by the mcp service, and by the web service when a
+DAIMON_WEB__NODES__* node names a server.
 
 ### `DAIMON_MCP_IDENTITY__SERVERS`
 
@@ -431,9 +431,7 @@ otherwise invalidate every issued login).
 `str | None` · optional · default unset
 
 Slack OAuth app client ID for the /slack/mcp login mount. Register &lt;hub
-origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url). Web
-app sign-in with Slack uses this app too: also register &lt;web public
-url&gt;/auth/slack/callback.
+origin&gt;/slack/auth/callback as a redirect URL on the Slack app (see public_url).
 
 ### `DAIMON_HUB__SLACK_CLIENT_SECRET`
 
@@ -968,7 +966,7 @@ choose Get link to team and copy the groupId parameter. Unset: nobody is an admi
 
 Read from `daimon.core.config.WebSettings`. Prefix `DAIMON_WEB__`.
 
-The web app: its server, sign-in providers and embedded apps.
+The web app: its server, Discord sign-in and connection nodes.
 
 Optional so deployments without the web app boot unchanged; the block is ``None`` when
 no ``DAIMON_WEB__*`` variable is set.
@@ -1002,95 +1000,37 @@ package, where the image build puts it.
 
 Sections of the web app that are on, comma-separated: chat, agents, credits, admin.
 
-### `DAIMON_WEB__PROVIDERS`
-
-`tuple['oidc' | 'discord' | 'slack' | 'microsoft', ...]` · optional · default `oidc`
-
-Sign-in methods offered, comma-separated: oidc, discord, slack, microsoft. A method also
-needs its own settings to appear.
-
-### `DAIMON_WEB__OIDC__ISSUER`
+### `DAIMON_WEB__NODES__DATA_SERVER__IDENTITY_SERVER`
 
 `str` · **required**
 
-Issuer URL of the provider, exactly as it appears in its ID tokens' `iss` claim. Its
-discovery document is read from `&lt;issuer&gt;/.well-known/openid-configuration`.
+Name of the `DAIMON_MCP_IDENTITY__SERVERS` entry for the server. Its MCP relay is what a
+connected agent gets; its audience is the server's base URL, which serves the API and
+`/oauth/token`.
 
-### `DAIMON_WEB__OIDC__CLIENT_ID`
+### `DAIMON_WEB__NODES__DATA_SERVER__LABEL`
+
+`str` · optional · default `Data server`
+
+Name the agent editor shows.
+
+### `DAIMON_WEB__NODES__DATA_SERVER__CLIENT_ID`
 
 `str` · **required**
 
-Client ID registered with the provider. Its redirect URI is `&lt;public
-url&gt;/auth/oidc/callback`.
+OAuth client the web app exchanges tokens as.
 
-### `DAIMON_WEB__OIDC__CLIENT_SECRET`
+### `DAIMON_WEB__NODES__DATA_SERVER__CLIENT_SECRET`
 
 `SecretStr` · **required** · secret
 
-Client secret for that client ID.
+Secret of that client.
 
-### `DAIMON_WEB__OIDC__TENANT_ID`
+### `DAIMON_WEB__NODES__DATA_SERVER__SCOPE`
 
-`UUID` · **required**
+`str` · optional · default `openid`
 
-Workspace (tenant id) every person who signs in with this provider joins. It must
-already be set up.
-
-### `DAIMON_WEB__OIDC__WORKSPACE_NAME`
-
-`str` · optional · default `Workspace`
-
-Name the web app shows for that workspace.
-
-### `DAIMON_WEB__OIDC__LABEL`
-
-`str` · optional · default `Single sign-on`
-
-Name on the sign-in button.
-
-### `DAIMON_WEB__OIDC__ICON`
-
-`str | None` · optional · default unset
-
-Icon shown on the sign-in button: a Lucide name, or a `data:image/svg+xml;base64,` or
-`data:image/png;base64,` URI up to 16 KB.
-
-### `DAIMON_WEB__OIDC__SCOPES`
-
-`tuple[str, ...]` · optional · default `openid,email,profile`
-
-Scopes requested at sign-in, comma-separated. Add `offline_access` or an API scope when
-the provider needs it. A refresh token is kept only if the provider returns one.
-
-### `DAIMON_WEB__OIDC__GROUPS_CLAIM`
-
-`str` · optional · default `groups`
-
-ID token claim that lists the person's groups, matched against group roles.
-
-### `DAIMON_WEB__OIDC__ALLOWED_DOMAINS`
-
-`tuple[str, ...]` · optional · default unset
-
-Email domains that may sign in, comma-separated. Only verified addresses count. Empty:
-the provider alone decides who may sign in.
-
-### `DAIMON_WEB__OIDC__TRUST_CHAT_ACCOUNTS`
-
-`bool` · optional · default `False`
-
-Trust the provider's chat_accounts ID token claim: a list of "discord:&lt;user id&gt;",
-"slack:&lt;team id&gt;:&lt;user id&gt;" and "teams:&lt;tenant id&gt;:&lt;user object
-id&gt;". A person then also signs in to every chat workspace where one of those accounts
-is a member, acting as it. Membership is read from the workspace's member list; for
-Teams, and for a workspace whose list has not loaded yet, the claim alone is the proof.
-Turn on only for a provider that verifies those accounts itself.
-
-### `DAIMON_WEB__APPS`
-
-`tuple[EmbeddedAppSettings, ...]` · optional · default unset
-
-Embedded apps, as a JSON list.
+Scopes asked for in the token exchange.
 
 ### `DAIMON_WEB__SESSION_TTL_DAYS`
 
@@ -1202,8 +1142,7 @@ Inert until `client_id`, `client_secret` and `tenant_id` are all set.
 `str | None` · optional · default unset
 
 Application (client) ID of the Entra app registration people sign in to with Connect
-Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`; web
-app sign-in with Microsoft also needs `&lt;web public url&gt;/auth/microsoft/callback`.
+Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`.
 
 ### `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET`
 

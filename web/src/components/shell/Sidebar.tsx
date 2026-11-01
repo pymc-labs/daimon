@@ -6,7 +6,7 @@ import { useMemo, useState } from "react"
 import { Link, NavLink, useMatch, useNavigate } from "react-router"
 import { toast } from "sonner"
 
-import { AppIcon, BrandIcon, Logo } from "@/components/brand"
+import { BrandIcon, Logo } from "@/components/brand"
 import { AgentAvatar, Avatar, Kbd } from "@/components/common"
 import { useConfirm } from "@/lib/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
@@ -21,7 +21,7 @@ import { useTheme } from "@/lib/theme-context"
 import type { ChatSession, Me, Person } from "@/lib/types"
 import { cn, MOD } from "@/lib/utils"
 import { evict } from "@/modules/chat/turns"
-import { isAppItem, sidebarFor } from "@/modules/registry"
+import { sidebarFor } from "@/modules/registry"
 import { signOut } from "./auth"
 import { ShellCtx } from "./shell-context"
 import { RenameDialog } from "./RenameDialog"
@@ -47,14 +47,14 @@ export function Sidebar() {
           className="flex h-8 items-center gap-2 rounded-md border bg-background px-2.5 text-sm font-medium shadow-[0_1px_2px_rgb(0_0_0/0.04)] hover:bg-accent"
         >
           <Plus className="size-4" />
-          New chat
+          New thread
           <span className="ml-auto flex gap-0.5"><Kbd>{MOD}</Kbd><Kbd>O</Kbd></span>
         </Link>
       </div>
       <nav className="space-y-0.5 px-3">
         {sidebarFor(me).map((item) => (
-          <NavLink key={item.to} to={item.to} end={item.end} title={isAppItem(item) ? item.app.name : undefined} className={({ isActive }) => itemCls(isActive || (item.to === "/chat" && chatOpen))}>
-            {isAppItem(item) ? <AppIcon icon={item.icon} className="size-4" /> : <item.icon className="size-4" strokeWidth={1.75} />}
+          <NavLink key={item.to} to={item.to} end={item.end} className={({ isActive }) => itemCls(isActive || (item.to === "/chat" && chatOpen))}>
+            <item.icon className="size-4" strokeWidth={1.75} />
             {item.label}
           </NavLink>
         ))}
@@ -158,7 +158,7 @@ function RecentChats() {
       evict(s.id)
       qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
       if (s.id === id) navigate("/chat")
-      toast("Chat deleted")
+      toast("Thread deleted")
     },
   })
   return (
@@ -183,14 +183,14 @@ function RecentChats() {
               <DropdownMenu>
                 <DropdownMenuTrigger
                   className="absolute top-1 right-1 rounded p-1 text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-background focus-visible:opacity-100 data-[state=open]:opacity-100"
-                  aria-label="Chat actions"
+                  aria-label="Thread actions"
                 >
                   <MoreHorizontal className="size-4" />
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
                   <DropdownMenuItem onSelect={() => setRenaming(s)}>Rename</DropdownMenuItem>
                   <DropdownMenuItem variant="destructive" onSelect={async () => {
-                    if (await confirm({ title: "Delete chat?", body: s.title, action: "Delete", destructive: true })) del.mutate(s)
+                    if (await confirm({ title: "Delete thread?", body: s.title, action: "Delete", destructive: true })) del.mutate(s)
                   }}>Delete</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -225,7 +225,7 @@ function UserMenu() {
     location.assign("/chat")
   }
   const linked = new Set(me.identities.map((i) => i.provider))
-  const linkable = me.role === "visitor" ? [] : (providers.data ?? []).filter((p) => p.id !== "oidc")
+  const linkable = me.role === "visitor" ? [] : (providers.data ?? []).filter((p) => p.kind === "redirect")
   return (
     <ShellCtx.Consumer>
       {({ openShortcuts }) => (
@@ -275,7 +275,7 @@ function UserMenu() {
                 <DropdownMenuSubContent>
                   {linkable.map((p) => (
                     <DropdownMenuItem key={p.id} disabled={linked.has(p.id) || link.isPending} onSelect={() => link.mutate(p.id)}>
-                      <BrandIcon brand={p.id} icon={p.icon} />{p.label}
+                      <BrandIcon brand={p.id} />{p.label}
                       {linked.has(p.id) && <Check className="ml-auto" />}
                     </DropdownMenuItem>
                   ))}

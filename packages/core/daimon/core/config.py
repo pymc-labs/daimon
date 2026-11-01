@@ -11,7 +11,6 @@ import binascii
 import ipaddress
 import json
 import os
-import re
 import ssl
 import uuid
 from datetime import UTC, date, datetime, timedelta
@@ -452,8 +451,7 @@ class HubSettings(BaseModel):
         description=(
             "Slack OAuth app client ID for the /slack/mcp login mount. Register "
             "<hub origin>/slack/auth/callback as a redirect URL on the Slack app "
-            "(see public_url). Web app sign-in with Slack uses this app too: also register "
-            "<web public url>/auth/slack/callback."
+            "(see public_url)."
         ),
     )
     slack_client_secret: SecretStr | None = Field(
@@ -1059,263 +1057,6 @@ class TeamsSettings(BaseModel):
             ) from None
 
 
-WebProvider = Literal["oidc", "discord", "slack", "microsoft"]
-WebModuleKey = Literal["chat", "agents", "credits", "admin"]
-_WEB_MODULES: tuple[WebModuleKey, ...] = ("chat", "agents", "credits", "admin")
-
-
-#: Longest an icon may be, as text: a name, or a `data:` URI the operator inlines.
-ICON_MAX_CHARS = 16 * 1024
-_ICON_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-_ICON_URI = re.compile(r"data:image/(?:svg\+xml|png);base64,[A-Za-z0-9+/]+={0,2}")
-
-
-def _icon(value: str | None) -> str | None:
-    """A Lucide icon name or a base64 SVG/PNG `data:` URI of at most `ICON_MAX_CHARS`."""
-    if value is None:
-        return value
-    if len(value) > ICON_MAX_CHARS:
-        raise ValueError(f"an icon must be at most {ICON_MAX_CHARS // 1024} KB")
-    if not (_ICON_NAME.fullmatch(value) or _ICON_URI.fullmatch(value)):
-        raise ValueError(
-            "an icon must be a Lucide name or a data:image/svg+xml;base64, "
-            "or data:image/png;base64, URI"
-        )
-    return value
-
-
-def _split_csv(value: object) -> object:
-    """Accept a comma-separated string or a JSON list for a tuple-of-strings variable."""
-    if not isinstance(value, str):
-        return value
-    text = value.strip()
-    if text.startswith("["):
-        return json.loads(text)
-    return tuple(part.strip() for part in text.split(",") if part.strip())
-
-
-class WebOidcSettings(BaseModel):
-    """The OpenID Connect provider people sign in to the web app with."""
-
-    issuer: str = Field(
-        description=(
-            "Issuer URL of the provider, exactly as it appears in its ID tokens' `iss` "
-            "claim. Its discovery document is read from "
-            "`<issuer>/.well-known/openid-configuration`."
-        ),
-    )
-    client_id: str = Field(
-        description=(
-            "Client ID registered with the provider. Its redirect URI is "
-            "`<public url>/auth/oidc/callback`."
-        ),
-    )
-    client_secret: SecretStr = Field(description="Client secret for that client ID.")
-    tenant_id: UUID = Field(
-        description=(
-            "Workspace (tenant id) every person who signs in with this provider joins. "
-            "It must already be set up."
-        ),
-    )
-    workspace_name: str = Field(
-        default="Workspace",
-        description="Name the web app shows for that workspace.",
-    )
-    label: str = Field(
-        default="Single sign-on",
-        description="Name on the sign-in button.",
-    )
-    icon: str | None = Field(
-        default=None,
-        description=(
-            "Icon shown on the sign-in button: a Lucide name, or a "
-            "`data:image/svg+xml;base64,` or `data:image/png;base64,` URI up to 16 KB."
-        ),
-    )
-    scopes: Annotated[tuple[str, ...], NoDecode] = Field(
-        default=("openid", "email", "profile"),
-        description=(
-            "Scopes requested at sign-in, comma-separated. Add `offline_access` or an API "
-            "scope when the provider needs it. A refresh token is kept only if the provider "
-            "returns one."
-        ),
-    )
-    groups_claim: str = Field(
-        default="groups",
-        description="ID token claim that lists the person's groups, matched against group roles.",
-    )
-    allowed_domains: Annotated[tuple[str, ...], NoDecode] = Field(
-        default=(),
-        description=(
-            "Email domains that may sign in, comma-separated. Only verified addresses count. "
-            "Empty: the provider alone decides who may sign in."
-        ),
-    )
-    trust_chat_accounts: bool = Field(
-        default=False,
-        description=(
-            "Trust the provider's chat_accounts ID token claim: a list of "
-            '"discord:<user id>", "slack:<team id>:<user id>" and '
-            '"teams:<tenant id>:<user object id>". A person then also signs in to every '
-            "chat workspace where one of those accounts is a member, acting as it. "
-            "Membership is read from the workspace's member list; for Teams, and for a "
-            "workspace whose list has not loaded yet, the claim alone is the proof. Turn "
-            "on only for a provider that verifies those accounts itself."
-        ),
-    )
-
-    _split_lists = field_validator("scopes", "allowed_domains", mode="before")(_split_csv)
-    _icon_form = field_validator("icon")(_icon)
-
-    @field_validator("scopes")
-    @classmethod
-    def _scopes_include_openid(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if "openid" not in value:
-            raise ValueError("DAIMON_WEB__OIDC__SCOPES must include openid")
-        return value
-
-    @field_validator("allowed_domains")
-    @classmethod
-    def _lowercase_domains(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(domain.lower().lstrip("@") for domain in value)
-
-    @field_validator("issuer")
-    @classmethod
-    def _issuer_is_a_url(cls, value: str) -> str:
-        parts = urlsplit(value)
-        if (
-            parts.scheme not in {"http", "https"}
-            or not parts.netloc
-            or parts.query
-            or parts.fragment
-        ):
-            raise ValueError("DAIMON_WEB__OIDC__ISSUER must be an http(s) URL without a query")
-        return value
-
-
-class EmbeddedNavItem(BaseModel):
-    """One sidebar entry an embedded app adds."""
-
-    label: str = Field(description="Sidebar text.")
-    path: str = Field(description="Path inside the app, starting with `/`.")
-    icon: str = Field(description="Icon name from the web app's icon set.")
-
-
-def _panel_path(value: str | None) -> str | None:
-    if value is None:
-        return value
-    if (
-        not value.startswith("/")
-        or value.startswith("//")
-        or value.count("{agent_id}") != 1
-        or "{" in value.replace("{agent_id}", "")
-        or "}" in value.replace("{agent_id}", "")
-    ):
-        raise ValueError(
-            "a panel path must start with / and contain {agent_id} once, with no other braces"
-        )
-    return value
-
-
-class AppPanel(BaseModel):
-    """Where an app shows one Daimon object: path templates inside the app."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    embed: str = Field(
-        description=(
-            "Path of the view shown in a drawer, starting with `/` and containing "
-            "`{agent_id}`, for example `/embed/agents/{agent_id}`."
-        ),
-    )
-    page: str | None = Field(
-        default=None,
-        description="Path of the same view as a full page, same form. Unset: no link to it.",
-    )
-
-    _path_form = field_validator("embed", "page")(_panel_path)
-
-
-class AppPanels(BaseModel):
-    """The views an app offers, by what Daimon shows them for."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    agent: AppPanel | None = Field(
-        default=None,
-        description=(
-            "View of one agent, shown in the agent's page. `{agent_id}` is the id the agent "
-            "has at MCP servers, as the `agent` claim of Daimon's identity assertion."
-        ),
-    )
-
-
-class EmbeddedAppSettings(BaseModel):
-    """A separately hosted app shown inside the web app in a frame."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    key: str = Field(description="Short identifier, unique among the apps, used in web app URLs.")
-    name: str = Field(description="Name the web app shows for the app.")
-    icon: str = Field(
-        description=(
-            "Icon the web app shows for the app: `database`, `plug`, `key-round` or `link` "
-            "(another Lucide name shows `database`), or a `data:image/svg+xml;base64,` or "
-            "`data:image/png;base64,` URI up to 16 KB."
-        ),
-    )
-    origin: str = Field(
-        description="Origin the app is served from, such as `https://app.example.com`."
-    )
-    nav: tuple[EmbeddedNavItem, ...] = Field(
-        default=(), description="Sidebar entries the app adds."
-    )
-    panels: AppPanels = Field(
-        default_factory=AppPanels,
-        description="Views the app offers Daimon, by what they show.",
-    )
-    connections_path: str | None = Field(
-        default=None,
-        description=(
-            "Path inside the app where people manage the connections it serves to their "
-            "agents, starting with `/`. Unset: the app offers none."
-        ),
-    )
-    oidc_issuer: str | None = Field(
-        default=None,
-        description=(
-            "Issuer of the sign-in provider whose access tokens the app accepts. A person "
-            "signed in with that provider gets their token passed to the app. Unset: none is."
-        ),
-    )
-    identity_server: str | None = Field(
-        default=None,
-        description=(
-            "Name of a `DAIMON_MCP_IDENTITY__SERVERS` entry. A person signed in another way "
-            "then gets a token for the app by token exchange at `oidc_issuer`: Daimon signs "
-            "who they are with `DAIMON_MCP_IDENTITY__SIGNING_KEY`, using that entry's issuer "
-            "id. Needs `oidc_issuer` to be the web sign-in provider. Unset: no exchange."
-        ),
-    )
-
-    _icon_form = field_validator("icon")(_icon)
-
-    @field_validator("origin")
-    @classmethod
-    def _origin_only(cls, value: str) -> str:
-        parts = urlsplit(value)
-        if parts.scheme not in {"http", "https"} or not parts.netloc or parts.path not in {"", "/"}:
-            raise ValueError("an embedded app origin must be scheme://host[:port] with no path")
-        return origin_of(value)
-
-    @field_validator("connections_path")
-    @classmethod
-    def _connections_path(cls, value: str | None) -> str | None:
-        if value is not None and not value.startswith("/"):
-            raise ValueError("connections_path must be a path starting with /")
-        return value
-
-
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
@@ -1330,6 +1071,21 @@ def origin_of(url: str) -> str:
     return f"{parts.scheme}://{host}{suffix}"
 
 
+WebProvider = Literal["discord"]
+WebModuleKey = Literal["chat", "agents", "credits", "admin"]
+_WEB_MODULES: tuple[WebModuleKey, ...] = ("chat", "agents", "credits", "admin")
+
+
+def _split_csv(value: object) -> object:
+    """Accept a comma-separated string or a JSON list for a tuple-of-strings variable."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.startswith("["):
+        return json.loads(text)
+    return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
 def _is_loopback_host(host: str | None) -> bool:
     """Whether a URL host is `localhost` or a loopback IP address."""
     if host is None:
@@ -1342,8 +1098,41 @@ def _is_loopback_host(host: str | None) -> bool:
         return False
 
 
+class DataServerNodeSettings(BaseModel):
+    """A data server the agent editor manages an agent in, as the signed-in person."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    identity_server: str = Field(
+        description=(
+            "Name of the `DAIMON_MCP_IDENTITY__SERVERS` entry for the server. Its MCP relay "
+            "is what a connected agent gets; its audience is the server's base URL, which "
+            "serves the API and `/oauth/token`."
+        ),
+    )
+    label: str = Field(default="Data server", description="Name the agent editor shows.")
+    client_id: str = Field(description="OAuth client the web app exchanges tokens as.")
+    client_secret: SecretStr = Field(description="Secret of that client.")
+    scope: str = Field(default="openid", description="Scopes asked for in the token exchange.")
+
+
+class WebNodesSettings(BaseModel):
+    """Connection nodes the agent editor offers, one block per kind."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    data_server: DataServerNodeSettings | None = Field(
+        default=None,
+        description="A data server agents are linked to, which keeps their access.",
+    )
+
+    def configured(self) -> dict[str, DataServerNodeSettings]:
+        """Each set node by its kind, the field name."""
+        return {} if self.data_server is None else {"data_server": self.data_server}
+
+
 class WebSettings(BaseModel):
-    """The web app: its server, sign-in providers and embedded apps.
+    """The web app: its server, Discord sign-in and connection nodes.
 
     Optional so deployments without the web app boot unchanged; the block is
     ``None`` when no ``DAIMON_WEB__*`` variable is set.
@@ -1369,17 +1158,9 @@ class WebSettings(BaseModel):
             "Sections of the web app that are on, comma-separated: chat, agents, credits, admin."
         ),
     )
-    providers: Annotated[tuple[WebProvider, ...], NoDecode] = Field(
-        default=("oidc",),
-        description=(
-            "Sign-in methods offered, comma-separated: oidc, discord, slack, microsoft. "
-            "A method also needs its own settings to appear."
-        ),
-    )
-    oidc: WebOidcSettings | None = None
-    apps: tuple[EmbeddedAppSettings, ...] = Field(
-        default=(),
-        description="Embedded apps, as a JSON list.",
+    nodes: WebNodesSettings = Field(
+        default_factory=WebNodesSettings,
+        description="Connection nodes offered in the agent editor.",
     )
     session_ttl_days: int = Field(
         default=30,
@@ -1404,7 +1185,7 @@ class WebSettings(BaseModel):
         ),
     )
 
-    _split_lists = field_validator("modules", "providers", mode="before")(_split_csv)
+    _split_lists = field_validator("modules", mode="before")(_split_csv)
 
     @model_validator(mode="after")
     def _check_deployment(self) -> WebSettings:
@@ -1415,8 +1196,6 @@ class WebSettings(BaseModel):
             raise ValueError(
                 "DAIMON_WEB__DEV needs DAIMON_WEB__PUBLIC_URL to be localhost or a loopback address"
             )
-        if len({app.key for app in self.apps}) != len(self.apps):
-            raise ValueError("DAIMON_WEB__APPS keys must be unique")
         return self
 
 
@@ -1585,8 +1364,7 @@ class MicrosoftAccountsSettings(BaseModel):
         description=(
             "Application (client) ID of the Entra app registration people sign in to "
             "with Connect Microsoft. Its Web redirect URI is "
-            "`<public root>/oauth/microsoft/callback`; web app sign-in with Microsoft "
-            "also needs `<web public url>/auth/microsoft/callback`."
+            "`<public root>/oauth/microsoft/callback`."
         ),
     )
     client_secret: SecretStr | None = Field(
@@ -2451,7 +2229,7 @@ class McpIdentitySettings(BaseModel):
             "DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte "
             "seed. Generate one with `daimon mcp identity-keygen`, which also prints the "
             "public key to register with each server. Read by the mcp service, and by the "
-            "web service when an embedded app sets identity_server."
+            "web service when a DAIMON_WEB__NODES__* node names a server."
         ),
     )
     servers: Annotated[list[SignedIdentityServer], NoDecode] = Field(
@@ -2760,67 +2538,20 @@ class Settings(BaseSettings):
         """
         return self.microsoft_accounts.touched and not self.microsoft_accounts_missing()
 
-    def web_provider_needs(self) -> dict[WebProvider, tuple[str, bool]]:
-        """For each web sign-in method, the settings it needs and whether they are all set."""
-        web = self.web
-        return {
-            "oidc": ("DAIMON_WEB__OIDC__*", web is not None and web.oidc is not None),
-            "discord": (
-                "DAIMON_HUB__DISCORD_CLIENT_ID and DAIMON_HUB__DISCORD_CLIENT_SECRET",
-                self.hub.discord_configured,
-            ),
-            "slack": (
-                "DAIMON_HUB__SLACK_CLIENT_ID and DAIMON_HUB__SLACK_CLIENT_SECRET",
-                self.hub.slack_configured,
-            ),
-            "microsoft": (
-                "DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID, _CLIENT_SECRET and _TENANT_ID",
-                self.microsoft_accounts.configured,
-            ),
-        }
-
     @model_validator(mode="after")
-    def _web_providers_are_complete(self) -> Settings:
-        """A sign-in method named in `DAIMON_WEB__PROVIDERS` must have its own settings.
-
-        Only a list written out counts: the default `oidc` stays quietly off when
-        no OIDC provider is set, so a deployment using other methods needs no extra line.
-        """
-        web = self.web
-        if web is None or "providers" not in web.model_fields_set:
-            return self
-        needs = self.web_provider_needs()
-        for provider in web.providers:
-            what, present = needs[provider]
-            if not present:
+    def _web_nodes_have_servers(self) -> Settings:
+        """Each web node names a signed-identity server, and the key that signs for it."""
+        nodes = {} if self.web is None else self.web.nodes.configured()
+        servers = {server.name for server in self.mcp_identity.servers}
+        for kind, node in nodes.items():
+            env = f"DAIMON_WEB__NODES__{kind.upper()}"
+            if node.identity_server not in servers:
                 raise ValueError(
-                    f"DAIMON_WEB__PROVIDERS lists {provider}, which needs {what}. "
-                    "Set them or drop it from the list."
-                )
-        return self
-
-    @model_validator(mode="after")
-    def _app_token_exchange_is_complete(self) -> Settings:
-        """An app that exchanges tokens names a known server, a key, and the web provider."""
-        web = self.web
-        for app in () if web is None else web.apps:
-            if app.identity_server is None:
-                continue
-            where = f"DAIMON_WEB__APPS entry {app.key!r}"
-            if not any(s.name == app.identity_server for s in self.mcp_identity.servers):
-                raise ValueError(
-                    f"{where} names identity_server {app.identity_server!r}, which is not in "
-                    "DAIMON_MCP_IDENTITY__SERVERS"
+                    f"{env}__IDENTITY_SERVER names {node.identity_server!r}, "
+                    "which DAIMON_MCP_IDENTITY__SERVERS lacks"
                 )
             if self.mcp_identity.signing_key is None:
-                raise ValueError(
-                    f"{where} sets identity_server, which needs DAIMON_MCP_IDENTITY__SIGNING_KEY"
-                )
-            if web is None or web.oidc is None or app.oidc_issuer != web.oidc.issuer:
-                raise ValueError(
-                    f"{where} sets identity_server, which needs oidc_issuer to be "
-                    "DAIMON_WEB__OIDC__ISSUER"
-                )
+                raise ValueError(f"{env} needs DAIMON_MCP_IDENTITY__SIGNING_KEY")
         return self
 
     @model_validator(mode="after")

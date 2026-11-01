@@ -30,7 +30,7 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .conftest import ISSUER, web_settings
+from .conftest import web_settings
 
 SESSION_ID = "sesn_web"
 STREAM = rf"/v1/sessions/{SESSION_ID}/events/stream"
@@ -155,8 +155,8 @@ async def signed_in(factory: async_sessionmaker[AsyncSession], person: WebPerson
             db,
             tenant_id=person.tenant_id,
             person_id=person.id,
-            provider="oidc",
-            issuer=ISSUER,
+            provider="discord",
+            issuer="",
             subject=str(person.id),
             label=person.email or "",
             groups=(),
@@ -164,8 +164,8 @@ async def signed_in(factory: async_sessionmaker[AsyncSession], person: WebPerson
         await web_sessions.create_session(
             db,
             token_sha256=token_sha256(token),
-            provider="oidc",
-            issuer=ISSUER,
+            provider="discord",
+            issuer="",
             subject=str(person.id),
             people=[person],
             ttl=timedelta(days=1),

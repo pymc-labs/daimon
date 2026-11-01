@@ -3,7 +3,10 @@ import { useEffect, useRef } from "react"
 import { toast } from "sonner"
 
 import { api } from "@/lib/api"
-import type { Agent, AgentConfig, AgentSummary, AgentVersion, Backend, Catalog, Draft, Effect, Skill, SkillFiles, Template } from "./types"
+import type {
+  Agent, AgentConfig, AgentSummary, AgentVersion, Backend, Catalog, DataServerAgent, DataServerAgentPatch, DataServerScope, DataServerStatus,
+  DataServerToolPut, DataServerTools, Draft, Effect, Skill, SkillFiles, Template,
+} from "./types"
 
 export const useAgents = () => useQuery({ queryKey: ["agents"], queryFn: () => api.get<AgentSummary[]>("/api/agents") })
 export const useAgent = (id: string) => useQuery({ queryKey: ["agents", id], queryFn: () => api.get<Agent>(`/api/agents/${id}`) })
@@ -36,6 +39,82 @@ export function useServerToken(agentId: string, key: string) {
   return {
     save: useMutation({ mutationFn: (token: string) => api.put(path, { token }), onSuccess: done, onError: fail }),
     remove: useMutation({ mutationFn: () => api.del(path), onSuccess: done, onError: fail }),
+  }
+}
+
+const nodeKey = (agentId: string, kind: string) => ["agents", agentId, "nodes", kind] as const
+const nodePath = (agentId: string, kind: string) => `/api/agents/${agentId}/nodes/${kind}`
+
+/** What a connection node of any kind knows of the agent. */
+export const useNodeStatus = <T,>(agentId: string, kind: string, enabled = true) =>
+  useQuery({ queryKey: nodeKey(agentId, kind), queryFn: () => api.get<T>(nodePath(agentId, kind)), enabled, retry: false })
+
+/** Attach or detach a node; the agent detail lists its nodes, so it refreshes too. */
+export function useNodeLink<T>(agentId: string, kind: string) {
+  const qc = useQueryClient()
+  const done = (s: T) => {
+    qc.setQueryData(nodeKey(agentId, kind), s)
+    void qc.invalidateQueries({ queryKey: ["agents", agentId], exact: true })
+    void qc.invalidateQueries({ queryKey: ["agents", agentId, "draft"] })
+    void qc.invalidateQueries({ queryKey: [...nodeKey(agentId, kind), "tools"] })
+  }
+  const fail = (e: Error) => toast.error(e.message)
+  return {
+    connect: useMutation({ mutationFn: () => api.post<T>(`${nodePath(agentId, kind)}/connect`, {}), onSuccess: done, onError: fail }),
+    disconnect: useMutation({ mutationFn: () => api.post<T>(`${nodePath(agentId, kind)}/disconnect`, {}), onSuccess: done, onError: fail }),
+  }
+}
+
+/** Connect a node of any kind, chosen when it is added. */
+export function useConnectNode(agentId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (kind: string) => api.post<unknown>(`${nodePath(agentId, kind)}/connect`, {}),
+    onSuccess: (s, kind) => {
+      qc.setQueryData(nodeKey(agentId, kind), s)
+      void qc.invalidateQueries({ queryKey: ["agents", agentId], exact: true })
+      void qc.invalidateQueries({ queryKey: ["agents", agentId, "draft"] })
+    },
+    onError: (e) => toast.error(e.message),
+  })
+}
+
+const DATA = "data_server"
+
+/** The data-server node: status (with the server's agent, tokens and activity), tools and the person's scopes. */
+export const useDataServerStatus = (agentId: string, enabled = true) => useNodeStatus<DataServerStatus>(agentId, DATA, enabled)
+export const useDataServerLink = (agentId: string) => useNodeLink<DataServerStatus>(agentId, DATA)
+export const useDataServerTools = (agentId: string, enabled = true) =>
+  useQuery({ queryKey: [...nodeKey(agentId, DATA), "tools"], queryFn: () => api.get<DataServerTools>(`${nodePath(agentId, DATA)}/tools`), enabled })
+export const useDataServerScopes = (agentId: string, enabled = true) =>
+  useQuery({ queryKey: [...nodeKey(agentId, DATA), "scopes"], queryFn: () => api.get<DataServerScope[]>(`${nodePath(agentId, DATA)}/scopes`), enabled, staleTime: 60_000 })
+
+/** Edit the server's agent, its tools and tokens; each answer replaces the cached value it changes. */
+export function useDataServerEdit(agentId: string) {
+  const qc = useQueryClient()
+  const key = nodeKey(agentId, DATA)
+  const path = nodePath(agentId, DATA)
+  const fail = (e: Error) => toast.error(e.message)
+  return {
+    update: useMutation({
+      mutationFn: (b: DataServerAgentPatch) => api.patch<DataServerAgent>(`${path}/agent`, b),
+      // The answer is the list form: keep the detail's tokens and activity.
+      onSuccess: (a) => {
+        qc.setQueryData<DataServerStatus>(key, (s) => s && s.agent ? { ...s, agent: { ...s.agent, ...a, tokens: s.agent.tokens, activity: s.agent.activity } } : s)
+        void qc.invalidateQueries({ queryKey: [...key, "tools"] })
+      },
+      onError: fail,
+    }),
+    setTool: useMutation({
+      mutationFn: (b: DataServerToolPut) => api.put<DataServerTools>(`${path}/tools`, b),
+      onSuccess: (t) => qc.setQueryData([...key, "tools"], t),
+      onError: fail,
+    }),
+    revokeToken: useMutation({
+      mutationFn: (tokenId: string) => api.del<unknown>(`${path}/tokens/${encodeURIComponent(tokenId)}`),
+      onSuccess: () => qc.invalidateQueries({ queryKey: key, exact: true }),
+      onError: fail,
+    }),
   }
 }
 
@@ -123,7 +202,8 @@ export function useRevert(id: string) {
 
 /** What an edit to this node does once applied; mirrors the server's tagging. */
 export function nodeEffect(node: string, backend: Backend): Effect {
-  if (node === "agent" || node === "places") return "live"
+  // Connection nodes change on their own server, which applies it on the next call.
+  if (node === "agent" || node === "places" || node === "node") return "live"
   if (backend !== "anthropic") return "threads"
   return ["instructions", "model", "skills", "skill"].includes(node.split(":")[0]!) ? "session" : "live"
 }

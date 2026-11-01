@@ -16,7 +16,7 @@ from daimon.adapters.web.app import create_app
 from daimon.adapters.web.cookies import new_session_token, token_sha256
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import agent_skill_files
-from daimon.core.config import EmbeddedAppSettings, Settings
+from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef
@@ -35,7 +35,7 @@ from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, json_body
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .conftest import ISSUER, PUBLIC_URL, web_settings
+from .conftest import PUBLIC_URL, web_settings
 
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
 NOW = datetime(2030, 1, 15, 12, tzinfo=UTC)
@@ -119,8 +119,8 @@ async def _token(factory: async_sessionmaker[AsyncSession], person: WebPersonRow
             db,
             tenant_id=person.tenant_id,
             person_id=person.id,
-            provider="oidc",
-            issuer=ISSUER,
+            provider="discord",
+            issuer="",
             subject=str(person.id),
             label="person@example.com",
             groups=(),
@@ -128,8 +128,8 @@ async def _token(factory: async_sessionmaker[AsyncSession], person: WebPersonRow
         await sessions_store.create_session(
             db,
             token_sha256=token_sha256(token),
-            provider="oidc",
-            issuer=ISSUER,
+            provider="discord",
+            issuer="",
             subject=str(person.id),
             people=[person],
             ttl=NOW - datetime(2029, 1, 1, tzinfo=UTC),
@@ -151,7 +151,7 @@ async def _client(
     async with httpx.AsyncClient() as http:
         runtime = WebRuntime(
             settings=settings,
-            web=extra.pop("web", None) or web_settings(tenant_id),
+            web=extra.pop("web", None) or web_settings(),
             sessionmaker=factory,
             http_client=http,
             fernet=build_multifernet((Fernet.generate_key().decode(),)),
@@ -189,55 +189,9 @@ async def test_a_member_reads_the_agent_without_its_prompt(
     assert roster.json()[0]["owner"]["name"] == "Test Person", "the owner is named"
     body = agent.json()
     assert body["system"] is None and body["can_edit"] is False, "a member only reads"
-    assert body["apps"] == [], "no embedded app is configured"
+    assert body["nodes"] == [], "no connection node is configured"
     assert "data_access" not in body, "the agent carries no app vocabulary"
     assert refused.status_code == 403, "a member who does not own it cannot draft"
-
-
-_NOTES = EmbeddedAppSettings.model_validate(
-    {
-        "key": "notes",
-        "name": "Notes",
-        "icon": "book",
-        "origin": "https://notes.example.com",
-        "panels": {
-            "agent": {
-                "embed": "/embed/agents/external/{agent_id}",
-                "page": "/agents/external/{agent_id}",
-            }
-        },
-    }
-)
-
-
-async def test_an_agent_lists_the_app_views_of_it_for_apps_it_has_a_server_at(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    server = {"type": "url", "name": "notes", "url": "https://notes.example.com/mcp"}
-    agents, owner, _other = await _people(db_session, mcp_servers=[server])
-    token = await _token(db_session_factory, owner)
-    web = web_settings(owner.tenant_id, apps=(_NOTES,))
-    async with _client(agents, owner.tenant_id, db_session_factory, token, web=web) as client:
-        body = (await client.get("/api/agents/ag_w")).json()
-    mcp_id = derive_agent_uuid(tenant_id=owner.tenant_id, ma_agent_id="ag_w")
-    assert body["apps"] == [
-        {
-            "key": "notes",
-            "embed": f"/embed/agents/external/{mcp_id}",
-            "page": f"/agents/external/{mcp_id}",
-        }
-    ], "the app's panel paths carry the id the agent has at MCP servers, not its id here"
-
-
-async def test_an_agent_without_a_server_at_the_app_gets_no_app(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    agents, owner, _other = await _people(db_session)
-    token = await _token(db_session_factory, owner)
-    web = web_settings(owner.tenant_id, apps=(_NOTES,))
-    async with _client(agents, owner.tenant_id, db_session_factory, token, web=web) as client:
-        body = (await client.get("/api/agents/ag_w")).json()
-    assert body["apps"] == [], "the app has no business with this agent"
 
 
 async def test_the_owner_drafts_applies_and_sees_history(

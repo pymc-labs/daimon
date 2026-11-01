@@ -1308,7 +1308,6 @@ class CompatibilityPreview(_BackendConsentFacts):
 WebPersonKind = Literal["member", "visitor"]
 WebPersonStatus = Literal["active", "suspended"]
 WebRoleGrant = Literal["owner", "admin"]
-WebGroupRoleName = Literal["admin", "member"]
 
 
 class WebPersonRow(BaseModel):
@@ -1386,14 +1385,13 @@ class ChatStandingRow(BaseModel):
         return self.member or not self.synced
 
 
-class WebOidcTokenRow(BaseModel):
+class WebNodeTokenRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
     person_id: uuid.UUID
-    issuer: str
+    token_key: str
     tenant_id: uuid.UUID
     access_token_enc: bytes
-    refresh_token_enc: bytes | None
     expires_at: datetime
 
 
@@ -1442,7 +1440,6 @@ class WebWorkspaceSettingsRow(BaseModel):
 
     tenant_id: uuid.UUID
     modules_off: tuple[str, ...] = ()
-    signin_off: tuple[str, ...] = ()
     default_agent: str | None = None
 
 

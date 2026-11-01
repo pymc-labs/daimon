@@ -16,7 +16,7 @@ from daimon.core import agent_editing
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_view import AgentConfigDoc, SkillDoc
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.mux_compat import download_skill_version
+from daimon.core.mux_compat import download_skill_version, list_skill_versions
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import (
     SkillIngestError,
@@ -76,6 +76,35 @@ async def _attached_skill(
     raise AgentEditError("This skill is not on the agent.", kind="not_found")
 
 
+def _version_order(version: str) -> tuple[int, str]:
+    """Versions are increasing numbers in a string; anything else sorts before them."""
+    return (int(version), version) if version.isdigit() else (-1, version)
+
+
+async def _concrete_version(
+    deps: AgentEditDeps, *, actor: AgentActor, skill_id: str, version: str
+) -> str:
+    """``version`` itself, or the newest published one when an agent pins ``latest``.
+
+    The editor's base version has to be a real one: it is what a save keeps files from and
+    what the next save is compared against, and ``latest`` moves under it.
+    """
+    if version != "latest":
+        return version
+    try:
+        listed = [
+            row.version
+            async for row in list_skill_versions(
+                deps.client, skill_id, limit=100, scope=actor.scope()
+            )
+        ]
+    except (anthropic.APIStatusError, ScopeViolation) as exc:
+        raise AgentEditError("This skill's files can't be read.", kind="not_found") from exc
+    if not listed:
+        raise AgentEditError("This skill has no version to read.", kind="invalid")
+    return max(listed, key=_version_order)
+
+
 async def _download_files(
     deps: AgentEditDeps, *, actor: AgentActor, skill_id: str, version: str
 ) -> dict[str, bytes]:
@@ -100,7 +129,7 @@ async def read_skill_files(
     """The files of a custom skill the agent (or the actor's draft of it) holds."""
     agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
     pinned = await _attached_skill(deps, actor=actor, agent=agent, skill_id=skill_id)
-    held = version or pinned
+    held = await _concrete_version(deps, actor=actor, skill_id=skill_id, version=version or pinned)
     files = await _download_files(deps, actor=actor, skill_id=skill_id, version=held)
     out: list[SkillFileDoc] = []
     for path in sorted(files, key=lambda p: (p != "SKILL.md", p)):
@@ -146,9 +175,10 @@ async def save_skill_files(
         if skill_id is None:
             raise AgentEditError("A new skill has no files to keep.", kind="invalid")
         pinned = await _attached_skill(deps, actor=actor, agent=agent, skill_id=skill_id)
-        original = await _download_files(
+        base = await _concrete_version(
             deps, actor=actor, skill_id=skill_id, version=version or pinned
         )
+        original = await _download_files(deps, actor=actor, skill_id=skill_id, version=base)
         if not kept <= original.keys():
             raise AgentEditError("A kept file is not in the skill.", kind="invalid")
         bodies |= {path: original[path] for path in kept}

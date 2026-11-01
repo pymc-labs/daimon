@@ -55,16 +55,10 @@ async def main() -> None:
     if not settings.crypto.keys:
         log.error("web adapter requires DAIMON_CRYPTO__KEYS for token encryption")
         sys.exit(1)
-    needs = settings.web_provider_needs()
-    for provider in web.providers:
-        what, present = needs[provider]
-        if not present:
-            log.warning("web.provider.incomplete", provider=provider, needs=what)
-    if not web.dev and not any(needs[p][1] for p in web.providers):
+    if not web.dev and not settings.hub.discord_configured:
         log.error(
-            "web.providers.none_usable",
-            listed=list(web.providers),
-            hint="set the settings of at least one DAIMON_WEB__PROVIDERS method",
+            "web.signin.unconfigured",
+            hint="set DAIMON_HUB__DISCORD_CLIENT_ID and DAIMON_HUB__DISCORD_CLIENT_SECRET",
         )
         sys.exit(1)
     init_sentry(

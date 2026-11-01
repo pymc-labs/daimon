@@ -122,7 +122,6 @@ class McpServer(_Doc):
     url: str
     auth: Literal["oauth", "token", "none"]
     credential: Literal["connected", "missing", "expired"] | None
-    app: str | None = Field(default=None, exclude_if=_omit_none)
     tools: list[McpTool] = Field(default_factory=list[McpTool])
 
 

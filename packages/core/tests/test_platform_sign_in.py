@@ -1,30 +1,14 @@
-"""Chat-platform sign-in helpers: Discord user and guilds, Slack user grant, Microsoft account."""
+"""Chat-platform sign-in helpers: Discord user and guilds, Slack user grant."""
 
 from __future__ import annotations
 
-import base64
-import json
-
 import httpx
 import pytest
-from daimon.core.config import MicrosoftAccountsSettings
-from daimon.core.microsoft_identity import MicrosoftIdentityMismatch, MicrosoftTokens
 from daimon.core.platform_sign_in import (
     PlatformSignInError,
     exchange_slack_user_code,
     fetch_discord_user,
     fetch_discord_workspaces,
-    verify_microsoft_sign_in,
-)
-from pydantic import HttpUrl, SecretStr
-
-TENANT = "11111111-1111-1111-1111-111111111111"
-OID = "22222222-2222-2222-2222-222222222222"
-MICROSOFT = MicrosoftAccountsSettings(
-    client_id="app-1",
-    client_secret=SecretStr("app-secret"),
-    tenant_id=TENANT,
-    authority=HttpUrl("https://login.example.com"),
 )
 
 
@@ -46,13 +30,6 @@ def _slack_http(payload: dict[str, object]) -> httpx.AsyncClient:
         return httpx.Response(200, json=payload)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-
-def _microsoft_tokens(**claims: object) -> MicrosoftTokens:
-    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
-    return MicrosoftTokens(
-        access_token="at", refresh_token=None, expires_in=3600, scope="", id_token=f"e30.{body}.s"
-    )
 
 
 async def test_fetch_discord_workspaces_returns_user_and_guilds() -> None:
@@ -115,26 +92,3 @@ async def test_slack_exchange_refuses_unusable_answers(
         await exchange_slack_user_code(
             _slack_http(payload), client_id="c", client_secret="s", code="x", redirect_uri="r"
         )
-
-
-def test_microsoft_sign_in_returns_the_canonical_directory_and_object_ids() -> None:
-    tokens = _microsoft_tokens(
-        tid=TENANT.upper(), oid=OID.upper(), aud="app-1", name="Ines", preferred_username="i@x"
-    )
-    signed = verify_microsoft_sign_in(tokens, MICROSOFT)
-    assert (signed.tenant_id, signed.object_id, signed.name) == (TENANT, OID, "Ines"), signed
-
-
-@pytest.mark.parametrize(
-    "claims",
-    [
-        {"tid": "33333333-3333-3333-3333-333333333333", "oid": OID, "aud": "app-1"},
-        {"tid": TENANT, "oid": OID, "aud": "other-app"},
-        {"tid": TENANT, "aud": "app-1"},
-    ],
-)
-def test_microsoft_sign_in_refuses_foreign_directories_apps_and_missing_ids(
-    claims: dict[str, str],
-) -> None:
-    with pytest.raises(MicrosoftIdentityMismatch):
-        verify_microsoft_sign_in(_microsoft_tokens(**claims), MICROSOFT)

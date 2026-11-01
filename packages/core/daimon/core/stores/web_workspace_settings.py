@@ -28,13 +28,11 @@ async def save_settings(
     *,
     tenant_id: uuid.UUID,
     modules_off: Sequence[str],
-    signin_off: Sequence[str],
     default_agent: str | None,
     now: datetime,
 ) -> WebWorkspaceSettingsRow:
     values = {
         "modules_off": sorted(set(modules_off)),
-        "signin_off": sorted(set(signin_off)),
         "default_agent": default_agent,
         "updated_at": now,
     }

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from daimon.core.config import EmbeddedAppSettings
 
-from .conftest import PUBLIC_URL, WebClientFactory, web_settings
+from .conftest import PUBLIC_URL, WebClientFactory
 
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
 
@@ -19,16 +18,7 @@ async def test_every_response_carries_the_security_headers(web_client: WebClient
     assert "max-age" in headers["strict-transport-security"]
     csp = headers["content-security-policy"]
     assert "frame-ancestors 'none'" in csp and "script-src 'self'" in csp
-    assert "frame-src 'none'" in csp, "no app configured means no frames"
-
-
-async def test_only_configured_app_origins_may_be_framed(web_client: WebClientFactory) -> None:
-    app = EmbeddedAppSettings(
-        key="notes", name="Notes", icon="book", origin="https://notes.example.com"
-    )
-    async with web_client(web_settings(apps=(app,))) as client:
-        csp = (await client.get("/healthz")).headers["content-security-policy"]
-    assert "frame-src https://notes.example.com;" in csp
+    assert "frame-src 'none'" in csp, "nothing may be framed"
 
 
 async def test_api_and_auth_responses_are_not_cached(web_client: WebClientFactory) -> None:

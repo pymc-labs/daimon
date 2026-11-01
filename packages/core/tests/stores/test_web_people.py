@@ -147,21 +147,11 @@ async def test_find_identity_returns_every_workspace_the_login_reaches(
     ), "the issuer is part of the identity"
 
 
-async def test_group_roles_match_only_the_issuer_and_groups_asked_for(
+async def test_the_workspace_role_is_read_back(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    await roles.set_group_role(
-        db_session, tenant_id=tenant.id, issuer=_ISSUER, group="staff", role="admin"
-    )
-
-    hit = await roles.list_group_roles(
-        db_session, tenant_id=tenant.id, issuer=_ISSUER, groups=["staff", "other"]
-    )
-    miss = await roles.list_group_roles(
-        db_session, tenant_id=tenant.id, issuer="https://other.example.com", groups=["staff"]
-    )
     await roles.set_workspace_role(
         db_session,
         tenant_id=tenant.id,
@@ -170,8 +160,6 @@ async def test_group_roles_match_only_the_issuer_and_groups_asked_for(
         granted_by_account_id=None,
     )
 
-    assert hit == {"admin"}, "a member of a mapped group gets its role"
-    assert miss == frozenset(), "another issuer's group of the same name confers nothing"
     assert (
         await roles.get_workspace_role(db_session, tenant_id=tenant.id, account_id=account.id)
         == "owner"

@@ -50,9 +50,7 @@ async def _chat(
         return SimpleNamespace(state=done)
 
     with one_session(), patch("daimon.adapters.web.turns.run_prepared_turn", turn_with_a_card):
-        async with web_client(
-            web_settings(ws.tenant_id), sessionmaker=factory, turns=turns
-        ) as client:
+        async with web_client(web_settings(), sessionmaker=factory, turns=turns) as client:
             client.cookies.set("__Host-daimon_web", token, domain="web.example.com")
             client.headers.update({"X-Daimon-Web": "1", "Origin": PUBLIC_URL})
             sid = (await client.post("/api/chat/sessions", json={"agent_id": AGENT_ID})).json()[

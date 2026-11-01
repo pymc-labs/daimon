@@ -28,14 +28,6 @@ function ModuleGate({ k }: { k: ModuleKey }) {
   return to ? <Navigate to={to} replace /> : <Outlet />
 }
 
-/** The app frames live in the shell; this only turns away an app the person does not have. */
-function AppGate() {
-  const { data } = useMe()
-  const { pathname } = useLocation()
-  const to = data && redirectFor(data, pathname)
-  return to ? <Navigate to={to} replace /> : null
-}
-
 export default function App() {
   return (
     <Routes>
@@ -47,7 +39,6 @@ export default function App() {
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/chat" replace />} />
           {MODULES.map((m) => <Route key={m.key} element={<ModuleGate k={m.key} />}>{m.routes}</Route>)}
-          <Route path="/apps/:app/*" element={<AppGate />} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Route>

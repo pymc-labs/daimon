@@ -1,8 +1,7 @@
-import { Database, MessageSquare, Monitor, Moon, Plus, Sun } from "lucide-react"
+import { MessageSquare, Monitor, Moon, Plus, Sun } from "lucide-react"
 import { useDeferredValue, useState } from "react"
 import { useNavigate } from "react-router"
 
-import { APP_ICONS } from "@/lib/app-icons"
 import { AgentAvatar, Kbd } from "@/components/common"
 import {
   Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList,
@@ -29,7 +28,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
 
   const groups: [string, Row[]][] = [
     ["Actions", pick([
-      { key: "new", label: "New chat", icon: <Plus />, run: to("/chat") },
+      { key: "new", label: "New thread", icon: <Plus />, run: to("/chat") },
       ...actionsFor(me).map((a) => ({ key: `a-${a.to}`, label: a.label, icon: <a.icon />, run: to(a.to) })),
       { key: "light", label: "Theme: Light", icon: <Sun />, run: go(() => setTheme("light")) },
       { key: "dark", label: "Theme: Dark", icon: <Moon />, run: go(() => setTheme("dark")) },
@@ -37,14 +36,10 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     ], 8)],
     ["Pages", pick([
       ...navFor(me).map((n) => ({ key: `p-${n.to}`, label: n.label, icon: <n.icon />, run: to(n.to), hint: n.g && `G ${n.g.toUpperCase()}` })),
-      ...me.apps.flatMap((a) => a.nav.map((n) => {
-        const Icon = APP_ICONS[n.icon] ?? Database
-        return { key: `app-${a.key}${n.path}`, label: `${a.name}: ${n.label}`, icon: <Icon />, run: to(`/apps/${a.key}${n.path}`) }
-      })),
     ], 8)],
     ["Chat with", pick((agents ?? []).map((a) => (
       { key: `ag-${a.id}`, label: a.name, icon: <AgentAvatar src={a.avatar} name={a.name} className="size-4 rounded" />, run: to(`/chat?agent=${a.id}`) })))],
-    ["Chats", pick((sessions ?? []).map((s) => (
+    ["Threads", pick((sessions ?? []).map((s) => (
       { key: `c-${s.id}`, label: s.title, icon: <MessageSquare />, run: to(`/chat/${s.id}`) })))],
   ]
   const empty = groups.every(([, r]) => !r.length)

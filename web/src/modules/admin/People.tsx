@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { BrandIcon } from "@/components/brand"
+import { IdentityIcon } from "@/components/brand"
 import { Ago, Avatar, CopyButton } from "@/components/common"
 import { useConfirm } from "@/lib/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
@@ -59,7 +59,7 @@ export function People() {
                 <TableCell className="text-muted-foreground">{ROLE[p.role]}</TableCell>
                 <TableCell className="max-w-56 truncate text-muted-foreground max-lg:hidden">{p.groups.join(", ") || "–"}</TableCell>
                 <TableCell className="max-md:hidden">
-                  <span className="flex gap-1.5">{p.identities.map((i) => <BrandIcon key={i.provider} brand={i.provider} icon={i.icon} />)}</span>
+                  <span className="flex gap-1.5">{p.identities.map((i) => <IdentityIcon key={i.provider} identity={i} />)}</span>
                 </TableCell>
                 <TableCell className="text-right text-muted-foreground"><Ago iso={p.last_seen} /></TableCell>
               </TableRow>
@@ -114,7 +114,7 @@ function PersonBody({ p, save }: { p: AdminPerson; save: { mutate: (b: Partial<A
         <div className="space-y-1">
           {p.identities.map((i) => (
             <div key={i.provider} className="flex h-8 items-center gap-2.5 text-sm">
-              <BrandIcon brand={i.provider} icon={i.icon} />
+              <IdentityIcon identity={i} />
               <span>{i.provider_label}</span>
               <span className="truncate text-muted-foreground">{i.label}</span>
             </div>
@@ -132,7 +132,7 @@ function PersonBody({ p, save }: { p: AdminPerson; save: { mutate: (b: Partial<A
         <div className="border-t px-5 py-4">
           {p.status === "active" ? (
             <Button variant="outline" size="sm" className="text-destructive" onClick={async () => {
-              if (await confirm({ title: `Suspend ${p.name}?`, body: "Their chats stop on every platform.", action: "Suspend", destructive: true })) save.mutate({ status: "suspended" })
+              if (await confirm({ title: `Suspend ${p.name}?`, body: "Their threads stop on every platform.", action: "Suspend", destructive: true })) save.mutate({ status: "suspended" })
             }}>Suspend</Button>
           ) : <Button variant="outline" size="sm" onClick={() => save.mutate({ status: "active" })}>Restore</Button>}
         </div>

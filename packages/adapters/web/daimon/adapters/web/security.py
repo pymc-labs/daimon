@@ -18,9 +18,8 @@ _GUARDED_PREFIXES = ("/api/", "/auth/")
 _NO_STORE_PREFIXES = ("/api/", "/auth/")
 
 
-def content_security_policy(web: WebSettings) -> str:
-    """The page policy: own scripts only, and frames only for the configured apps."""
-    frames = " ".join(sorted({app.origin for app in web.apps})) or "'none'"
+def content_security_policy() -> str:
+    """The page policy: own scripts only, no frames."""
     return "; ".join(
         (
             "default-src 'self'",
@@ -29,7 +28,7 @@ def content_security_policy(web: WebSettings) -> str:
             "img-src 'self' data: blob:",
             "font-src 'self' data:",
             "connect-src 'self'",
-            f"frame-src {frames}",
+            "frame-src 'none'",
             "frame-ancestors 'none'",
             "object-src 'none'",
             "base-uri 'self'",
@@ -40,7 +39,7 @@ def content_security_policy(web: WebSettings) -> str:
 
 def _headers(web: WebSettings) -> dict[str, str]:
     headers = {
-        "Content-Security-Policy": content_security_policy(web),
+        "Content-Security-Policy": content_security_policy(),
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
         "Referrer-Policy": "strict-origin-when-cross-origin",

@@ -15,7 +15,6 @@ import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from daimon.adapters.web.app_probe import AppStatusCache
 from daimon.adapters.web.card_listener import NoticeListener
 from daimon.adapters.web.directory import AgentDirectory
 from daimon.adapters.web.single_process import hold_web_process_lock
@@ -38,7 +37,6 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
-from daimon.core.web_oidc import OidcCache
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -58,10 +56,9 @@ class WebRuntime:
     settings: Settings
     web: WebSettings
     sessionmaker: async_sessionmaker[AsyncSession]
-    # Outbound HTTP to sign-in providers and embedded apps. Redirects stay off.
+    # Outbound HTTP to sign-in providers and connection nodes. Redirects stay off.
     http_client: httpx.AsyncClient
     fernet: MultiFernet
-    oidc: OidcCache | None = None
     # Managed Agents, for the agents pages; None where the process reads no agents.
     anthropic: AsyncAnthropic | None = None
     # Agent lookups this process caches; an agent edit here clears its entries.
@@ -79,20 +76,19 @@ class WebRuntime:
     skill_descriptions: Mapping[str, str] = field(default_factory=dict[str, str])
     agent_templates: Sequence[AgentSpec] = ()
     agents: AgentDirectory = field(default_factory=AgentDirectory)
-    app_statuses: AppStatusCache = field(default_factory=AppStatusCache)
-    # Signs who a chat sign-in is, for apps that take a token exchange; None where none do.
+    # Signs who a chat sign-in is, for node token exchanges; None where no node is set.
     identity_key: Ed25519PrivateKey | None = None
-    # (person, app) whose exchange was refused, until when it is not tried again.
+    # (person, node kind) whose exchange was refused, until when it is not tried again.
     exchange_refused: dict[tuple[uuid.UUID, str], datetime] = field(
         default_factory=dict[tuple[uuid.UUID, str], datetime]
     )
 
 
 def identity_key_of(settings: Settings) -> Ed25519PrivateKey | None:
-    """The caller-identity key, when an embedded app exchanges tokens with it."""
+    """The caller-identity key, when a connection node exchanges tokens with it."""
     key = settings.mcp_identity.signing_key
     web = settings.web
-    if key is None or web is None or not any(a.identity_server for a in web.apps):
+    if key is None or web is None or not web.nodes.configured():
         return None
     return load_signing_key(key.get_secret_value())
 
@@ -158,7 +154,6 @@ async def build_runtime(settings: Settings) -> AsyncIterator[WebRuntime]:
                     sessionmaker=sessionmaker,
                     http_client=http_client,
                     fernet=build_multifernet(keys),
-                    oidc=OidcCache(http_client, web.oidc) if web.oidc is not None else None,
                     anthropic=anthropic,
                     resolver_cache=resolver_cache,
                     turns=turns,

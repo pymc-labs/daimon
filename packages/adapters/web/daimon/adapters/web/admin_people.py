@@ -63,7 +63,7 @@ def people_router(runtime: WebRuntime) -> APIRouter:
             role=role,
             status=person.status,
             groups=groups,
-            identities=[identity_json(runtime, row) for row in identities],
+            identities=[identity_json(row) for row in identities],
             credit=meter,
             last_seen=person.last_seen_at.isoformat(),
         )
@@ -72,7 +72,7 @@ def people_router(runtime: WebRuntime) -> APIRouter:
         """One person with where they stand against their allowance, which costs the
         spend queries a listing leaves out."""
         identities = await identities_store.list_for_person(db, person_id=person.id)
-        role = await role_of(db, person, identities)
+        role = await role_of(db, person)
         meter = await person_meter(
             runtime, person, role, frozenset(g for i in identities for g in i.groups)
         )
@@ -104,7 +104,7 @@ def people_router(runtime: WebRuntime) -> APIRouter:
             identities = await identities_store.list_for_people(
                 db, person_ids=[p.id for p in shown]
             )
-            roles = await roles_of(db, shown, identities)
+            roles = await roles_of(db, shown)
         return [person_json(p, roles[p.id], identities[p.id], None) for p in shown]
 
     @router.get("/groups")
@@ -135,16 +135,15 @@ def people_router(runtime: WebRuntime) -> APIRouter:
         now, tenant_id = runtime.now(), caller.person.tenant_id
         async with runtime.sessionmaker.begin() as db:
             target = await person_of(db, caller, person_id)
-            identities = await identities_store.list_for_person(db, person_id=target.id)
-            was = await role_of(db, target, identities)
+            was = await role_of(db, target)
             if "owner" in (was, body.role) and caller.role != "owner":
                 raise HTTPException(status_code=403, detail="Only an owner can do that.")
             if body.role is not None and body.role != was:
                 await _set_role(db, caller, target, was, body.role)
                 target = await person_of(db, caller, person_id)
-                now_role = await role_of(db, target, identities)
+                now_role = await role_of(db, target)
                 if now_role != body.role:
-                    raise conflict("This role comes from their chat workspace or group.")
+                    raise conflict("This role comes from their chat workspace.")
                 if was == "owner" and not await roles_store.has_active_owner(
                     db, tenant_id=tenant_id
                 ):
@@ -207,9 +206,8 @@ def people_router(runtime: WebRuntime) -> APIRouter:
             person = await person_of(db, caller, person_id)
             if person.kind != "visitor":
                 raise no_person()
-            identities = await identities_store.list_for_person(db, person_id=person.id)
             # A link signs in as the person, so it must never hand a caller a higher role.
-            if at_or_above(await role_of(db, person, identities), caller.role):
+            if at_or_above(await role_of(db, person), caller.role):
                 raise HTTPException(status_code=403, detail="Ask an owner.")
             _, token = await issue_link(
                 db,

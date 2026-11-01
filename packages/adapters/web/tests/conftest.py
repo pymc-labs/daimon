@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -17,9 +17,8 @@ from daimon.adapters.web.app import create_app
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.billing import BillingConfig
-from daimon.core.config import Settings, WebOidcSettings, WebSettings
+from daimon.core.config import Settings, WebSettings
 from daimon.core.github_credentials import build_multifernet
-from daimon.core.web_oidc import OidcCache
 from daimon.testing.db import (  # noqa: F401
     db_clean,
     db_committing_engine,
@@ -30,26 +29,51 @@ from daimon.testing.db import (  # noqa: F401
     db_session,
     db_session_factory,
 )
-from daimon.testing.oidc import FakeOidcProvider
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from stripe import StripeClient
 
 PUBLIC_URL = "https://web.example.com"
-ISSUER = "https://id.example.com"
 
 
-def web_settings(tenant_id: uuid.UUID | None = None, **overrides: object) -> WebSettings:
-    """Web settings for a deployment at `PUBLIC_URL` signing in through `ISSUER`."""
+def web_settings(**overrides: object) -> WebSettings:
+    """Web settings for a deployment at `PUBLIC_URL`."""
+    return WebSettings(**{"public_url": PUBLIC_URL, **overrides})  # pyright: ignore[reportArgumentType]
+
+
+def discord_settings(**overrides: object) -> Settings:
+    """Settings with Discord sign-in configured."""
     fields: dict[str, object] = {
-        "public_url": PUBLIC_URL,
-        "oidc": WebOidcSettings(
-            issuer=ISSUER,
-            client_id="web-client",
-            client_secret="web-secret",  # pyright: ignore[reportArgumentType]  # SecretStr coerces
-            tenant_id=tenant_id or uuid.uuid4(),
-        ),
+        "database": {"url": "postgresql+asyncpg://u:p@h/db"},
+        "hub": {"discord_client_id": "dc", "discord_client_secret": "ds"},
     }
-    return WebSettings(**{**fields, **overrides})  # pyright: ignore[reportArgumentType]
+    return Settings(_env_file=None, **{**fields, **overrides})  # pyright: ignore[reportCallIssue, reportArgumentType]
+
+
+@dataclass(frozen=True)
+class FakeUpstream:
+    """Answers the web app's outbound requests."""
+
+    handler: Callable[[httpx.Request], httpx.Response]
+
+
+def fake_discord(
+    user: dict[str, str], guilds: list[tuple[str, str]], *, fallback: FakeUpstream | None = None
+) -> FakeUpstream:
+    """Discord's token, user and guild endpoints, answering as `user`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "discord.com":
+            if request.url.path == "/api/v10/oauth2/token":
+                return httpx.Response(200, json={"access_token": "dtok", "token_type": "Bearer"})
+            if request.url.path == "/api/v10/users/@me":
+                return httpx.Response(200, json=user)
+            if request.url.path == "/api/v10/users/@me/guilds":
+                return httpx.Response(200, json=[{"id": g, "name": n} for g, n in guilds])
+        if fallback is not None:
+            return fallback.handler(request)
+        return httpx.Response(404)
+
+    return FakeUpstream(handler)
 
 
 WebClientFactory = Callable[..., AbstractAsyncContextManager[httpx.AsyncClient]]
@@ -68,7 +92,7 @@ def web_client() -> WebClientFactory:
         web: WebSettings | None = None,
         *,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
-        provider: FakeOidcProvider | None = None,
+        provider: FakeUpstream | None = None,
         now: Callable[[], datetime] | None = None,
         turns: WebTurns | None = None,
         settings: Settings | None = None,
@@ -90,7 +114,6 @@ def web_client() -> WebClientFactory:
                 sessionmaker=sessionmaker or async_sessionmaker(class_=AsyncSession),
                 http_client=provider_http,
                 fernet=build_multifernet((Fernet.generate_key().decode(),)),
-                oidc=OidcCache(provider_http, web.oidc) if web.oidc else None,
                 turns=turns,
                 billing_config=billing_config,
                 stripe=stripe,
@@ -115,22 +138,9 @@ def built_app(tmp_path: Path) -> Path:
     return tmp_path
 
 
-async def sign_in(
-    client: httpx.AsyncClient,
-    provider: FakeOidcProvider,
-    *,
-    next: str | None = None,
-    refresh_token: str | None = None,
-    **claims: object,
-) -> httpx.Response:
-    """Walk the redirect flow the way a browser would and return the callback response."""
-    start = await client.get("/auth/oidc/start", params={"next": next} if next else None)
+async def sign_in(client: httpx.AsyncClient, *, next: str | None = None) -> httpx.Response:
+    """Walk the Discord redirect flow the way a browser would; return the callback response."""
+    start = await client.get("/auth/discord/start", params={"next": next} if next else None)
     assert start.status_code == 303, start.text
-    query = parse_qs(urlsplit(start.headers["location"]).query)
-    token = provider.id_token(nonce=query["nonce"][0], **claims)  # pyright: ignore[reportArgumentType]
-    code = provider.issue_code(
-        code_challenge=query["code_challenge"][0], id_token=token, refresh_token=refresh_token
-    )
-    return await client.get(
-        "/auth/oidc/callback", params={"code": code, "state": query["state"][0]}
-    )
+    state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
+    return await client.get("/auth/discord/callback", params={"code": "c", "state": state})

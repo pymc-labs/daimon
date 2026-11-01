@@ -72,6 +72,7 @@ export function AgentPage() {
             changedNodes={changedNodes}
             selected={node}
             select={(n) => setNode(n || null)}
+            ro={ro}
           />
           {node && (
             <Inspector

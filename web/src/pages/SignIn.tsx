@@ -41,7 +41,7 @@ export function SignIn() {
           : !providers.data.length ? <p className="text-sm text-muted-foreground">No way to sign in is set up. Ask whoever runs Daimon.</p>
           : providers.data.map((p) => (
             <Button key={p.id} variant="outline" size="lg" className="w-full" disabled={dev.isPending} onClick={() => go(p)}>
-              <BrandIcon brand={p.id} icon={p.icon} />Continue with {p.label}
+              <BrandIcon brand={p.id} />Continue with {p.label}
             </Button>
           ))}
       </div>

@@ -7,26 +7,31 @@ from datetime import datetime
 from typing import Annotated
 
 from daimon.adapters.web.access import is_admin
-from daimon.adapters.web.apps import AgentApp, agent_apps, available_apps
-from daimon.adapters.web.caller import WebCaller, requires
-from daimon.adapters.web.channel_names import channel_lookup_of, channel_names
-from daimon.adapters.web.faces import avatar_base_url
+from daimon.adapters.web.agent_access import (
+    Creator,
+    Editor,
+    Viewer,
+    actor_of,
+    change_deps,
+    edit_refusal,
+)
+from daimon.adapters.web.caller import WebCaller
+from daimon.adapters.web.channel_names import channel_names
+from daimon.adapters.web.nodes import AgentNode, agent_nodes, build_nodes, tenant_workspace
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import agent_catalog, agent_changes, agent_editing, agent_skill_files, agent_view
 from daimon.core.agent_changes import AgentChangeDeps, Change, Draft
-from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
+from daimon.core.agent_editing import AgentEditError
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.agent_view import (
     AgentConfigDoc,
     AgentSummary,
     AgentView,
-    AgentViewDeps,
     AgentViewer,
     PersonRef,
     SkillDoc,
 )
-from daimon.core.authz import Subject, Surface
 from daimon.core.billing import month_start
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL, MODEL_DISPLAY_NAMES
 from daimon.core.defaults.ma_index import list_skills_lenient
@@ -37,25 +42,13 @@ from daimon.core.pricing import AGENT_MODEL_PRICING
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_drafts as drafts_store
 from daimon.core.stores import agent_mcp_credentials as credentials_store
+from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.tenant_summary import load_tenant_summary
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
 from pydantic import BaseModel, Field, StringConstraints, ValidationError
-
-Viewer = Annotated[WebCaller, Depends(requires("agents.view"))]
-Editor = Annotated[WebCaller, Depends(requires("agents.edit"))]
-Creator = Annotated[WebCaller, Depends(requires("agents.create"))]
-
-_STATUS = {
-    "forbidden": 403,
-    "not_found": 404,
-    "stale": 409,
-    "conflict": 409,
-    "taken": 409,
-    "invalid": 422,
-}
 
 
 class CatalogModel(BaseModel):
@@ -97,9 +90,9 @@ class AgentVersionDoc(BaseModel):
 
 
 class AgentDetail(AgentView):
-    """An agent with the embedded apps' views of it."""
+    """An agent with the connection nodes it has, or can add."""
 
-    apps: list[AgentApp]
+    nodes: list[AgentNode]
 
 
 class CreateBody(BaseModel):
@@ -163,48 +156,12 @@ def _template_doc(spec: AgentSpec) -> Template:
     )
 
 
-def _refused(exc: AgentEditError) -> HTTPException:
-    return HTTPException(status_code=_STATUS.get(exc.kind, 400), detail=str(exc))
-
-
 def agents_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/agents")
+    nodes = build_nodes(runtime.settings)
 
     def deps() -> AgentChangeDeps:
-        if runtime.anthropic is None:
-            raise HTTPException(status_code=503, detail="Agents are not available here.")
-        public_url = runtime.settings.mcp.public_url
-        base = str(public_url) if public_url is not None else None
-        return AgentChangeDeps(
-            edit=AgentEditDeps(
-                client=runtime.anthropic,
-                session_factory=runtime.sessionmaker,
-                public_url=base,
-                denied_tools=runtime.settings.tool_safety.denied,
-                resolver_cache=runtime.resolver_cache,
-                deployment_default=runtime.deployment_default,
-            ),
-            view=AgentViewDeps(
-                client=runtime.anthropic,
-                session_factory=runtime.sessionmaker,
-                markup=runtime.settings.billing.markup,
-                avatar_base_url=avatar_base_url(runtime),
-                deployment_default=runtime.deployment_default,
-                skill_descriptions=runtime.skill_descriptions,
-                mcp_tools=runtime.mcp_tool_lister,
-                fernet=runtime.fernet,
-                channel_lookup=channel_lookup_of(runtime),
-            ),
-        )
-
-    def actor_of(caller: WebCaller) -> AgentActor:
-        account = caller.person.account_id
-        return AgentActor(
-            tenant_id=caller.person.tenant_id,
-            account_id=account,
-            subject=Subject(is_admin=is_admin(caller.role), platform_user_id=str(account)),
-            surface=Surface.WEB,
-        )
+        return change_deps(runtime)
 
     def viewer_of(caller: WebCaller) -> AgentViewer:
         return AgentViewer(
@@ -234,13 +191,14 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         )
         if view is None:
             raise HTTPException(status_code=404, detail="No such agent.")
-        mcp_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
-        apps = agent_apps(
-            await available_apps(runtime, caller),
-            agent_id=str(mcp_id),
-            server_urls=[s.url for s in view.mcp_servers],
+        async with runtime.sessionmaker() as db:
+            tenant = await tenants_store.get_tenant(db, tenant_id)
+        found = agent_nodes(
+            nodes,
+            server_urls={s.key: s.url for s in view.mcp_servers},
+            workspace=tenant_workspace(tenant),
         )
-        return AgentDetail(**dict(view), apps=apps)
+        return AgentDetail(**dict(view), nodes=found)
 
     @router.get("")
     async def list_agents(caller: Viewer) -> list[AgentSummary]:  # pyright: ignore[reportUnusedFunction]
@@ -366,7 +324,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 d.edit, actor=actor_of(caller), spec=spec, owner=True
             )
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
         runtime.agents.forget(caller.person.tenant_id)
         queue_agent_face(
             runtime.sessionmaker,
@@ -392,7 +350,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         try:
             return await agent_changes.load_draft(d, actor=actor_of(caller), agent=agent)
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
 
     @router.patch("/{agent_id}/draft")
     async def save_draft(caller: Editor, agent_id: str, body: DraftBody) -> Draft | None:  # pyright: ignore[reportUnusedFunction]
@@ -405,14 +363,14 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 config=body.config,
             )
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
 
     @router.delete("/{agent_id}/draft")
     async def discard_draft(caller: Editor, agent_id: str) -> None:  # pyright: ignore[reportUnusedFunction]
         try:
             await agent_changes.discard_draft(deps(), actor=actor_of(caller), ma_agent_id=agent_id)
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
 
     @router.post("/{agent_id}/apply")
     async def apply(caller: Editor, agent_id: str, body: ApplyBody) -> AgentDetail:  # pyright: ignore[reportUnusedFunction]
@@ -421,7 +379,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 deps(), actor=actor_of(caller), ma_agent_id=agent_id, note=body.note
             )
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
         runtime.agents.forget(caller.person.tenant_id)
         return await view_of(caller, agent_id)
 
@@ -438,7 +396,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 version=version,
             )
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
 
     @router.post("/{agent_id}/skills")
     async def save_skill(  # pyright: ignore[reportUnusedFunction]
@@ -454,7 +412,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 files=body.files,
             )
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
 
     async def server_url(caller: WebCaller, agent_id: str, key: str) -> tuple[uuid.UUID, str]:
         """The agent's id as the credential store keys it, and the URL of its server ``key``."""
@@ -476,7 +434,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         try:
             owner_id, url = await server_url(caller, agent_id, key)
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
         await save_agent_mcp_credential(
             sessionmaker=runtime.sessionmaker,
             fernet=runtime.fernet,
@@ -494,7 +452,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         try:
             owner_id, url = await server_url(caller, agent_id, key)
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
         async with runtime.sessionmaker.begin() as session:
             await credentials_store.delete_credential(
                 session,
@@ -548,7 +506,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 deps(), actor=actor_of(caller), ma_agent_id=agent_id, version=body.version
             )
         except AgentEditError as exc:
-            raise _refused(exc) from exc
+            raise edit_refusal(exc) from exc
         runtime.agents.forget(caller.person.tenant_id)
         return await view_of(caller, agent_id)
 

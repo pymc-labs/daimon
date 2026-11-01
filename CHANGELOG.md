@@ -7,21 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Web app.** People chat with agents in a browser, signing in through your OpenID
-  Connect provider or with Discord, Slack or Microsoft. Shared files reach the agent, and
-  files it makes come back as downloads. Key requests show as a form in the chat. Admins
-  manage people, invites, credit and settings, and a one-time owner link sets up a new
-  workspace. Embedded apps show inside it and can get the person's sign-in token.
+- **Web app.** People chat with agents in a browser, signing in with Discord. Shared files
+  reach the agent, and files it makes come back as downloads. Key requests show as a form in
+  the chat. Admins manage people, invites, credit and settings, and a one-time owner link
+  (`owner-link --workspace`) sets up a new workspace. Agent editors connect an agent to a
+  data server set in `DAIMON_WEB__NODES__DATA_SERVER__*`, acting on it as themselves.
   Start it with `docker compose --profile web up -d`; see the Web app page.
 - **Web access follows chat membership.** Every sign-in reaches each workspace where the
-  person's chat account is a member, and leaving a Discord server or Slack workspace ends
-  web access there at once; a chat admin is a web admin. The Discord bot needs the Server
-  Members intent for this; without it the bot still connects and each sign-in decides.
-  Slack apps apply the manifest (`team_join`, `user_change`) and reinstall. An OpenID
-  Connect provider can vouch for chat accounts (`DAIMON_WEB__OIDC__TRUST_CHAT_ACCOUNTS`),
-  and an embedded app with `identity_server` gets a token by token exchange for chat
-  sign-ins; an app with no token for the person is hidden. Migration 0156 adds the member
-  lists.
+  person's Discord account is a member, and leaving a Discord server ends web access there
+  at once; a chat admin is a web admin. The Discord bot needs the Server Members intent for
+  this; without it the bot still connects and each sign-in decides. Slack apps apply the
+  manifest (`team_join`, `user_change`) and reinstall. Migration 0156 adds the member
+  lists; migration 0157 keeps only tokens exchanged for data servers.
 - **Failures are the agent's to explain, or a card.** While a turn runs, Daimon no longer
   writes its own lines into or beside the reply: an MCP server that dropped out, a lost or
   replaced workspace, a GitHub key restart and skipped images reach the agent as a short note

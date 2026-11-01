@@ -25,21 +25,21 @@ function AdminCredits() {
   const { data: overview } = useQuery({ queryKey: ["credits", "overview"], queryFn: () => api.get<Overview>("/api/credits/overview") })
   const action = pathname === "/credits" ? overview?.topup && <Button size="sm" onClick={() => setDialog("topup")}><Plus />Top up</Button>
     : pathname === "/credits/allowances" ? <Button size="sm" onClick={() => setDialog("allowance")}><Plus />New allowance</Button> : null
-  const tab = { "/credits/spend": "Spend", "/credits/allowances": "Allowances", "/credits/mine": "Mine" }[pathname]
+  const tab = { "/credits/spend": "Spend", "/credits/allowances": "Allowances", "/credits/usage": "My usage" }[pathname]
   return (
     <Page
       crumbs={[{ label: "Credits", to: "/credits" }, ...(tab ? [{ label: tab }] : [])]}
       actions={action}
       tabs={[
         { label: "Overview", to: "/credits", end: true }, { label: "Spend", to: "/credits/spend" },
-        { label: "Allowances", to: "/credits/allowances" }, { label: "Mine", to: "/credits/mine" },
+        { label: "Allowances", to: "/credits/allowances" }, { label: "My usage", to: "/credits/usage" },
       ]}
     >
       <Routes>
         <Route index element={<OverviewTab />} />
         <Route path="spend" element={<SpendTab />} />
         <Route path="allowances" element={<Allowances />} />
-        <Route path="mine" element={<MineTab />} />
+        <Route path="usage" element={<MineTab />} />
         <Route path="*" element={<Navigate to="/credits" replace />} />
       </Routes>
       {overview?.topup && <TopUp mode={overview.topup} open={dialog === "topup"} onOpenChange={(o) => setDialog(o ? "topup" : null)} />}

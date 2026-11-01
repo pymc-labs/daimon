@@ -1,4 +1,4 @@
-// Mock API for the chat module: sessions, streamed turns, cards, app items and per-turn credit.
+// Mock API for the chat module: sessions, streamed turns, cards and per-turn credit.
 // Keywords in a message pick the scenario: "approve", "credential", "refuse"; anything else is a rich reply.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
@@ -302,7 +302,7 @@ export const chatHandlers: HttpHandler[] = [
     const { agent_id } = (await request.json()) as { agent_id: string }
     const ag = AGENTS.find((a) => a.id === agent_id)
     if (!ag || (p.role === "visitor" && ag.id !== "ag_pricing")) return forbidden()
-    const s: ChatSession = { id: `s_${uid()}`, title: "New chat", agent: ag, updated_at: new Date().toISOString() }
+    const s: ChatSession = { id: `s_${uid()}`, title: "New thread", agent: ag, updated_at: new Date().toISOString() }
     mine(p.id).unshift(s)
     threads[s.id] = []
     owners[s.id] = p.id
@@ -350,7 +350,7 @@ export const chatHandlers: HttpHandler[] = [
     const body = (await request.json()) as { id: string; content: string; attachments?: { id: string; name: string; size: number }[] }
     if (!list.some((x) => x.id === body.id)) {
       list.push({ id: body.id, role: "user", content: body.content, created_at: new Date().toISOString(), attachments: body.attachments?.length ? body.attachments.map(({ name, size }) => ({ name, size })) : undefined })
-      if (s.title === "New chat") s.title = lastWord(body.content).slice(0, 56)
+      if (s.title === "New thread") s.title = lastWord(body.content).slice(0, 56)
       s.updated_at = new Date().toISOString()
     }
     await wait(200)

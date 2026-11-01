@@ -8,23 +8,23 @@ import { face } from "./face"
 
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString()
-const P = (id: string, name: string, role: AdminPerson["role"], groups: string[], seen: number | null, credit: [number, number] | null, extra: AdminPerson["identities"] = []): AdminPerson => ({
+const P = (id: string, name: string, role: AdminPerson["role"], groups: string[], seen: number | null, credit: [number, number] | null): AdminPerson => ({
   id, name, role, groups, status: "active", last_seen: seen == null ? null : ago(seen),
   email: role === "visitor" ? "jordan@brightwave.example" : `${name.toLowerCase().replace(/ /g, ".").normalize("NFD").replace(/[̀-ͯ]/g, "")}@${DOMAIN}`,
-  identities: role === "visitor" ? [{ provider: "invite", provider_label: "Invite link", icon: "link", label: "jordan@brightwave.example" }] : [{ provider: "discord", provider_label: "Discord", label: name.split(" ")[0]!.toLowerCase() }, ...extra],
+  identities: role === "visitor" ? [{ provider: "invite", provider_label: "Invite link", icon: "link", label: "jordan@brightwave.example" }] : [{ provider: "discord", provider_label: "Discord", label: name.split(" ")[0]!.toLowerCase() }],
   credit: credit && { left_usd: credit[0], total_usd: credit[1] },
 })
 
 const people: AdminPerson[] = [
-  P("p_maya", "Maya Lindqvist", "owner", ["Leadership", "Platform"], 0.2, [63.2, 100], [{ provider: "oidc", provider_label: "Fernhill", label: `maya.lindqvist@${DOMAIN}` }]),
-  P("p_jonas", "Jonas Weber", "admin", ["Platform"], 6, [81.75, 100], [{ provider: "oidc", provider_label: "Fernhill", label: `jonas.weber@${DOMAIN}` }]),
+  P("p_maya", "Maya Lindqvist", "owner", ["Leadership", "Platform"], 0.2, [63.2, 100]),
+  P("p_jonas", "Jonas Weber", "admin", ["Platform"], 6, [81.75, 100]),
   P("p_viktor", "Viktor Petrov", "admin", ["Leadership", "Sales"], 7, [92.1, 100]),
-  P("p_priya", "Priya Raman", "member", ["CLV"], 12, [12.4, 40], [{ provider: "slack", provider_label: "Slack", label: "priya" }]),
+  P("p_priya", "Priya Raman", "member", ["CLV"], 12, [12.4, 40]),
   P("p_aiko", "Aiko Tanaka", "member", ["Support", "MMM"], 3, [25.1, 40]),
   P("p_tomas", "Tomás Okafor", "member", ["MMM"], 1, [15.85, 40]),
   P("p_rafael", "Rafael Costa", "member", ["MMM"], 20, [30.6, 40]),
   P("p_owen", "Owen Brooks", "member", ["Pricing"], 0.9, [35.15, 40]),
-  P("p_ines", "Inês Duarte", "member", ["CLV", "Pricing"], 1, [40, 40], [{ provider: "microsoft", provider_label: "Microsoft", label: "ines.duarte" }]),
+  P("p_ines", "Inês Duarte", "member", ["CLV", "Pricing"], 1, [40, 40]),
   P("p_lena", "Lena Fischer", "member", ["Marketing"], 9, [38.2, 40]),
   P("p_jordan", "Jordan Ellis", "visitor", [], 1, [3.85, 5]),
 ]
@@ -56,19 +56,12 @@ const audit: AuditEntry[] = [
   { id: "a6", at: ago(30), who: "Maya Lindqvist", action: "Topped up", target: "Balance", detail: "$500.00" },
   { id: "a7", at: ago(51), who: "Jonas Weber", action: "Turned off web chat", target: "Code Reviewer" },
   { id: "a8", at: ago(74), who: "Maya Lindqvist", action: "Changed role", target: "Jonas Weber", detail: "Member to Admin" },
-  { id: "a9", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Sign-in", detail: "Email link on" },
+  { id: "a9", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Default agent", detail: "Daimon" },
 ]
 
 const settings: WorkspaceSettings = {
   modules: { chat: true, agents: true, credits: true },
-  signin: [
-    { id: "discord", label: "Discord", enabled: true },
-    { id: "slack", label: "Slack", enabled: true },
-    { id: "microsoft", label: "Microsoft", enabled: false },
-    { id: "oidc", label: "Fernhill", enabled: true },
-  ],
   default_agent: "ag_daimon",
-  apps: [{ key: "almanac", name: "Almanac", icon: "database", url: "http://localhost:5173" }],
 }
 
 const admin = () => me()?.capabilities.includes("people.manage")
@@ -138,12 +131,9 @@ export const adminHandlers: HttpHandler[] = [
     return HttpResponse.json({ link: `${location.origin}/invite/inv_${Math.random().toString(36).slice(2, 10)}` })
   }),
   http.get("/api/admin/audit", ({ request }) => paged(request, audit)),
-  http.get("/api/admin/apps/status", () => HttpResponse.json(Object.fromEntries(settings.apps.map((a) => [a.key, "connected"])))),
   http.get("/api/admin/settings", () => HttpResponse.json(settings)),
   http.patch("/api/admin/settings", async ({ request }) => {
-    const { signin, ...b } = (await request.json()) as Partial<Omit<WorkspaceSettings, "signin">> & { signin?: Record<string, boolean> }
-    Object.assign(settings, b)
-    for (const m of settings.signin) if (signin && m.id in signin) m.enabled = signin[m.id]!
+    Object.assign(settings, (await request.json()) as Partial<WorkspaceSettings>)
     log("Changed setting", "Workspace")
     return HttpResponse.json(settings)
   }),

@@ -50,7 +50,7 @@ export function AgentList() {
           <ToggleGroupItem value="mine" className="px-3 text-xs">Mine</ToggleGroupItem>
         </ToggleGroup>
         <SearchInput value={q} onChange={(v) => setQ(v || null)} className="w-56" />
-        <Facet label="Runs in" value={runs} onChange={setRuns} options={(["discord", "dm", "web"] as const).map((k) => ({ value: k, label: RUNS[k].label, icon: RUNS[k].icon }))} />
+        <Facet label="Channels" value={runs} onChange={setRuns} options={(["discord", "dm", "web"] as const).map((k) => ({ value: k, label: RUNS[k].label, icon: RUNS[k].icon }))} />
         <span className="ml-auto text-xs text-muted-foreground tabular">{plural(rows.length, "agent")}</span>
       </FilterBar>
       <QueryState query={query} className="px-6" isEmpty={() => !rows.length} empty="No agents">{() => (
@@ -59,7 +59,7 @@ export function AgentList() {
               <TableRow className="hover:bg-transparent">
                 <TableHead className="pl-4 lg:pl-6">Name</TableHead>
                 <TableHead className="max-md:hidden">Model</TableHead>
-                <TableHead>Runs in</TableHead>
+                <TableHead>Channels</TableHead>
                 <TableHead className="max-lg:hidden">Owner</TableHead>
                 <TableHead className="text-right max-sm:hidden">This month</TableHead>
                 <TableHead className="pr-4 text-right lg:pr-6">Edited</TableHead>
