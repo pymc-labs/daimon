@@ -220,6 +220,36 @@ async def test_a_chat_person_signing_in_with_another_provider_account_is_not_mer
     assert "sub-1" in refused[0].detail, "both provider accounts are named"
 
 
+async def test_a_refusal_is_audited_when_the_whole_sign_in_is_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """With no home workspace to fall back on, the refused sign-in raises; the audit of
+    the refusal must outlive the rollback that raising causes."""
+    guild_id = await _guild_listing_the_user(db_session)
+    await db_session.commit()
+    absent_home = uuid.uuid4()
+    settings = _settings(absent_home)
+    first = await resolve_web_people(
+        db_session_factory, identity=_identity("sub-0"), settings=settings, clock=lambda: _NOW
+    )
+    chat_person = next(p for p in first if p.tenant_id == guild_id)
+
+    with pytest.raises(web_identity.WebSignInRefused):
+        await resolve_web_people(
+            db_session_factory,
+            identity=_identity("sub-1"),
+            settings=settings,
+            clock=lambda: _NOW,
+        )
+
+    async with db_session_factory() as session:
+        audit = await web_audit.list_recent(session, tenant_id=guild_id)
+    refused = [a for a in audit if a.action == "Refused vouched chat account"]
+    assert len(refused) == 1 and refused[0].target_person_id == chat_person.id, (
+        "the refusal is recorded although the sign-in raised"
+    )
+
+
 async def test_the_vouched_sign_in_is_audited_on_first_link_only(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

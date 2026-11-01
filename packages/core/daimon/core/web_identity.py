@@ -58,6 +58,16 @@ class WebSignInRefused(UserFacingError):
 
 
 @dataclass(frozen=True, slots=True)
+class _Refusal:
+    """A vouched chat account refused its workspace, to be audited."""
+
+    tenant: HubTenant
+    person_id: uuid.UUID
+    held: str
+    claimed: str
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedIdentity:
     """What a provider proved about the person who just signed in."""
 
@@ -113,31 +123,41 @@ async def resolve_web_people(
     if not email_domain_allowed(identity, oidc.allowed_domains):
         raise WebSignInRefused("This account can't sign in here. Ask an admin.")
     vouched = await _vouched_workspaces(session_factory, identity, oidc)
-    async with session_factory() as session, session.begin():
-        people: list[WebPersonRow] = []
-        for account, tenant in vouched:
-            if not await _signin_on(session, tenant.tenant_id, "oidc"):
-                continue
-            person = await _vouched_person(
-                session,
-                identity=identity,
-                account=account,
-                tenant=tenant,
-                new_id=new_id,
-                now=clock(),
-            )
-            if person is not None:
-                people.append(person)
-        if not any(p.tenant_id == oidc.tenant_id for p in people):
-            try:
-                people.append(
-                    await _oidc_person(session, identity=identity, oidc=oidc, new_id=new_id)
+    now = clock()
+    refusals: list[_Refusal] = []
+    try:
+        async with session_factory() as session, session.begin():
+            people: list[WebPersonRow] = []
+            for account, tenant in vouched:
+                if not await _signin_on(session, tenant.tenant_id, "oidc"):
+                    continue
+                person = await _vouched_person(
+                    session,
+                    identity=identity,
+                    account=account,
+                    tenant=tenant,
+                    new_id=new_id,
+                    now=now,
+                    refusals=refusals,
                 )
-            except WebSignInRefused:
-                # The home workspace is optional for a person a chat account already let in.
-                if not people:
-                    raise
-        return people
+                if person is not None:
+                    people.append(person)
+            if not any(p.tenant_id == oidc.tenant_id for p in people):
+                try:
+                    people.append(
+                        await _oidc_person(session, identity=identity, oidc=oidc, new_id=new_id)
+                    )
+                except WebSignInRefused:
+                    # The home workspace is optional for a person a chat account already let in.
+                    if not people:
+                        raise
+            await _record_refusals(session, refusals, now)
+            return people
+    except WebSignInRefused:
+        # The sign-in's transaction rolled back, and the refusals it saw with it.
+        async with session_factory() as session, session.begin():
+            await _record_refusals(session, refusals, now)
+        raise
 
 
 async def _vouched_workspaces(
@@ -173,6 +193,7 @@ async def _vouched_person(
     tenant: HubTenant,
     new_id: Callable[[], uuid.UUID],
     now: datetime,
+    refusals: list[_Refusal],
 ) -> WebPersonRow | None:
     """The person a vouched chat account acts as in one workspace, carrying the OIDC login.
 
@@ -182,7 +203,7 @@ async def _vouched_person(
     one wins: the chats, files and role move over, the login with them, and the old
     person's sign-ins end. Spend recorded under the old person's `web` id stays there.
 
-    None, audited, when the claim would merge two different people: the chat account's
+    None, noted in `refusals`, when the claim would merge two different people: the chat account's
     person already signs in with another account of this provider, or this login already
     runs as another chat account here.
     """
@@ -201,7 +222,7 @@ async def _vouched_person(
             None,
         )
         if held is not None:
-            await _refuse_vouching(session, tenant, chat_person.id, held, identity.subject, now)
+            refusals.append(_Refusal(tenant, chat_person.id, held, identity.subject))
             return None
     known = [
         row
@@ -222,13 +243,13 @@ async def _vouched_person(
         if platform != "web":
             # The login runs as another chat account here; moving it would hand that
             # account's chats and role to this one.
-            await _refuse_vouching(
-                session,
-                tenant,
-                earlier.id,
-                f"{platform}:{user_id}",
-                f"{account.platform}:{account.user_id}",
-                now,
+            refusals.append(
+                _Refusal(
+                    tenant,
+                    earlier.id,
+                    f"{platform}:{user_id}",
+                    f"{account.platform}:{account.user_id}",
+                )
             )
             return None
         carried = await _carry_role(
@@ -305,24 +326,18 @@ async def _move_onto_account(
     return True
 
 
-async def _refuse_vouching(
-    session: AsyncSession,
-    tenant: HubTenant,
-    person_id: uuid.UUID,
-    held: str,
-    claimed: str,
-    now: datetime,
-) -> None:
-    await web_audit.record(
-        session,
-        tenant_id=tenant.tenant_id,
-        actor_account_id=tenant.account_id,
-        action="Refused vouched chat account",
-        target=web_audit.PERSON_LABEL,
-        target_person_id=person_id,
-        detail=f"Already linked to {held}; refused {claimed}",
-        at=now,
-    )
+async def _record_refusals(session: AsyncSession, refusals: list[_Refusal], now: datetime) -> None:
+    for refusal in refusals:
+        await web_audit.record(
+            session,
+            tenant_id=refusal.tenant.tenant_id,
+            actor_account_id=refusal.tenant.account_id,
+            action="Refused vouched chat account",
+            target=web_audit.PERSON_LABEL,
+            target_person_id=refusal.person_id,
+            detail=f"Already linked to {refusal.held}; refused {refusal.claimed}",
+            at=now,
+        )
 
 
 async def _chat_member(
