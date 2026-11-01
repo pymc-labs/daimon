@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from daimon.core.microsoft_identity import canonical_uuid
+from daimon.core.platform_words import space_for
 from daimon.core.stores.domain import ChatPlatform, TenantRow
 
 #: ID token claim an OpenID Connect provider vouches for chat accounts in.
@@ -19,11 +20,6 @@ CHAT_ACCOUNTS_CLAIM: Final = "chat_accounts"
 GLOBAL_USER_IDS: Final[frozenset[ChatPlatform]] = frozenset({"discord"})
 _DISCORD_ID = re.compile(r"[0-9]{15,21}")
 _SLACK_ID = re.compile(r"[A-Z0-9]{2,32}")
-_FALLBACK_NAMES: Final[dict[ChatPlatform, str]] = {
-    "discord": "Discord server",
-    "slack": "Slack workspace",
-    "teams": "Microsoft Teams",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +92,11 @@ def reached_workspaces(
                 continue
         elif tenant.external_id not in proven:
             continue
-        name = proven.get(tenant.external_id) or synced.get(tenant.id) or _FALLBACK_NAMES[platform]
+        name = (
+            proven.get(tenant.external_id)
+            or synced.get(tenant.id)
+            or space_for(platform).capitalize()
+        )
         reached.append(ReachedWorkspace(tenant, name))
     reached.sort(key=lambda w: (w.name.lower(), w.tenant.external_id))
     return reached
