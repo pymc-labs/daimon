@@ -179,6 +179,8 @@ class PlatformPrincipal(Base):
             name="uq_platform_principal",
         ),
         Index("ix_platform_principals_tenant_id", "tenant_id"),
+        # Who an account runs as, read on every web request.
+        Index("ix_platform_principals_account_id", "account_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -4432,6 +4434,43 @@ class WebOidcToken(Base):
     access_token_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceMember(Base):
+    """Who is a member of a chat workspace Daimon is installed in, as its platform says.
+
+    A mirror the chat adapters keep from the platform (a full reload, then join, leave
+    and role events), so the web app can tell who still belongs without asking the
+    platform per request. Not erased with an account: it holds only what the platform
+    shows every member, and the next sync would write it back.
+    """
+
+    __tablename__ = "workspace_members"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    platform_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WorkspaceMemberSync(Base):
+    """A workspace whose member list was loaded in full at least once.
+
+    Without a row the list is incomplete, so sign-in falls back to what the
+    platform's own sign-in proves.
+    """
+
+    __tablename__ = "workspace_member_syncs"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    workspace_name: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class WorkspaceAdmin(Base):
