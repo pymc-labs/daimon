@@ -10,8 +10,9 @@ from secrets import randbits
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
-from daimon.adapters.discord.__main__ import start_when_leased
+from daimon.adapters.discord.__main__ import connect_gateway, start_when_leased
 from daimon.adapters.discord.runtime import DiscordRuntime, hold_worker_owner
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
@@ -575,3 +576,33 @@ def test_heartbeat_grace_outlasts_the_holders_fail_stop_bound() -> None:
         OWNER_PROBE_INTERVAL_S + OWNER_PROBE_TIMEOUT_S + OWNER_RETRY_BUDGET_S + OWNER_HARD_EXIT_S
     )
     assert fail_stop_bound < OWNER_LOSS_GRACE_S
+
+
+def _intents_bot(*, members: bool) -> MagicMock:
+    bot = MagicMock()
+    bot.intents = discord.Intents.default()
+    bot.intents.members = members
+    bot.start = AsyncMock(side_effect=discord.PrivilegedIntentsRequired(None))
+    bot.connect = AsyncMock()
+    return bot
+
+
+async def test_without_the_members_intent_the_bot_connects_without_it() -> None:
+    """The Server Members intent is optional: refused, the bot connects again without it
+    and member lists stay unloaded."""
+    bot = _intents_bot(members=True)
+
+    await connect_gateway(bot, "token")
+
+    bot.connect.assert_awaited_once()
+    assert bot._connection._intents.members is False, "identifies again without members"
+    assert bot._connection._intents.message_content == bot.intents.message_content
+
+
+async def test_a_refusal_without_the_members_intent_still_fails() -> None:
+    """Message Content cannot be dropped: the bot could not read mentions."""
+    bot = _intents_bot(members=False)
+
+    with pytest.raises(discord.PrivilegedIntentsRequired):
+        await connect_gateway(bot, "token")
+    bot.connect.assert_not_awaited()

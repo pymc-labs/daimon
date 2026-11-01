@@ -2054,8 +2054,9 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker, guild_id=guild.id, channels=guild.channels
                 )
         await self._retire_orphaned_turns()
-        # Every ready: events missed while disconnected are not replayed.
-        if self._member_reload is None or self._member_reload.done():
+        # Every ready: events missed while disconnected are not replayed. Without the
+        # members intent there is no list to load.
+        if self.intents.members and (self._member_reload is None or self._member_reload.done()):
             self._member_reload = self._spawn(
                 self._member_sync.reload_all([g for g in self.guilds if self._allows_guild(g.id)])
             )
@@ -2392,7 +2393,8 @@ class DaimonBot(commands.Bot):
             return
         # Background seed → flips status + posts the ✅/⚠️ follow-up.
         self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
-        self._spawn(self._member_sync.reload_all([guild]))
+        if self.intents.members:
+            self._spawn(self._member_sync.reload_all([guild]))
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Soft-archive: stamp archived_at=now(). NO row delete."""

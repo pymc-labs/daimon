@@ -43,6 +43,27 @@ async def drain_on_owner_loss(bot: DaimonBot) -> None:
         os._exit(1)
 
 
+async def connect_gateway(bot: DaimonBot, token: str) -> None:
+    """Connect to the gateway, and connect again without the Server Members intent when
+    the application has not enabled it.
+
+    Member lists then stay unloaded, so web access falls back to what each sign-in
+    proves, as it does before a list first loads. A missing Message Content intent is
+    still fatal: the bot cannot read mentions without it.
+    """
+    try:
+        await bot.start(token)
+    except discord.PrivilegedIntentsRequired:
+        if not bot.intents.members:
+            raise
+        log.warning("discord.members_intent_missing")
+        intents = bot.intents
+        intents.members = False
+        # discord.py has no setter, and a new client would lose this one's wiring.
+        bot._connection._intents = intents  # pyright: ignore[reportPrivateUsage]
+        await bot.connect()
+
+
 async def start_when_leased(
     bot: DaimonBot, token: str, *, stop: asyncio.Event, started: asyncio.Event
 ) -> None:
@@ -77,7 +98,7 @@ async def start_when_leased(
         return
     started.set()
     try:
-        await bot.start(token)
+        await connect_gateway(bot, token)
     finally:
         # Here rather than in the drain task: bot.start returns once close()
         # is done, and the runtime then tears down the owner connection the
@@ -123,7 +144,8 @@ async def main() -> None:
     async with build_runtime(settings) as runtime:
         intents = discord.Intents.default()
         intents.message_content = True
-        # Privileged: the member lists web access follows (member_sync).
+        # Privileged: the member lists web access follows (member_sync). Dropped at
+        # connect when the application has not enabled it (connect_gateway).
         intents.members = True
         bot = DaimonBot(runtime=runtime, intents=intents)
         bot.wake_poller_enabled = True

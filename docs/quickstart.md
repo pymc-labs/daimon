@@ -52,7 +52,8 @@ gitignored. `.env.example` documents every other setting.
 3. Still under **Bot**, enable the **Message Content Intent** and the
    **Server Members Intent**. Both are privileged: the first lets the bot read
    mentions, the second keeps web access in step with who is in the server.
-   The bot cannot connect without them.
+   The bot cannot connect without the first. Without the second it connects,
+   and web access goes by what each sign-in proves.
 4. Under **OAuth2 > URL Generator**, select the `bot` and
    `applications.commands` scopes.
 5. Under **Bot Permissions**, select `View Channels`, `Send Messages`,
