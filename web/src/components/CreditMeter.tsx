@@ -1,11 +1,7 @@
+import { creditTone } from "@/lib/credit"
 import { usd } from "@/lib/format"
 import type { CreditMeter as Meter } from "@/lib/types"
 import { cn } from "@/lib/utils"
-
-export const creditTone = (m: Meter) => {
-  const pct = m.total_usd ? m.left_usd / m.total_usd : 0
-  return pct <= 0 ? "out" : pct < 0.2 ? "low" : "ok"
-}
 
 /** Credit left as a bar. `compact` is the sidebar form. */
 export function CreditMeter({ meter, compact, className }: { meter: Meter; compact?: boolean; className?: string }) {

@@ -1,6 +1,6 @@
 import { Ago, Avatar } from "@/components/common"
 import { Drawer } from "@/components/Drawer"
-import { rowProps, useParam } from "@/components/filters"
+import { rowProps, useParam } from "@/lib/filters"
 import { LoadMore, QueryState } from "@/components/QueryState"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { absolute } from "@/lib/format"

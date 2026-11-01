@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button"
 import { api, ApiError } from "@/lib/api"
 import { useProviders } from "@/lib/hooks"
 import type { Me, Provider } from "@/lib/types"
-import { Card, safeNext } from "./Card"
+import { safeNext } from "@/lib/safe-next"
+import { Card } from "./Card"
 
 /** After sign-in: pick a workspace when there is more than one. */
 async function landing(next: string) {

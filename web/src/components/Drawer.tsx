@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronUp, Link2, X } from "lucide-react"
 import { toast } from "sonner"
 
-import { useParam } from "@/components/filters"
+import { useParam } from "@/lib/filters"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetClose, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { cn } from "@/lib/utils"

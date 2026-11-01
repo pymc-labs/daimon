@@ -1,7 +1,7 @@
 import "@xyflow/react/dist/style.css"
 
 import {
-  Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, Handle, type Node, Position, ReactFlow, useNodesState, useReactFlow,
+  Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, Handle, type Node, Position, ReactFlow, useEdgesState, useNodesState, useReactFlow,
   useStore,
 } from "@xyflow/react"
 import type { ELK, ElkExtendedEdge, ElkNode } from "elkjs/lib/elk-api"
@@ -12,9 +12,9 @@ import { AppIcon } from "@/components/brand"
 import { AgentAvatar, Ago, Avatar, Money } from "@/components/common"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useMe } from "@/lib/hooks"
-import { useTheme } from "@/lib/theme"
+import { useTheme } from "@/lib/theme-context"
 import { cn } from "@/lib/utils"
-import { pressProps } from "@/components/filters"
+import { pressProps } from "@/lib/filters"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
 import { EFFORT_LABEL, placeName } from "./lib"
 import type { Agent, AgentApp, AgentConfig, Catalog } from "./types"
@@ -378,7 +378,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
   const structure = `${agent.apps.map((a) => a.key).join(",")}|${config.mcp_servers.map((s) => s.key).join(",")}|${config.skills.map((s) => `${s.skill_id}:${(s.requires ?? []).join("+")}`).join(",")}`
   const built = useMemo(() => graph(config, agent.apps), [structure]) // eslint-disable-line react-hooks/exhaustive-deps
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
-  const [edges, setEdges] = useState<Edge[]>([])
+  const [edges, setEdges] = useEdgesState<Edge>([])
   const [ready, setReady] = useState(false)
   const fitted = useRef(false)
   const [fit, setFit] = useState(false)
@@ -392,7 +392,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
       return p ? { ...n, position: p.position, measured: p.measured, style: p.style } : { ...n, style: { opacity: 0 } }
     }))
     setEdges((prev) => built.edges.map((e) => ({ ...e, data: { ...e.data, points: (prev.find((x) => x.id === e.id)?.data as { points?: Pt[] })?.points } })))
-  }, [built, setNodes])
+  }, [built, setNodes, setEdges])
 
   useEffect(() => {
     if (!measured) return

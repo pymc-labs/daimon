@@ -2,7 +2,7 @@ import { ChevronRight, RotateCcw } from "lucide-react"
 import { useState } from "react"
 
 import { Ago, Avatar } from "@/components/common"
-import { useConfirm } from "@/components/confirm"
+import { useConfirm } from "@/lib/confirm"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/lib/utils"

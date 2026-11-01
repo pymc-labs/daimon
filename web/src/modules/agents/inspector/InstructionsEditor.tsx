@@ -2,7 +2,8 @@ import { useState } from "react"
 import { Prose } from "@/components/common"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Locked } from "../bits"
-import { Section, useLocal, type Props } from "./parts"
+import { Section, type Props } from "./parts"
+import { useLocal } from "./useLocal"
 
 export function InstructionsEditor({ agent, config, ro, update }: Props) {
   const [tab, setTab] = useState("write")

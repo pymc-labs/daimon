@@ -1,9 +1,6 @@
-import { createContext, useContext, useEffect, useState } from "react"
+import { useEffect, useState } from "react"
 
-type Theme = "system" | "light" | "dark"
-const Ctx = createContext<{ theme: Theme; resolved: "light" | "dark"; setTheme: (t: Theme) => void }>({
-  theme: "system", resolved: "light", setTheme: () => {},
-})
+import { Ctx, type Theme } from "./theme-context"
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // stored only when picked; the old key held "system" for everyone
@@ -22,5 +19,3 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [resolved])
   return <Ctx.Provider value={{ theme, resolved, setTheme }}>{children}</Ctx.Provider>
 }
-
-export const useTheme = () => useContext(Ctx)

@@ -7,6 +7,7 @@ import { api, ApiError } from "@/lib/api"
 import { shortDate, usd } from "@/lib/format"
 import { useMe } from "@/lib/hooks"
 import type { AgentRef } from "@/lib/types"
+import { landingOf } from "./landing"
 import { Card } from "./Card"
 
 export type Invite = {
@@ -23,9 +24,6 @@ const COPY = {
 const Row = ({ k, children }: { k: string; children: React.ReactNode }) => (
   <div className="flex justify-between px-4 py-2.5"><dt className="text-muted-foreground">{k}</dt><dd>{children}</dd></div>
 )
-
-/** Where an accepted invite lands: the first agent it names, else chat. */
-export const landingOf = (i: Pick<Invite, "agents">) => (i.agents[0] ? `/chat?agent=${i.agents[0].id}` : "/chat")
 
 export function InviteLanding() {
   const { token } = useParams()

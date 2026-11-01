@@ -21,6 +21,9 @@ from typing import Annotated, Any, Literal, cast
 import yaml
 from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
+from anthropic.types.beta.beta_managed_agents_custom_tool_input_schema_param import (
+    BetaManagedAgentsCustomToolInputSchemaParam,
+)
 from anthropic.types.beta.beta_managed_agents_multiagent_params import (
     BetaManagedAgentsMultiagentParams,
 )
@@ -32,11 +35,25 @@ from daimon.core.context_prompt import ContextFragment, TurnContext, encode_frag
 from daimon.core.errors import SpecError
 from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.stores.domain import ChatPlatform
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+    with_config,
+)
 
 #: Optional deployment features a platform-limited default skill can require
 #: (`SkillRef.requires`); `Settings.configured_features` says which are set up.
 SettingsFeature = Literal["microsoft_accounts"]
+
+
+# The SDK declares this TypedDict open (`extra_items=object`) but gives it no
+# pydantic config, so it inherits `extra="forbid"` from `AgentSpec` and pydantic
+# warns that the setting is ignored. Declaring the config it already runs under
+# removes the warning without changing what validates.
+with_config(ConfigDict(extra="allow"))(BetaManagedAgentsCustomToolInputSchemaParam)
 
 
 class SkillRef(BaseModel):

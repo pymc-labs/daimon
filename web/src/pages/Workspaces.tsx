@@ -7,7 +7,8 @@ import { QueryState } from "@/components/QueryState"
 import { api } from "@/lib/api"
 import { plural } from "@/lib/format"
 import { useMe } from "@/lib/hooks"
-import { Card, safeNext } from "./Card"
+import { safeNext } from "@/lib/safe-next"
+import { Card } from "./Card"
 
 export function Workspaces() {
   const me = useMe()

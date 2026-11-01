@@ -8,7 +8,7 @@ import { toast } from "sonner"
 
 import { AppIcon, BrandIcon, Logo } from "@/components/brand"
 import { AgentAvatar, Avatar, Kbd } from "@/components/common"
-import { useConfirm } from "@/components/confirm"
+import { useConfirm } from "@/lib/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
 import { LoadMore, QueryState, Rows } from "@/components/QueryState"
 import {
@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { api } from "@/lib/api"
 import { useMe, useProviders, useSessions } from "@/lib/hooks"
-import { useTheme } from "@/lib/theme"
+import { useTheme } from "@/lib/theme-context"
 import type { ChatSession, Me, Person } from "@/lib/types"
 import { cn, MOD } from "@/lib/utils"
 import { evict } from "@/modules/chat/turns"

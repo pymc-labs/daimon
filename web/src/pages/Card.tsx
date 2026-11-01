@@ -10,5 +10,3 @@ export function Card({ children, mark }: { children: React.ReactNode; mark?: Rea
     </div>
   )
 }
-
-export const safeNext = (raw: string | null) => (raw && raw.startsWith("/") && !/^\/[/\\]/.test(raw) ? raw : "/chat")
