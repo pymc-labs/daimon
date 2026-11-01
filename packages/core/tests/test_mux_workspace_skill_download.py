@@ -101,6 +101,16 @@ async def test_fork_lookup_matches_main_and_stops_at_first_match(case):
     assert after.requests == before.requests
 
 
+async def test_a_version_pinned_by_its_short_id_downloads() -> None:
+    transport = script("early")
+    async with transport.client() as client:
+        data = await download_skill_version(
+            client, skill_id="skill1", version="skver_target", scope=resource_scope(tenant_id="t")
+        )
+    assert data == b"zip", "an agent's skver_ pin names the listed skill_version_ id"
+    transport.assert_consumed()
+
+
 @pytest.mark.parametrize("status", [200, 403])
 async def test_export_uses_known_native_id_without_an_extra_lookup(status):
     before, after = ScriptedTransport(), ScriptedTransport()

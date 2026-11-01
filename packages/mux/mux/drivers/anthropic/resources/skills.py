@@ -34,6 +34,17 @@ class NativeSkillVersions(SkillVersions, Protocol):
     ) -> AsyncIterator[bytes]: ...
 
 
+def names_skill_version(pinned: str, version: str, version_id: str) -> bool:
+    """Whether a pin names this version: its number, or its id under either prefix.
+
+    An agent names a version "skver_<id>"; the version list names it "skill_version_<id>".
+    """
+    if pinned in (version, version_id):
+        return True
+    _, sep, suffix = pinned.rpartition("_")
+    return bool(sep) and suffix == version_id.rpartition("_")[2]
+
+
 def skill_record(item: SkillCreateResponse | SkillListResponse | SkillRetrieveResponse) -> Skill:
     return Skill.model_validate(
         {
@@ -187,10 +198,7 @@ class AnthropicSkillVersions:
         async for item in provider_iter(
             self._client.beta.skills.versions.list(skill_id=skill_id, limit=100)
         ):
-            if version == item.version or (
-                # An agent names a version "skver_<id>"; the list names it "skill_version_<id>".
-                "_" in version and version.rsplit("_", 1)[1] == item.id.rsplit("_", 1)[1]
-            ):
+            if names_skill_version(version, item.version, item.id):
                 return item.id
             made = datetime.fromisoformat(item.created_at)
             if version == "latest" and (newest is None or made > newest[0]):
