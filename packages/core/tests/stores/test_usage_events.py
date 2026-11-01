@@ -289,7 +289,7 @@ async def test_cost_for_tenant_since_sums_across_users(
     assert tenant_cost == u1_cost + u2_cost, "tenant cost should equal sum of per-user costs"
 
 
-async def test_turn_count_for_tenant_since_excludes_null_user_rows(
+async def test_turn_count_for_tenant_since_counts_rows_with_no_person(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
@@ -318,7 +318,7 @@ async def test_turn_count_for_tenant_since_excludes_null_user_rows(
         tenant_id=tenant_id,
         since=past,
     )
-    assert count == 1, "tenant turn count should exclude NULL platform_user_id rows"
+    assert count == 2, "a debited turn with no person recorded still counts"
 
 
 async def test_turn_count_for_tenant_since_counts_distinct_sessions_across_users(
