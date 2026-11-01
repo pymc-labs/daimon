@@ -24,6 +24,7 @@ from daimon.adapters.discord.checks import (
     require_registered_guild,
 )
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
+from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.config import DirectMessagePolicy, Settings
@@ -694,6 +695,13 @@ class DirectMessageCog(commands.Cog):
                         role=role,
                         role_ids=subject.role_ids,
                         verified_membership=subject.verified_membership,
+                        confirmation_for=lambda admission: discord_confirmation_hook(
+                            message.channel,
+                            runtime=runtime,
+                            tenant_id=conversation.tenant_id,
+                            account_id=admission.account_id,
+                            admission=admission,
+                        ),
                     )
             finally:
                 ticket.release()

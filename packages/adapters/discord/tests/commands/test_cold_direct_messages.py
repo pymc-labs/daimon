@@ -558,3 +558,24 @@ async def test_selector_recheck_operational_failure_is_generic_and_consumes_sele
         reply.assert_not_awaited()
     finally:
         await cog.cog_unload()
+
+
+async def test_dm_turn_posts_approval_cards_in_the_dm(db_session_factory, monkeypatch):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    hooks = []
+
+    def hook(channel, **kwargs):
+        hooks.append((channel, kwargs))
+        return AsyncMock()
+
+    monkeypatch.setattr(module, "discord_confirmation_hook", hook)
+    msg = message()
+    await cog.on_message(msg)
+    confirmation_for = reply.await_args.kwargs["confirmation_for"]
+    admitted = SimpleNamespace(account_id="acct-1")
+    confirmation_for(admitted)
+    ((channel, kwargs),) = hooks
+    assert channel is msg.channel, "the card is posted in the person's DM"
+    assert kwargs["tenant_id"] == tenants[0].id
+    assert kwargs["account_id"] == "acct-1"
+    assert kwargs["admission"] is admitted
