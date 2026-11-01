@@ -510,7 +510,7 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
             release.set()
             await asyncio.gather(first, second)
     assert replies == ["reply", "reply"]
-    assert not any(call.args[0] == GLOBAL_CAP_NOTICE for call in channel.send.await_args_list)
+    assert not any(call.args[:1] == (GLOBAL_CAP_NOTICE,) for call in channel.send.await_args_list)
     assert bot.turn_queue.in_flight() == 0
 
     with (

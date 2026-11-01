@@ -259,7 +259,11 @@ async def test_dm_reply_delivery_and_deduplication(
     guild.fetch_member = AsyncMock(return_value=member)
     channel = MagicMock(spec=discord.DMChannel)
     channel.id = "dm-42"
-    channel.send = AsyncMock(return_value=None)
+    sent = MagicMock(spec=discord.Message)
+    sent.id = 4200
+    sent.channel = channel
+    sent.edit = AsyncMock(return_value=sent)
+    channel.send = AsyncMock(return_value=sent)
 
     @asynccontextmanager
     async def typing() -> AsyncIterator[None]:
