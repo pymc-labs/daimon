@@ -202,11 +202,7 @@ def test_every_sharded_job_loads_the_plugin_the_checker_discovers() -> None:
         for name, job in jobs.items()
         if any("-p daimon.testing.ci_shard" in command for command in _pytest_commands(job))
     }
-    with_shards = {
-        name
-        for name, job in jobs.items()
-        if any("shards" in leg for leg in _legs(job))
-    }
+    with_shards = {name for name, job in jobs.items() if any("shards" in leg for leg in _legs(job))}
     assert (
         with_plugin
         == with_shards
