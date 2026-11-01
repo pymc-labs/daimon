@@ -53,8 +53,9 @@ log = structlog.get_logger(__name__)
 _ACCESS: dict[str, tuple[int, str]] = {
     "no_account": (403, "Sign in with your chat account to use {label}."),
     "not_served": (403, "{label} doesn't serve this workspace."),
-    "refused": (403, "{label} didn't accept your sign-in. Try again in a few minutes."),
+    "refused": (403, "{label} refused access. Ask a {label} admin."),
     "unconfigured": (503, "{label} isn't set up here."),
+    "unreachable": (502, "{label} didn't answer. Try again soon."),
 }
 # Server answers passed on as they are, with the server's own reason.
 _PASSED_ON = frozenset({400, 409, 422})

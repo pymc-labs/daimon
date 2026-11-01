@@ -46,7 +46,7 @@ DEFAULT_TOKEN_LIFE = timedelta(minutes=5)
 NODE_TIMEOUT_S = 10.0
 _MAX_REFUSALS = 1024
 
-NodeAccessProblem = Literal["no_account", "not_served", "refused", "unconfigured"]
+NodeAccessProblem = Literal["no_account", "not_served", "refused", "unconfigured", "unreachable"]
 
 
 class NodeAccessError(DaimonError):
@@ -157,8 +157,12 @@ async def node_token(
         got = await exchange_subject_token(
             http, client, subject_token=subject, timeout=NODE_TIMEOUT_S
         )
-    except (TokenExchangeError, httpx.HTTPError) as err:
-        log.warning("web.node_token.refused", kind=kind, err_type=type(err).__name__)
+    except httpx.HTTPError as err:
+        log.warning("web.node_token.unreachable", kind=kind, err_type=type(err).__name__)
+        raise NodeAccessError("unreachable") from err
+    except TokenExchangeError as err:
+        # Its text is only the OAuth error code (`invalid_grant`), never the description.
+        log.warning("web.node_token.refused", kind=kind, error=str(err))
         _remember_refusal(runtime, refused_key, now + EXCHANGE_BACKOFF)
         raise NodeAccessError("refused") from err
     life = timedelta(seconds=got.expires_in) if got.expires_in > 0 else DEFAULT_TOKEN_LIFE
