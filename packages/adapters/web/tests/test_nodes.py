@@ -22,6 +22,7 @@ from daimon.adapters.web.cookies import new_session_token, token_sha256
 from daimon.adapters.web.nodes import NodeConfigError
 from daimon.adapters.web.nodes.data_server import DataServerNode
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core import agent_changes
 from daimon.core.agent_view import AgentConfigDoc, McpServer, ModelChoice
 from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet
@@ -314,6 +315,30 @@ async def test_disconnect_removes_the_relay_and_keeps_the_server_agent(
     assert not gone.json()["attached"] and gone.json()["agent"]["id"] == "sa-1", gone.json()
     assert agents.agent.mcp_servers == [], "the relay is detached"
     assert not [c for c in server.calls if c[0] == "DELETE"], "the server agent stays"
+
+
+async def test_a_concurrent_connect_or_disconnect_is_not_an_error(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agents, owner, _ = await _setup(db_session)
+    real = agent_changes.apply_change
+
+    async def racing(*args: Any, **kwargs: Any) -> Any:
+        await real(*args, **kwargs)  # the other request lands first
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_changes, "apply_change", racing)
+    async with _client(
+        agents, _Server(), db_session_factory, owner, key=generate_signing_key()
+    ) as c:
+        connected = await c.post(f"{_BASE_PATH}/connect", headers=_OWN)
+        attached = [s.url for s in agents.agent.mcp_servers]
+        gone = await c.post(f"{_BASE_PATH}/disconnect", headers=_OWN)
+    assert connected.status_code == 200 and connected.json()["attached"], connected.text
+    assert attached == [_RELAY], "attached once"
+    assert gone.status_code == 200 and not gone.json()["attached"], gone.text
 
 
 async def test_only_an_editor_of_the_agent_connects(

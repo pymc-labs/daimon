@@ -283,9 +283,8 @@ class DataServerNode:
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
 
-    async def status(
-        self, runtime: WebRuntime, caller: WebCaller, agent_id: str
-    ) -> DataServerStatus:
+    async def _attached(self, runtime: WebRuntime, caller: WebCaller, agent_id: str) -> bool:
+        """Whether the relay is attached, refused to viewers who can't see the agent's servers."""
         view = await load_agent_view(
             change_deps(runtime).view,
             tenant_id=caller.person.tenant_id,
@@ -298,7 +297,12 @@ class DataServerNode:
         if not view.can_view_details:
             # The view hides attached servers from this viewer; so does this route.
             raise HTTPException(status_code=403, detail="You can't see this agent's connections.")
-        attached = any(self.claims(s.url) for s in view.mcp_servers)
+        return any(self.claims(s.url) for s in view.mcp_servers)
+
+    async def status(
+        self, runtime: WebRuntime, caller: WebCaller, agent_id: str
+    ) -> DataServerStatus:
+        attached = await self._attached(runtime, caller, agent_id)
         try:
             server_id = await self._server_agent_id(runtime, caller, agent_id)
         except HTTPException as exc:
@@ -349,6 +353,7 @@ class DataServerNode:
             raise HTTPException(status_code=503, detail=f"{self.label} isn't set up here.")
         deps, actor = change_deps(runtime), actor_of(caller)
         agent = await self._editable(runtime, caller, agent_id)
+        await self._attached(runtime, caller, agent_id)
         server_id = await self._server_agent_id(runtime, caller, agent_id)
         if server_id is None or not await self._managed(runtime, caller, server_id):
             try:
@@ -376,7 +381,9 @@ class DataServerNode:
                     note=f"Connected {self.label}",
                 )
             except AgentEditError as exc:
-                raise edit_refusal(exc) from exc
+                # Nothing to apply: a concurrent connect attached it first.
+                if not await self._attached(runtime, caller, agent_id):
+                    raise edit_refusal(exc) from exc
             runtime.agents.forget(caller.person.tenant_id)
             log.info("web.node.attached", kind=self.kind)
         return await self.status(runtime, caller, agent_id)
@@ -386,11 +393,10 @@ class DataServerNode:
     ) -> DataServerStatus:
         """Detach the server from the agent; the server's agent and its access stay."""
         deps, actor = change_deps(runtime), actor_of(caller)
-        try:
-            agent = await agent_editing.load_editable_agent(
-                deps.edit, actor=actor, ma_agent_id=agent_id
-            )
-            if any(self.claims(s.url) for s in agent.mcp_servers):
+        agent = await self._editable(runtime, caller, agent_id)
+        await self._attached(runtime, caller, agent_id)
+        if any(self.claims(s.url) for s in agent.mcp_servers):
+            try:
                 await agent_changes.apply_change(
                     deps,
                     actor=actor,
@@ -398,10 +404,12 @@ class DataServerNode:
                     change=self._without_servers,
                     note=f"Disconnected {self.label}",
                 )
-                runtime.agents.forget(caller.person.tenant_id)
-                log.info("web.node.detached", kind=self.kind)
-        except AgentEditError as exc:
-            raise edit_refusal(exc) from exc
+            except AgentEditError as exc:
+                # Nothing to apply: a concurrent disconnect detached it first.
+                if await self._attached(runtime, caller, agent_id):
+                    raise edit_refusal(exc) from exc
+            runtime.agents.forget(caller.person.tenant_id)
+            log.info("web.node.detached", kind=self.kind)
         return await self.status(runtime, caller, agent_id)
 
     def _with_relay(self, config: AgentConfigDoc, relay: str) -> AgentConfigDoc:
