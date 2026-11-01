@@ -228,6 +228,18 @@ def cold_dm_text(platform: ChatPlatform, *, dms_on: bool | None) -> str:
     )
 
 
+def dm_permission_text(platform: ChatPlatform) -> str:
+    """The answer to a member whose server refused them private chats for lack of access.
+
+    Sent only after their membership was verified, so it tells them nothing about
+    a server they are not in."""
+    words = words_for(platform)
+    return (
+        "You don't have permission to DM Daimon.\n"
+        f"Ask {words.admin} for access if you think you should have it."
+    )
+
+
 def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
     """Keep a small text-only context, newest selected, oldest rendered first."""
     remaining = 16_000
