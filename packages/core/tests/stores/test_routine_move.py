@@ -140,12 +140,12 @@ async def test_run_once_retains_claimed_slot_and_completion(db_session):
     assert claimed[0].last_fired_at == claim_now
     await pause_routine(db_session, rows[0].id, tenant_id=tid)
     before = routine_rollback_document(
-        await rollback_rows(db_session, tenant_id=tid), exported_at=NOW
+        await rollback_rows(db_session, tenant_id=tid), exported_at=claim_now
     )
     assert not before["final"] and before["routines"][0]["in_flight"]
     await record_result(db_session, rows[0].id, tail=None, error="failed", expected_row=claimed[0])
     after = routine_rollback_document(
-        await rollback_rows(db_session, tenant_id=tid), exported_at=NOW
+        await rollback_rows(db_session, tenant_id=tid), exported_at=claim_now
     )
     assert after["final"] and not after["routines"][0]["in_flight"]
     assert after["routines"][0]["resume_after"] == slot.isoformat()
