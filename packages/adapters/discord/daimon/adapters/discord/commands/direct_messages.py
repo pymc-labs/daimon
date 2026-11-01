@@ -190,6 +190,9 @@ class DirectMessageCog(commands.Cog):
         if not tenant_ready(tenant):
             self._suppress(message, "tenant_unavailable")
             return None, False, False
+        if not self.bot.allows_tenant(tenant):
+            self._suppress(message, "guild_not_allowed")
+            return None, False, False
         async with runtime.sessionmaker() as session:
             enabled = await dm_enabled(session, tenant_id=tenant.id)
             agent = await get_dm_agent_name(session, tenant_id=tenant.id)
@@ -644,6 +647,7 @@ class DirectMessageCog(commands.Cog):
             if (
                 not enabled
                 or not tenant_ready(tenant)
+                or not self.bot.allows_tenant(tenant)
                 or not recipient_policy.allows(str(message.author.id))
                 or subject.verified_membership is not True
                 or not authorize(policy, subject=subject, action=Action.START_TURN)

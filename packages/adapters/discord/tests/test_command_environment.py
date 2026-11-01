@@ -112,13 +112,11 @@ async def test_empty_non_production_allowlist_registers_no_commands() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_allowlisted_messages_interactions_and_dms_are_ignored() -> None:
+async def test_non_allowlisted_messages_and_interactions_are_ignored() -> None:
     bot, _, _, _ = await _ready_bot("staging", [111])
     with patch("daimon.adapters.discord.bot.remember_guild_user") as remember:
         await bot.on_message(SimpleNamespace(guild=SimpleNamespace(id=222)))  # type: ignore[arg-type]
-        await bot.on_message(SimpleNamespace(guild=None))  # type: ignore[arg-type]
         await bot.on_interaction(SimpleNamespace(guild_id=222))  # type: ignore[arg-type]
-        await bot.on_interaction(SimpleNamespace(guild_id=None))  # type: ignore[arg-type]
     remember.assert_not_called()
     # The SDK otherwise routes slash commands, buttons, and modals before
     # on_interaction; invalid stubs here prove rejection before SDK parsing.
@@ -129,13 +127,45 @@ async def test_non_allowlisted_messages_interactions_and_dms_are_ignored() -> No
     with patch("discord.state.Interaction") as make_interaction:
         for kind in (2, 3, 5):
             parse({"type": kind, "guild_id": "222"})
-            parse({"type": kind})
         make_interaction.assert_not_called()
     with patch.object(commands.Bot, "dispatch") as inherited_dispatch:
         bot.dispatch("message", SimpleNamespace(guild=SimpleNamespace(id=222)))
         bot.dispatch("interaction", SimpleNamespace(guild_id=222))
-        bot.dispatch("message", SimpleNamespace(guild=None))
         inherited_dispatch.assert_not_called()
         bot.dispatch("message", SimpleNamespace(guild=SimpleNamespace(id=111)))
         inherited_dispatch.assert_called_once()
     await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_non_production_dms_and_their_buttons_reach_the_listeners() -> None:
+    bot, _, _, _ = await _ready_bot("lane-preview", [111])
+    with patch.object(commands.Bot, "dispatch") as inherited_dispatch:
+        bot.dispatch("message", SimpleNamespace(guild=None))
+        bot.dispatch("interaction", SimpleNamespace(guild_id=None, guild=None))
+    assert [call.args[0] for call in inherited_dispatch.call_args_list] == [
+        "message",
+        "interaction",
+    ], "a lane bot must pass guildless DM events to the direct-message cog"
+    parse = cast(
+        Callable[[dict[str, object]], None],
+        bot._connection.parsers["INTERACTION_CREATE"],  # pyright: ignore[reportPrivateUsage]
+    )
+    with patch("discord.state.Interaction") as make_interaction:
+        parse({"type": 3, "data": {"custom_id": "dm-switch", "component_type": 2}})
+        make_interaction.assert_called_once()
+    await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_non_production_dms_reach_only_allowlisted_tenants() -> None:
+    lane, _, _, _ = await _ready_bot("lane-preview", [111])
+    production, _, _, _ = await _ready_bot("", [])
+    allowed = SimpleNamespace(external_id="111")
+    other = SimpleNamespace(external_id="222")
+    assert lane.allows_tenant(allowed)  # type: ignore[arg-type]
+    assert not lane.allows_tenant(other), "a lane must not answer DMs for a guild off its list"  # type: ignore[arg-type]
+    assert not lane.allows_tenant(None)
+    assert production.allows_tenant(other)  # type: ignore[arg-type]
+    await lane.close()  # type: ignore[attr-defined]
+    await production.close()  # type: ignore[attr-defined]
