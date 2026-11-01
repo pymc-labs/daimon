@@ -24,6 +24,7 @@ from daimon.core.access_policy import (
 )
 from daimon.core.authz import Action, Place, Surface, authorize
 from daimon.core.config import load_turn_settings
+from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.errors import UserFacingError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
@@ -570,13 +571,15 @@ async def _run_admitted_dm_turn(
     destination: AbstractAsyncContextManager[None] | None = None,
     origin: TurnContext = "chat",
     watch_row: TaskContinuationRow | None = None,
+    confirm_write: ConfirmationHook | None = None,
 ) -> tuple[str, str]:
     """Run one admitted, bound private turn and return its final text and session.
 
     Shared by live DM replies, DM routines and DM watch reports (`watch_row`,
     which runs under watch posture). `on_sealed` runs when the DM's source was
     sealed during the turn (it may raise its own refusal). Nothing is rendered
-    while the turn runs; the caller delivers the answer.
+    while the turn runs; the caller delivers the answer. Without `confirm_write`
+    a write that needs approval is refused, as on any surface with no card.
     """
     async with (
         destination if destination is not None else nullcontext(),
@@ -620,6 +623,7 @@ async def _run_admitted_dm_turn(
                 deadline=deadline,
                 attended=False if watch_row is not None else None,
                 watch_row=watch_row,
+                confirm_write=confirm_write,
             )
         except DmSourceSealedError:
             # Decided again during a dead-session recovery.
@@ -681,12 +685,15 @@ async def reply_to_dm_result(
     role_ids: tuple[str, ...] = (),
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
+    confirmation_for: Callable[[Admission], ConfirmationHook] | None = None,
 ) -> DirectMessageReply | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
     A duplicate delivery returns None. The adapter verifies live membership
     and supplies the current role before entering; stored admin roles never
     authorize a private turn. Platform API errors must fail that check closed.
+    `confirmation_for` builds the approval-card hook for the admitted turn; an
+    adapter that cannot show a card in a DM omits it and approvals are refused.
     """
     async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True):
         now = datetime.now(UTC)
@@ -812,6 +819,9 @@ async def reply_to_dm_result(
                 deadline=deadline,
                 destination=_dm_destination(deps, conversation, admission.slack_turn_context_id),
                 on_sealed=lambda: _quarantine(deps, conversation),
+                confirm_write=(
+                    confirmation_for(prepared.admission) if confirmation_for is not None else None
+                ),
             )
             turns = bounded_turns(
                 [

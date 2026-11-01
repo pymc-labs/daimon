@@ -14,6 +14,7 @@ import httpx
 import pytest
 from daimon.adapters.discord.commands import direct_messages as module
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.config import TurnSettings
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import get_conversation, set_dm_agent_name, set_dm_enabled
@@ -138,7 +139,9 @@ async def real_dm(db_engine, db_clean):
     bot.draining = False
     bot.runtime.sessionmaker = factory
     bot.runtime.settings = SimpleNamespace(
-        direct_message_policies={}, ops=SimpleNamespace(alert_webhook_url=None)
+        direct_message_policies={},
+        ops=SimpleNamespace(alert_webhook_url=None),
+        turn=TurnSettings(),
     )
     bot.runtime.turn_deps = replace(
         deps_for(provider.client, factory),
