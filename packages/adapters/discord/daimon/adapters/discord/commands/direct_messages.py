@@ -407,8 +407,10 @@ class DirectMessageCog(commands.Cog):
         guild = self.bot.get_guild(int(tenant.external_id))
         server_name = guild.name if guild else tenant.external_id
 
+        # The only message that carries the controls; /dm-settings shows them again.
         await message.channel.send(
-            f"Private conversation with {admission.config.agent_name} in {server_name}.",
+            f"Private conversation with {admission.config.agent_name} in {server_name}.\n"
+            "Run `/dm-settings` to switch server or start a new conversation.",
             view=self._switch_control(
                 user_id=message.author.id,
                 route_id=message.channel.id,
@@ -551,6 +553,44 @@ class DirectMessageCog(commands.Cog):
     @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
     async def new(self, interaction: discord.Interaction[commands.Bot]) -> None:
         await self._new_conversation(interaction, scope_id=None)
+
+    @app_commands.command(name="dm-settings", description=DESCRIPTIONS["dm_settings"])
+    @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
+    async def dm_settings(self, interaction: discord.Interaction[commands.Bot]) -> None:
+        """Show who answers this DM, with the switch-server and new-conversation controls."""
+        channel = interaction.channel
+        if not isinstance(channel, discord.DMChannel):
+            await interaction.response.send_message(
+                "Run /dm-settings in your DMs with me.", ephemeral=True
+            )
+            return
+        async with self.bot.runtime.sessionmaker() as session:
+            current = await get_conversation(
+                session,
+                platform="discord",
+                route_key=str(channel.id),
+                external_user_id=str(interaction.user.id),
+            )
+            agent = (
+                await get_dm_agent_name(session, tenant_id=current.tenant_id)
+                if current is not None
+                else None
+            )
+        if current is None:
+            await interaction.response.send_message(
+                "There is no conversation yet. Send a message to start one.", ephemeral=True
+            )
+            return
+        guild = self.bot.get_guild(int(current.workspace_id))
+        server_name = guild.name if guild else "this server"
+        who = f"{agent} in {server_name}" if agent else server_name
+        await interaction.response.send_message(
+            f"Private conversation with {who}.",
+            view=self._switch_control(
+                user_id=interaction.user.id, route_id=channel.id, scope_id=current.scope_id
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @app_commands.command(name="dm-me", description=DESCRIPTIONS["dm_me"])
     @app_commands.guild_only()
@@ -832,21 +872,10 @@ class DirectMessageCog(commands.Cog):
                     ).allows(str(message.author.id)):
                         self._suppress(message, "delivery_recipient_revoked")
                         return
-                    chunk = answer[start : start + 1900]
-                    if start + 1900 >= len(answer):
-                        await message.channel.send(
-                            chunk,
-                            view=self._switch_control(
-                                user_id=message.author.id,
-                                route_id=message.channel.id,
-                                scope_id=conversation.scope_id,
-                            ),
-                            allowed_mentions=discord.AllowedMentions.none(),
-                        )
-                    else:
-                        await message.channel.send(
-                            chunk, allowed_mentions=discord.AllowedMentions.none()
-                        )
+                    await message.channel.send(
+                        answer[start : start + 1900],
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
         except _DM_FAILURES as exc:
             log_anthropic_overload(
                 exc,
