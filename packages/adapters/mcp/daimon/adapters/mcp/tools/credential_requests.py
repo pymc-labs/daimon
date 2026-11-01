@@ -38,6 +38,7 @@ from daimon.adapters.mcp.tools.reachability import (
     target_facts,
 )
 from daimon.adapters.mcp.tools.setup_target import (
+    get_web_turn_origin,
     origin_channel_id,
     require_turn_origin,
     resolve_setup_agent,
@@ -88,6 +89,7 @@ from daimon.core.stores.credential_requests import (
 )
 from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
 from daimon.core.stores.turn_origins import get_active_origin
+from daimon.core.stores.web_notices import WebCredentialNotice, send_web_notice
 from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -200,6 +202,14 @@ def _require_requestable_platform(auth: AuthIdentity) -> str:
     if auth.platform == "slack" and auth.external_id is None:
         raise ToolError("credential requests require a chat context")
     return auth.platform_user_id
+
+
+async def _require_origin(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> TurnOriginRow:
+    """The turn's origin: a web chat's when the id names one, else the chat platform's."""
+    web = await get_web_turn_origin(runtime, auth, origin_context_id)
+    return web if web is not None else await require_turn_origin(runtime, auth, origin_context_id)
 
 
 def _bounded_pending_task(pending_task: str | None, *, echoes: tuple[str, ...]) -> str | None:
@@ -415,9 +425,18 @@ async def _mint_and_post(
     replaces_updated_at: datetime | None = None,
     branch: str | None = None,
 ) -> RequestCredentialResult:
+    on_web = origin.platform == "web"
+    if on_web and kind != "env":
+        # The web chat's card holds one named key; files and connections need a chat app.
+        raise ToolError(
+            "This can't be set up from the web app. Ask for one named key, "
+            "or set this up from a chat app."
+        )
     await require_pin_write_access(runtime, auth, ma_agent=ma_agent, origin=origin)
     # A tool-supplied channel cannot redirect a private-input request.
-    channel_id = origin.parent_channel_id if auth.platform == "slack" else origin.thread_id
+    channel_id = (
+        origin.parent_channel_id if auth.platform == "slack" and not on_web else origin.thread_id
+    )
     if auth.platform == "teams" and runtime.teams_client is None:
         raise ToolError("Teams tools are not configured on this server")
     token = mint_request_token()
@@ -472,7 +491,10 @@ async def _mint_and_post(
             origin_thread_id=origin.thread_id,
         )
     try:
-        if auth.platform == "slack":
+        if on_web:
+            # The web process raises the card when the notice below arrives.
+            message_id = str(row.idempotency_key)
+        elif auth.platform == "slack":
             message_id = await _post_slack_credential_button_impl(
                 runtime,
                 auth,
@@ -522,9 +544,17 @@ async def _mint_and_post(
         ) from exc
     async with runtime.session_factory.begin() as session:
         await update_credential_request_message(session, token=token, posted_message_id=message_id)
+        if on_web:
+            await send_web_notice(
+                session,
+                WebCredentialNotice(thread_id=origin.thread_id, request_id=row.idempotency_key),
+            )
     # Only now that the replacement is visible: an edit that lands first would
     # point the reader at a "newer form below" that does not exist yet.
     for old in retired:
+        if on_web:
+            # A superseded web card fails on save; the web app shows the newer one.
+            continue
         if auth.platform == "slack":
             await edit_slack_card_replaced(runtime, auth, row=old)
         elif auth.platform == "teams":
@@ -588,7 +618,7 @@ async def _request_agent_key_impl(
             "first. Do not name settings or environment variables, and do not ask for "
             "the value in chat."
         )
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = await _require_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
@@ -684,7 +714,7 @@ async def _request_mcp_token_impl(
     # would stack rather than replace. Observed live: request row held the
     # slashed form while the vault held the bare one.
     url = url.rstrip("/")
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = await _require_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
@@ -738,7 +768,7 @@ async def _request_mcp_oauth_impl(
         raise ToolError(str(err)) from err
     _reject_reserved_server(runtime, server_name=server_name, url=url)
     url = url.rstrip("/")
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = await _require_origin(runtime, auth, origin_context_id)
     agent_id, ma_agent = await _resolve_agent_uuid(
         runtime, auth, agent_name, expected_ma_agent_id, origin
     )
@@ -769,7 +799,7 @@ async def _request_mcp_oauth_impl(
 
 
 def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack", "teams", "web"})  # pyright: ignore[reportArgumentType]
     async def request_agent_key(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,

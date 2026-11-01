@@ -4835,6 +4835,12 @@ class DaimonBot(commands.Bot):
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                 )
+            elif err.reason == "allowance_exhausted":
+                log.info(
+                    "turn.skipped.allowance_exhausted",
+                    guild_id=guild_id,
+                    user_id=str(message.author.id),
+                )
             else:
                 log.info(
                     "turn.skipped.over_cap",
@@ -5136,6 +5142,9 @@ class DaimonBot(commands.Bot):
                 "timed_out": QUEUE_TIMED_OUT_TEXT,
                 "balance_depleted": admission_refusal_message(
                     "balance_depleted", self.runtime.settings
+                ),
+                "allowance_exhausted": admission_refusal_message(
+                    "allowance_exhausted", self.runtime.settings
                 ),
                 "queue_full": TENANT_CAP_NOTICE,
             }[slot]

@@ -296,9 +296,11 @@ def register_hub_tools(
             auth,
             sessionmaker=runtime.session_factory,
             billing_config=billing_config,
+            markup=runtime.settings.billing.markup,
             tool_name=tool_name,
             agent_names=names,
             pin_exempt=hub_exempt,
+            agent_id=agent.id,
         )
         recheck = _admission_recheck(
             admitted,

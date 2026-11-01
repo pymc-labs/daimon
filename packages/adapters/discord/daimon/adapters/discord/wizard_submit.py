@@ -533,6 +533,8 @@ async def run_wizard_submit_turn_observed(
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
             elif err.reason == "channel_budget_exceeded":
                 _log.info("wizard_submit.skipped.over_channel_budget", short_id=row.id)
+            elif err.reason == "allowance_exhausted":
+                _log.info("wizard_submit.skipped.allowance_exhausted", short_id=row.id)
             else:
                 _log.info("wizard_submit.skipped.over_cap", user_id=str(interaction.user.id))
             if err.reason != "writers_none":

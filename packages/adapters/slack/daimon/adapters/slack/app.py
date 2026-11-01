@@ -2424,6 +2424,15 @@ class SlackApp:
                     channel_id=channel,
                     thread_id=thread_id,
                 )
+            elif err.reason == "allowance_exhausted":
+                log.info(
+                    "turn.skipped.allowance_exhausted",
+                    tenant_id=str(tenant_id),
+                    user_id=str(event.get("user") or ""),
+                    team_id=team_id,
+                    channel_id=channel,
+                    thread_id=thread_id,
+                )
             else:
                 log.info(
                     "turn.skipped.over_cap",
@@ -2603,6 +2612,9 @@ class SlackApp:
                     text={
                         "balance_depleted": admission_refusal_message(
                             "balance_depleted", self.runtime.settings, foreign=standing.foreign
+                        ),
+                        "allowance_exhausted": admission_refusal_message(
+                            "allowance_exhausted", self.runtime.settings, foreign=standing.foreign
                         ),
                         "queue_full": TENANT_CAP_NOTICE,
                     }.get(slot, QUEUE_TIMED_OUT_TEXT),

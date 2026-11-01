@@ -54,7 +54,13 @@ from daimon.core.rule_views import RoutineOrigin
 from daimon.core.scheduler import run_one_tick
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.session_snapshot import SessionSnapshot
-from daimon.core.stores import github_issued_tokens, tenant_ledger, tenant_user_caps, usage_events
+from daimon.core.stores import (
+    github_issued_tokens,
+    spend_allowances,
+    tenant_ledger,
+    tenant_user_caps,
+    usage_events,
+)
 from daimon.core.stores import promo_codes as promo_store
 from daimon.core.stores.accounts import delete_account
 from daimon.core.stores.domain import RoutineRow
@@ -1628,6 +1634,78 @@ async def test_fire_rejects_routine_when_tenant_balance_depleted(
     assert fetched.delivery_payload.startswith("Your team's Daimon credit has run out.")
 
     await fake_client.close()
+
+
+@pytest.mark.parametrize("amount", [Decimal("0"), Decimal("5")], ids=["exhausted", "room"])
+async def test_fire_is_stopped_by_the_creators_exhausted_allowance(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    amount: Decimal,
+) -> None:
+    """The creator's spend allowance gates a fire after balance and channel budget."""
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await spend_allowances.create_allowance(
+        db_session,
+        tenant_id=tenant.id,
+        subject_kind="person",
+        subject_id="u4",
+        agent_id=None,
+        amount_usd=amount,
+        window="total",
+        starts_at=now - timedelta(days=1),
+    )
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u4",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+        channel_id="chan-4",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    calls: list[dict[str, object]] = []
+
+    async def capturing_run_turn(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "tail"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_z"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
+    ):
+        await fire(row)
+    await fake_client.close()
+
+    async with db_session_factory() as s:
+        fetched = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert fetched is not None
+    if amount == 0:
+        assert calls == [], "an exhausted allowance must refuse the fire"
+        assert fetched.last_error == "allowance_exhausted"
+        return
+    assert fetched.last_error is None, "an allowance with room lets the fire run"
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("limit", [Decimal("0"), Decimal("5")], ids=["over", "under"])

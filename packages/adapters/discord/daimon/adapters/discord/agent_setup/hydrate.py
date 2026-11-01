@@ -360,7 +360,7 @@ async def load_roster_state(
 
     thread_context: ThreadContext | None = None
     selected = roster.answering
-    if binding is not None:
+    if binding is not None and binding.kind != "web":  # a web chat is never a Discord thread
         thread_context = ThreadContext(
             kind=binding.kind,
             responder_name=binding.responder_name,

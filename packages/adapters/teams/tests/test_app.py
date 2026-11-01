@@ -1172,6 +1172,18 @@ async def test_a_turn_while_the_owners_cannot_be_read_keeps_a_stored_admin_role(
     assert account is not None and account.role is Role.ADMIN, "the stored role stands"
 
 
+def _balance_gone_after_admission(depleted: bool) -> AsyncMock:
+    """The balance check: fine at admission (its first call), `depleted` at the re-check."""
+    calls = 0
+
+    async def check(**_kwargs: Any) -> bool:
+        nonlocal calls
+        calls += 1
+        return depleted and calls > 1
+
+    return AsyncMock(side_effect=check)
+
+
 @pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize(
     "outcome", ["starts-on-free-slot", "stopped-while-queued", "balance-ran-out-while-queued"]
@@ -1202,7 +1214,7 @@ async def test_a_queued_turn_posts_its_card_then_waits_behind_it(
         patched_admission(),
         patch("daimon.core.turn.run.run_turn", run),
         # Admission passed before the wait; the re-check after it decides.
-        patch("daimon.core.turn.slots.is_over_balance", AsyncMock(return_value=depleted)),
+        patch("daimon.core.spend_gate.is_over_balance", _balance_gone_after_admission(depleted)),
     ):
         task = asyncio.create_task(turn())
         async with asyncio.timeout(5):

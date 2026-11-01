@@ -1561,7 +1561,7 @@ class TestInvokerAccessPolicy:
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_mention_from_an_allowlisted_user_passes_the_policy(
         self,
@@ -2248,7 +2248,7 @@ class TestProtectedChannelBeforeAnyNotice:
         ],
         ids=["no-policy", "no-category-policy", "category-policy-fetches-once"],
     )
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_an_uncached_parent_is_fetched_only_for_a_category_policy_and_once(
         self,
@@ -2430,7 +2430,7 @@ class TestBillingAdmissionGate:
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_over_cap_skips_turn(
         self,
@@ -2475,7 +2475,7 @@ class TestBillingAdmissionGate:
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_under_cap_proceeds_normally(
         self,
@@ -2512,7 +2512,7 @@ class TestBillingAdmissionGate:
         mock_create_session.assert_called_once()
         mock_run_turn.assert_called_once()
 
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     async def test_dm_no_gate_short_circuit(
         self,
         mock_is_over_cap: AsyncMock,
@@ -2536,7 +2536,7 @@ class TestBillingAdmissionGate:
     @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
     @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
     @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
-    @patch("daimon.core.turn.admission.is_over_cap", new_callable=AsyncMock)
+    @patch("daimon.core.spend_gate.is_over_cap", new_callable=AsyncMock)
     @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
     async def test_billed_record_wired_with_session_model_id(
         self,
@@ -3670,9 +3670,17 @@ class TestOverCapQueue:
         db_session_factory: async_sessionmaker[AsyncSession],
         exit_kind: str,
     ) -> None:
+        calls = 0
+
+        async def balance_gone_after_admission(**_kwargs: object) -> bool:
+            # Fine at admission (the first call), depleted at the re-check after the wait.
+            nonlocal calls
+            calls += 1
+            return exit_kind == "balance" and calls > 1
+
         with patch(
-            "daimon.core.turn.slots.is_over_balance",
-            AsyncMock(return_value=exit_kind == "balance"),
+            "daimon.core.spend_gate.is_over_balance",
+            AsyncMock(side_effect=balance_gone_after_admission),
         ):
             async with _over_cap_turn(
                 db_session,

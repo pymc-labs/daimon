@@ -433,6 +433,7 @@ def create_mcp_app(
     mcp.add_transform(Visibility(False, tags={"discord"}))
     mcp.add_transform(Visibility(False, tags={"slack"}))
     mcp.add_transform(Visibility(False, tags={"teams"}))
+    mcp.add_transform(Visibility(False, tags={"web"}))
     # Deployment-wide promo issuing: only an operator token holding the scope
     # re-enables these (middleware/mcp_identity.py); admins never see them.
     mcp.add_transform(Visibility(False, tags={scope_tag("promo:create")}))

@@ -2239,7 +2239,9 @@ async def test_start_turn_with_bundle_stamps_billing_exempt_for_caller_without_p
     ), f"the isolated session must carry the exempt stamp; got {create_bodies[0]!r}"
 
 
-async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place() -> None:
+async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     """Mixed posture on one session: the same account can hold an internal
     token (no platform user) and a platform token, and ``continue_turn`` checks
     only agent + account. A billed caller continuing an exempt session sends
@@ -2278,7 +2280,9 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place() -> 
         platform_user_id="discord-user-7",
     )
 
-    result = await _continue_turn_impl(_runtime(client), billed_caller, "ses_exempt", "more")
+    result = await _continue_turn_impl(
+        _runtime(client, session_factory=db_session_factory), billed_caller, "ses_exempt", "more"
+    )
 
     assert result["handle"] == "ses_exempt", "a same-account billed caller may continue"
     assert requests == [
@@ -2648,7 +2652,7 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
     auth = replace(_auth(), platform="discord", platform_user_id="u-1") if billed else _auth()
     runtime = _runtime(build_fake_anthropic(router.dispatch))
 
-    with patch("daimon.adapters.mcp.tools.agent_chat.is_over_channel_budget", gate):
+    with patch("daimon.core.spend_gate.is_over_channel_budget", gate):
         if not billed:
             await _continue_turn_impl(runtime, auth, "ses_test001", "again")
             assert gate.await_count == 0 and sent == ["send"], "an unbilled caller is not gated"

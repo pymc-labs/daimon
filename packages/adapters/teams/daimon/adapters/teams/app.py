@@ -264,6 +264,7 @@ _RESOLVER_MISS = _resolver_miss(TEAMS_REFUSAL_NOUNS)
 _DENIALS: dict[AdmissionDenialReason, str] = {
     "balance_depleted": "turn.skipped.over_balance",
     "cap_exceeded": "turn.skipped.over_cap",
+    "allowance_exhausted": "turn.skipped.allowance_exhausted",
     "invoker_not_allowed": "turn.skipped.invoker_not_allowed",
     "runs_elsewhere": "turn.skipped.runs_elsewhere",
     "channel_budget_exceeded": "turn.skipped.channel_budget_exceeded",
@@ -1569,6 +1570,12 @@ class TeamsApp:
                             if inbound.is_foreign
                             else TEAMS_REFUSAL_NOUNS,
                         ),
+                        "allowance_exhausted": admission_refusal_text(
+                            "allowance_exhausted",
+                            TEAMS_FOREIGN_REFUSAL_NOUNS
+                            if inbound.is_foreign
+                            else TEAMS_REFUSAL_NOUNS,
+                        ),
                         "queue_full": _SHED,
                     }[slot]
                     await lifecycle.close_with_notice(
@@ -1577,8 +1584,8 @@ class TeamsApp:
                     if reraise:
                         # A continuation that never ran must not settle as
                         # delivered: tell its dispatcher.
-                        if slot == "balance_depleted":
-                            raise AdmissionDenied(reason="balance_depleted")
+                        if slot in ("balance_depleted", "allowance_exhausted"):
+                            raise AdmissionDenied(reason=slot)
                         raise TurnNotStarted(slot)
                     return
                 await self._bind_and_run(

@@ -26,10 +26,10 @@ from daimon.adapters.mcp.services.youtube import YouTubeService, YouTubeTranscri
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
+    _gate_origin_spend,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
+from daimon.adapters.mcp.tools.channel_budgets import OriginSpend, origin_spend
 from daimon.core.billing import BillingConfig
-from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.media.youtube_url import extract_video_id
 from daimon.core.pricing import MODEL_PRICING
@@ -51,7 +51,7 @@ async def _meter_billed_call(
     markup: Decimal,
     model_id: str,
     usage: MediaUsage,
-    channel_id: str | None,
+    spend: OriginSpend,
 ) -> None:
     """Record spend for a successful Gemini call on the billed path only.
 
@@ -71,7 +71,8 @@ async def _meter_billed_call(
         cache_read_input_tokens=usage.cache_read_input_tokens,
         markup=markup,
         pricing=MODEL_PRICING.get(model_id),
-        channel_id=channel_id,
+        channel_id=spend.channel_id,
+        agent_id=spend.agent_id,
     )
 
 
@@ -81,34 +82,30 @@ async def _media_budget_channel(
     sessionmaker: async_sessionmaker[AsyncSession],
     origin_context_id: str | None,
     tool_name: str,
-) -> str | None:
-    """The channel a billed media call counts against, refused once its budget is used up.
+    markup: Decimal,
+) -> OriginSpend:
+    """Where a billed media call is attributed, refused once its channel budget or the
+    person's allowance on the agent is used up.
 
     Runs after the balance and cap gates. Without an origin the call is
     recorded with no channel, and no budget applies.
     """
     if auth.platform_user_id is None:
-        return None
-    channel_id = await origin_budget_channel(sessionmaker, auth, origin_context_id)
-    if await is_over_channel_budget(
+        return OriginSpend()
+    spend = await origin_spend(sessionmaker, auth, origin_context_id)
+    await _gate_origin_spend(
+        auth,
         sessionmaker=sessionmaker,
-        tenant_id=auth.tenant_id,
-        platform=auth.platform or "",
-        channel_id=channel_id,
-        now=datetime.now(UTC),
-    ):
-        log.info(
-            "mcp.admission_denied",
-            tenant_id=str(auth.tenant_id),
-            platform_user_id=auth.platform_user_id,
-            tool=tool_name,
-            gate="channel_budget",
-        )
-        raise ToolError(
+        markup=markup,
+        tool_name=tool_name,
+        channel_id=spend.channel_id,
+        agent_id=spend.agent_id,
+        budget_message=(
             "TERMINAL ERROR: This channel has used its spending budget. "
             "An admin can raise or clear it."
-        )
-    return channel_id
+        ),
+    )
+    return spend
 
 
 def register_media_tools(
@@ -176,13 +173,15 @@ def _register_youtube(
             ctx,
             sessionmaker=sessionmaker,
             billing_config=billing_config,
+            markup=markup,
             tool_name="fetch_youtube_transcript",
         )
-        channel_id = await _media_budget_channel(
+        spend = await _media_budget_channel(
             auth,
             sessionmaker=sessionmaker,
             origin_context_id=origin_context_id,
             tool_name="fetch_youtube_transcript",
+            markup=markup,
         )
 
         if extract_video_id(url) is None:
@@ -203,7 +202,7 @@ def _register_youtube(
             markup=markup,
             model_id=YOUTUBE_MODEL,
             usage=result.usage,
-            channel_id=channel_id,
+            spend=spend,
         )
         return render_untrusted(result.text, source="youtube_transcript", attrs={"url": url})
 
