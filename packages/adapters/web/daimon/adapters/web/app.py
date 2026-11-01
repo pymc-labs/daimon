@@ -19,6 +19,7 @@ from daimon.adapters.web.upload_limit import UploadLimitMiddleware
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
@@ -62,6 +63,8 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.add_exception_handler(anthropic.APIConnectionError, _provider_unreachable)  # pyright: ignore[reportArgumentType]
     app.add_middleware(UploadLimitMiddleware)
     app.add_middleware(SecurityMiddleware, web=runtime.web)
+    # A skill's files or the page bundle run to megabytes; event streams are never compressed.
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
     app.include_router(_health_router(runtime))
     app.include_router(auth_router(runtime))
     app.include_router(avatars_router(runtime))

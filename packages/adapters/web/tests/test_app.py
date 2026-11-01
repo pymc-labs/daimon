@@ -39,6 +39,18 @@ async def test_pages_fall_back_to_index_and_files_are_served(
     assert "immutable" in asset.headers["cache-control"], "hashed assets never change"
 
 
+async def test_large_answers_are_compressed_for_clients_that_accept_it(
+    web_client: WebClientFactory, built_app: Path
+) -> None:
+    (built_app / "assets" / "big-abc123.js").write_text("let a = 1;\n" * 500)
+    async with web_client(web_settings(static_dir=built_app)) as client:
+        big = await client.get("/assets/big-abc123.js", headers={"Accept-Encoding": "gzip"})
+        small = await client.get("/", headers={"Accept-Encoding": "gzip"})
+    assert big.headers.get("content-encoding") == "gzip", "a large answer is gzipped"
+    assert big.text == "let a = 1;\n" * 500, "and decodes to the same bytes"
+    assert "content-encoding" not in small.headers, "a small answer is sent as it is"
+
+
 async def test_unknown_api_and_auth_paths_are_404_not_the_app(
     web_client: WebClientFactory, built_app: Path
 ) -> None:

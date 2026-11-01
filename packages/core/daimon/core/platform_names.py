@@ -427,7 +427,8 @@ async def lookup_channel_names(
 
     Only for ids the stored names missed, at most `_MAX_LOOKUPS` per call (the rest wait for
     a later call). A channel the platform could not name is not asked again for an hour; one
-    it called gone or a direct message is answered from memory for a day.
+    it called gone or a direct message is answered from memory for a day. One it did not
+    answer in time is asked again on the next call.
     Never raises and never waits past a few seconds.
     """
     now = time.monotonic()
@@ -459,7 +460,9 @@ async def lookup_channel_names(
         task.cancel()
     found: dict[str, str] = {}
     for task, channel_id in tasks.items():
-        answer = task.result() if task in done and not task.cancelled() else None
+        if task not in done or task.cancelled():
+            continue  # no answer in time: asked again on the next call
+        answer = task.result()
         if isinstance(answer, str) and not isinstance(answer, ChannelStatus):
             found[channel_id] = answer
             continue
