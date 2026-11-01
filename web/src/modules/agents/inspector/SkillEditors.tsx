@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
+import { useConfirm } from "@/components/confirm"
 import { pressProps } from "@/components/filters"
 import { saveSkillFiles, useSkillFiles } from "../api"
 import { Dot, Pill } from "../bits"
@@ -102,6 +103,7 @@ export function SkillEditor(p: Props & { skill: Skill }) {
 }
 
 function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill: Skill }) {
+  const confirm = useConfirm()
   const custom = skill.type === "custom"
   const files = useSkillFiles(agent.id, skill, custom && !ro)
   const [edits, setEdits] = useState<Record<string, string>>({})
@@ -136,6 +138,11 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
       setBusy(false)
     }
   }
+  const removeSkill = async () => {
+    if (!(await confirm({ title: "Remove skill?", body: skill.title, action: "Remove", destructive: true }))) return
+    update((c) => { c.skills = c.skills.filter((x) => x.skill_id !== skill.skill_id) }, 0)
+    select("skills")
+  }
   const addFile = () => {
     const n = (naming ?? "").trim()
     if (!PATH.test(n) || names.includes(n)) return
@@ -157,6 +164,11 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
           <h2 className="text-base font-semibold">{skill.title}</h2>
           <Pill>{custom ? "Custom" : "Anthropic"}</Pill>
           <span className="text-xs text-faint">v{skill.version}</span>
+          {!ro && (
+            <Button variant="ghost" size="xs" className="ml-auto text-muted-foreground hover:text-destructive" onClick={() => void removeSkill()}>
+              <Trash2 />Remove skill
+            </Button>
+          )}
         </div>
         <p className="text-sm text-muted-foreground">{skill.description}</p>
         {(servers.length > 0 || skill.platforms) && (
@@ -192,14 +204,6 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
             {dirty && <Button variant="ghost" size="xs" disabled={busy} onClick={() => { setEdits({}); setAdded([]); setRemoved([]) }}>Discard</Button>}
             <Button size="xs" disabled={!dirty || busy} onClick={() => void save()}>Save version</Button>
           </div>
-        </div>
-      )}
-      {!ro && (
-        <div className="flex h-9 shrink-0 items-center border-b px-5 text-xs text-muted-foreground">
-          <Button variant="ghost" size="xs" className="ml-auto text-muted-foreground hover:text-destructive"
-            onClick={() => { update((c) => { c.skills = c.skills.filter((x) => x.skill_id !== skill.skill_id) }, 0); select("skills") }}>
-            <Trash2 />Remove
-          </Button>
         </div>
       )}
       {custom && !ro ? (
