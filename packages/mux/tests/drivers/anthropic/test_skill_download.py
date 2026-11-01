@@ -26,7 +26,11 @@ def version(number: str, created_at: str) -> dict[str, object]:
 
 
 # Version 3 is newer, though its text sorts first: the times are compared, not the text.
-ROWS = [version("1", "2026-03-01T01:00:00+05:00"), version("3", "2026-02-28T21:00:00Z")]
+ROWS = [
+    version("1", "2026-03-01T01:00:00+05:00"),
+    version("3", "2026-02-28T21:00:00Z"),
+    version("2", "2026-02-27T21:00:00Z"),
+]
 
 
 def transport(*replies: ScriptedReply) -> ScriptedTransport:
@@ -58,14 +62,14 @@ async def test_latest_downloads_the_newest_version() -> None:
 async def test_a_version_pinned_by_id_downloads_that_version() -> None:
     sdk = transport(
         ScriptedReply(
-            "GET", "/v1/skills/s/versions/ver_1/content", httpx.Response(200, content=b"ZIP")
+            "GET", "/v1/skills/s/versions/ver_2/content", httpx.Response(200, content=b"ZIP")
         )
     )
-    assert await download(sdk, "ver_1") == b"ZIP", "agents pin a version by its id"
+    assert await download(sdk, "skver_2") == b"ZIP", "an agent's skver_ id names the listed ver_ id"
     assert not sdk.violations, sdk.violations
 
 
 async def test_a_missing_version_is_not_found() -> None:
     with pytest.raises(ProviderError) as raised:
-        await download(transport(), "2")
+        await download(transport(), "4")
     assert raised.value.category == "not_found", "a version the skill lacks is not found"

@@ -42,6 +42,7 @@ from daimon.core.mux_compat import (
     list_native_skill_versions,
 )
 from mux.contracts.ids import Scope
+from mux.drivers.anthropic import names_skill_version
 
 _log = structlog.get_logger(__name__)
 
@@ -297,7 +298,7 @@ async def list_skills_strict(client: AsyncAnthropic) -> list[SkillListResponse]:
 async def download_skill_version(
     client: AsyncAnthropic, *, skill_id: str, version: str, scope: Scope
 ) -> bytes:
-    """Return the zip of `skill_id` at `version` (the epoch version string).
+    """Return the zip of `skill_id` at `version` (its epoch string or its id).
 
     The SDK's download sends `anthropic-beta: skills-2025-10-02`, which a
     workspace API key is refused with 403; without it the endpoint takes the
@@ -305,7 +306,7 @@ async def download_skill_version(
     """
     version_id = None
     async for row in list_native_skill_versions(client, skill_id, scope=scope):
-        if row.version == version:
+        if names_skill_version(version, row.version, row.id):
             version_id = row.id
             break
     if version_id is None:
