@@ -40,6 +40,7 @@ from daimon.core.stores.identity import (
     list_platform_principals_for_account,
 )
 from daimon.core.turn_hold import RequesterOrg
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -207,6 +208,12 @@ async def _vouched_person(
     person already signs in with another account of this provider, or this login already
     runs as another chat account here.
     """
+    # Two first sign-ins from different logins would both pass the held check below and
+    # both link; the second waits here and sees the first's link.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": vouch_lock_key(tenant)},
+    )
     chat_person = await people_store.get_person_for_account(
         session, tenant_id=tenant.tenant_id, account_id=tenant.account_id
     )
@@ -324,6 +331,11 @@ async def _move_onto_account(
             raise
         return False
     return True
+
+
+def vouch_lock_key(tenant: HubTenant) -> str:
+    """The advisory lock that serialises vouched sign-ins onto one chat account."""
+    return f"daimon:web_vouch:{tenant.tenant_id}:{tenant.account_id}"
 
 
 async def _record_refusals(session: AsyncSession, refusals: list[_Refusal], now: datetime) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
@@ -9,6 +10,7 @@ import pytest
 from daimon.core import web_identity
 from daimon.core.chat_accounts import ChatAccount
 from daimon.core.config import WebOidcSettings, WebSettings
+from daimon.core.hub_identity import resolve_hub_tenants
 from daimon.core.stores import web_audit
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores import web_identities as identities_store
@@ -18,13 +20,16 @@ from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.web_identity import VerifiedIdentity, resolve_web_people
+from daimon.testing.db import build_test_engine
 from daimon.testing.factories import (
     make_account,
     make_platform_principal,
     make_tenant,
     make_web_person,
 )
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
 
 _ISSUER = "https://id.example.com"
 _GUILD = "123456789012345678"
@@ -313,3 +318,42 @@ async def test_a_chat_sign_in_racing_the_move_is_merged_into(
     async with db_session_factory() as session:
         left = await identities_store.list_for_person(session, person_id=earlier.id)
     assert left == [], "the login leaves the earlier person"
+
+
+async def test_vouched_sign_ins_onto_one_chat_account_wait_for_each_other(
+    db_session: AsyncSession, db_engine: AsyncEngine, db_schema: str
+) -> None:
+    """Two first sign-ins from different logins would both pass the "already held" check;
+    the sign-in takes the chat account's lock first, so the later one waits and then sees
+    the earlier one's link."""
+    home = await make_tenant(db_session, platform="web", workspace_id="home")
+    guild_id = await _guild_listing_the_user(db_session)
+    await db_session.commit()
+    engine = build_test_engine(
+        db_engine.url.render_as_string(hide_password=False), db_schema, poolclass=NullPool
+    )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        (hub,) = await resolve_hub_tenants(
+            factory, platform="discord", platform_user_id=_USER, workspaces=()
+        )
+        assert hub.tenant_id == guild_id, "the account reaches the guild"
+        async with engine.connect() as holder:
+            await holder.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": web_identity.vouch_lock_key(hub)},
+            )
+            waiting = asyncio.create_task(
+                resolve_web_people(
+                    factory, identity=_identity("sub-1"), settings=_settings(home.id)
+                )
+            )
+            await asyncio.sleep(0.3)
+            blocked = not waiting.done()
+            await holder.rollback()
+        people = await asyncio.wait_for(waiting, 10)
+    finally:
+        await engine.dispose()
+
+    assert blocked, "the sign-in waits while another holds the chat account's lock"
+    assert guild_id in {p.tenant_id for p in people}, "and goes on once it is released"
