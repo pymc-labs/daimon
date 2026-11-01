@@ -27,6 +27,7 @@ from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger(__name__)
 
@@ -140,7 +141,7 @@ class SlackMemberSync:
         try:
             if not await self._load(team_id):
                 self._next_load[team_id] = self._monotonic() + _UNINSTALLED_RETRY_S
-        except (SlackApiError, aiohttp.ClientError, TimeoutError) as err:
+        except (SlackApiError, aiohttp.ClientError, TimeoutError, SQLAlchemyError) as err:
             self._next_load[team_id] = self._monotonic() + _RETRY_AFTER_S
             log.warning("slack.members.load_failed", team_id=team_id, err_type=type(err).__name__)
         finally:

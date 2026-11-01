@@ -8,6 +8,7 @@ again after it (`member_reloads`), so the older read never undoes them.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
@@ -18,11 +19,16 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.member_reloads import ReloadChanges, overlay
 from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.tenants import get_tenant
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
 log = structlog.get_logger(__name__)
+
+#: A server's member chunks must arrive within this; reloads run one at a time, so a
+#: stuck one would hold up every later one.
+CHUNK_TIMEOUT_S = 300.0
 
 
 def _utcnow() -> datetime:
@@ -71,7 +77,7 @@ class MemberSync:
     async def _replace(self, guild: discord.Guild, tenant_id: uuid.UUID) -> bool:
         """Whether the server is installed, and so its list written."""
         if not guild.chunked:
-            await guild.chunk(cache=True)
+            await asyncio.wait_for(guild.chunk(cache=True), CHUNK_TIMEOUT_S)
         async with self._sessionmaker.begin() as session:
             tenant = await get_tenant(session, tenant_id)
             if tenant is None or tenant.archived_at is not None:
@@ -93,7 +99,12 @@ class MemberSync:
         for guild in guilds:
             try:
                 await self.reload(guild)
-            except (discord.ClientException, discord.HTTPException, TimeoutError) as err:
+            except (
+                discord.ClientException,
+                discord.HTTPException,
+                TimeoutError,
+                SQLAlchemyError,
+            ) as err:
                 log.warning(
                     "discord.members.reload_failed",
                     guild_id=str(guild.id),

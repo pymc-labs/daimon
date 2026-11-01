@@ -12,6 +12,7 @@ from daimon.adapters.discord.member_sync import MemberSync, tenant_of
 from daimon.core.stores import workspace_members as members_store
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _GUILD = 123456789012345678
@@ -129,3 +130,38 @@ async def test_a_leave_landing_during_the_reload_write_is_written_again(
     await asyncio.gather(*leaves)
 
     assert "33" not in await _rows(factory), "the leave stands after the reload"
+
+
+async def test_a_stuck_or_failing_server_leaves_the_rest_to_load(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chunking that never finishes times out, and a database error on one server is
+    logged; the servers after each still load."""
+    stuck, failing, fine = _guild(), _guild(), _guild()
+    stuck.id, failing.id, fine.id = 1, 2, 3
+    for guild in (stuck, failing, fine):
+        await make_tenant(db_session, platform="discord", workspace_id=str(guild.id))
+    await db_session.commit()
+
+    async def never(**_: object) -> None:
+        await asyncio.Event().wait()
+
+    stuck.chunk.side_effect = never
+    real = members_store.replace_members
+
+    async def fail_once(session: AsyncSession, **kwargs: Any) -> None:
+        if kwargs["tenant_id"] == tenant_of(failing.id):
+            raise OperationalError("INSERT", {}, Exception("connection reset"))
+        await real(session, **kwargs)
+
+    monkeypatch.setattr("daimon.adapters.discord.member_sync.CHUNK_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(members_store, "replace_members", fail_once)
+    await MemberSync(db_session_factory).reload_all([stuck, failing, fine])
+
+    async with db_session_factory() as session:
+        synced = await members_store.list_synced(
+            session, tenant_ids=[tenant_of(g.id) for g in (stuck, failing, fine)]
+        )
+    assert set(synced) == {tenant_of(fine.id)}, "only the healthy server loaded, and it did"
