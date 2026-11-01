@@ -189,7 +189,7 @@ async def test_multiple_tenants_pending_messages_are_silent_and_selection_answer
 
 
 @pytest.mark.parametrize("facts", [Membership(is_member=False), Membership(is_member=True)])
-async def test_no_membership_or_role_gets_only_generic_guidance(
+async def test_non_member_gets_generic_guidance_and_member_without_role_is_told(
     db_session_factory, monkeypatch, facts
 ):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
@@ -200,7 +200,13 @@ async def test_no_membership_or_role_gets_only_generic_guidance(
         )
     msg = message()
     await cog.on_message(msg)
-    assert_generic_guidance(msg, tenants)
+    if facts.is_member:
+        msg.channel.send.assert_awaited_once()
+        assert msg.channel.send.await_args.args[0] == module.dm_permission_text("discord"), (
+            "a verified member without the role is told they lack permission"
+        )
+    else:
+        assert_generic_guidance(msg, tenants)
     reply.assert_not_awaited()
     assert await conversation(db_session_factory) is None
 
@@ -458,6 +464,9 @@ async def test_admission_denials_preserve_notices_and_silence_access_failures(
         }:
             if active_route:
                 msg.channel.send.assert_not_awaited()
+            elif reason == "invoker_not_allowed":
+                msg.channel.send.assert_awaited_once()
+                assert msg.channel.send.await_args.args[0] == module.dm_permission_text("discord")
             else:
                 assert_generic_guidance(msg, tenants)
             assert any(entry.get("reason") == reason for entry in logs)
