@@ -173,6 +173,7 @@ goes idle.
 | `packages/adapters/discord/` | Discord bot adapter |
 | `packages/adapters/slack/` | Slack adapter (optional, early) |
 | `packages/adapters/teams/` | Microsoft Teams adapter (optional, early) |
+| `packages/adapters/web/` | Web app adapter (optional, early) |
 | `packages/adapters/mcp/` | MCP server adapter and agent tools |
 | `packages/adapters/scheduler/` | Routines scheduler |
 | `packages/adapters/cli/` | `daimon` admin CLI |

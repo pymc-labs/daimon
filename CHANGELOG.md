@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Web app.** People chat with agents in a browser, signing in through your OpenID
+  Connect provider or with Discord, Slack or Microsoft. Shared files reach the agent, and
+  files it makes come back as downloads. Key requests show as a form in the chat. Admins
+  manage people, invites, credit and settings, and a one-time owner link sets up a new
+  workspace. Embedded apps show inside it and can get the person's sign-in token.
+  Start it with `docker compose --profile web up -d`; see the Web app page.
 - **Failures are the agent's to explain, or a card.** While a turn runs, Daimon no longer
   writes its own lines into or beside the reply: an MCP server that dropped out, a lost or
   replaced workspace, a GitHub key restart and skipped images reach the agent as a short note

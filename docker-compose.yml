@@ -143,6 +143,34 @@ services:
     entrypoint: ["python", "-m", "daimon.adapters.teams"]
     restart: unless-stopped
 
+  # Opt-in: `docker compose --profile web up -d`. Needs DAIMON_WEB__* and
+  # DAIMON_CRYPTO__KEYS in .env. Put an HTTPS proxy in front of the published
+  # port at DAIMON_WEB__PUBLIC_URL. Setup: docs/web.md.
+  web:
+    build: .
+    profiles: ["web"]
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (see .env.example)}@postgres:5432/${POSTGRES_DB:-daimon}
+    ports:
+      - "127.0.0.1:${DAIMON_WEB__PORT:-8780}:${DAIMON_WEB__PORT:-8780}"
+    volumes:
+      - ./runtime:/app/runtime:ro
+    entrypoint: ["python", "-m", "daimon.adapters.web"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os, urllib.request; urllib.request.urlopen('http://localhost:' + os.environ.get('DAIMON_WEB__PORT', '8780') + '/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    # Running replies get up to 60 s to finish before the process stops.
+    stop_grace_period: 90s
+    restart: unless-stopped
+
   scheduler:
     build: .
     depends_on:

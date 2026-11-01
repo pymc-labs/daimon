@@ -16,7 +16,7 @@ server](https://daimon.decision.ai/) instead.
   install, then [Model providers](providers.md) and
   [Operations](operations.md).
 - **Add a platform or tool:** [Slack](slack.md),
-  [Microsoft Teams](teams.md), [GitHub](github.md),
+  [Microsoft Teams](teams.md), the [web app](web.md), [GitHub](github.md),
   [MCP servers](mcp-servers.md) and the
   [Claude Code plugin](plugin.md).
 - **Shape what it does:** [Defaults](defaults.md) for agents and skills,

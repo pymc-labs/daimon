@@ -96,6 +96,7 @@ TAG_LABELS: dict[str, str] = {
     "scope:tenant:read": "operator tokens with tenant:read",
     "slack": "Slack callers",
     "teams": "Teams callers",
+    "web": "web app callers",
 }
 UNTAGGED_LABEL = "all callers"
 

@@ -87,6 +87,27 @@ jobs:
   # (scripts/generate_ci_durations.py refreshes it); add legs and raise
   # `shards` together to rebalance.
   # The shard-check job proves the legs of a suite cover it exactly once.
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: web
+      - run: npm run lint
+        working-directory: web
+      - run: npm run typecheck
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
   pytest-db:
     name: pytest-${{ matrix.suite }}${{ matrix.shards > 1 && format(' ({0}/{1})', matrix.shard, matrix.shards) || '' }}
     runs-on: ubuntu-latest
@@ -105,6 +126,7 @@ jobs:
           - { suite: mcp, shard: 1, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
           - { suite: slack, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/slack }
           - { suite: teams, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/teams }
+          - { suite: web, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/web }
           - { suite: parity, shard: 0, shards: 1, fetch-depth: 1, paths: tests/parity }
     services:
       postgres:
