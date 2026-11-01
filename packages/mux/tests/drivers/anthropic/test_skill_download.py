@@ -25,7 +25,8 @@ def version(number: str, created_at: str) -> dict[str, object]:
     }
 
 
-ROWS = [version("1", "2026-01-01T00:00:00Z"), version("3", "2026-03-01T00:00:00Z")]
+# Version 3 is newer, though its text sorts first: the times are compared, not the text.
+ROWS = [version("1", "2026-03-01T01:00:00+05:00"), version("3", "2026-02-28T21:00:00Z")]
 
 
 def transport(*replies: ScriptedReply) -> ScriptedTransport:

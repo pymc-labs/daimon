@@ -1,6 +1,7 @@
 """Skills and version history, preserving direct multipart upload requests."""
 
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Protocol, cast
 
 from anthropic import AsyncAnthropic, omit
@@ -182,17 +183,18 @@ class AnthropicSkillVersions:
 
     async def _version_id(self, skill_id: str, version: str) -> str:
         """The id of ``version``; "latest" is the newest one."""
-        newest: VersionListResponse | None = None
+        newest: tuple[datetime, str] | None = None
         async for item in provider_iter(
             self._client.beta.skills.versions.list(skill_id=skill_id, limit=100)
         ):
             if item.version == version:
                 return item.id
-            if version == "latest" and (newest is None or item.created_at > newest.created_at):
-                newest = item
+            made = datetime.fromisoformat(item.created_at)
+            if version == "latest" and (newest is None or made > newest[0]):
+                newest = (made, item.id)
         if newest is None:
             raise ProviderError("not_found", retryable=False)
-        return newest.id
+        return newest[1]
 
     async def walk_native(self, scope: Scope, skill_id: str) -> AsyncIterator[dict[str, JsonValue]]:
         """Preserve main's lazy list and partial native version rows."""
