@@ -358,13 +358,20 @@ async def resolve_names(
     return labels, found
 
 
-ChannelLookup = Callable[[str], Awaitable[str | None]]
-"""A platform lookup by channel id: its name, or None when the platform can't say."""
+ChannelLookup = Callable[[str, str], Awaitable[str | None]]
+"""A platform lookup by (workspace external id, channel id): the name, or None.
+
+None also means the channel belongs to another workspace than the one named.
+"""
 
 # How long a channel the platform could not name is left alone, so a deleted channel is
 # asked about once an hour, not on every page.
 _MISS_TTL_S = 3600.0
 _LOOKUP_TIMEOUT_S = 3.0
+# At most this many platform calls per lookup, this many at once: a page that lists many
+# unnamed channels must not turn into a burst of requests to the platform.
+_MAX_LOOKUPS = 20
+_LOOKUP_CONCURRENCY = 5
 _MISS_MEMO_SIZE = 5_000
 _missed: OrderedDict[tuple[uuid.UUID, str, str], float] = OrderedDict()
 
@@ -374,28 +381,33 @@ async def lookup_channel_names(
     *,
     tenant_id: uuid.UUID,
     platform: str,
+    external_id: str,
     channel_ids: Collection[str],
     lookup: ChannelLookup,
 ) -> dict[str, str]:
     """Ask the platform for channels the store has no name for, and remember what it says.
 
-    Only for ids the stored names missed. A channel the platform could not name is not
-    asked again for an hour. Never raises and never waits past a few seconds.
+    Only for ids the stored names missed, at most `_MAX_LOOKUPS` per call (the rest wait for
+    a later call). A channel the platform could not name is not asked again for an hour.
+    Never raises and never waits past a few seconds.
     """
     now = time.monotonic()
     ids = [
         cid
         for cid in dict.fromkeys(channel_ids)
         if now - _missed.get((tenant_id, platform, cid), -_MISS_TTL_S) >= _MISS_TTL_S
-    ]
+    ][:_MAX_LOOKUPS]
     if not ids:
         return {}
+    gate = asyncio.Semaphore(_LOOKUP_CONCURRENCY)
 
     async def one(channel_id: str) -> str | None:
-        try:
-            return _clean(await lookup(channel_id))
-        except Exception:
-            return None
+        async with gate:
+            try:
+                return _clean(await lookup(external_id, channel_id))
+            except Exception:
+                # Boundary: the lookup is the caller's network call; a name is optional.
+                return None
 
     tasks = {asyncio.create_task(one(cid)): cid for cid in ids}
     done, pending = await asyncio.wait(tasks, timeout=_LOOKUP_TIMEOUT_S)

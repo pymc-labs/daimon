@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal, get_args, get_type_hints
@@ -625,11 +625,12 @@ class _TenantPlaces:
     channels: Sequence[ChannelConfigRow]
     dm_origins: Sequence[DmOrigin]
     channel_names: Mapping[str, str]
+    external_id: str
+    unnamed: frozenset[str]
+    """Channels the store has no name for, left to the platform lookup after the session closes."""
 
 
-async def _tenant_places(
-    session: AsyncSession, tenant_id: uuid.UUID, deps: AgentViewDeps
-) -> _TenantPlaces:
+async def _tenant_places(session: AsyncSession, tenant_id: uuid.UUID) -> _TenantPlaces:
     tenant = await get_tenant(session, tenant_id)
     if tenant is None:
         raise StoreError(f"no tenant {tenant_id}")
@@ -640,14 +641,6 @@ async def _tenant_places(
     names = await platform_names.get_channel_names(
         session, tenant_id=tenant_id, platform=tenant.platform, channel_ids=wanted
     )
-    if deps.channel_lookup is not None and (missing := wanted - names.keys()):
-        names |= await lookup_channel_names(
-            deps.session_factory,
-            tenant_id=tenant_id,
-            platform=tenant.platform,
-            channel_ids=missing,
-            lookup=deps.channel_lookup,
-        )
     return _TenantPlaces(
         tenant.platform,
         policy,
@@ -655,7 +648,29 @@ async def _tenant_places(
         channels,
         await list_dm_origins(session, tenant_id=tenant_id),
         names,
+        tenant.external_id,
+        frozenset(wanted - names.keys()),
     )
+
+
+async def _named_places(
+    places: _TenantPlaces, deps: AgentViewDeps, tenant_id: uuid.UUID
+) -> _TenantPlaces:
+    """``places`` with the names the platform gave for channels the store had none for.
+
+    Runs with no database session held: the lookup is a network call.
+    """
+    if deps.channel_lookup is None or places.platform != "discord" or not places.unnamed:
+        return places
+    found = await lookup_channel_names(
+        deps.session_factory,
+        tenant_id=tenant_id,
+        platform=places.platform,
+        external_id=places.external_id,
+        channel_ids=places.unnamed,
+        lookup=deps.channel_lookup,
+    )
+    return replace(places, channel_names={**places.channel_names, **found})
 
 
 async def _listed_tools(
@@ -699,7 +714,9 @@ async def load_agent_facts(
     )
     facts: list[AgentFacts] = []
     async with deps.session_factory() as session:
-        shared = await _tenant_places(session, tenant_id, deps)
+        shared = await _tenant_places(session, tenant_id)
+    shared = await _named_places(shared, deps, tenant_id)
+    async with deps.session_factory() as session:
         # The credit pages' source: billed spend by agent, markup included.
         costs = (
             await usage_events.costs_by_agent_in_tenant_since(
