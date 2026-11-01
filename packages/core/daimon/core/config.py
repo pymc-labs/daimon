@@ -1151,6 +1151,16 @@ class WebOidcSettings(BaseModel):
             "Empty: the provider alone decides who may sign in."
         ),
     )
+    trust_chat_accounts: bool = Field(
+        default=False,
+        description=(
+            "Trust the provider's `chat_accounts` ID token claim: a list of "
+            "`discord:<user id>`, `slack:<team id>:<user id>` and "
+            "`teams:<tenant id>:<user object id>`. A person then also signs in to every "
+            "chat workspace where one of those accounts is a member, acting as it. Turn on "
+            "only for a provider that verifies those accounts itself."
+        ),
+    )
 
     _split_lists = field_validator("scopes", "allowed_domains", mode="before")(_split_csv)
     _icon_form = field_validator("icon")(_icon)
@@ -1274,6 +1284,15 @@ class EmbeddedAppSettings(BaseModel):
         description=(
             "Issuer of the sign-in provider whose access tokens the app accepts. A person "
             "signed in with that provider gets their token passed to the app. Unset: none is."
+        ),
+    )
+    identity_server: str | None = Field(
+        default=None,
+        description=(
+            "Name of a `DAIMON_MCP_IDENTITY__SERVERS` entry. A person signed in another way "
+            "then gets a token for the app by token exchange at `oidc_issuer`: Daimon signs "
+            "who they are with `DAIMON_MCP_IDENTITY__SIGNING_KEY`, using that entry's issuer "
+            "id. Needs `oidc_issuer` to be the web sign-in provider. Unset: no exchange."
         ),
     )
 
@@ -2429,7 +2448,8 @@ class McpIdentitySettings(BaseModel):
             "Ed25519 private key that signs caller identities for the servers in "
             "DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte "
             "seed. Generate one with `daimon mcp identity-keygen`, which also prints the "
-            "public key to register with each server. Read only by the mcp service."
+            "public key to register with each server. Read by the mcp service, and by the "
+            "web service when an embedded app sets identity_server."
         ),
     )
     servers: Annotated[list[SignedIdentityServer], NoDecode] = Field(
@@ -2774,6 +2794,30 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"DAIMON_WEB__PROVIDERS lists {provider}, which needs {what}. "
                     "Set them or drop it from the list."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _app_token_exchange_is_complete(self) -> Settings:
+        """An app that exchanges tokens names a known server, a key, and the web provider."""
+        web = self.web
+        for app in () if web is None else web.apps:
+            if app.identity_server is None:
+                continue
+            where = f"DAIMON_WEB__APPS entry {app.key!r}"
+            if not any(s.name == app.identity_server for s in self.mcp_identity.servers):
+                raise ValueError(
+                    f"{where} names identity_server {app.identity_server!r}, which is not in "
+                    "DAIMON_MCP_IDENTITY__SERVERS"
+                )
+            if self.mcp_identity.signing_key is None:
+                raise ValueError(
+                    f"{where} sets identity_server, which needs DAIMON_MCP_IDENTITY__SIGNING_KEY"
+                )
+            if web is None or web.oidc is None or app.oidc_issuer != web.oidc.issuer:
+                raise ValueError(
+                    f"{where} sets identity_server, which needs oidc_issuer to be "
+                    "DAIMON_WEB__OIDC__ISSUER"
                 )
         return self
 

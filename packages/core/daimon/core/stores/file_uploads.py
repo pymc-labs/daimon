@@ -21,7 +21,17 @@ from typing import Any, cast
 
 from daimon.core._models import FileUpload, WebMessage
 from daimon.core.stores.domain import FileUploadRow
-from sqlalchemy import CursorResult, Select, and_, delete, func, literal_column, or_, select
+from sqlalchemy import (
+    CursorResult,
+    Select,
+    and_,
+    delete,
+    func,
+    literal_column,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Matches Discord's per-file upload ceiling — a larger row could never be
@@ -175,6 +185,16 @@ async def person_upload_bytes(session: AsyncSession, *, person_id: uuid.UUID) ->
         )
     )
     return int(total or 0)
+
+
+async def move_person_uploads(
+    session: AsyncSession, *, from_person_id: uuid.UUID, to_person_id: uuid.UUID
+) -> None:
+    await session.execute(
+        update(FileUpload)
+        .where(FileUpload.person_id == from_person_id)
+        .values(person_id=to_person_id)
+    )
 
 
 async def lock_person_uploads(session: AsyncSession, *, person_id: uuid.UUID) -> None:
