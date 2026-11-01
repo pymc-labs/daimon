@@ -306,6 +306,10 @@ def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
         for step in steps
         if step.get("name", "").startswith("Build + push")
     }
+    # A build lands on the tag the images step chose, never straight on the short SHA.
+    assert {
+        step["with"]["tags"] for step in steps if step.get("name", "").startswith("Build + push")
+    } == {f"${{{{ steps.images.outputs.{name} }}}}" for name in ("daimon", "notebook", "report")}
     assert builds == {
         f"Build + push {name} image": f"steps.images.outputs.build_{output} == 'true'"
         for name, output in (
@@ -330,6 +334,7 @@ _RECORDED = {
     "report": "example.test/test-project/images/report-host@sha256:" + "f" * 64,
 }
 _TAGS = {name: f"example/{name}:abc1234" for name in ("daimon", "notebook", "report")}
+_RUN_TAG = "deploy-7-1"
 
 
 @pytest.mark.parametrize(
@@ -354,7 +359,7 @@ _TAGS = {name: f"example/{name}:abc1234" for name in ("daimon", "notebook", "rep
         }),
         ("staging", True, {}, ("report",), {
             "daimon": _RECORDED["daimon"],
-            "report": _TAGS["report"],
+            "report": f"example.test/test-project/images/report-host:{_RUN_TAG}",
             "build_daimon": "false",
             "build_report": "true",
         }),
@@ -399,6 +404,7 @@ def test_image_selection_shell_validation(
         "ZONE": "zone-a",
         "VM_PREFIX": "env-daimon",
         "SELECTIVE": str(selective).lower(),
+        "RUN_TAG": _RUN_TAG,
         **{f"{name.upper()}_DIGEST": digests.get(name, "") for name in _TAGS},
         **{f"{name.upper()}_CHANGED": str(name in changed).lower() for name in _TAGS},
         **{f"REC_{name.upper()}": ref for name, ref in _RECORDED.items()},
@@ -419,7 +425,16 @@ def test_image_selection_shell_validation(
     assert outputs == outputs | expected
 
 
-def test_unreadable_deployed_image_is_rebuilt(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("recorded", "served"),
+    [
+        # From another registry path: never reused.
+        ("elsewhere/daimon@sha256:" + "d" * 64, True),
+        # Deleted from the registry since it was deployed.
+        (_RECORDED["daimon"], False),
+    ],
+)
+def test_unusable_deployed_image_is_rebuilt(tmp_path: Path, recorded: str, served: bool) -> None:
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
     script = next(step["run"] for step in steps if step.get("id") == "images")
     script = script.replace("${{ inputs.environment }}", "staging")
@@ -435,13 +450,12 @@ def test_unreadable_deployed_image_is_rebuilt(tmp_path: Path) -> None:
         "ZONE": "zone-a",
         "VM_PREFIX": "env-daimon",
         "SELECTIVE": "true",
+        "RUN_TAG": _RUN_TAG,
         **{f"{name.upper()}_CHANGED": "false" for name in _TAGS},
     }
-    # A recorded ref from another registry path is never reused.
     fake = (
-        'gcloud() { case "$*" in *extract*) echo "elsewhere/daimon@sha256:'
-        + "d" * 64
-        + '" ;; esac; }\n'
+        f'gcloud() {{ case "$*" in *extract*) echo "{recorded}" ;; '
+        f"*images\\ describe*) return {0 if served else 1} ;; esac; }}\n"
     )
     result = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", fake + script],
@@ -452,8 +466,8 @@ def test_unreadable_deployed_image_is_rebuilt(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert {outputs[f"build_{name}"] for name in _TAGS} == {"true"}
-    assert outputs["daimon"] == _TAGS["daimon"]
+    assert outputs["build_daimon"] == "true"
+    assert outputs["daimon"] == f"example.test/test-project/images/daimon:{_RUN_TAG}"
 
 
 _RECORD_STEP = "Record deployed image digests for VM boot"
@@ -807,3 +821,56 @@ def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> Non
         "packages/core/tests/turn/test_staging_configuration_paths.py",
     ):
         assert selected in command
+
+
+_CLEAR_STEP = "Forget the deployed commit until this deploy passes"
+
+
+@pytest.mark.parametrize("removable", [True, False])
+def test_staging_forgets_its_deployed_commit_before_any_change(
+    tmp_path: Path, removable: bool
+) -> None:
+    """A deploy that stops midway leaves no record, so the next one is full."""
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    names = [step.get("name") for step in steps]
+    assert names.index("Plan the components to refresh") < names.index(_CLEAR_STEP)
+    assert names.index(_CLEAR_STEP) < names.index("Run migrations (blocking gate)")
+    step = steps[names.index(_CLEAR_STEP)]
+    assert without_freshness(step["if"]) == "inputs.environment == 'staging'"
+    state = tmp_path / "deployed-sha"
+    state.write_text("a" * 40)
+    fake = (
+        'gcloud() { case "$*" in *describe*) cat "$STATE" ;; '
+        '*remove-metadata*) [ "$REMOVABLE" = 1 ] && : > "$STATE" ;; esac; }\n'
+        "sleep() { :; }\n"
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", fake + step["run"]],
+        env={
+            **os.environ,
+            "STATE": str(state),
+            "REMOVABLE": str(int(removable)),
+            "WORKERS_VM": "vm",
+            "ZONE": "zone-a",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is removable, result.stderr
+    assert (state.read_text() == "") is removable
+
+
+def test_a_config_change_recreates_and_checks_every_worker() -> None:
+    steps = {step.get("name"): step for step in _workflow("deploy.yml")["jobs"]["deploy"]["steps"]}
+    run = steps["Refresh worker VM containers (recreate in place)"]["run"]
+    marker = "config changed: recreating every service"
+    assert run.index("before=$(config)") < run.index("daimon-refresh-env")
+    assert run.index(f'echo "{marker}"') < run.index("wants() {")
+    assert f'grep -q "^{marker}"' in run
+    reconcile = "steps.refresh.outputs.reconcile || steps.plan.outputs.reconcile"
+    settle = steps["Let the adapters' boot reconcile settle"]
+    assert settle["env"]["SERVICES"] == f"${{{{ {reconcile} }}}}"
+    for step in (settle, steps["Verify deployed installs match shipped defaults"]):
+        assert without_freshness(step["if"]) == f"({reconcile}) != ''"
+    assert "steps.refresh.outputs.smoke == 'true'" in steps["Post-deploy smoke turn"]["if"]

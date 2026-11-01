@@ -149,7 +149,9 @@ jobs:
       # deploy recorded its commit (scripts/ci/plan.py). Planned again here, not
       # taken from the candidate job: another deploy may have moved that record
       # since. Manual and production deploys refresh everything, inline, because
-      # a rollback checks out an old SHA that may not have the planner.
+      # a rollback checks out an old SHA that may not have the planner. A secret
+      # or worker config change applies with the next worker refresh, or at once
+      # through a manual deploy.
       - name: Plan the components to refresh
         if: steps.fresh.outputs.superseded != 'true'
         id: plan
@@ -186,6 +188,7 @@ jobs:
           NOTEBOOK_CHANGED: ${{ steps.plan.outputs.notebook_image }}
           REPORT_CHANGED: ${{ steps.plan.outputs.report_image }}
           VM_PREFIX: ${{ vars.GCP_AR_REPO }}
+          RUN_TAG: deploy-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           if [ "$SELECTIVE" != true ]; then
             if [ -n "$DAIMON_DIGEST$NOTEBOOK_DIGEST$REPORT_DIGEST" ]; then
@@ -205,34 +208,36 @@ jobs:
           fi
           BASE="$AR_HOST/${{ vars.GCP_PROJECT_ID }}/$REPO"
           # This run's candidate; else, unchanged since the last deploy, the image
-          # the VM boots; else a build from source below. A malformed candidate
-          # digest fails rather than falling back to a build.
+          # the VM boots; else a build from source below. A malformed or missing
+          # candidate fails rather than falling back to a build. A build here gets
+          # a run tag: the short-SHA tag promote.yml trusts comes only after the gates.
           select_image() {
-            local name="$1" package="$2" digest="$3" changed="$4" vm="$5" key="$6" tag="$7" ref=""
+            local name="$1" package="$2" digest="$3" changed="$4" vm="$5" key="$6" ref=""
             if [ -n "$digest" ]; then
               [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Malformed $name digest" >&2; return 1; }
               ref="$BASE/$package@$digest"
+              # Confirm the digest is a manifest Artifact Registry can serve.
+              gcloud artifacts docker images describe "$ref" --format=json >/dev/null
             elif [ "$changed" != true ]; then
               ref="$(gcloud compute instances describe "$vm" --zone "$ZONE" \
                 --format="value(metadata.items.extract($key).flatten())" || true)"
               [[ "$ref" =~ ^"$BASE/$package@"sha256:[0-9a-f]{64}$ ]] || ref=""
+              if [ -n "$ref" ] && ! gcloud artifacts docker images describe "$ref" --format=json >/dev/null; then
+                echo "::notice::$ref is no longer in the registry; building $name."
+                ref=""
+              fi
             fi
             if [ -z "$ref" ]; then
               echo "build_$name=true" >> "$GITHUB_OUTPUT"
-              echo "$name=$tag" >> "$GITHUB_OUTPUT"
+              echo "$name=$BASE/$package:$RUN_TAG" >> "$GITHUB_OUTPUT"
               return 0
             fi
-            # Confirm the digest is a manifest Artifact Registry can serve.
-            gcloud artifacts docker images describe "$ref" --format=json >/dev/null
             echo "build_$name=false" >> "$GITHUB_OUTPUT"
             echo "$name=$ref" >> "$GITHUB_OUTPUT"
           }
-          select_image daimon daimon "$DAIMON_DIGEST" "$DAIMON_CHANGED" \
-            "$VM_PREFIX-workers" daimon-image "${{ steps.tags.outputs.daimon }}"
-          select_image notebook notebook-host "$NOTEBOOK_DIGEST" "$NOTEBOOK_CHANGED" \
-            "$VM_PREFIX-notebook" notebook-image "${{ steps.tags.outputs.notebook }}"
-          select_image report report-host "$REPORT_DIGEST" "$REPORT_CHANGED" \
-            "$VM_PREFIX-notebook" report-image "${{ steps.tags.outputs.report }}"
+          select_image daimon daimon "$DAIMON_DIGEST" "$DAIMON_CHANGED" "$VM_PREFIX-workers" daimon-image
+          select_image notebook notebook-host "$NOTEBOOK_DIGEST" "$NOTEBOOK_CHANGED" "$VM_PREFIX-notebook" notebook-image
+          select_image report report-host "$REPORT_DIGEST" "$REPORT_CHANGED" "$VM_PREFIX-notebook" report-image
           echo "prebuilt=true" >> "$GITHUB_OUTPUT"
 
       - name: Start staging IAP SSH key registration
@@ -261,7 +266,7 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          tags: ${{ steps.tags.outputs.daimon }}
+          tags: ${{ steps.images.outputs.daimon }}
           push: true
           build-args: DAIMON_RELEASE=${{ inputs.sha }}
           provenance: false
@@ -274,7 +279,7 @@ jobs:
         with:
           context: .
           file: apps/notebook-host/Dockerfile
-          tags: ${{ steps.tags.outputs.notebook }}
+          tags: ${{ steps.images.outputs.notebook }}
           push: true
           provenance: false
           sbom: false
@@ -286,11 +291,29 @@ jobs:
         with:
           context: .
           file: apps/report-host/Dockerfile
-          tags: ${{ steps.tags.outputs.report }}
+          tags: ${{ steps.images.outputs.report }}
           push: true
           provenance: false
           sbom: false
           cache-from: type=gha,scope=report-host
+
+      # Written again only by the record step, so a deploy that fails or is
+      # cancelled after this makes the next selective deploy a full one.
+      - name: Forget the deployed commit until this deploy passes
+        if: (inputs.environment == 'staging') && steps.fresh.outputs.superseded != 'true'
+        env:
+          WORKERS_VM: ${{ vars.GCP_AR_REPO }}-workers
+        run: |
+          cleared() {
+            local value
+            value=$(gcloud compute instances describe "$WORKERS_VM" --zone "$ZONE" \
+              --format='value(metadata.items.extract(deployed-sha).flatten())') && [ -z "$value" ]
+          }
+          for attempt in 1 2 3; do
+            cleared && exit 0
+            gcloud compute instances remove-metadata "$WORKERS_VM" --zone "$ZONE" --keys deployed-sha || sleep 5
+          done
+          cleared || { echo "Could not clear deployed-sha on $WORKERS_VM" >&2; exit 1; }
 
       - name: Run migrations (blocking gate)
         if: (steps.plan.outputs.migrate == 'true') && steps.fresh.outputs.superseded != 'true'
@@ -484,7 +507,9 @@ jobs:
 
       - name: Refresh worker VM containers (recreate in place)
         if: (steps.plan.outputs.workers != '') && steps.fresh.outputs.superseded != 'true'
+        id: refresh
         run: |
+          set -o pipefail
           # Skip the refresh when the workers VM is stopped (nothing to recreate).
           STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-workers \
             --zone "$ZONE" --format='value(status)')
@@ -516,6 +541,8 @@ jobs:
               # exits nonzero on a permission or transient
               # Secret Manager failure, failing the deploy — intended: a
               # config the pipeline cannot assemble must not read green.
+              config() { sudo cat /etc/daimon/daimon.env /etc/daimon/compose.worker.yml 2>/dev/null | sha256sum || true; }
+              before=$(config)
               sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
               sudo chmod 755 /usr/local/bin/daimon-refresh-env
               sudo /usr/local/bin/daimon-refresh-env
@@ -533,6 +560,11 @@ jobs:
               # Main CI recreates only the services whose files changed; the rest
               # keep running. "all" is every service in the compose file.
               services="${{ steps.plan.outputs.workers }}"
+              # A container reads its env and compose config only when recreated.
+              if [ "$services" != all ] && [ "$(config)" != "$before" ]; then
+                echo "config changed: recreating every service"
+                services=all
+              fi
               wants() { case " $services " in *" all "*|*" $1 "*) return 0 ;; esac; return 1; }
               # --timeout exceeds the 90s stop_grace_period in the worker asset.
               # The adapters drain in-flight turns for up to 60s
@@ -659,7 +691,11 @@ jobs:
               # each deploy leaves a ~1GB tag behind, and a full root disk
               # breaks IAP SSH key writes (breaking this very refresh step).
               sudo docker image prune -af || true
-            '
+            ' | tee "$RUNNER_TEMP/workers-refresh.log"
+          # Every service restarted, so the checks after this cover them all.
+          if grep -q "^config changed: recreating every service" "$RUNNER_TEMP/workers-refresh.log"; then
+            printf '%s\n' "reconcile=discord slack teams" smoke=true >> "$GITHUB_OUTPUT"
+          fi
           date +%s > "$RUNNER_TEMP/workers-refreshed-at"
 
       - name: Wait for notebook-host VM refresh
@@ -716,7 +752,7 @@ jobs:
           echo "mcp did not become healthy" >&2; exit 1
 
       - name: Post-deploy smoke turn
-        if: (inputs.environment == 'staging' && steps.plan.outputs.smoke == 'true') && steps.fresh.outputs.superseded != 'true'
+        if: (inputs.environment == 'staging' && (steps.plan.outputs.smoke == 'true' || steps.refresh.outputs.smoke == 'true')) && steps.fresh.outputs.superseded != 'true'
         timeout-minutes: 5
         run: |
           # Deliberately no VM-status precheck and no error-suppressing fallback
@@ -733,10 +769,10 @@ jobs:
             '
 
       - name: Let the adapters' boot reconcile settle
-        if: (steps.plan.outputs.reconcile != '') && steps.fresh.outputs.superseded != 'true'
+        if: ((steps.refresh.outputs.reconcile || steps.plan.outputs.reconcile) != '') && steps.fresh.outputs.superseded != 'true'
         env:
           DAIMON_IMAGE: ${{ steps.images.outputs.daimon }}
-          SERVICES: ${{ steps.plan.outputs.reconcile }}
+          SERVICES: ${{ steps.refresh.outputs.reconcile || steps.plan.outputs.reconcile }}
         run: |
           # After it starts, each adapter reconciles its installs against the
           # shipped defaults in the background; the verify below would read a
@@ -832,7 +868,7 @@ jobs:
           fi
 
       - name: Verify deployed installs match shipped defaults
-        if: (steps.plan.outputs.reconcile != '') && steps.fresh.outputs.superseded != 'true'
+        if: ((steps.refresh.outputs.reconcile || steps.plan.outputs.reconcile) != '') && steps.fresh.outputs.superseded != 'true'
         # No environment gate, deliberately: this runs on every staging deploy
         # that restarts an adapter that reconciles installs, AND every production
         # promote — unlike the smoke turn above, which is scoped to staging only.
