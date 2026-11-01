@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -20,6 +21,7 @@ from daimon.core.defaults.loader import DeploymentDefault
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef, TenantScopeRef
+from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
@@ -30,6 +32,8 @@ from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_NOW = datetime(2026, 5, 1, tzinfo=UTC)
 
 
 def _runtime(client: AsyncAnthropic, session_factory: Any) -> McpRuntime:
@@ -119,6 +123,31 @@ async def test_list_daimons_spans_every_tenant_and_disambiguates_same_names(
         str(derive_agent_uuid(tenant_id=t2.tenant_id, ma_agent_id="ag_2")),
     }, f"ids must be the derived per-agent UUIDs, got {[d.id for d in daimons]!r}"
     assert daimons[0].platform == "discord" and daimons[0].role_summary.startswith("Answers ops")
+
+
+async def test_a_workspace_the_caller_left_drops_out_on_the_next_call(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    hub = await _two_tenant_hub(db_session)
+    t1, t2 = hub.tenants
+    await members_store.replace_members(
+        db_session, tenant_id=t1.tenant_id, members={}, workspace_name="PyMC", now=_NOW
+    )
+    await db_session.commit()
+    client = build_fake_anthropic(
+        _agents_router(
+            {t1.tenant_id: [("ag_1", "helper")], t2.tenant_id: [("ag_2", "helper")]}
+        ).dispatch
+    )
+    runtime = _runtime(client, db_session_factory)
+
+    daimons = await _list_daimons_impl(runtime, hub)
+
+    assert [d.workspace for d in daimons] == ["Bayes"], "the list without them decides"
+    with pytest.raises(ToolError):
+        await _resolve_daimon(
+            runtime, hub, str(derive_agent_uuid(tenant_id=t1.tenant_id, ma_agent_id="ag_1"))
+        )
 
 
 async def test_list_daimons_leaves_out_only_a_tenant_whose_policy_cant_be_read(

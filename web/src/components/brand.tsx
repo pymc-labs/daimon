@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { Database, Globe, KeyRound, Link2, Mail, Plug } from "lucide-react"
 import { siDiscord, siGithub, siGoogle } from "simple-icons"
 
@@ -15,7 +16,8 @@ export const APP_ICONS: Record<string, typeof Database> = { database: Database, 
 const IMAGE_ICON = /^data:image\/(?:svg\+xml|png);base64,/
 
 export function AppIcon({ icon, className }: { icon: string; className?: string }) {
-  if (IMAGE_ICON.test(icon)) return <img src={icon} alt="" className={cn("size-4 shrink-0 object-contain", className)} />
+  const [broken, setBroken] = useState<string | null>(null)
+  if (IMAGE_ICON.test(icon) && broken !== icon) return <img src={icon} alt="" onError={() => setBroken(icon)} className={cn("size-4 shrink-0 object-contain", className)} />
   const I = APP_ICONS[icon] ?? Database
   return <I className={cn("size-4 shrink-0", className)} strokeWidth={1.75} />
 }

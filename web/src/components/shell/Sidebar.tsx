@@ -1,12 +1,12 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import {
-  Check, ChevronsUpDown, Database, Keyboard, Link2, LogOut, Monitor, Moon, MoreHorizontal, Plus, Search, Sun, UserRound,
+  Check, ChevronsUpDown, Keyboard, Link2, LogOut, Monitor, Moon, MoreHorizontal, Plus, Search, Sun, UserRound,
 } from "lucide-react"
 import { useMemo, useState } from "react"
 import { Link, NavLink, useMatch, useNavigate } from "react-router"
 import { toast } from "sonner"
 
-import { APP_ICONS, AppIcon, BrandIcon, Logo } from "@/components/brand"
+import { AppIcon, BrandIcon, Logo } from "@/components/brand"
 import { AgentAvatar, Avatar, Kbd } from "@/components/common"
 import { useConfirm } from "@/components/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
@@ -21,7 +21,7 @@ import { useTheme } from "@/lib/theme"
 import type { ChatSession, Me, Person } from "@/lib/types"
 import { cn, MOD } from "@/lib/utils"
 import { evict } from "@/modules/chat/turns"
-import { navFor } from "@/modules/registry"
+import { isAppItem, sidebarFor } from "@/modules/registry"
 import { signOut } from "./auth"
 import { ShellCtx } from "./shell-context"
 import { RenameDialog } from "./RenameDialog"
@@ -52,30 +52,13 @@ export function Sidebar() {
         </Link>
       </div>
       <nav className="space-y-0.5 px-3">
-        {navFor(me).map(({ to, label, icon: Icon, end }) => (
-          <NavLink key={to} to={to} end={end} className={({ isActive }) => itemCls(isActive || (to === "/chat" && chatOpen))}>
-            <Icon className="size-4" strokeWidth={1.75} />
-            {label}
+        {sidebarFor(me).map((item) => (
+          <NavLink key={item.to} to={item.to} end={item.end} title={isAppItem(item) ? item.app.name : undefined} className={({ isActive }) => itemCls(isActive || (item.to === "/chat" && chatOpen))}>
+            {isAppItem(item) ? <AppIcon icon={item.icon} className="size-4" /> : <item.icon className="size-4" strokeWidth={1.75} />}
+            {item.label}
           </NavLink>
         ))}
       </nav>
-      {me.apps.map((app) => (
-        <nav key={app.key} className="mt-4 space-y-0.5 px-3" aria-label={app.name}>
-          <div className="flex items-center gap-1.5 px-2.5 pb-1 text-xs font-medium text-muted-foreground">
-            <AppIcon icon={app.icon} className="size-3.5" />
-            {app.name}
-          </div>
-          {app.nav.map((n) => {
-            const Icon = APP_ICONS[n.icon] ?? Database
-            return (
-              <NavLink key={n.path} to={`/apps/${app.key}${n.path}`} className={({ isActive }) => itemCls(isActive)}>
-                <Icon className="size-4" strokeWidth={1.75} />
-                {n.label}
-              </NavLink>
-            )
-          })}
-        </nav>
-      ))}
       <RecentChats />
       {me.credit && (
         <CreditLink me={me}>

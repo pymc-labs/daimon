@@ -105,6 +105,18 @@ def test_diff_config_lists_each_change_with_its_key() -> None:
     assert agent_changes.diff_config(a, a) == [], "no change, no entries"
 
 
+def test_a_new_skill_version_is_an_edit_of_the_pinned_version() -> None:
+    newer = SkillDoc(type="custom", skill_id="sk_a", title="Notes", version="2")
+    (change,) = agent_changes.diff_config(_config(), _config(skills=[newer]))
+    assert (change.key, change.kind, change.before, change.after) == (
+        "skill:sk_a",
+        "edit",
+        "1",
+        "2",
+    )
+    assert not change.text, "a skill's files are not diffed as one text"
+
+
 def test_model_backend_switch_is_threads_and_unsupported() -> None:
     a = _config()
     b = _config(model=ModelChoice(id="gpt-5.5", backend="openai", speed="standard", effort="high"))

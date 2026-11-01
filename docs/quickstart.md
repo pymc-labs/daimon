@@ -49,8 +49,11 @@ gitignored. `.env.example` documents every other setting.
    [Discord Developer Portal](https://discord.com/developers/applications).
 2. Under **Bot**, create a bot user and copy its token into `.env` as
    `DAIMON_DISCORD__BOT_TOKEN`.
-3. Still under **Bot**, enable the **Message Content Intent**. It is a
-   privileged intent, and without it the bot cannot read mentions.
+3. Still under **Bot**, enable the **Message Content Intent** and the
+   **Server Members Intent**. Both are privileged: the first lets the bot read
+   mentions, the second keeps web access in step with who is in the server.
+   The bot cannot connect without the first. Without the second it connects,
+   and web access goes by what each sign-in proves.
 4. Under **OAuth2 > URL Generator**, select the `bot` and
    `applications.commands` scopes.
 5. Under **Bot Permissions**, select `View Channels`, `Send Messages`,
@@ -92,7 +95,8 @@ and posts the result there. Anyone in the server can follow up in the thread.
 
 - Run `docker compose logs discord`. An unset `DAIMON_DISCORD__BOT_TOKEN` is
   the usual cause.
-- Confirm the Message Content Intent is on and the bot can see the channel.
+- Confirm the Message Content and Server Members intents are on and the bot
+  can see the channel.
 - Run `docker compose ps` and check that `mcp`, `discord` and `scheduler` are
   up. A service that exits at start usually names the missing variable in its
   log.

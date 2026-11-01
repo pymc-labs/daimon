@@ -73,7 +73,8 @@ async def test_me_has_the_shape_the_app_reads(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    person = await make_web_person(db_session, email="ada@example.com")
+    tenant = await make_tenant(db_session, platform="web")
+    person = await make_web_person(db_session, tenant=tenant, email="ada@example.com")
     await db_session.commit()
     token = await _sign_in_as(db_session_factory, person)
     app = EmbeddedAppSettings(

@@ -87,8 +87,9 @@ OpenAI key instead, no Anthropic account at all? Skip to
 
 2. Create a Discord bot in the
    [Developer Portal](https://discord.com/developers/applications), enable
-   the **Message Content Intent**, put its token in `.env` as
-   `DAIMON_DISCORD__BOT_TOKEN`, and invite it to a server you control.
+   the **Message Content Intent** and **Server Members Intent**, put its
+   token in `.env` as `DAIMON_DISCORD__BOT_TOKEN`, and invite it to a server
+   you control.
 
 3. Start the stack.
 

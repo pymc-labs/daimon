@@ -7,6 +7,7 @@ from daimon.adapters.web.admin import admin_router
 from daimon.adapters.web.agents import agents_router
 from daimon.adapters.web.apps import apps_router
 from daimon.adapters.web.auth import auth_router
+from daimon.adapters.web.avatars import avatars_router
 from daimon.adapters.web.chat import chat_router
 from daimon.adapters.web.credits import credits_router
 from daimon.adapters.web.invites import invites_router
@@ -63,6 +64,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.add_middleware(SecurityMiddleware, web=runtime.web)
     app.include_router(_health_router(runtime))
     app.include_router(auth_router(runtime))
+    app.include_router(avatars_router(runtime))
     app.include_router(me_router(runtime))
     app.include_router(agents_router(runtime))
     app.include_router(chat_router(runtime))

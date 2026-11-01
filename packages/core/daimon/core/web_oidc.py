@@ -1,9 +1,9 @@
 """OpenID Connect sign-in for the web app: authorization code with PKCE.
 
-Discovery, the authorize URL, code exchange, refresh and ID token verification, all
-against an injected `httpx.AsyncClient`. Verification is pure given the provider's keys
-and a clock reading, so the checks that matter (signature, issuer, audience, expiry,
-nonce) are unit-tested with tokens signed in the test.
+Discovery, the authorize URL, code exchange, refresh, token exchange for a chat sign-in
+and ID token verification, all against an injected `httpx.AsyncClient`. Verification is
+pure given the provider's keys and a clock reading, so the checks that matter (signature,
+issuer, audience, expiry, nonce) are unit-tested with tokens signed in the test.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from urllib.parse import urlencode
 
 import httpx
 import jwt
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from daimon.core.chat_accounts import CHAT_ACCOUNTS_CLAIM, parse_chat_accounts
 from daimon.core.config import WebOidcSettings
 from daimon.core.errors import DaimonError
 from daimon.core.web_identity import VerifiedIdentity
@@ -31,6 +33,11 @@ _ALGORITHMS = frozenset(
 _LEEWAY = timedelta(seconds=60)
 _JWKS_TTL = timedelta(hours=1)
 _JWKS_MIN_REFETCH = timedelta(minutes=1)
+#: RFC 8693 token exchange, with a signed JWT naming who the token is for.
+TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
+JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
+#: A subject token is spent at once; this only bounds a replay.
+SUBJECT_TOKEN_TTL = timedelta(seconds=120)
 
 
 class OidcError(DaimonError):
@@ -218,6 +225,48 @@ async def refresh(
     )
 
 
+def sign_subject_token(
+    *,
+    key: Ed25519PrivateKey,
+    issuer: str,
+    audience: str,
+    subject: str,
+    workspace: str,
+    now: datetime,
+    jti: str,
+) -> str:
+    """The JWT a token exchange presents: who (`sub`) in which workspace (`ws`), each as
+    `<platform>:<id>`, signed EdDSA like a caller identity."""
+    issued = int(now.timestamp())
+    claims = {
+        "iss": issuer,
+        "aud": audience,
+        "iat": issued,
+        "exp": issued + int(SUBJECT_TOKEN_TTL.total_seconds()),
+        "jti": jti,
+        "sub": subject,
+        "ws": workspace,
+    }
+    return jwt.encode(claims, key, algorithm="EdDSA", headers={"typ": "JWT"})
+
+
+async def exchange_subject_token(
+    http: httpx.AsyncClient, meta: OidcMetadata, settings: WebOidcSettings, *, subject_token: str
+) -> OidcTokens:
+    """Trade a signed subject token for an access token, as the web client."""
+    return await _token_request(
+        http,
+        meta,
+        settings,
+        {
+            "grant_type": TOKEN_EXCHANGE_GRANT,
+            "subject_token": subject_token,
+            "subject_token_type": JWT_TOKEN_TYPE,
+            "scope": " ".join(settings.scopes),
+        },
+    )
+
+
 def _signing_key(jwks: jwt.PyJWKSet, kid: str | None) -> jwt.PyJWK:
     keys = list(jwks.keys)
     if kid is None:
@@ -261,7 +310,8 @@ def verify_id_token(
     """Check the ID token and read who signed in.
 
     Signature (asymmetric algorithms the provider advertises), issuer, audience,
-    expiry, not-before and nonce are all required to pass.
+    expiry, not-before and nonce are all required to pass. The chat accounts it vouches
+    for are read only where the settings trust them; malformed entries are dropped.
     """
     if tokens.id_token is None:
         raise OidcTokenInvalid("token response carried no id_token")
@@ -326,6 +376,11 @@ def verify_id_token(
         email=email_text,
         email_verified=_is_true(claims.get("email_verified")),
         groups=_claim_strings(claims.get(settings.groups_claim)),
+        chat_accounts=(
+            parse_chat_accounts(_claim_strings(claims.get(CHAT_ACCOUNTS_CLAIM)))
+            if settings.trust_chat_accounts
+            else ()
+        ),
     )
 
 

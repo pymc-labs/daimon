@@ -7,7 +7,7 @@ from collections.abc import Collection, Sequence
 
 from daimon.core._models import WebIdentity, WebPerson
 from daimon.core.stores.domain import WebIdentityRow
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,6 +56,20 @@ async def link_identity(
         .returning(WebIdentity)
     )
     return WebIdentityRow.model_validate((await session.execute(stmt)).scalar_one())
+
+
+async def delete_identity(
+    session: AsyncSession, *, tenant_id: uuid.UUID, provider: str, issuer: str, subject: str
+) -> None:
+    """Detach a login from whoever holds it in the workspace."""
+    await session.execute(
+        delete(WebIdentity).where(
+            WebIdentity.tenant_id == tenant_id,
+            WebIdentity.provider == provider,
+            WebIdentity.issuer == issuer,
+            WebIdentity.subject == subject,
+        )
+    )
 
 
 async def list_for_person(session: AsyncSession, *, person_id: uuid.UUID) -> list[WebIdentityRow]:

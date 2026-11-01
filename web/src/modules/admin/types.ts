@@ -30,6 +30,7 @@ export type AgentAccess = {
   who: "everyone" | "groups" | "invites"
   groups: string[]
   fixed_to: string | null
+  fixed_name: string | null
 }
 
 export type AuditEntry = { id: string; at: string; who: string; action: string; target: string; detail?: string }

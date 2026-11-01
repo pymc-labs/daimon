@@ -64,6 +64,7 @@ export const api = {
   },
   post: <T>(path: string, body: unknown = {}, retry = false) => request<T>("POST", path, body, retry),
   patch: <T>(path: string, body: unknown) => request<T>("PATCH", path, body, true),
+  put: <T>(path: string, body: unknown) => request<T>("PUT", path, body, true),
   del: <T>(path: string) => request<T>("DELETE", path),
 }
 

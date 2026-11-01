@@ -51,7 +51,8 @@ from daimon.adapters.discord.lifecycle import (
     drain_retained_card_tasks,
     edit_recovered_card,
 )
-from daimon.adapters.discord.names import remember_guild_user
+from daimon.adapters.discord.member_sync import MemberSync
+from daimon.adapters.discord.names import remember_guild_channels, remember_guild_user
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
@@ -695,7 +696,8 @@ class DaimonBot(commands.Bot):
         http_client: HTTPClient | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        super().__init__(command_prefix=[], intents=intents)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
+        # Member lists load in the background (MemberSync), so ready is never held for them.
+        super().__init__(command_prefix=[], intents=intents, chunk_guilds_at_startup=False)  # type: ignore[arg-type]  # discord.py expects Iterable but [] is valid
         # Explicit in-process ingress only; normal gateway/HTTP and time remain
         # untouched when neither dependency is supplied.
         if http_client is not None:
@@ -813,6 +815,8 @@ class DaimonBot(commands.Bot):
         # cleanup DB await while the completed turn still owns its thread.
         self._committed_message_ids: set[str] = set()
         self._orphans_retired: bool = False
+        self._member_sync = MemberSync(self.runtime.sessionmaker)
+        self._member_reload: asyncio.Task[None] | None = None
         self._orphan_sweep_lock = asyncio.Lock()
         self._orphan_retry_rows: list[ThreadSessionRow] = []
         self._boot_turn_card_intents: list[TurnCardIntentRow] | None = None
@@ -2044,7 +2048,18 @@ class DaimonBot(commands.Bot):
         )
         if non_production and not command_guild_ids:
             log.warning("discord_command_allowlist_empty", environment=environment_name)
+        for guild in self.guilds:
+            if self._allows_guild(guild.id):
+                remember_guild_channels(
+                    self.runtime.sessionmaker, guild_id=guild.id, channels=guild.channels
+                )
         await self._retire_orphaned_turns()
+        # Every ready: events missed while disconnected are not replayed. Without the
+        # members intent there is no list to load.
+        if self.intents.members and (self._member_reload is None or self._member_reload.done()):
+            self._member_reload = self._spawn(
+                self._member_sync.reload_all([g for g in self.guilds if self._allows_guild(g.id)])
+            )
         if not self._startup_replay_started:
             self._startup_replay_started = True
             self._spawn(self._replay_missed_messages())
@@ -2378,6 +2393,8 @@ class DaimonBot(commands.Bot):
             return
         # Background seed → flips status + posts the ✅/⚠️ follow-up.
         self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
+        if self.intents.members:
+            self._spawn(self._member_sync.reload_all([guild]))
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Soft-archive: stamp archived_at=now(). NO row delete."""
@@ -2392,6 +2409,7 @@ class DaimonBot(commands.Bot):
                 log.info("stale_guild_remove_skipped", guild_id=guild_id, guild_name=guild.name)
                 return
             await set_provision_status(self.runtime.sessionmaker, tenant_id=tenant_id, archive=True)
+            await self._member_sync.removed(guild.id)
         log.warning("guild_removed", guild_id=guild_id, guild_name=guild.name)
 
     def _cancel_participation_batch(self, thread_id: int) -> None:
@@ -2802,6 +2820,9 @@ class DaimonBot(commands.Bot):
         remember_guild_user(
             self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
         )
+        remember_guild_channels(
+            self.runtime.sessionmaker, guild_id=interaction.guild_id, channels=[interaction.channel]
+        )
 
     async def _notice_writers_none(self, message: discord.Message, tenant_id: uuid.UUID) -> None:
         """Opted-in, non-content host signal; never authorizes a post or a turn."""
@@ -3008,6 +3029,9 @@ class DaimonBot(commands.Bot):
         bot_display_name = _resolve_bot_display_name(self.runtime.settings)
         # For /billing's top spenders; in the background, never failing the turn.
         remember_guild_user(self.runtime.sessionmaker, guild_id=guild.id, user=message.author)
+        remember_guild_channels(
+            self.runtime.sessionmaker, guild_id=guild.id, channels=[message.channel]
+        )
 
         # --- Unified non-ready self-heal gate through turn completion,
         # guarded end-to-end. A DB hiccup or an unclassified bug
@@ -4385,18 +4409,44 @@ class DaimonBot(commands.Bot):
             return
         if before.permissions != after.permissions:
             clear_webhook_backoff(after.guild)
+            await self._member_sync.admins_changed(after.guild, after.members)
+
+    async def on_guild_role_delete(self, role: discord.Role) -> None:
+        # A new role has no members, so only a delete and an update move admin flags.
+        if self._allows_guild(role.guild.id):
+            await self._member_sync.admins_changed(role.guild, role.guild.members)
+
+    async def on_guild_update(self, before: discord.Guild, after: discord.Guild) -> None:
+        if not self._allows_guild(after.id) or before.owner_id == after.owner_id:
+            return
+        owners = {before.owner_id, after.owner_id}
+        await self._member_sync.admins_changed(after, [m for m in after.members if m.id in owners])
+
+    async def on_member_join(self, member: discord.Member) -> None:
+        if self._allows_guild(member.guild.id):
+            await self._member_sync.joined(member)
+
+    async def on_raw_member_remove(self, payload: discord.RawMemberRemoveEvent) -> None:
+        # Raw, so a member missing from the cache still leaves the list.
+        if self._allows_guild(payload.guild_id):
+            await self._member_sync.left(payload.guild_id, payload.user.id)
 
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
         if not self._allows_guild(after.guild.id):
             return
         if self.user is not None and after.id == self.user.id and before.roles != after.roles:
             clear_webhook_backoff(after.guild)
+        if before.roles != after.roles:
+            await self._member_sync.joined(after)
 
     async def on_guild_channel_update(
         self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
     ) -> None:
         if not self._allows_guild(after.guild.id):
             return
+        remember_guild_channels(
+            self.runtime.sessionmaker, guild_id=after.guild.id, channels=[after]
+        )
         if before.overwrites != after.overwrites:
             clear_webhook_backoff(after.guild)
 
