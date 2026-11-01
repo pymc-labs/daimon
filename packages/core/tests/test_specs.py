@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -599,3 +601,18 @@ def test_dump_agent_spec_excludes_isolated_from_ma_payload() -> None:
         "isolated must be excluded from dump_agent_spec output — an unexcluded "
         "field would be sent to MA as an unknown create/update parameter"
     )
+
+
+def test_importing_specs_emits_no_typeddict_extra_config_warning() -> None:
+    """The SDK's open custom-tool schema TypedDict must not inherit `extra="forbid"`."""
+    code = (
+        "import warnings\n"
+        "from pydantic.warnings import TypedDictExtraConfigWarning\n"
+        "with warnings.catch_warnings(record=True) as caught:\n"
+        "    warnings.simplefilter('always')\n"
+        "    import daimon.core.specs\n"
+        "hits = [str(w.message) for w in caught if issubclass(w.category, TypedDictExtraConfigWarning)]\n"
+        "assert not hits, hits\n"
+    )
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
