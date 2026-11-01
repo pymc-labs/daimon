@@ -170,7 +170,7 @@ class Rig:
         turns = build_turns(self.factory, build_turn_router(str(ws.tenant_id)), self.tmp_path)
         token = await signed_in(self.factory, ws.person if as_owner else member)
         async with self.web_client(
-            web_settings(ws.tenant_id, **(web or {})),
+            web_settings(**(web or {})),
             sessionmaker=self.factory,
             turns=turns,
             **options,
@@ -567,7 +567,7 @@ async def test_one_turn_is_the_same_charge_in_the_reply_the_meter_and_every_tota
     token = await signed_in(db_session_factory, ws.person)
     with one_session():
         async with web_client(
-            web_settings(ws.tenant_id), sessionmaker=db_session_factory, turns=turns
+            web_settings(), sessionmaker=db_session_factory, turns=turns
         ) as client:
             client.cookies.set("__Host-daimon_web", token, domain="web.example.com")
             client.headers.update(_OWN)

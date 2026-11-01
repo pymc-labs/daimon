@@ -778,3 +778,22 @@ async def revert(
             target=revert_target(base, AgentConfigDoc.model_validate(row.config)),
             note=f"Reverted to v{version}",
         )
+
+
+async def apply_change(
+    deps: AgentChangeDeps,
+    *,
+    actor: AgentActor,
+    ma_agent_id: str,
+    change: Callable[[AgentConfigDoc], AgentConfigDoc],
+    note: str,
+) -> BetaManagedAgentsAgent:
+    """Write `change` of the agent's current config as its next version, like an apply."""
+    async with _agent_edit_lock(deps, tenant_id=actor.tenant_id, agent_id=ma_agent_id):
+        agent = await agent_editing.load_editable_agent(
+            deps.edit, actor=actor, ma_agent_id=ma_agent_id
+        )
+        base = await current_config(deps, tenant_id=actor.tenant_id, agent=agent)
+        return await _write(
+            deps, actor=actor, agent=agent, base=base, target=change(base), note=note
+        )

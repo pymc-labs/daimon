@@ -22,13 +22,10 @@ ALL: tuple[WebModuleKey, ...] = ("chat", "agents", "credits", "admin")
         ({"workspace_grant": "owner"}, "owner"),
         ({"workspace_grant": "admin"}, "admin"),
         ({"platform_admin": True}, "admin"),
-        ({"group_roles": {"admin"}}, "admin"),
-        ({"group_roles": {"member"}}, "member"),
         ({"kind": "visitor"}, "visitor"),
         ({"kind": "visitor", "workspace_grant": "admin"}, "visitor"),
         ({"kind": "visitor", "workspace_grant": "owner"}, "visitor"),
         ({"kind": "visitor", "platform_admin": True}, "visitor"),
-        ({"kind": "visitor", "group_roles": {"admin"}}, "visitor"),
         ({"workspace_grant": "owner", "platform_admin": True}, "owner"),
     ],
 )
@@ -37,7 +34,6 @@ def test_role_is_the_highest_one_held(kwargs: dict[str, object], expected: Role)
         "kind": "member",
         "workspace_grant": None,
         "platform_admin": False,
-        "group_roles": set(),
     }
     assert role_for(**{**base, **kwargs}) == expected  # pyright: ignore[reportArgumentType]
 

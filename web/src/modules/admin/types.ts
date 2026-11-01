@@ -37,11 +37,5 @@ export type AuditEntry = { id: string; at: string; who: string; action: string; 
 
 export type WorkspaceSettings = {
   modules: Record<"chat" | "agents" | "credits", boolean>
-  /** Sign-in methods this deployment offers, each allowed or not for this workspace. */
-  signin: { id: string; label: string; icon?: string; enabled: boolean }[]
   default_agent: string
-  apps: { key: string; name: string; icon: string; url: string }[]
 }
-
-/** Whether each embedded app answers, by app key. */
-export type AppStatuses = Record<string, "connected" | "error">

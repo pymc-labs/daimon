@@ -75,9 +75,7 @@ async def _chat(
         patch("daimon.adapters.web.turns.run_prepared_turn", turn),
         patch("daimon.adapters.web.turns.sweep_session_outputs", sweep),
     ):
-        async with web_client(
-            web_settings(ws.tenant_id), sessionmaker=factory, turns=turns
-        ) as client:
+        async with web_client(web_settings(), sessionmaker=factory, turns=turns) as client:
             client.cookies.set("__Host-daimon_web", token, domain="web.example.com")
             client.headers.update(_HEADERS)
             sid = (await client.post("/api/chat/sessions", json={"agent_id": AGENT_ID})).json()[
@@ -111,8 +109,7 @@ async def test_a_shared_file_reaches_the_agent_as_a_link_anyone_with_it_can_fetc
     found = _LINK.search(asked[0])
     assert found is not None, f"the agent gets a link: {asked[0]}"
     assert "[attachment] `notes.txt`" in asked[0], "the line names the file"
-    ws = await funded_workspace(db_session_factory)
-    async with web_client(web_settings(ws.tenant_id), sessionmaker=db_session_factory) as bare:
+    async with web_client(web_settings(), sessionmaker=db_session_factory) as bare:
         missing = await bare.get(found.group(1))
     assert missing.status_code == 404, "without the turn's key the link opens nothing"
 
@@ -199,7 +196,7 @@ async def test_another_person_cannot_fetch_a_turns_file(
     file_id, _ = await _chat(web_client, db_session_factory, tmp_path, script)
     other = await funded_workspace(db_session_factory)
     token = await signed_in(db_session_factory, other.person)
-    async with web_client(web_settings(other.tenant_id), sessionmaker=db_session_factory) as c:
+    async with web_client(web_settings(), sessionmaker=db_session_factory) as c:
         c.cookies.set("__Host-daimon_web", token, domain="web.example.com")
         c.headers.update(_HEADERS)
         refused = await c.get(f"/api/chat/files/{file_id}")

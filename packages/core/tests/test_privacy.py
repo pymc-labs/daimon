@@ -507,7 +507,7 @@ async def test_preview_and_purge_agree_on_web_people_and_their_sessions(
     from datetime import UTC, datetime, timedelta
 
     from daimon.core.stores import web_identities as identities_store
-    from daimon.core.stores import web_oidc_tokens as oidc_tokens_store
+    from daimon.core.stores import web_node_tokens as node_tokens_store
     from daimon.core.stores import web_roles as roles_store
     from daimon.core.stores import web_sessions as sessions_store
     from daimon.testing import make_web_person
@@ -542,13 +542,12 @@ async def test_preview_and_purge_agree_on_web_people_and_their_sessions(
         ttl=timedelta(days=1),
         now=datetime.now(tz=UTC),
     )
-    await oidc_tokens_store.upsert_oidc_token(
+    await node_tokens_store.upsert_node_token(
         db_session,
         tenant_id=tenant.id,
         person_id=person.id,
-        issuer="https://id.example.com",
+        token_key="issuer-1#data",
         access_token_enc=b"a",
-        refresh_token_enc=None,
         expires_at=datetime.now(tz=UTC),
     )
     await db_session.commit()
@@ -567,10 +566,10 @@ async def test_preview_and_purge_agree_on_web_people_and_their_sessions(
         identities = await identities_store.find_identity(
             session, provider="oidc", issuer="https://id.example.com", subject="sub-1"
         )
-        token = await oidc_tokens_store.get_oidc_token(
-            session, person_id=person.id, issuer="https://id.example.com"
+        token = await node_tokens_store.get_node_token(
+            session, person_id=person.id, token_key="issuer-1#data"
         )
-    assert token is None, "the provider tokens must go with the person"
+    assert token is None, "the exchanged tokens must go with the person"
     assert live is None, "the browser session must go with the person"
     assert identities == [], "the sign-in identity must go with the person"
 

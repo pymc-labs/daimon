@@ -14,6 +14,7 @@ from daimon.adapters.web.boot_sweep import (
     sweep_orphaned_web_turns,
     sweep_stale_web_uploads_forever,
 )
+from daimon.adapters.web.nodes import NodeConfigError, build_nodes
 from daimon.adapters.web.owner_link import owner_link
 from daimon.adapters.web.runtime import build_runtime
 from daimon.adapters.web.single_process import WebProcessAlreadyRunning
@@ -55,17 +56,16 @@ async def main() -> None:
     if not settings.crypto.keys:
         log.error("web adapter requires DAIMON_CRYPTO__KEYS for token encryption")
         sys.exit(1)
-    needs = settings.web_provider_needs()
-    for provider in web.providers:
-        what, present = needs[provider]
-        if not present:
-            log.warning("web.provider.incomplete", provider=provider, needs=what)
-    if not web.dev and not any(needs[p][1] for p in web.providers):
+    if not web.dev and not settings.hub.discord_configured:
         log.error(
-            "web.providers.none_usable",
-            listed=list(web.providers),
-            hint="set the settings of at least one DAIMON_WEB__PROVIDERS method",
+            "web.signin.unconfigured",
+            hint="set DAIMON_HUB__DISCORD_CLIENT_ID and DAIMON_HUB__DISCORD_CLIENT_SECRET",
         )
+        sys.exit(1)
+    try:
+        build_nodes(settings)
+    except NodeConfigError as exc:
+        log.error("web.nodes.misconfigured", error=str(exc))
         sys.exit(1)
     init_sentry(
         dsn=settings.sentry.dsn.get_secret_value() if settings.sentry.dsn else None,

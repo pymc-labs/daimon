@@ -25,7 +25,6 @@ async def test_settings_default_to_everything_on_and_save_once_per_workspace(
         db_session,
         tenant_id=tenant.id,
         modules_off=["agents", "agents"],
-        signin_off=["slack"],
         default_agent="a1",
         now=_NOW,
     )
@@ -33,15 +32,14 @@ async def test_settings_default_to_everything_on_and_save_once_per_workspace(
         db_session,
         tenant_id=tenant.id,
         modules_off=["credits"],
-        signin_off=[],
         default_agent=None,
         now=_NOW,
     )
 
-    assert (fresh.modules_off, fresh.signin_off, fresh.default_agent) == ((), (), None), (
+    assert (fresh.modules_off, fresh.default_agent) == ((), None), (
         "a workspace that chose nothing has everything on"
     )
-    assert (saved.modules_off, saved.signin_off) == (("credits",), ()), "the last save wins"
+    assert saved.modules_off == ("credits",), "the last save wins"
     assert await settings.get_settings(db_session, tenant_id=tenant.id) == saved, "it is kept"
 
 

@@ -11,7 +11,7 @@ export function RenameDialog({ session, onClose }: { session: ChatSession | null
   return (
     <Dialog open={!!session} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-sm">
-        <DialogHeader><DialogTitle>Rename chat</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>Rename thread</DialogTitle></DialogHeader>
         {/* Keyed by session, so the draft title starts from that session's title each time it opens. */}
         <RenameForm key={session?.id} session={session} onClose={onClose} />
       </DialogContent>

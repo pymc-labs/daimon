@@ -4,7 +4,6 @@ import { Outlet, useLocation, useNavigate } from "react-router"
 import { Rows } from "@/components/QueryState"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useKey, useMe } from "@/lib/hooks"
-import { AppFrames } from "@/modules/apps/AppFrame"
 import { navFor } from "@/modules/registry"
 import { CommandPalette } from "./CommandPalette"
 import { ShellCtx } from "./shell-context"
@@ -53,12 +52,9 @@ export function AppShell() {
             <Sidebar />
           </SheetContent>
         </Sheet>
-        {!loc.pathname.startsWith("/apps/") && (
-          <div key={loc.pathname.split("/").slice(1, 3).join("/")} className="flex min-w-0 flex-1">
-            <Suspense fallback={<Rows className="w-full p-6" />}><Outlet /></Suspense>
-          </div>
-        )}
-        <AppFrames />
+        <div key={loc.pathname.split("/").slice(1, 3).join("/")} className="flex min-w-0 flex-1">
+          <Suspense fallback={<Rows className="w-full p-6" />}><Outlet /></Suspense>
+        </div>
       </div>
       <CommandPalette open={palette} onOpenChange={setPalette} />
       <ShortcutsDialog open={shortcuts} onOpenChange={setShortcuts} />

@@ -4,20 +4,21 @@ import {
   Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, Handle, type Node, Position, ReactFlow, useEdgesState, useNodesState, useReactFlow,
   useStore,
 } from "@xyflow/react"
-import type { ELK, ElkExtendedEdge, ElkNode } from "elkjs/lib/elk-api"
 import { Blocks, Cpu, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, Wrench } from "lucide-react"
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
-import { AppIcon } from "@/components/brand"
 import { AgentAvatar, Ago, Avatar, Money } from "@/components/common"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { useMe } from "@/lib/hooks"
 import { useTheme } from "@/lib/theme-context"
 import { cn } from "@/lib/utils"
 import { pressProps } from "@/lib/filters"
+import { useConnectNode } from "./api"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
+import { layoutNarrow, layoutWide, type Dep, type Plan, type Pt, type Size } from "./layout"
 import { EFFORT_LABEL, placeName } from "./lib"
-import type { Agent, AgentApp, AgentConfig, Catalog } from "./types"
+import { nodeId, nodeUi } from "./nodes/registry"
+import type { Agent, AgentConfig, AgentNode as ConnectionNode, Catalog } from "./types"
 
 type Ctx = {
   agent: Agent
@@ -27,6 +28,7 @@ type Ctx = {
   changedNodes: Set<string>
   selected: string
   select: (id: string) => void
+  ro: boolean
 }
 const CanvasCtx = createContext<Ctx>(null!)
 const useCanvas = () => useContext(CanvasCtx)
@@ -158,9 +160,9 @@ function ModelNode() {
 function PlacesNode() {
   const { config, agent } = useCanvas()
   return (
-    <Card id="places" icon={<Blocks />} title="Where it runs" count={config.places?.length}>
+    <Card id="places" icon={<Blocks />} title="Channels" count={config.places?.length}>
       {config.places == null ? <Locked who={agent.owner.name} className="p-3" /> : !config.places.length ? (
-        <div className="p-3 text-xs text-faint">Nowhere yet</div>
+        <div className="p-3 text-xs text-faint">None</div>
       ) : (
         <div className="py-1">
           {config.places.map((p) => (
@@ -174,12 +176,6 @@ function PlacesNode() {
       )}
     </Card>
   )
-}
-
-function AppNode({ id }: { id: string }) {
-  const app = useMe().data?.apps.find((a) => `app:${a.key}` === id)
-  if (!app) return null
-  return <Card id={id} icon={<AppIcon icon={app.icon} />} title={app.name} />
 }
 
 function SkillsNode() {
@@ -206,7 +202,7 @@ function ToolsNode() {
   const { config, catalog, changed } = useCanvas()
   const on = config.tools.filter((t) => t.enabled)
   return (
-    <Card id="tools" icon={<Wrench />} title="Built-in tools" count={`${on.length}/${config.tools.length}`}>
+    <Card id="tools" icon={<Wrench />} title="Tools" count={`${on.length}/${config.tools.length}`}>
       <div className="flex flex-wrap gap-1 p-3">
         {on.map((t) => (
           <Pill key={t.name} className={cn("text-foreground/80", changed.has(`tool:${t.name}`) && "border-link/40 text-link")}>
@@ -221,17 +217,15 @@ function ToolsNode() {
 
 function McpNode({ id }: { id: string }) {
   const { config } = useCanvas()
-  const apps = useMe().data?.apps
   const s = config.mcp_servers.find((x) => `mcp:${x.key}` === id)
   if (!s) return null
-  const app = apps?.find((a) => a.key === s.app)
   const cred = s.credential === "expired" ? <span className="text-[11px] font-medium text-destructive">Expired</span>
       : s.credential === "missing" ? <span className="text-[11px] font-medium text-warning">Not signed in</span> : null
   return (
     <Card
       id={id}
       className="w-64"
-      icon={app ? <AppIcon icon={app.icon} /> : <Plug />}
+      icon={<Plug />}
       title={s.name}
       count={s.tools.length}
       action={cred && <Tooltip><TooltipTrigger asChild><span className="flex items-center">{cred}</span></TooltipTrigger><TooltipContent>Sign in again</TooltipContent></Tooltip>}
@@ -248,14 +242,60 @@ function McpNode({ id }: { id: string }) {
   )
 }
 
+/** A platform node: the kind's own card body under its label. */
+function PlatformNode({ id }: { id: string }) {
+  const { agent } = useCanvas()
+  const node = agent.nodes.find((n) => nodeId(n.kind) === id)
+  if (!node) return null
+  const ui = nodeUi(node.kind)
+  return <Card id={id} className="w-64" icon={<ui.icon />} title={node.label}><ui.Card agent={agent} node={node} /></Card>
+}
+
+/** The Connections branch: its count, and adding an MCP server or a node kind not yet attached. */
+function HubNode() {
+  const { agent, config, select, ro } = useCanvas()
+  const connect = useConnectNode(agent.id)
+  const n = connections(agent, config).length
+  const addable = agent.nodes.filter((x) => x.server == null)
+  return (
+    <div className="flex h-8 items-center gap-1.5 rounded-full border bg-card pr-1 pl-3 text-xs shadow-[0_1px_3px_rgb(0_0_0/0.05)]">
+      <Handle type="target" position={Position.Top} isConnectable={false} className="!pointer-events-none !opacity-0" />
+      <Handle type="source" position={Position.Bottom} isConnectable={false} className="!pointer-events-none !opacity-0" />
+      <span className="font-medium">Connections</span>
+      <span className="text-faint tabular">{n}</span>
+      {ro ? <span className="w-1.5" /> : (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="flex size-6 items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="Add connection">
+              <Plus className="size-3.5" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="center" className="w-48">
+            <DropdownMenuItem onSelect={() => select("mcp:new")}><Plug />MCP server</DropdownMenuItem>
+            {addable.map((x) => {
+              const Icon = nodeUi(x.kind).icon
+              return (
+                <DropdownMenuItem key={x.kind} disabled={connect.isPending}
+                  onSelect={() => connect.mutate(x.kind, { onSuccess: () => select(nodeId(x.kind)) })}>
+                  <Icon />{x.label}
+                </DropdownMenuItem>
+              )
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+    </div>
+  )
+}
+
 const NODE_TYPES = {
   agent: AgentNode, instructions: InstructionsNode, model: ModelNode, places: PlacesNode,
-  skills: SkillsNode, tools: ToolsNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />, app: ({ id }: { id: string }) => <AppNode id={id} />,
+  skills: SkillsNode, tools: ToolsNode, mcp: ({ id }: { id: string }) => <McpNode id={id} />,
+  platform: ({ id }: { id: string }) => <PlatformNode id={id} />, hub: HubNode,
 }
 
 // ---------- Edges ----------
 
-type Pt = { x: number; y: number }
 /** Orthogonal polyline with rounded corners. */
 function roundedPath(p: Pt[], r = 10) {
   let d = `M ${p[0]!.x} ${p[0]!.y}`
@@ -269,155 +309,117 @@ function roundedPath(p: Pt[], r = 10) {
   return `${d} L ${z.x} ${z.y}`
 }
 
-function ElkEdge({ id, data }: EdgeProps) {
-  const pts = (data as { points?: Pt[]; dep?: boolean } | undefined)?.points
-  if (!pts) return null
-  const dep = (data as { dep?: boolean }).dep
+function LineEdge({ id, data }: EdgeProps) {
+  const { points, dep } = (data ?? {}) as { points?: Pt[]; dep?: boolean }
+  if (!points) return null
   return (
     <BaseEdge
       id={id}
-      path={roundedPath(pts)}
+      path={roundedPath(points)}
       style={dep ? { stroke: "var(--link)", strokeWidth: 1.25, strokeDasharray: "4 4", opacity: 0.7 } : { stroke: "var(--border-strong)", strokeWidth: 1.25 }}
     />
   )
 }
-const EDGE_TYPES = { elk: ElkEdge }
+const EDGE_TYPES = { line: LineEdge }
 
 // ---------- Graph and layout ----------
 
 const LEFT = ["instructions", "model", "places"]
+const RIGHT = ["skills", "tools"]
+const HUB = "connections"
+/** Below this canvas width the editor is one column. */
+const NARROW = 760
 
-function graph(config: AgentConfig, apps: AgentApp[]) {
-  const mcp = config.mcp_servers.map((s) => `mcp:${s.key}`)
-  const left = [...LEFT.map((id) => ({ id, type: id })), ...apps.map((a) => ({ id: `app:${a.key}`, type: "app" }))]
-  const nodes: (Node & { partition: number })[] = [
-    ...left.map((n) => ({ ...n, partition: 0 })),
-    { id: "agent", type: "agent", partition: 1 },
-    { id: "skills", type: "skills", partition: 2 },
-    { id: "tools", type: "tools", partition: 2 },
-    ...mcp.map((id) => ({ id, type: "mcp", partition: 3 })),
-  ].map((n) => ({ ...n, position: { x: 0, y: 0 }, data: {}, draggable: false, selectable: false }))
-  const e = (source: string, target: string, data: Record<string, unknown> = {}): Edge => ({ id: `${source}>${target}${"skill" in data ? `:${data.skill}` : ""}`, source, target, type: "elk", data })
-  const edges: Edge[] = [
-    ...left.map((n) => e(n.id, "agent")),
-    e("agent", "skills"), e("agent", "tools"),
-    ...mcp.map((id) => e("agent", id)),
-    ...config.skills.flatMap((s) => (s.requires ?? []).filter((k) => mcp.includes(`mcp:${k}`)).map((k) => e("skills", `mcp:${k}`, { dep: true, skill: s.skill_id }))),
+/** MCP servers no node claims, then each attached node. */
+function connections(agent: Agent, config: AgentConfig): { id: string; type: "mcp" | "platform" }[] {
+  const claimed = new Set(agent.nodes.flatMap((n: ConnectionNode) => (n.server ? [n.server] : [])))
+  return [
+    ...config.mcp_servers.filter((s) => !claimed.has(s.key)).map((s) => ({ id: `mcp:${s.key}`, type: "mcp" as const })),
+    ...agent.nodes.filter((n) => n.server).map((n) => ({ id: nodeId(n.kind), type: "platform" as const })),
   ]
-  return { nodes, edges }
 }
 
-/** The layout engine loads on first use and runs in a worker, off the page's thread. */
-let elk: Promise<ELK> | undefined
-const engine = () => (elk ??= Promise.all([import("elkjs/lib/elk-api"), import("elkjs/lib/elk-worker.min.js?url")])
-  .then(([{ default: Engine }, { default: workerUrl }]) => new Engine({ workerUrl })))
-const HEAD = 20
+function graph(agent: Agent, config: AgentConfig, ro: boolean) {
+  const conns = connections(agent, config)
+  const hub = conns.length || !ro
+  const nodes: Node[] = [
+    ...LEFT.map((id) => ({ id, type: id })),
+    { id: "agent", type: "agent" },
+    ...RIGHT.map((id) => ({ id, type: id })),
+    ...(hub ? [{ id: HUB, type: "hub" }] : []),
+    ...conns,
+  ].map((n) => ({ ...n, position: { x: 0, y: 0 }, data: {}, draggable: false, selectable: false }))
+  const ids = new Set(conns.map((c) => c.id))
+  const deps = config.skills.flatMap((s) => (s.requires ?? []).filter((k) => ids.has(`mcp:${k}`)).map((k) => ({ skill: s.skill_id, target: `mcp:${k}` })))
+  return { nodes, conns: conns.map((c) => c.id), hub: hub ? HUB : null, deps }
+}
 
-async function layout(nodes: (Node & { partition?: number })[], edges: Edge[]) {
-  const size = (n: Node) => ({ width: n.measured?.width ?? 240, height: n.measured?.height ?? 80 })
-  const rowY = (skill: string) => {
-    const el = document.querySelector<HTMLElement>(`.react-flow__node[data-id="skills"] [data-row="skill:${skill}"]`)
-    return el ? el.offsetTop + el.offsetHeight / 2 : HEAD
-  }
-  const g: ElkNode = {
-    id: "root",
-    layoutOptions: {
-      "elk.algorithm": "layered", "elk.direction": "RIGHT", "elk.partitioning.activate": "true", "elk.edgeRouting": "ORTHOGONAL",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "64", "elk.spacing.nodeNode": "20", "elk.layered.spacing.edgeNodeBetweenLayers": "20",
-      "elk.layered.spacing.edgeEdgeBetweenLayers": "8", "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF", "elk.layered.nodePlacement.bk.fixedAlignment": "BALANCED",
-      "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES", "elk.layered.crossingMinimization.forceNodeModelOrder": "true",
-    },
-    children: nodes.map((n) => {
-      const { width, height } = size(n)
-      const mid = n.id === "agent" ? height / 2 : HEAD
-      const deps = n.id === "skills" ? edges.filter((e) => e.source === "skills").map((e) => (e.data as { skill: string }).skill) : []
-      return {
-        id: n.id, width, height,
-        layoutOptions: { "elk.partitioning.partition": String(n.partition ?? 0), "elk.portConstraints": "FIXED_POS" },
-        ports: [
-          { id: `${n.id}:in`, x: -1, y: mid, width: 1, height: 1, layoutOptions: { "elk.port.side": "WEST" } },
-          { id: `${n.id}:out`, x: width, y: mid, width: 1, height: 1, layoutOptions: { "elk.port.side": "EAST" } },
-          ...[...new Set(deps)].map((s) => ({ id: `skills:${s}`, x: width, y: rowY(s), width: 1, height: 1, layoutOptions: { "elk.port.side": "EAST" } })),
-        ],
-      }
-    }),
-    edges: edges.map((e): ElkExtendedEdge => {
-      const skill = (e.data as { skill?: string }).skill
-      return { id: e.id, sources: [skill ? `skills:${skill}` : `${e.source}:out`], targets: [`${e.target}:in`] }
-    }),
-  }
-  const out = await (await engine()).layout(g)
-  const pos = Object.fromEntries((out.children ?? []).map((c) => [c.id, { x: c.x ?? 0, y: c.y ?? 0 }]))
-  const pts = Object.fromEntries((out.edges ?? []).map((e) => {
-    const s = e.sections?.[0]
-    return [e.id, s ? [s.startPoint, ...(s.bendPoints ?? []), s.endPoint] : undefined]
-  }))
-  // Center the agent on the graph; shift the ends of its edges with it (last/first segment is horizontal).
-  const a = out.children?.find((c) => c.id === "agent")
-  if (a) {
-    const ys = (out.children ?? []).flatMap((c) => [c.y ?? 0, (c.y ?? 0) + (c.height ?? 0)])
-    const dy = Math.round((Math.min(...ys) + Math.max(...ys)) / 2 - ((a.y ?? 0) + (a.height ?? 0) / 2))
-    pos.agent!.y += dy
-    for (const e of edges) {
-      const p = pts[e.id]
-      if (!p || (e.target !== "agent" && e.source !== "agent")) continue
-      if (p.length === 2) { const mx = (p[0]!.x + p[1]!.x) / 2; p.splice(1, 0, { x: mx, y: p[0]!.y }, { x: mx, y: p[1]!.y }) }
-      const ends = e.target === "agent" ? [p.length - 2, p.length - 1] : [0, 1]
-      for (const i of ends) p[i] = { ...p[i]!, y: p[i]!.y + dy }
-    }
-  }
-  return { pos, pts }
+/** The y of a skill's row inside the skills card. */
+const rowY = (skill: string) => {
+  const el = document.querySelector<HTMLElement>(`.react-flow__node[data-id="skills"] [data-row="skill:${skill}"]`)
+  return el ? el.offsetTop + el.offsetHeight / 2 : 20
 }
 
 // ---------- Canvas ----------
 
 export const PANEL_W = 440
 
-export function Canvas({ agent, config, catalog, changed, changedNodes, selected, select }: Ctx) {
+type Props = Omit<Ctx, "ro"> & { ro: boolean }
+
+export function Canvas({ agent, config, catalog, changed, changedNodes, selected, select, ro }: Props) {
   const { resolved } = useTheme()
-  const structure = `${agent.apps.map((a) => a.key).join(",")}|${config.mcp_servers.map((s) => s.key).join(",")}|${config.skills.map((s) => `${s.skill_id}:${(s.requires ?? []).join("+")}`).join(",")}`
-  const built = useMemo(() => graph(config, agent.apps), [structure]) // eslint-disable-line react-hooks/exhaustive-deps
+  const structure = `${config.mcp_servers.map((s) => s.key).join(",")}|${agent.nodes.map((n) => `${n.kind}:${n.server}`).join(",")}|${ro}|${config.skills.map((s) => `${s.skill_id}:${(s.requires ?? []).join("+")}`).join(",")}`
+  const built = useMemo(() => graph(agent, config, ro), [structure]) // eslint-disable-line react-hooks/exhaustive-deps
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges] = useEdgesState<Edge>([])
-  const [ready, setReady] = useState(false)
   const fitted = useRef(false)
   const [fit, setFit] = useState(false)
   const rf = useReactFlow()
+  const width = useStore((s) => s.width)
+  const narrow = width > 0 && width < NARROW
   const sizes = useStore((s) => s.nodes.map((n) => `${n.id}:${n.measured?.width ?? 0}x${n.measured?.height ?? 0}`).join("|"))
   const measured = useStore((s) => s.nodes.length > 0 && s.nodes.every((n) => n.measured?.width))
+  const ready = nodes.length > 0 && nodes.every((n) => n.style?.opacity === 1)
 
   useEffect(() => {
     setNodes((prev) => built.nodes.map((n) => {
       const p = prev.find((x) => x.id === n.id)
       return p ? { ...n, position: p.position, measured: p.measured, style: p.style } : { ...n, style: { opacity: 0 } }
     }))
-    setEdges((prev) => built.edges.map((e) => ({ ...e, data: { ...e.data, points: (prev.find((x) => x.id === e.id)?.data as { points?: Pt[] })?.points } })))
-  }, [built, setNodes, setEdges])
+  }, [built, setNodes])
 
   useEffect(() => {
     if (!measured) return
-    let live = true
-    layout(rf.getNodes() as (Node & { partition?: number })[], built.edges).then(({ pos, pts }) => {
-      if (!live) return
-      setNodes((ns) => ns.map((n) => ({ ...n, position: pos[n.id] ?? n.position, style: { opacity: 1 } })))
-      setEdges(built.edges.map((e) => ({ ...e, data: { ...e.data, points: pts[e.id] } })))
-      setReady(true)
-    })
-    return () => { live = false }
-  }, [sizes, measured, built]) // eslint-disable-line react-hooks/exhaustive-deps
+    const known = Object.fromEntries(rf.getNodes().map((n) => [n.id, { w: n.measured?.width ?? 240, h: n.measured?.height ?? 80 }]))
+    const size = (id: string): Size => known[id] ?? { w: 240, h: 80 }
+    const deps: Dep[] = built.deps.map((d) => ({ key: `${d.skill}>${d.target}`, target: d.target, y: rowY(d.skill) }))
+    const plan: Plan = { left: LEFT, right: RIGHT, hub: built.hub, conns: built.conns, skills: "skills", deps }
+    const laid = (narrow ? layoutNarrow : layoutWide)("agent", plan, size)
+    setNodes((ns) => ns.map((n) => ({ ...n, position: laid.pos[n.id] ?? n.position, style: { opacity: 1 } })))
+    setEdges(Object.entries(laid.edges).map(([id, l]) => ({ id, source: l.source, target: l.target, type: "line", data: { points: l.points, dep: l.dep } })))
+  }, [sizes, measured, built, narrow]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Fit once laid out, and again when the editor switches between one and two columns.
+  useEffect(() => { fitted.current = false }, [narrow])
   useEffect(() => {
     if (!ready || fitted.current) return
     fitted.current = true
-    setTimeout(() => rf.fitView({ padding: 0.06, maxZoom: 1 }).then(() => setFit(true)), 30)
-  }, [ready]) // eslint-disable-line react-hooks/exhaustive-deps
+    setTimeout(() => {
+      if (!narrow) { void rf.fitView({ padding: 0.06, maxZoom: 1 }).then(() => setFit(true)); return }
+      // One column reads top down at full size; scroll to see the rest.
+      const ns = rf.getNodes()
+      const right = Math.max(...ns.map((n) => n.position.x + (n.measured?.width ?? 0)))
+      const zoom = Math.min(1, (width - 24) / (right + 12))
+      void rf.setViewport({ x: Math.max(12, (width - right * zoom) / 2), y: 16, zoom }).then(() => setFit(true))
+    }, 30)
+  }, [ready, narrow, sizes]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Keep the selected node clear of the inspector; pan back when it closes.
+  // Keep the selected node clear of the inspector; pan back when it closes. One column: the panel covers it.
   const home = useRef<{ x: number; y: number; zoom: number } | null>(null)
   useEffect(() => {
-    if (!fit) return
+    if (!fit || narrow) return
     if (!selected) {
-      if (home.current) rf.setViewport(home.current, { duration: 250 })
+      if (home.current) void rf.setViewport(home.current, { duration: 250 })
       home.current = null
       return
     }
@@ -431,12 +433,12 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
     const room = el.clientWidth - PANEL_W - 24
     if (right > room || left < 24) {
       home.current ??= vp
-      rf.setViewport({ ...vp, x: vp.x - (right > room ? Math.min(right - room, left - 24) : left - 24) }, { duration: 250 })
+      void rf.setViewport({ ...vp, x: vp.x - (right > room ? Math.min(right - room, left - 24) : left - 24) }, { duration: 250 })
     }
   }, [selected, fit]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <CanvasCtx.Provider value={{ agent, config, catalog, changed, changedNodes, selected, select }}>
+    <CanvasCtx.Provider value={{ agent, config, catalog, changed, changedNodes, selected, select, ro }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}

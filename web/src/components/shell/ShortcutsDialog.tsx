@@ -5,7 +5,7 @@ import { MOD } from "@/lib/utils"
 import { navFor } from "@/modules/registry"
 
 const FIXED: [string, [string, string[]][]][] = [
-  ["General", [["Search", [MOD, "K"]], ["Filter list", ["/"]], ["New chat", [MOD, "O"]], ["Shortcuts", ["?"]]]],
+  ["General", [["Search", [MOD, "K"]], ["Filter list", ["/"]], ["New thread", [MOD, "O"]], ["Shortcuts", ["?"]]]],
   ["Lists", [["Open row", ["↵"]], ["Next / previous in drawer", ["J", "K"]], ["Close drawer", ["Esc"]]]],
   ["Chat", [["Send", ["↵"]], ["New line", ["⇧", "↵"]], ["Stop", ["Esc"]]]],
 ]

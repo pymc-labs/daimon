@@ -14,7 +14,7 @@ import { Workspace } from "./Workspace"
 const TABS: { label: string; to: string; end?: boolean; cap: Capability }[] = [
   { label: "People", to: "/admin", end: true, cap: "people.manage" }, { label: "Invites", to: "/admin/invites", cap: "people.manage" },
   { label: "Agent access", to: "/admin/agents", cap: "workspace.manage" }, { label: "Audit log", to: "/admin/audit", cap: "audit.view" },
-  { label: "Workspace", to: "/admin/workspace", cap: "workspace.manage" },
+  { label: "Settings", to: "/admin/settings", cap: "workspace.manage" },
 ]
 
 export function Admin() {
@@ -33,14 +33,14 @@ export function Admin() {
     <Page
       crumbs={[{ label: "Admin", to: "/admin" }, ...(tab ? [{ label: tab.label }] : [])]}
       tabs={tabs}
-      actions={can("people.manage") && !pathname.startsWith("/admin/workspace") ? <Button size="sm" onClick={() => setDialog("invite")}><Plus />Invite</Button> : null}
+      actions={can("people.manage") && !pathname.startsWith("/admin/settings") ? <Button size="sm" onClick={() => setDialog("invite")}><Plus />Invite</Button> : null}
     >
       <Routes>
         {page("", "people.manage", <People />)}
         {page("invites", "people.manage", <Invites />)}
         {page("agents", "workspace.manage", <AgentAccessView />)}
         {page("audit", "audit.view", <Audit />)}
-        {page("workspace", "workspace.manage", <Workspace />)}
+        {page("settings", "workspace.manage", <Workspace />)}
         <Route path="*" element={<Navigate to={first ?? "/chat"} replace />} />
       </Routes>
       {can("people.manage") && <NewInvite />}

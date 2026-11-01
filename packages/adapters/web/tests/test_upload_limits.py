@@ -69,7 +69,7 @@ async def test_the_app_refuses_an_oversized_form_before_parsing_it(
 ) -> None:
     ws = await funded_workspace(db_session_factory)
     monkeypatch.setattr(upload_limit, "MAX_BODY_BYTES", 200)
-    async with web_client(web_settings(ws.tenant_id), sessionmaker=db_session_factory) as client:
+    async with web_client(web_settings(), sessionmaker=db_session_factory) as client:
         client.cookies.set(_COOKIE, await signed_in(db_session_factory, ws.person))
         client.headers.update(_HEADERS)
         res = await client.post(
@@ -89,9 +89,7 @@ async def test_a_file_only_its_owner_can_attach_and_a_quota_bounds_them(
     turns = build_turns(db_session_factory, build_turn_router(str(ws.tenant_id)), tmp_path)
     monkeypatch.setattr(chat, "PERSON_UPLOAD_QUOTA_BYTES", 8)
 
-    async with web_client(
-        web_settings(ws.tenant_id), sessionmaker=db_session_factory, turns=turns
-    ) as client:
+    async with web_client(web_settings(), sessionmaker=db_session_factory, turns=turns) as client:
         client.headers.update(_HEADERS)
         client.cookies.set(_COOKIE, await signed_in(db_session_factory, guest))
         upload = (await client.post("/api/chat/uploads", files=_FORM)).json()
@@ -117,9 +115,7 @@ async def test_deleting_a_chat_erases_its_files_and_the_sweep_takes_the_unsent(
 ) -> None:
     ws = await funded_workspace(db_session_factory)
     turns = build_turns(db_session_factory, build_turn_router(str(ws.tenant_id)), tmp_path)
-    async with web_client(
-        web_settings(ws.tenant_id), sessionmaker=db_session_factory, turns=turns
-    ) as client:
+    async with web_client(web_settings(), sessionmaker=db_session_factory, turns=turns) as client:
         client.headers.update(_HEADERS)
         client.cookies.set(_COOKIE, await signed_in(db_session_factory, ws.person))
         sid = (await client.post("/api/chat/sessions", json={"agent_id": AGENT_ID})).json()["id"]

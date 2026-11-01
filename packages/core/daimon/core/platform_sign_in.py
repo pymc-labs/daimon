@@ -1,4 +1,4 @@
-"""Chat-platform sign-in: who a Discord, Slack or Microsoft login is, and where they belong.
+"""Chat-platform sign-in: who a Discord or Slack login is, and where they belong.
 
 Shared by every surface that signs people in with their chat account (the MCP hub
 mounts, the web app). Each helper does the provider's own I/O through an injected
@@ -8,32 +8,27 @@ for; matching those to installed tenants is `hub_identity`'s job.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urlencode
 
 import httpx
-from daimon.core.config import MicrosoftAccountsSettings
 from daimon.core.errors import DaimonError
-from daimon.core.microsoft_identity import (
-    MicrosoftIdentityMismatch,
-    MicrosoftTokens,
-    canonical_uuid,
-    id_token_claims,
-)
 
 DISCORD_API = "https://discord.com/api/v10"
 DISCORD_AUTHORIZE_URL = "https://discord.com/oauth2/authorize"
 DISCORD_SIGN_IN_SCOPES: tuple[str, ...] = ("identify", "guilds")
 # Most guilds Discord returns per request of `/users/@me/guilds`.
 DISCORD_GUILDS_PAGE = 200
-SLACK_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
-SLACK_USERS_INFO_URL = "https://slack.com/api/users.info"
-# A user grant needs one user scope; this one also lets sign-in read the person's name.
-SLACK_SIGN_IN_USER_SCOPES: tuple[str, ...] = ("users:read",)
-# Sign-in only needs who the person is; the Connect Microsoft scopes are asked for there.
-MICROSOFT_SIGN_IN_SCOPES: tuple[str, ...] = ("openid", "profile", "email")
+
+
+def code_challenge_s256(verifier: str) -> str:
+    """The PKCE challenge for a verifier (RFC 7636, S256)."""
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
 class PlatformSignInError(DaimonError, ValueError):
@@ -141,34 +136,6 @@ async def fetch_discord_workspaces(
     return user.user_id, user.workspaces
 
 
-def slack_authorize_url(*, client_id: str, redirect_uri: str, state: str) -> str:
-    """Slack's user-grant consent. It takes no PKCE, and `scope` would install the bot."""
-    query = {
-        "client_id": client_id,
-        "user_scope": ",".join(SLACK_SIGN_IN_USER_SCOPES),
-        "redirect_uri": redirect_uri,
-        "state": state,
-    }
-    return f"{SLACK_AUTHORIZE_URL}?{urlencode(query)}"
-
-
-async def fetch_slack_user_name(
-    http: httpx.AsyncClient, *, access_token: str, user_id: str
-) -> str | None:
-    """The person's Slack display name, or None when Slack will not say."""
-    response = await http.get(
-        SLACK_USERS_INFO_URL,
-        params={"user": user_id},
-        headers={"Authorization": f"Bearer {access_token}"},
-    )
-    response.raise_for_status()
-    body: dict[str, Any] = response.json()
-    user: dict[str, Any] = body.get("user") or {}
-    profile: dict[str, Any] = user.get("profile") or {}
-    name = profile.get("display_name") or user.get("real_name") or user.get("name")
-    return str(name) if body.get("ok") and name else None
-
-
 @dataclass(frozen=True, slots=True)
 class SlackUserGrant:
     """A Slack user (xoxp) grant, lifted out of `oauth.v2.access`'s `authed_user`."""
@@ -226,41 +193,4 @@ async def exchange_slack_user_code(
         user_id=str(user_id) if user_id is not None else None,
         expires_in=int(expires_in) if expires_in is not None else None,
         refresh_token=cast(str | None, authed_user.get("refresh_token")) or None,
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class MicrosoftUser:
-    # Canonical lowercase UUIDs: the Entra directory, and the person's object id in it.
-    tenant_id: str
-    object_id: str
-    name: str
-    username: str | None
-
-
-def verify_microsoft_sign_in(
-    tokens: MicrosoftTokens, config: MicrosoftAccountsSettings
-) -> MicrosoftUser:
-    """Who signed in, if the account is the configured directory's and the token is ours.
-
-    The sign-in sibling of `microsoft_identity.verify_identity`: there is no Teams
-    person to match yet, so any account of the directory passes.
-    """
-    if tokens.id_token is None:
-        raise MicrosoftIdentityMismatch("token response carried no id_token")
-    claims = id_token_claims(tokens.id_token)
-    tid = canonical_uuid(claims.get("tid"))
-    if tid is None or tid != config.tenant_id:
-        raise MicrosoftIdentityMismatch("account belongs to another tenant")
-    if claims.get("aud") != config.client_id:
-        raise MicrosoftIdentityMismatch("id_token was issued to another app")
-    oid = canonical_uuid(claims.get("oid"))
-    if oid is None:
-        raise MicrosoftIdentityMismatch("id_token carried no object id")
-    username = claims.get("preferred_username")
-    return MicrosoftUser(
-        tenant_id=tid,
-        object_id=oid,
-        name=str(claims.get("name") or username or oid),
-        username=str(username) if username else None,
     )

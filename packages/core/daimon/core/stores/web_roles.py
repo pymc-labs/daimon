@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Sequence
 from typing import Any, cast
 
-from daimon.core._models import WebGroupRole, WebPerson, WorkspaceAdmin
-from daimon.core.stores.domain import WebGroupRoleName, WebRoleGrant
-from sqlalchemy import CursorResult, delete, func, select, tuple_
+from daimon.core._models import WebPerson, WorkspaceAdmin
+from daimon.core.stores.domain import WebRoleGrant
+from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,56 +52,6 @@ async def set_workspace_role(
             set_={"role": role, "granted_by_account_id": granted_by_account_id},
         )
     )
-
-
-async def set_group_role(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    issuer: str,
-    group: str,
-    role: WebGroupRoleName,
-) -> None:
-    await session.execute(
-        insert(WebGroupRole)
-        .values(tenant_id=tenant_id, issuer=issuer, group=group, role=role)
-        .on_conflict_do_update(
-            index_elements=[WebGroupRole.tenant_id, WebGroupRole.issuer, WebGroupRole.group],
-            set_={"role": role},
-        )
-    )
-
-
-async def list_group_roles(
-    session: AsyncSession, *, tenant_id: uuid.UUID, issuer: str, groups: Sequence[str]
-) -> frozenset[str]:
-    """The roles the person's groups confer here (`admin`, `member`)."""
-    if not groups:
-        return frozenset()
-    rows = await session.execute(
-        select(WebGroupRole.role).where(
-            WebGroupRole.tenant_id == tenant_id,
-            WebGroupRole.issuer == issuer,
-            WebGroupRole.group.in_(list(groups)),
-        )
-    )
-    return frozenset(rows.scalars())
-
-
-async def list_group_roles_for(
-    session: AsyncSession, *, tenant_id: uuid.UUID, groups: Collection[tuple[str, str]]
-) -> dict[tuple[str, str], str]:
-    """The role each `(issuer, group)` pair confers here (`admin`, `member`), in one read;
-    a group that confers none is absent."""
-    if not groups:
-        return {}
-    rows = await session.execute(
-        select(WebGroupRole.issuer, WebGroupRole.group, WebGroupRole.role).where(
-            WebGroupRole.tenant_id == tenant_id,
-            tuple_(WebGroupRole.issuer, WebGroupRole.group).in_(list(groups)),
-        )
-    )
-    return {(issuer, group): role for issuer, group, role in rows.all()}
 
 
 async def has_active_owner(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:

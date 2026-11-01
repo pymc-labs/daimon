@@ -70,7 +70,6 @@ class SignInFlow:
 
     verifier: str
     state: str
-    nonce: str
     next: str
     # Set when a signed-in person links this sign-in to themselves rather than signing in.
     link_person: str | None = None
@@ -82,7 +81,6 @@ def seal_flow(fernet: MultiFernet, flow: SignInFlow) -> str:
         {
             "v": flow.verifier,
             "s": flow.state,
-            "n": flow.nonce,
             "x": flow.next,
             "p": flow.link_person,
         }
@@ -99,7 +97,6 @@ def open_flow(fernet: MultiFernet, sealed: str | None) -> SignInFlow | None:
         return SignInFlow(
             verifier=data["v"],
             state=data["s"],
-            nonce=data["n"],
             next=data["x"],
             link_person=data.get("p"),
         )

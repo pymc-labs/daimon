@@ -99,7 +99,7 @@ async def test_the_session_sweep_deletes_only_expired_sign_ins(
             await sessions_store.create_session(
                 db,
                 token_sha256=token,
-                provider="oidc",
+                provider="discord",
                 issuer="",
                 subject="sub",
                 people=[ws.person],
@@ -127,7 +127,7 @@ async def test_the_session_sweep_loop_sweeps_at_once_and_stops_when_cancelled(
         await sessions_store.create_session(
             db,
             token_sha256=b"c" * 32,
-            provider="oidc",
+            provider="discord",
             issuer="",
             subject="sub",
             people=[ws.person],

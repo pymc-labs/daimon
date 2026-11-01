@@ -67,20 +67,19 @@ def role_for(
     kind: WebPersonKind,
     workspace_grant: WebRoleGrant | None,
     platform_admin: bool,
-    group_roles: Collection[str],
     chat_admin: bool = False,
 ) -> Role:
     """The highest role the person holds. A visitor never rises above visitor.
 
-    A visitor reaches only the agents they were invited to, so no grant, platform admin
-    or group role lifts them: promoting one is an admin turning them into a member.
+    A visitor reaches only the agents they were invited to, so no grant or platform admin
+    lifts them: promoting one is an admin turning them into a member.
     `chat_admin` is an admin of the chat workspace itself, as its member list says.
     """
     if kind == "visitor":
         return "visitor"
     if workspace_grant == "owner":
         return "owner"
-    if workspace_grant == "admin" or platform_admin or chat_admin or "admin" in group_roles:
+    if workspace_grant == "admin" or platform_admin or chat_admin:
         return "admin"
     return "member"
 

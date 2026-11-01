@@ -56,7 +56,7 @@ export function DraftBar({ agent, draft, shift }: { agent: Agent; draft: Draft; 
       >
         <span className="size-1.5 rounded-full bg-link" />
         <span className="text-sm font-medium whitespace-nowrap tabular">{n} {n === 1 ? "change" : "changes"}</span>
-        <span className="flex items-center gap-1">{counts.map(([e, k]) => <span key={e} className={cn("inline-flex h-5 items-center rounded px-1.5 text-[11px] font-medium tabular", EFFECT[e].cls)}>{k} {EFFECT[e].label}</span>)}</span>
+        <span className="flex items-center gap-1">{counts.map(([e, k]) => <span key={e} className={cn("inline-flex h-5 items-center rounded px-1.5 text-[11px] font-medium tabular", EFFECT[e].cls)}>{k} {EFFECT[e].count}</span>)}</span>
         {draft.stale && <span className="flex items-center gap-1 text-xs text-warning"><TriangleAlert className="size-3.5" />v{agent.version} is newer</span>}
         <span className="h-5 w-px bg-border" />
         <Button variant="ghost" size="sm" onClick={() => discard.mutate()} disabled={discard.isPending}>Discard</Button>

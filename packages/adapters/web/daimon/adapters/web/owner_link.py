@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 def parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="daimon-web owner-link", description=__doc__)
-    parser.add_argument("--workspace", type=uuid.UUID, help="Workspace (tenant) id.")
+    parser.add_argument("--workspace", type=uuid.UUID, required=True, help="Workspace (tenant) id.")
     parser.add_argument("--days", type=int, default=1, help="Days the link stays usable.")
     parser.add_argument(
         "--revoke", action="store_true", help="Revoke the workspace's unopened owner links."
@@ -83,14 +83,11 @@ async def revoke_owner_links(
 
 
 async def owner_link(settings: Settings, argv: list[str]) -> str:
-    """The link, for the workspace named or the one OIDC sign-in serves."""
+    """The link, for the workspace named."""
     if settings.web is None:
         raise SystemExit("The web app is not configured.")
     args = parse(argv)
-    oidc = settings.web.oidc
-    tenant_id = args.workspace or (oidc.tenant_id if oidc is not None else None)
-    if tenant_id is None:
-        raise SystemExit("Name the workspace with --workspace.")
+    tenant_id: uuid.UUID = args.workspace
     engine = owner_link_engine(settings)
     try:
         factory = build_session_factory(

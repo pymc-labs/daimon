@@ -1,16 +1,16 @@
 // The fictional org every mock handler draws from. Invented names.
-import type { AgentRef, Capability, ChatSession, EmbeddedApp, Me, ModuleKey, Person, Role, Workspace } from "@/lib/types"
+import type { AgentRef, Capability, ChatSession, Me, ModuleKey, Person, Role, Workspace } from "@/lib/types"
 import { face } from "./face"
 
 export const DOMAIN = "fernhill.example"
 
 export const PEOPLE: (Person & { identities: Me["identities"] })[] = [
   { id: "p_maya", name: "Maya Lindqvist", email: `maya.lindqvist@${DOMAIN}`, role: "owner", title: "Head of AI Platform",
-    identities: [{ provider: "discord", provider_label: "Discord", label: "maya.l" }, { provider: "oidc", provider_label: "Fernhill", label: `maya.lindqvist@${DOMAIN}` }] },
+    identities: [{ provider: "discord", provider_label: "Discord", label: "maya.l" }] },
   { id: "p_jonas", name: "Jonas Weber", email: `jonas.weber@${DOMAIN}`, role: "admin", title: "ML Engineer",
-    identities: [{ provider: "discord", provider_label: "Discord", label: "jonasw" }, { provider: "oidc", provider_label: "Fernhill", label: `jonas.weber@${DOMAIN}` }] },
+    identities: [{ provider: "discord", provider_label: "Discord", label: "jonasw" }] },
   { id: "p_priya", name: "Priya Raman", email: `priya.raman@${DOMAIN}`, role: "member", title: "Senior Data Scientist",
-    identities: [{ provider: "discord", provider_label: "Discord", label: "priya.r" }, { provider: "oidc", provider_label: "Fernhill", label: `priya.raman@${DOMAIN}` }] },
+    identities: [{ provider: "discord", provider_label: "Discord", label: "priya.r" }] },
   { id: "p_jordan", name: "Jordan Ellis", email: "jordan@brightwave.example", role: "visitor", title: "Brightwave Telecom",
     identities: [{ provider: "invite", provider_label: "Invite link", icon: "link", label: "jordan@brightwave.example" }] },
 ]
@@ -51,16 +51,6 @@ export const SESSIONS: Record<string, ChatSession[]> = {
   p_jordan: [
     { id: "s_vis1", title: "Price test for the unlimited plan", agent: agent("ag_pricing"), updated_at: hoursAgo(1) },
   ],
-}
-
-export const ALMANAC: EmbeddedApp = {
-  key: "almanac", name: "Almanac", icon: "database", origin: "http://localhost:5173",
-  nav: [
-    { label: "Data", path: "/data", icon: "database" },
-    { label: "Connections", path: "/connections", icon: "plug" },
-    { label: "Access", path: "/access/people", icon: "key-round" },
-  ],
-  connections_path: "/connections",
 }
 
 const ALL: Capability[] = [
@@ -121,6 +111,5 @@ export function me(): Me | null {
     id: p.id, name: p.name, email: p.email, workspace: ws, workspaces: wss, role,
     modules: MODULES[role], capabilities: CAPS[role], identities: p.identities, credit: live(p.id, CREDIT[role]),
     invited_by: role === "visitor" ? "Maya Lindqvist" : undefined,
-    apps: role === "visitor" ? [] : [role === "member" ? { ...ALMANAC, nav: ALMANAC.nav.slice(0, 1) } : ALMANAC],
   }
 }

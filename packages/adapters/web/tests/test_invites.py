@@ -64,7 +64,7 @@ def _client(
     tmp_path: Path,
 ) -> AbstractAsyncContextManager[httpx.AsyncClient]:
     turns = build_turns(factory, build_turn_router(str(ws.tenant_id)), tmp_path)
-    return web_client(web_settings(ws.tenant_id), sessionmaker=factory, turns=turns)
+    return web_client(web_settings(), sessionmaker=factory, turns=turns)
 
 
 async def test_reading_an_invite_leaves_it_usable_and_accepting_uses_it_once(
@@ -322,7 +322,7 @@ async def test_a_visitor_chats_with_the_invited_agent(
 
     with one_session():
         async with web_client(
-            web_settings(ws.tenant_id), sessionmaker=db_session_factory, turns=turns
+            web_settings(), sessionmaker=db_session_factory, turns=turns
         ) as client:
             client.headers.update(_OWN)
             await client.post(f"/api/invites/{token}/accept")
@@ -371,7 +371,7 @@ async def test_the_owner_link_command_makes_a_link_that_grants_owner(
     tmp_path: Path,
 ) -> None:
     ws = await funded_workspace(db_session_factory)
-    web = web_settings(ws.tenant_id)
+    web = web_settings()
     settings = Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]

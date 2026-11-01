@@ -2,8 +2,8 @@
 import { http, HttpResponse } from "msw"
 
 import type {
-  Agent, AgentApp, AgentConfig, AgentSummary, AgentVersion, Backend, BuiltinTool, Catalog, CatalogModel, Change, Draft,
-  Effect, McpServer, ModelChoice, PersonRef, Place, Skill, Template,
+  Agent, AgentConfig, AgentSummary, AgentVersion, Backend, BuiltinTool, Catalog, CatalogModel, Change, Draft,
+  DataServerAgent, DataServerStatus, DataServerTools, Effect, McpServer, ModelChoice, PersonRef, Place, Skill, Template,
 } from "@/modules/agents/types"
 import { notFound, unauthorized, wait } from "./util"
 import { me, PEOPLE } from "./world"
@@ -83,7 +83,7 @@ const skill = (id: string) => clone(SKILLS.find((s) => s.skill_id === id)!)
 
 const SERVERS: Record<string, McpServer> = {
   almanac: {
-    key: "almanac", name: "Almanac", url: "https://almanac.example.com/mcp", auth: "oauth", credential: "connected", app: "almanac",
+    key: "almanac", name: "Almanac", url: "https://almanac.example.com/mcp", auth: "oauth", credential: "connected",
     tools: [
       { name: "search", description: "Search documents, tables and briefs", effect: "read", rule: "allow" },
       { name: "ask", description: "Ask the librarian a question", effect: "read", rule: "allow" },
@@ -350,11 +350,8 @@ function redact(c: AgentConfig, full: boolean): AgentConfig {
   return { ...c, system: null, places: null, mcp_servers: c.mcp_servers.map((s) => ({ ...s, url: "", credential: null })) }
 }
 
-/** The agent's views in apps it has an MCP server at, as the server fills them in. */
-function appsOf(c: AgentConfig): AgentApp[] {
-  const id = "5b1c2f56-6a39-5c1e-9a0e-3f5a2f6f2d11"
-  return c.mcp_servers.some((s) => s.app === "almanac") ? [{ key: "almanac", embed: `/embed/agents/external/${id}`, page: `/agents/external/${id}` }] : []
-}
+/** Agents with the data-server node attached. */
+const attached = new Set<string>(["ag_sales"])
 
 function view(r: Rec, v: Viewer): Agent {
   const cur = current(r)
@@ -362,7 +359,7 @@ function view(r: Rec, v: Viewer): Agent {
   return {
     id: r.id, version: cur.version, ...redact(cur.config, full), owner: ref(r.owner), co_owners: r.co_owners.map(ref),
     updated_at: cur.at, updated_by: ref(cur.by), last_used_at: r.last_used_at, month_usd: r.month_usd,
-    can_edit: full && v.edit, can_view_details: full, apps: full ? appsOf(cur.config) : [],
+    can_edit: full && v.edit, can_view_details: full, nodes: full ? [{ kind: "data_server", label: "Data server", server: attached.has(r.id) ? "data" : null }] : [],
   }
 }
 
@@ -432,6 +429,51 @@ async function setCredential(id: string, key: string, credential: McpServer["cre
   save()
   return HttpResponse.json({ ok: true })
 }
+
+// ---------- Data-server node ----------
+
+const VISIBLE_SCOPES = [
+  { id: "sales", kind: "team", name: "Sales" }, { id: "clients", kind: "team", name: "Clients" },
+  { id: "finance", kind: "team", name: "Finance" }, { id: "research", kind: "source", name: "Research library" },
+]
+const serverAgents = new Map<string, DataServerAgent>()
+function serverAgent(id: string): DataServerAgent {
+  const found = serverAgents.get(id)
+  if (found) return found
+  const a: DataServerAgent = {
+    id: `sa_${id}`, name: find(id)?.versions.at(-1)?.config.name ?? "Agent", title: "Agent", status: "active", role: "member", can_write: false,
+    acts_for: "requester", personal: false, redact_clients: true, external_id: id, created_at: ago(400), managed_by: "p_maya", suspended_by: null,
+    manager: "Maya Lindqvist", platform: "Daimon", scopes: ["sales", "clients"], team_scopes: [], last_call_at: ago(2), can_manage: true,
+    tokens: [
+      { id: "6c1f0d3e-0000-4000-8000-000000000001", name: "Nightly sync", prefix: "gk_7Hq2", created_at: ago(300), last_used_at: ago(9), expires_at: ago(-900), revoked_at: null },
+      { id: "6c1f0d3e-0000-4000-8000-000000000002", name: "Notebook", prefix: "gk_Lp9x", created_at: ago(80), last_used_at: null, expires_at: null, revoked_at: null },
+    ],
+    activity: [
+      { at: ago(2), via: "mcp", action: "search", target: "Q3 pipeline", channel: "sales", requester: "Maya Lindqvist" },
+      { at: ago(5), via: "mcp", action: "get_item", target: "Cobalt account brief", channel: "sales", requester: "Jonas Weber" },
+      { at: ago(26), via: "api", action: "query_table", target: "deals", channel: null, requester: null },
+    ],
+  }
+  serverAgents.set(id, a)
+  return a
+}
+const serverTools: DataServerTools = {
+  connections: [
+    { id: "crm", name: "CRM", scope: "sales", allow: null, admin: false, granted_by: null, grantable: true },
+    { id: "files", name: "Files", scope: "clients", allow: true, admin: false, granted_by: "Maya Lindqvist", grantable: true },
+  ],
+  tools: [
+    { connection_id: "crm", connection: "CRM", name: "search_deals", scope: "sales", writes: false, allow: null, whole: false, admin: false, granted_by: null, usable: true, grantable: true },
+    { connection_id: "crm", connection: "CRM", name: "update_deal", scope: "sales", writes: true, allow: null, whole: false, admin: false, granted_by: null, usable: false, grantable: true },
+    { connection_id: "files", connection: "Files", name: "read_file", scope: "clients", writes: false, allow: true, whole: true, admin: false, granted_by: "Maya Lindqvist", usable: true, grantable: true },
+    { connection_id: "files", connection: "Files", name: "list_folder", scope: "clients", writes: false, allow: true, whole: true, admin: false, granted_by: "Maya Lindqvist", usable: true, grantable: true },
+  ],
+}
+const dataStatus = (id: string): DataServerStatus => ({
+  attached: attached.has(id), reachable: true, problem: null, admin: false,
+  agent: attached.has(id) ? serverAgent(id) : null, open_url: attached.has(id) ? `https://data.example.com/agents?agent=sa_${id}` : null,
+})
+const DATA = "/api/agents/:id/nodes/data_server"
 
 export const agentsHandlers = [
   http.get("/api/agents", async () => {
@@ -543,6 +585,31 @@ export const agentsHandlers = [
     const title = SKILLS.find((x) => x.skill_id === id)?.title ?? name.replace(/-/g, " ").replace(/^./, (c) => c.toUpperCase())
     return HttpResponse.json({ type: "custom", skill_id: id, title, description, version } satisfies Skill)
   }),
+  http.get(DATA, async ({ params }) => { await wait(); return HttpResponse.json(dataStatus(String(params.id))) }),
+  http.post(`${DATA}/connect`, async ({ params }) => { await wait(); attached.add(String(params.id)); return HttpResponse.json(dataStatus(String(params.id))) }),
+  http.post(`${DATA}/disconnect`, async ({ params }) => { await wait(); attached.delete(String(params.id)); return HttpResponse.json(dataStatus(String(params.id))) }),
+  http.patch(`${DATA}/agent`, async ({ params, request }) => {
+    const a = serverAgent(String(params.id))
+    Object.assign(a, await request.json() as Partial<DataServerAgent>)
+    return HttpResponse.json(a)
+  }),
+  http.get(`${DATA}/tools`, () => HttpResponse.json(serverTools)),
+  http.put(`${DATA}/tools`, async ({ request }) => {
+    const b = await request.json() as { connection_id: string; tool_name?: string | null; allow: boolean | null }
+    for (const t of serverTools.tools) {
+      if (t.connection_id !== b.connection_id || (b.tool_name && t.name !== b.tool_name)) continue
+      t.allow = b.allow; t.whole = !b.tool_name && b.allow !== null; t.usable = b.allow ?? !t.writes
+    }
+    const c = serverTools.connections.find((x) => x.id === b.connection_id)
+    if (c && !b.tool_name) c.allow = b.allow
+    return HttpResponse.json(serverTools)
+  }),
+  http.delete(`${DATA}/tokens/:token`, ({ params }) => {
+    const a = serverAgent(String(params.id))
+    a.tokens = (a.tokens as { id: string }[]).filter((t) => t.id !== params.token) as DataServerAgent["tokens"]
+    return HttpResponse.json({ ok: true })
+  }),
+  http.get(`${DATA}/scopes`, () => HttpResponse.json(VISIBLE_SCOPES)),
   http.put("/api/agents/:id/mcp/:key/token", async ({ params }) => setCredential(String(params.id), String(params.key), "connected")),
   http.delete("/api/agents/:id/mcp/:key/token", async ({ params }) => setCredential(String(params.id), String(params.key), "missing")),
   http.get("/api/agents/:id/versions", async ({ params }) => {
