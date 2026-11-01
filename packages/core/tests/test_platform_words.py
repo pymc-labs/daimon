@@ -29,6 +29,8 @@ def test_teams_has_no_github_or_dm_me_command() -> None:
         ("teams", "group", "send `new`"),
         ("teams", "dm", "send `new`"),
         ("discord", "channel", "start a new thread"),
+        ("discord", "dm", "run `/new`"),
+        ("discord", "group", "ask me to start fresh"),
         ("slack", "dm", "ask me to start fresh"),
     ],
 )

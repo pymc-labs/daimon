@@ -159,7 +159,11 @@ async def test_one_tenant_answers_original_without_public_history(db_session_fac
     assert reply.await_args.kwargs["verified_membership"] is True
     assert fetch.await_count >= 2
     assert "private-0" in msg.channel.send.await_args_list[0].args[0]
+    assert "/dm-settings" in msg.channel.send.await_args_list[0].args[0]
     assert isinstance(msg.channel.send.await_args_list[0].kwargs["view"], module.ServerSwitch)
+    assert "view" not in msg.channel.send.await_args_list[-1].kwargs, (
+        "only the opening message carries the controls, never a reply"
+    )
 
 
 async def test_multiple_tenants_pending_messages_are_silent_and_selection_answers_once(
@@ -661,3 +665,40 @@ async def test_selector_recheck_operational_failure_is_generic_and_consumes_sele
         reply.assert_not_awaited()
     finally:
         await cog.cog_unload()
+
+
+async def test_dm_settings_shows_the_controls_for_the_current_conversation(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    msg = message()
+    await cog.on_message(msg)
+    row = await conversation(db_session_factory)
+    asked = interaction(channel=msg.channel)
+    await cog.dm_settings.callback(cog, asked)
+    text = asked.response.send_message.await_args.args[0]
+    view = asked.response.send_message.await_args.kwargs["view"]
+    assert "private-0" in text
+    assert isinstance(view, module.ServerSwitch)
+    assert [child.label for child in view.children] == ["Switch server", "New conversation"]
+    click = interaction(channel=msg.channel)
+    await view.children[1].callback(click)
+    assert (await conversation(db_session_factory)).scope_id != row.scope_id, (
+        "the controls shown by /dm-settings act on the current conversation"
+    )
+    await cog.cog_unload()
+
+
+async def test_dm_settings_outside_dms_or_without_conversation_shows_no_controls(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    in_guild = interaction(channel=MagicMock(spec=discord.TextChannel))
+    await cog.dm_settings.callback(cog, in_guild)
+    assert "in your DMs" in in_guild.response.send_message.await_args.args[0]
+    first = interaction()
+    await cog.dm_settings.callback(cog, first)
+    assert "Send a message to start one" in first.response.send_message.await_args.args[0]
+    for asked in (in_guild, first):
+        assert "view" not in asked.response.send_message.await_args.kwargs
+    await cog.cog_unload()

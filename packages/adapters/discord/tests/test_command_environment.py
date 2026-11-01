@@ -19,6 +19,7 @@ from daimon.core.config import (
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
+from discord import app_commands
 from discord.ext import commands
 from pydantic import PostgresDsn, SecretStr
 
@@ -26,7 +27,7 @@ from .harness import make_bot
 
 
 async def _ready_bot(
-    name: str, guild_ids: list[int]
+    name: str, guild_ids: list[int], *, dm_only: bool = False
 ) -> tuple[DaimonBot, AsyncMock, AsyncMock, MagicMock]:
     settings = Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]  # BaseSettings accepts this
@@ -53,6 +54,14 @@ async def _ready_bot(
     }
     bot._retire_orphaned_turns = AsyncMock()  # type: ignore[method-assign]
     bot._provision_joined_guild = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    if dm_only:
+
+        @app_commands.command(name="dm-only", description="d")
+        @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
+        async def dm_only_command(interaction: discord.Interaction) -> None: ...
+
+        bot.tree.add_command(dm_only_command)
+    bot.tree.remove_command = MagicMock()  # type: ignore[method-assign]
     bot.tree.sync = AsyncMock()  # type: ignore[method-assign]
     bot.tree.clear_commands = MagicMock()  # type: ignore[method-assign]
     bot.tree.copy_global_to = MagicMock()  # type: ignore[method-assign]
@@ -138,4 +147,19 @@ async def test_non_allowlisted_messages_interactions_and_dms_are_ignored() -> No
         inherited_dispatch.assert_not_called()
         bot.dispatch("message", SimpleNamespace(guild=SimpleNamespace(id=111)))
         inherited_dispatch.assert_called_once()
+    await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_non_production_registers_dm_only_commands_globally_and_not_in_guilds() -> None:
+    bot, _, global_overwrite, copy = await _ready_bot("lane-preview", [111], dm_only=True)
+    payload = global_overwrite.await_args.kwargs["payload"]
+    assert [command["name"] for command in payload] == ["dm-only"], (
+        "only the global scope reaches DMs, so a lane registers its DM-only commands there"
+    )
+    removed = bot.tree.remove_command.call_args_list  # type: ignore[attr-defined]
+    assert [(call.args[0], call.kwargs["guild"].id) for call in removed] == [("dm-only", 111)], (
+        "a DM-only command is dropped from the allowlisted guild's copy"
+    )
+    copy.assert_called_once()
     await bot.close()  # type: ignore[attr-defined]

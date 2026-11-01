@@ -274,6 +274,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from discord.http import HTTPClient
 
@@ -2405,16 +2406,27 @@ class DaimonBot(commands.Bot):
                 )
             )
         if non_production:
-            # Remove commands left by a production deployment without registering
-            # any global commands in this environment. Guild copies stay local.
+            # Replace commands left by a production deployment with the DM-only ones:
+            # only the global scope reaches DMs, and a DM-only command never shows in
+            # a guild, so registering it globally widens nothing.
+            dm_only = [
+                command
+                for command in self.tree.get_commands()
+                if isinstance(command, app_commands.Command)
+                and command.allowed_contexts is not None
+                and not command.allowed_contexts.guild
+            ]
             if not self._global_tree_synced:
                 if self.application_id is None:
                     log.warning("tree_sync_global_clear_failed", reason="missing_application_id")
                     return
                 try:
-                    await self.http.bulk_upsert_global_commands(self.application_id, payload=[])
+                    await self.http.bulk_upsert_global_commands(
+                        self.application_id,
+                        payload=[command.to_dict(self.tree) for command in dm_only],
+                    )
                     self._global_tree_synced = True
-                    log.info("tree_cleared_global")
+                    log.info("tree_cleared_global", dm_only=[c.name for c in dm_only])
                 except discord.HTTPException as exc:
                     log.warning("tree_sync_global_clear_failed", error=str(exc))
                     return
@@ -2426,6 +2438,8 @@ class DaimonBot(commands.Bot):
                     self.tree.clear_commands(guild=guild_obj)
                     if guild.id in command_guild_ids:
                         self.tree.copy_global_to(guild=guild_obj)
+                        for command in dm_only:
+                            self.tree.remove_command(command.name, guild=guild_obj)
                     await self.tree.sync(guild=guild_obj)
                     self._ready_synced_guild_ids.add(guild.id)
                     log.info("tree_synced", guild_id=str(guild.id))
