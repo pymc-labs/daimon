@@ -595,7 +595,7 @@ async def _facts(
     deps: AgentChangeDeps, *, tenant_id: uuid.UUID, agent: BetaManagedAgentsAgent
 ) -> AgentFacts:
     (facts,) = await load_agent_facts(
-        deps.view, tenant_id=tenant_id, agents=[agent], month_start=None
+        deps.view, tenant_id=tenant_id, agents=[agent], spend_since=None
     )
     return facts
 

@@ -6,7 +6,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -32,9 +32,11 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing.factories import make_account, make_tenant, make_web_person
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_account, make_tenant, make_usage_event, make_web_person
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, json_body
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import PUBLIC_URL, web_settings
@@ -194,6 +196,29 @@ async def test_a_member_reads_the_agent_without_its_prompt(
     assert body["nodes"] == [], "no connection node is configured"
     assert "data_access" not in body, "the agent carries no app vocabulary"
     assert refused.status_code == 403, "a member who does not own it cannot draft"
+
+
+async def test_spend_covers_the_last_30_days_not_the_calendar_month(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, _other = await _people(db_session)
+    tenant = await get_tenant(db_session, owner.tenant_id)
+    for days, session_id in ((20, "sess_recent"), (40, "sess_old")):
+        await make_usage_event(
+            db_session, tenant=tenant, agent_id="ag_w", managed_session_id=session_id
+        )
+        await db_session.execute(
+            text("update usage_events set occurred_at = :at where managed_session_id = :s"),
+            {"at": NOW - timedelta(days=days), "s": session_id},
+        )
+    await db_session.commit()
+    token = await _token(db_session_factory, owner)
+    async with _client(agents, owner.tenant_id, db_session_factory, token) as client:
+        roster = (await client.get("/api/agents")).json()
+        agent = (await client.get("/api/agents/ag_w")).json()
+    recent = roster[0]["spend_usd"]
+    assert recent > 0, "spend from last month but within 30 days counts"
+    assert agent["spend_usd"] == recent, "the card and the list show the same window"
 
 
 async def test_the_owner_drafts_applies_and_sees_history(

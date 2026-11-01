@@ -40,7 +40,6 @@ from daimon.core.agent_view import (
     PersonRef,
     SkillDoc,
 )
-from daimon.core.billing import month_start
 from daimon.core.channel_backend import make_backend_service
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL, MODEL_DISPLAY_NAMES
 from daimon.core.defaults.ma_index import list_skills_lenient
@@ -179,7 +178,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
             tenant_id=tenant_id,
             ma_agent_id=ma_agent_id,
             viewer=viewer_of(caller),
-            month_start=month_start(runtime.now()),
+            spend_since=runtime.now() - agent_view.SPEND_WINDOW,
             updated_by=await editors(tenant_id, [ma_agent_id]),
         )
         if view is None:
@@ -207,7 +206,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
             d.view,
             tenant_id=tenant_id,
             agents=agents,
-            month_start=month_start(runtime.now()),
+            spend_since=runtime.now() - agent_view.SPEND_WINDOW,
             updated_by=await editors(tenant_id, [a.id for a in agents]),
         )
         async with runtime.sessionmaker() as session:

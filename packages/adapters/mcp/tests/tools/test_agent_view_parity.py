@@ -100,7 +100,7 @@ async def test_view_and_get_agent_show_the_same_prompt_and_capabilities(
         tenant_id=tenant.id,
         ma_agent_id="ag_p",
         viewer=AgentViewer(account_id=caller.id, is_admin=admin, may_edit=True),
-        month_start=datetime(2026, 10, 1, tzinfo=UTC),
+        spend_since=datetime(2026, 10, 1, tzinfo=UTC),
     )
 
     assert view is not None, "the agent loads"

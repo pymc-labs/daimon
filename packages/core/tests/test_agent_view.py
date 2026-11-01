@@ -235,13 +235,13 @@ async def test_load_agent_view_reads_owner_and_refuses_another_tenants_agent(
     month = datetime(2026, 10, 1, tzinfo=UTC)
 
     view = await agent_view.load_agent_view(
-        deps, tenant_id=tenant.id, ma_agent_id="ag_v", viewer=viewer, month_start=month
+        deps, tenant_id=tenant.id, ma_agent_id="ag_v", viewer=viewer, spend_since=month
     )
     assert view is not None, "the tenant's own agent loads"
     assert view.owner.id != "", "the recorded creator is the owner"
     assert view.system == "Hi", "the owner reads the prompt"
     foreign = await agent_view.load_agent_view(
-        deps, tenant_id=tenant.id, ma_agent_id="ag_other", viewer=viewer, month_start=month
+        deps, tenant_id=tenant.id, ma_agent_id="ag_other", viewer=viewer, spend_since=month
     )
     assert foreign is None, "another tenant's agent reads as missing"
 
@@ -268,7 +268,7 @@ async def _view_of(
         tenant_id=tenant_id,
         ma_agent_id="ag_v",
         viewer=viewer,
-        month_start=datetime(2026, 10, 1, tzinfo=UTC),
+        spend_since=datetime(2026, 10, 1, tzinfo=UTC),
     )
     assert view is not None, "the tenant's own agent loads"
     return view
@@ -337,7 +337,7 @@ async def test_an_agent_with_no_recorded_owner_is_named_after_its_maker_without_
     assert elsewhere.owner.name == "Daimon", "a maker nothing names stays Daimon"
 
 
-async def test_month_usd_is_the_billed_spend_by_agent_and_last_used_is_the_latest_turn(
+async def test_spend_usd_is_the_billed_spend_by_agent_and_last_used_is_the_latest_turn(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -360,9 +360,9 @@ async def test_month_usd_is_the_billed_spend_by_agent_and_last_used_is_the_lates
         markup=Decimal("2"),
     )
     (facts,) = await agent_view.load_agent_facts(
-        deps, tenant_id=tenant.id, agents=[agent], month_start=month
+        deps, tenant_id=tenant.id, agents=[agent], spend_since=month
     )
-    assert facts.month_usd == float(Decimal(str(raw)) * 2), "spend is the cost times the markup"
+    assert facts.spend_usd == float(Decimal(str(raw)) * 2), "spend is the cost times the markup"
     assert facts.last_used_at is None, "no turn outcome means never used"
     assert [p.id for p in facts.places] == ["web"], "an unruled agent answers in web chat"
     assert await turn_outcomes.last_started_at(db_session, tenant.id, "ag_v") is None
@@ -393,7 +393,7 @@ async def test_load_agent_view_lists_the_servers_tools_for_the_agent_credential(
         tenant_id=tenant.id,
         ma_agent_id="ag_v",
         viewer=AgentViewer(account_id=uuid.uuid4(), is_admin=True, may_edit=True),
-        month_start=datetime(2026, 10, 1, tzinfo=UTC),
+        spend_since=datetime(2026, 10, 1, tzinfo=UTC),
     )
     assert view is not None and view.mcp_servers[0].tools == [], "nothing is recorded or listed"
     assert requests == [], "no credential, no call"
@@ -460,7 +460,7 @@ async def _own_server_view(
         tenant_id=tenant.id,
         ma_agent_id="ag_v",
         viewer=AgentViewer(account_id=viewer.id, is_admin=is_admin, may_edit=True),
-        month_start=datetime(2026, 10, 1, tzinfo=UTC),
+        spend_since=datetime(2026, 10, 1, tzinfo=UTC),
     )
     return view, viewer.id
 
@@ -550,7 +550,7 @@ async def _fact_statements(
     event.listen(bind.sync_engine, "before_cursor_execute", capture)
     try:
         facts = await agent_view.load_agent_facts(
-            deps, tenant_id=tenant_id, agents=agents, month_start=datetime(2000, 1, 1, tzinfo=UTC)
+            deps, tenant_id=tenant_id, agents=agents, spend_since=datetime(2000, 1, 1, tzinfo=UTC)
         )
     finally:
         event.remove(bind.sync_engine, "before_cursor_execute", capture)

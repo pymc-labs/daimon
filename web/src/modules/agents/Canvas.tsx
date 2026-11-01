@@ -109,8 +109,8 @@ function AgentNode() {
           <Avatar name={agent.owner.name} className="size-4 text-[8px]" /><span className="truncate">{agent.owner.name}</span>
           {agent.co_owners.length > 0 && <span className="text-faint">+{agent.co_owners.length}</span>}
         </span>
-        <span className="text-muted-foreground">This month</span>
-        <Money usd={agent.month_usd} />
+        <span className="text-muted-foreground">Last 30 days</span>
+        <Money usd={agent.spend_usd} />
         <span className="text-muted-foreground">Last used</span>
         <Ago iso={agent.last_used_at} />
       </div>

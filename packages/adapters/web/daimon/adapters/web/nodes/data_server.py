@@ -38,8 +38,7 @@ from daimon.adapters.web.nodes.exchange import (
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import agent_changes, agent_editing
 from daimon.core.agent_editing import AgentEditError
-from daimon.core.agent_view import AgentConfigDoc, McpServer, load_agent_view
-from daimon.core.billing import month_start
+from daimon.core.agent_view import SPEND_WINDOW, AgentConfigDoc, McpServer, load_agent_view
 from daimon.core.config import DataServerNodeSettings, Settings, SignedIdentityServer
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import relay_url
@@ -291,7 +290,7 @@ class DataServerNode:
             tenant_id=caller.person.tenant_id,
             ma_agent_id=agent_id,
             viewer=viewer_of(caller),
-            month_start=month_start(runtime.now()),
+            spend_since=runtime.now() - SPEND_WINDOW,
         )
         if view is None:
             raise HTTPException(status_code=404, detail="No such agent.")

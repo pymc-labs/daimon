@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Literal, get_args, get_type_hints
 
@@ -84,6 +84,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
+
+#: The spend an agent's card and the agent list show: this long up to now.
+SPEND_WINDOW = timedelta(days=30)
 
 Backend = Provider
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
@@ -190,7 +193,7 @@ class AgentView(AgentConfigDoc):
     updated_at: datetime
     updated_by: PersonRef
     last_used_at: datetime | None
-    month_usd: float
+    spend_usd: float
     can_edit: bool
     can_view_details: bool
 
@@ -206,7 +209,7 @@ class AgentSummary(_Doc):
     updated_at: datetime
     updated_by: PersonRef
     last_used_at: datetime | None
-    month_usd: float
+    spend_usd: float
     can_edit: bool
     draft_changes: int
     model_label: str
@@ -241,7 +244,7 @@ class AgentFacts:
     people: Mapping[uuid.UUID, PersonRef] = field(default_factory=dict[uuid.UUID, PersonRef])
     updated_by_account_id: uuid.UUID | None = None
     last_used_at: datetime | None = None
-    month_usd: float = 0.0
+    spend_usd: float = 0.0
     avatar_url: str = ""
     # What the skills' metadata says, by title; a skill not listed has no description.
     skill_descriptions: Mapping[str, str] = field(default_factory=dict[str, str])
@@ -416,7 +419,7 @@ def build_agent_view(facts: AgentFacts, viewer: AgentViewer) -> AgentView:
         updated_at=facts.agent.updated_at,
         updated_by=_person(facts, facts.updated_by_account_id or shown_owner),
         last_used_at=facts.last_used_at,
-        month_usd=facts.month_usd,
+        spend_usd=facts.spend_usd,
         can_edit=details and viewer.may_edit and not seeded,
         can_view_details=details,
     )
@@ -471,7 +474,7 @@ def summary_of(view: AgentView, *, draft_changes: int, runs_in: Sequence[str]) -
         updated_at=view.updated_at,
         updated_by=view.updated_by,
         last_used_at=view.last_used_at,
-        month_usd=view.month_usd,
+        spend_usd=view.spend_usd,
         can_edit=view.can_edit,
         draft_changes=draft_changes,
         model_label=view.model.id,
@@ -847,12 +850,12 @@ async def load_agent_facts(
     *,
     tenant_id: uuid.UUID,
     agents: Sequence[BetaManagedAgentsAgent],
-    month_start: datetime | None,
+    spend_since: datetime | None,
     updated_by: Mapping[str, uuid.UUID] | None = None,
 ) -> list[AgentFacts]:
     """Read what each agent's view needs: owners, backend, rules, credentials, places, use.
 
-    ``month_start=None`` skips use and spend, for callers that need only the config.
+    ``spend_since=None`` skips use and spend, for callers that need only the config.
     """
     titles, _truncated = await resolve_custom_skill_titles(
         deps.client, agents=agents, tenant_id=tenant_id
@@ -865,9 +868,9 @@ async def load_agent_facts(
         # The credit pages' source: billed spend by agent, markup included.
         costs = (
             await usage_events.costs_by_agent_in_tenant_since(
-                session, tenant_id=tenant_id, since=month_start
+                session, tenant_id=tenant_id, since=spend_since
             )
-            if month_start is not None
+            if spend_since is not None
             else {}
         )
         # One read per kind of fact for the whole list, not one per agent.
@@ -889,7 +892,7 @@ async def load_agent_facts(
             rules_by_agent.setdefault(rule.agent_id, []).append(rule)
         last_used = (
             await turn_outcomes.last_started_at_many(session, tenant_id, list(uuids))
-            if month_start is not None
+            if spend_since is not None
             else {}
         )
         avatars = await get_agent_avatars(
@@ -952,7 +955,7 @@ async def load_agent_facts(
                     },
                     updated_by_account_id=editor,
                     last_used_at=last_used.get(agent.id),
-                    month_usd=float(billed(costs.get(agent.id), deps.markup)),
+                    spend_usd=float(billed(costs.get(agent.id), deps.markup)),
                     avatar_url=served_avatar_url(deps.avatar_base_url, avatar),
                 )
             )
@@ -978,7 +981,7 @@ async def load_agent_view(
     tenant_id: uuid.UUID,
     ma_agent_id: str,
     viewer: AgentViewer,
-    month_start: datetime,
+    spend_since: datetime,
     updated_by: Mapping[str, uuid.UUID] | None = None,
 ) -> AgentView | None:
     """One agent as ``viewer`` may see it; None when the tenant has no such agent."""
@@ -989,7 +992,7 @@ async def load_agent_view(
         deps,
         tenant_id=tenant_id,
         agents=[agent],
-        month_start=month_start,
+        spend_since=spend_since,
         updated_by=updated_by,
     )
     if sees_details(facts, viewer):

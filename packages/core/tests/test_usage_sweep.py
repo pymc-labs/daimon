@@ -387,6 +387,7 @@ async def test_a_stamped_session_is_billed_to_its_tenant_user_and_budget_channel
     debit = (await db_session.execute(select(TenantLedger))).scalars().one()
     assert (usage.tenant_id, usage.platform_user_id) == (principal.tenant_id, "u-7")
     assert usage.channel_id == debit.channel_id == budget_channel
+    assert usage.agent_id == session.agent.id, "settled spend counts toward the session's agent"
 
 
 async def test_sessions_that_are_not_ours_are_not_billed(

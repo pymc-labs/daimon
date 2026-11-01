@@ -75,14 +75,14 @@ export type Agent = AgentConfig & {
   updated_at: string
   updated_by: PersonRef
   last_used_at: string | null
-  month_usd: number
+  spend_usd: number
   can_edit: boolean
   /** Prompt, credentials and reach detail: owners, co-owners and admins. */
   can_view_details: boolean
   nodes: AgentNode[]
 }
 
-export type AgentSummary = Pick<Agent, "id" | "name" | "purpose" | "avatar" | "version" | "owner" | "updated_at" | "updated_by" | "last_used_at" | "month_usd" | "can_edit" | "co_owners"> & {
+export type AgentSummary = Pick<Agent, "id" | "name" | "purpose" | "avatar" | "version" | "owner" | "updated_at" | "updated_by" | "last_used_at" | "spend_usd" | "can_edit" | "co_owners"> & {
   /** Changes in the signed-in person's draft. */
   draft_changes: number
   model_label: string
