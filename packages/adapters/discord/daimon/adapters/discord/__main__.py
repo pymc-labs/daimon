@@ -123,6 +123,8 @@ async def main() -> None:
     async with build_runtime(settings) as runtime:
         intents = discord.Intents.default()
         intents.message_content = True
+        # Privileged: the member lists web access follows (member_sync).
+        intents.members = True
         bot = DaimonBot(runtime=runtime, intents=intents)
         bot.wake_poller_enabled = True
         loop = asyncio.get_running_loop()
