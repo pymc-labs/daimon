@@ -15,6 +15,8 @@ from sqlalchemy import delete, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+_BATCH = 1000
+
 
 async def replace_members(
     session: AsyncSession,
@@ -29,19 +31,17 @@ async def replace_members(
     Atomic in the caller's transaction, which also marks the list as loaded in full.
     """
     await session.execute(delete(WorkspaceMember).where(WorkspaceMember.tenant_id == tenant_id))
-    if members:
-        await session.execute(
-            insert(WorkspaceMember),
-            [
-                {
-                    "tenant_id": tenant_id,
-                    "platform_user_id": user_id,
-                    "is_admin": is_admin,
-                    "updated_at": now,
-                }
-                for user_id, is_admin in members.items()
-            ],
-        )
+    rows = [
+        {
+            "tenant_id": tenant_id,
+            "platform_user_id": user_id,
+            "is_admin": is_admin,
+            "updated_at": now,
+        }
+        for user_id, is_admin in members.items()
+    ]
+    for start in range(0, len(rows), _BATCH):
+        await session.execute(insert(WorkspaceMember), rows[start : start + _BATCH])
     new = insert(WorkspaceMemberSync).values(
         tenant_id=tenant_id, workspace_name=workspace_name, synced_at=now
     )
@@ -88,20 +88,21 @@ async def delete_member(
 async def update_admin_flags(
     session: AsyncSession, *, tenant_id: uuid.UUID, flags: Mapping[str, bool], now: datetime
 ) -> None:
-    """Set the admin flag of members already listed; ids not listed are left out."""
+    """Set the admin flag of members already listed; ids not listed are left out.
+
+    In batches, so a whole large workspace stays within statement limits."""
     for is_admin in (True, False):
         user_ids = [user_id for user_id, flag in flags.items() if flag is is_admin]
-        if not user_ids:
-            continue
-        await session.execute(
-            update(WorkspaceMember)
-            .where(
-                WorkspaceMember.tenant_id == tenant_id,
-                WorkspaceMember.platform_user_id.in_(user_ids),
-                WorkspaceMember.is_admin.is_not(is_admin),
+        for start in range(0, len(user_ids), _BATCH):
+            await session.execute(
+                update(WorkspaceMember)
+                .where(
+                    WorkspaceMember.tenant_id == tenant_id,
+                    WorkspaceMember.platform_user_id.in_(user_ids[start : start + _BATCH]),
+                    WorkspaceMember.is_admin.is_not(is_admin),
+                )
+                .values(is_admin=is_admin, updated_at=now)
             )
-            .values(is_admin=is_admin, updated_at=now)
-        )
 
 
 async def clear_members(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
