@@ -1,7 +1,6 @@
-import { ExternalLink, RefreshCw, Trash2 } from "lucide-react"
+import { ExternalLink, Trash2 } from "lucide-react"
 import { useState } from "react"
 import { Link } from "react-router"
-import { toast } from "sonner"
 import { plural } from "@/lib/format"
 import { Mono, StatusDot } from "@/components/common"
 import { AppIcon } from "@/components/brand"
@@ -10,14 +9,13 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useMe } from "@/lib/hooks"
+import { useServerToken } from "../api"
 import { cn } from "@/lib/utils"
 import { Dot, Locked } from "../bits"
 import { RULE } from "../lib"
 import type { McpServer, ToolRule } from "../types"
 import { Field, Section, type Props } from "./parts"
 import { useLocal } from "./useLocal"
-
-const AUTH = { oauth: "OAuth", token: "Token", none: "None" }
 
 export function ServerEditor({ agent, ro, update, select, server: s, changed }: Props & { server: McpServer }) {
   const set = (fn: (x: McpServer) => void, d = 0) => update((c) => fn(c.mcp_servers.find((x) => x.key === s.key)!), d)
@@ -26,6 +24,10 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
   const writes = s.tools.filter((t) => t.effect === "write")
   const app = useMe().data?.apps.find((a) => a.key === s.app)
   const managed = !!s.app
+  // A server added in this draft has nothing to sign in to until the draft is applied.
+  const saved = agent.mcp_servers.some((x) => x.key === s.key)
+  const token = useServerToken(agent.id, s.key)
+  const [secret, setSecret] = useState("")
   return (
     <>
       <div className="flex items-center gap-3 px-5 py-4">
@@ -44,23 +46,27 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
               <Field label="URL" changed={changed.has(`mcp:${s.key}/url`)}>
                 <Input value={url} disabled={ro || managed} onChange={(e) => setUrl(e.target.value)} className="h-8 font-mono text-[12.5px]" />
               </Field>
-              <Field label="Sign-in" changed={changed.has(`mcp:${s.key}/auth`)}>
-                <Select value={s.auth} disabled={ro || managed} onValueChange={(v) => set((x) => { x.auth = v as McpServer["auth"] })}>
-                  <SelectTrigger className="h-8 w-36"><SelectValue /></SelectTrigger>
-                  <SelectContent>{Object.entries(AUTH).map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}</SelectContent>
-                </Select>
-              </Field>
-              <Field label="Credential">
-                <span className="flex items-center gap-3">
-                  {s.credential === "connected" ? <StatusDot status="healthy" label="Connected" />
-                    : s.credential === "expired" ? <StatusDot status="failing" label="Expired" /> : <StatusDot status="setup" label="Not signed in" />}
-                  {!ro && !managed && (
-                    <Button variant="outline" size="xs" className="ml-auto" onClick={() => toast(`Signing in to ${s.name}`)}>
-                      <RefreshCw />{s.credential === "connected" ? "Reconnect" : "Sign in"}
-                    </Button>
-                  )}
-                </span>
-              </Field>
+              {saved && (
+                <Field label="Credential">
+                  <span className="flex items-center gap-3">
+                    {s.credential === "connected" ? <StatusDot status="healthy" label="Connected" />
+                      : s.credential === "expired" ? <StatusDot status="failing" label="Expired" /> : <StatusDot status="setup" label="Not signed in" />}
+                    {!ro && !managed && s.credential !== "missing" && (
+                      <Button variant="outline" size="xs" className="ml-auto" disabled={token.remove.isPending} onClick={() => token.remove.mutate()}>
+                        <Trash2 />Remove
+                      </Button>
+                    )}
+                  </span>
+                </Field>
+              )}
+              {saved && !ro && !managed && (
+                <Field label="Token">
+                  <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (secret.trim()) token.save.mutate(secret.trim(), { onSuccess: () => setSecret("") }) }}>
+                    <Input type="password" autoComplete="off" value={secret} onChange={(e) => setSecret(e.target.value)} className="h-8 font-mono text-[12.5px]" />
+                    <Button type="submit" variant="outline" size="sm" disabled={!secret.trim() || token.save.isPending}>Save</Button>
+                  </form>
+                </Field>
+              )}
               {app && (
                 <Field label="Managed in">
                   <Button variant="outline" size="xs" className="w-fit" asChild>
@@ -122,19 +128,12 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
 export function NewServer({ config, update, select }: Props) {
   const [name, setName] = useState("")
   const [url, setUrl] = useState("")
-  const [auth, setAuth] = useState<McpServer["auth"]>("oauth")
   const key = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
   const ok = key && /^https:\/\/\S+$/.test(url) && !config.mcp_servers.some((s) => s.key === key)
   const add = () => {
     update((c) => {
       c.mcp_servers.push({
-        key, name: name.trim(), url, auth, credential: auth === "none" ? "connected" : "missing",
-        tools: [
-          { name: "search", description: "Search records", effect: "read", rule: "allow" },
-          { name: "get", description: "Read one record", effect: "read", rule: "allow" },
-          { name: "create", description: "Create a record", effect: "write", rule: "ask" },
-          { name: "update", description: "Change a record", effect: "write", rule: "ask" },
-        ],
+        key, name: name.trim(), url, auth: "none", credential: "missing", tools: [],
       })
     }, 0)
     select(`mcp:${key}`)
@@ -144,12 +143,6 @@ export function NewServer({ config, update, select }: Props) {
       <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); if (ok) add() }}>
         <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} autoFocus className="h-8" placeholder="Notion" /></Field>
         <Field label="URL"><Input value={url} onChange={(e) => setUrl(e.target.value)} className="h-8 font-mono text-[12.5px]" placeholder="https://" /></Field>
-        <Field label="Sign-in">
-          <Select value={auth} onValueChange={(v) => setAuth(v as McpServer["auth"])}>
-            <SelectTrigger className="h-8 w-36"><SelectValue /></SelectTrigger>
-            <SelectContent>{Object.entries(AUTH).map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}</SelectContent>
-          </Select>
-        </Field>
         <div className="flex justify-end gap-2 pt-2">
           <Button type="button" variant="ghost" size="sm" onClick={() => select("")}>Cancel</Button>
           <Button type="submit" size="sm" disabled={!ok}>Add server</Button>

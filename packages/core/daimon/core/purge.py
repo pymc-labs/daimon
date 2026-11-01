@@ -79,6 +79,9 @@ Deliberate carve-outs:
   underlying skill and the MA workspace is not under our delete authority.
   A skill added by hand is keyed by its agent, not the person who added it;
   erasure only nulls its `added_by_account_id`, through ON DELETE SET NULL.
+- `workspace_members` rows are kept: they mirror who the chat platform lists as a
+  member (platform user id and admin flag, no content), and the next reload would
+  restore a deleted row. They go when the install ends.
 - The user's GitHub-side OAuth grant is not revoked. No GitHub API client enters
   the purge path — we delete only our encrypted credential and oauth-state rows
   from our own DB.

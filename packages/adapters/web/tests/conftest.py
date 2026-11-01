@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.adapters.web.app import create_app
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.turns import WebTurns
@@ -73,6 +74,7 @@ def web_client() -> WebClientFactory:
         settings: Settings | None = None,
         billing_config: BillingConfig | None = None,
         stripe: StripeClient | None = None,
+        identity_key: Ed25519PrivateKey | None = None,
     ) -> AsyncIterator[httpx.AsyncClient]:
         web = web or web_settings()
         settings = settings or Settings(
@@ -92,6 +94,7 @@ def web_client() -> WebClientFactory:
                 turns=turns,
                 billing_config=billing_config,
                 stripe=stripe,
+                identity_key=identity_key,
                 **({"now": now} if now else {}),
             )
             async with httpx.AsyncClient(

@@ -119,6 +119,20 @@ async def update_thread(
         await session.execute(update(WebThread).where(WebThread.id == thread_id).values(**values))
 
 
+async def move_threads(
+    session: AsyncSession, *, from_person_id: uuid.UUID, to_person_id: uuid.UUID
+) -> None:
+    """Hand one person's chats, and the files they uploaded, to another in the same workspace."""
+    await session.execute(
+        update(WebThread)
+        .where(WebThread.person_id == from_person_id)
+        .values(person_id=to_person_id)
+    )
+    await file_uploads.move_person_uploads(
+        session, from_person_id=from_person_id, to_person_id=to_person_id
+    )
+
+
 async def delete_thread(session: AsyncSession, *, thread_id: uuid.UUID, now: datetime) -> None:
     """Soft-delete the thread and erase its messages and the files only they carried.
 

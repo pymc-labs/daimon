@@ -1,13 +1,12 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { MoreHorizontal } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 import { AgentAvatar, CopyButton } from "@/components/common"
-import { useParam } from "@/lib/filters"
+import { Drawer } from "@/components/Drawer"
+import { rowProps, useParam } from "@/lib/filters"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -20,7 +19,7 @@ import { cn } from "@/lib/utils"
 import { LoadMore, QueryState } from "@/components/QueryState"
 import type { Invite } from "./types"
 import { ROLE } from "./roles"
-import { Field } from "./shared"
+import { Facts, Field, PanelSection } from "./shared"
 
 // Invites
 
@@ -33,22 +32,24 @@ export function Invites() {
 
 function InviteTable({ data }: { data: Invite[] }) {
   const qc = useQueryClient()
+  const [, setInvite] = useParam("invite")
   const revoke = useMutation({
     mutationFn: (i: Invite) => api.del(`/api/admin/invites/${i.id}`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin", "invites"] }); toast("Invite revoked") },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin", "invites"] }); setInvite(null); toast("Invite revoked") },
   })
   return (
+    <>
     <Table>
       <TableHeader>
         <TableRow className="hover:bg-transparent">
           <TableHead>Email</TableHead><TableHead>Role</TableHead><TableHead className="max-md:hidden">Agents</TableHead>
           <TableHead className="text-right">Credit</TableHead><TableHead className="max-lg:hidden">Expires</TableHead>
-          <TableHead>Status</TableHead><TableHead className="w-10" />
+          <TableHead>Status</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {data.map((i) => (
-          <TableRow key={i.id}>
+          <TableRow key={i.id} {...rowProps(() => setInvite(i.id))}>
             <TableCell className="font-medium">{i.email}</TableCell>
             <TableCell className="text-muted-foreground">{ROLE[i.role]}</TableCell>
             <TableCell className="max-md:hidden">
@@ -64,20 +65,39 @@ function InviteTable({ data }: { data: Invite[] }) {
             <TableCell>
               <span className={cn("text-sm", i.status === "accepted" ? "text-success" : i.status === "expired" ? "text-faint" : "text-muted-foreground")}>{STATUS[i.status]}</span>
             </TableCell>
-            <TableCell>
-              {i.status === "pending" && (
-                <DropdownMenu>
-                  <DropdownMenuTrigger className="rounded p-1 text-muted-foreground hover:bg-accent" aria-label="Invite actions"><MoreHorizontal className="size-4" /></DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem variant="destructive" onSelect={() => revoke.mutate(i)}>Revoke</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              )}
-            </TableCell>
           </TableRow>
         ))}
       </TableBody>
     </Table>
+    <Drawer param="invite" title="Invite" ids={data.map((i) => i.id)}>
+      {(id) => {
+        const i = data.find((x) => x.id === id)
+        return i && (
+          <div>
+            <div className="px-5 py-5">
+              <div className="truncate text-base font-semibold">{i.email}</div>
+              <div className="text-sm text-muted-foreground">{STATUS[i.status]}</div>
+            </div>
+            <PanelSection title="Details">
+              <Facts rows={[["Role", ROLE[i.role]], ["Credit", usd(i.credit_usd)], ["Expires", shortDate(i.expires_at)], ["Invited by", i.by]]} />
+            </PanelSection>
+            <PanelSection title="Agents">
+              {i.agents.length ? (
+                <div className="space-y-1">
+                  {i.agents.map((a) => <div key={a.id} className="flex h-8 items-center gap-2 text-sm"><AgentAvatar src={a.avatar} name={a.name} />{a.name}</div>)}
+                </div>
+              ) : <span className="text-sm text-muted-foreground">Any agent</span>}
+            </PanelSection>
+            {i.status === "pending" && (
+              <div className="border-t px-5 py-4">
+                <Button variant="outline" size="sm" className="text-destructive" disabled={revoke.isPending} onClick={() => revoke.mutate(i)}>Revoke</Button>
+              </div>
+            )}
+          </div>
+        )
+      }}
+    </Drawer>
+    </>
   )
 }
 

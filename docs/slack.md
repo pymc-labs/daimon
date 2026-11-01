@@ -40,6 +40,7 @@ then reinstall the app so the workspace approves the scopes:
 | Private conversations | `im:history` and `im:write` scopes, the `message.im` event, the App Home messages tab |
 | Direct messages from agents | `im:write` scope |
 | Slack Connect channels | The `channel_shared`, `channel_unshared` and `member_joined_channel` events |
+| Web access that follows workspace membership | The `team_join` and `user_change` events |
 | Channel lifecycle tracking | The `message.channels`, `message.groups` and channel archive, unarchive and delete events |
 | File delivery | `files:write` scope |
 | Agent names and avatars | `chat:write.customize` scope, requested at install when [agent identity](agent-identity.md) is on |

@@ -3,7 +3,7 @@ import { useEffect, useRef } from "react"
 import { toast } from "sonner"
 
 import { api } from "@/lib/api"
-import type { Agent, AgentConfig, AgentSummary, AgentVersion, Backend, Catalog, Draft, Effect, Template } from "./types"
+import type { Agent, AgentConfig, AgentSummary, AgentVersion, Backend, Catalog, Draft, Effect, Skill, SkillFiles, Template } from "./types"
 
 export const useAgents = () => useQuery({ queryKey: ["agents"], queryFn: () => api.get<AgentSummary[]>("/api/agents") })
 export const useAgent = (id: string) => useQuery({ queryKey: ["agents", id], queryFn: () => api.get<Agent>(`/api/agents/${id}`) })
@@ -13,6 +13,31 @@ export const useVersions = (id: string, enabled = true) =>
   useQuery({ queryKey: ["agents", id, "versions"], queryFn: () => api.get<AgentVersion[]>(`/api/agents/${id}/versions`), enabled })
 export const useCatalog = () => useQuery({ queryKey: ["agents", "catalog"], queryFn: () => api.get<Catalog>("/api/agents/catalog"), staleTime: Infinity })
 export const useTemplates = () => useQuery({ queryKey: ["agents", "templates"], queryFn: () => api.get<Template[]>("/api/agents/templates"), staleTime: Infinity })
+
+/** The files of a custom skill at the version the config pins. */
+export const useSkillFiles = (agentId: string, skill: Skill, enabled: boolean) =>
+  useQuery({
+    queryKey: ["agents", agentId, "skill-files", skill.skill_id, skill.version],
+    queryFn: () => api.get<SkillFiles>(`/api/agents/${agentId}/skills/${skill.skill_id}/files?version=${encodeURIComponent(skill.version)}`),
+    enabled,
+    retry: false,
+  })
+
+/** Publish `files` as a new version of the skill (or a new skill when `skillId` is null); a null body keeps that file as `version` has it. */
+export const saveSkillFiles = (agentId: string, skillId: string | null, files: Record<string, string | null>, version?: string) =>
+  api.post<Skill>(`/api/agents/${agentId}/skills`, { skill_id: skillId, files, version })
+
+/** Store or remove the token an agent's MCP server is called with. */
+export function useServerToken(agentId: string, key: string) {
+  const qc = useQueryClient()
+  const done = () => { void qc.invalidateQueries({ queryKey: ["agents", agentId], exact: true }); void qc.invalidateQueries({ queryKey: ["agents", agentId, "draft"] }) }
+  const fail = (e: Error) => toast.error(e.message)
+  const path = `/api/agents/${agentId}/mcp/${encodeURIComponent(key)}/token`
+  return {
+    save: useMutation({ mutationFn: (token: string) => api.put(path, { token }), onSuccess: done, onError: fail }),
+    remove: useMutation({ mutationFn: () => api.del(path), onSuccess: done, onError: fail }),
+  }
+}
 
 /** The config being edited: the person's draft if any, else the current version. */
 function configOf(agent: Agent): AgentConfig {

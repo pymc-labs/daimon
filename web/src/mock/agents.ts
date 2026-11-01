@@ -39,9 +39,14 @@ const CODE_TOOLS = ["bash", "read", "write", "edit", "grep", "glob"]
 const md = (id: string, title: string, description: string, body: string) =>
   `---\nname: ${id}\ndescription: ${description}\n---\n\n# ${title}\n\n${body}\n`
 
-const SKILL = (id: string, title: string, description: string, body: string, extra: Partial<Skill> = {}): Skill => ({
-  type: "custom", skill_id: id, title, description, content: md(id, title, description, body), version: "3", ...extra,
-})
+/** Files of each published skill version, keyed `<skill id>@<version>`. */
+const FILES = new Map<string, Record<string, string>>()
+const latestVersion = (id: string) => Math.max(0, ...[...FILES.keys()].filter((k) => k.startsWith(`${id}@`)).map((k) => Number(k.split("@")[1])))
+
+const SKILL = (id: string, title: string, description: string, body: string, extra: Partial<Skill> = {}): Skill => {
+  FILES.set(`${id}@3`, { "SKILL.md": md(id, title, description, body) })
+  return { type: "custom", skill_id: id, title, description, version: "3", ...extra }
+}
 
 const SKILLS: Skill[] = [
   SKILL("data-validation", "Data validation", "Check a dataset's grain, types, ranges and joins before any analysis.",
@@ -70,9 +75,9 @@ const SKILLS: Skill[] = [
     "Sections: who they are, open deals, last three touches, risks. Pull deals from HubSpot.", { requires: ["hubspot"] }),
   SKILL("triage", "Ticket triage", "Label, prioritise and route support tickets.",
     "Label by product area. P1 if a customer is blocked. Route to the owning team's Linear project.", { requires: ["linear"] }),
-  { type: "anthropic", skill_id: "xlsx", title: "Excel", description: "Edit Excel files, keeping formulas and formatting.", content: "Anthropic skill.", version: "latest" },
-  { type: "anthropic", skill_id: "pptx", title: "PowerPoint", description: "Edit PowerPoint decks, keeping layouts.", content: "Anthropic skill.", version: "latest" },
-  { type: "anthropic", skill_id: "docx", title: "Word", description: "Edit Word documents with tracked changes.", content: "Anthropic skill.", version: "latest" },
+  { type: "anthropic", skill_id: "xlsx", title: "Excel", description: "Edit Excel files, keeping formulas and formatting.", version: "latest" },
+  { type: "anthropic", skill_id: "pptx", title: "PowerPoint", description: "Edit PowerPoint decks, keeping layouts.", version: "latest" },
+  { type: "anthropic", skill_id: "docx", title: "Word", description: "Edit Word documents with tracked changes.", version: "latest" },
 ]
 const skill = (id: string) => clone(SKILLS.find((s) => s.skill_id === id)!)
 
@@ -167,7 +172,7 @@ export function diffConfig(a: AgentConfig, b: AgentConfig): Change[] {
   for (const [id, s] of sb) {
     const o = sa.get(id)
     if (!o) add({ key: `skill:${id}`, node: "skills", label: `${s.title} skill`, kind: "add" }, "identity")
-    else if (o.content !== s.content) add({ key: `skill:${id}`, node: "skills", label: `${s.title} skill`, kind: "edit", before: o.content, after: s.content, text: true }, "identity")
+    else if (o.version !== s.version) add({ key: `skill:${id}`, node: "skills", label: `${s.title} skill`, kind: "edit", before: `v${o.version}`, after: `v${s.version}` }, "identity")
   }
   for (const [id, s] of sa) if (!sb.has(id)) add({ key: `skill:${id}`, node: "skills", label: `${s.title} skill`, kind: "remove" }, "identity")
   for (const t of b.tools) {
@@ -417,6 +422,17 @@ const FACES = [1, 3, 8, 23, 31, 44]
 
 const find = (id: string) => DB.find((r) => r.id === id)
 
+async function setCredential(id: string, key: string, credential: McpServer["credential"]) {
+  await wait(250)
+  const r = find(id)
+  const server = r && current(r).config.mcp_servers.find((x) => x.key === key)
+  if (!r || !server) return notFound()
+  server.credential = credential
+  server.auth = "token"
+  save()
+  return HttpResponse.json({ ok: true })
+}
+
 export const agentsHandlers = [
   http.get("/api/agents", async () => {
     await wait()
@@ -497,6 +513,38 @@ export const agentsHandlers = [
     save()
     return HttpResponse.json(view(r, v))
   }),
+  http.get("/api/agents/:id/skills/:skill/files", async ({ params, request }) => {
+    await wait(120)
+    if (!viewer()) return unauthorized()
+    const id = String(params.skill)
+    const version = new URL(request.url).searchParams.get("version") ?? String(latestVersion(id))
+    const files = FILES.get(`${id}@${version}`)
+    if (!files) return notFound()
+    return HttpResponse.json({
+      skill_id: id, version,
+      files: Object.entries(files).sort(([a], [b]) => (a === "SKILL.md" ? -1 : b === "SKILL.md" ? 1 : a.localeCompare(b)))
+        .map(([path, content]) => ({ path, size: content.length, content })),
+    })
+  }),
+  http.post("/api/agents/:id/skills", async ({ request }) => {
+    await wait(400)
+    if (!viewer()) return unauthorized()
+    const { skill_id, files, version: held } = (await request.json()) as { skill_id: string | null; files: Record<string, string | null>; version?: string }
+    const base = skill_id ? FILES.get(`${skill_id}@${held ?? latestVersion(skill_id)}`) ?? {} : {}
+    const next: Record<string, string> = {}
+    for (const [path, body] of Object.entries(files)) next[path] = body ?? base[path] ?? ""
+    const doc = next["SKILL.md"]
+    const name = doc?.match(/^name:\s*(\S+)/m)?.[1]
+    const description = doc?.match(/^description:\s*(.+)$/m)?.[1]?.trim()
+    if (!name || !description) return HttpResponse.json({ detail: "SKILL.md needs a name and a description." }, { status: 422 })
+    const id = skill_id ?? name
+    const version = String(latestVersion(id) + 1)
+    FILES.set(`${id}@${version}`, next)
+    const title = SKILLS.find((x) => x.skill_id === id)?.title ?? name.replace(/-/g, " ").replace(/^./, (c) => c.toUpperCase())
+    return HttpResponse.json({ type: "custom", skill_id: id, title, description, version } satisfies Skill)
+  }),
+  http.put("/api/agents/:id/mcp/:key/token", async ({ params }) => setCredential(String(params.id), String(params.key), "connected")),
+  http.delete("/api/agents/:id/mcp/:key/token", async ({ params }) => setCredential(String(params.id), String(params.key), "missing")),
   http.get("/api/agents/:id/versions", async ({ params }) => {
     await wait()
     const v = viewer(), r = find(String(params.id))

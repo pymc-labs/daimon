@@ -80,6 +80,7 @@ from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.workspace_members import list_chat_standings
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
@@ -123,13 +124,21 @@ async def _agents_by_tenant(
     A hub call runs outside every channel, so an isolated channel's own agents
     are neither listed nor resolvable here, except for an admin of that
     workspace (the isolation exemption in their own hub). A tenant whose access policy can't
-    be read is left out whole, so one bad workspace doesn't hide the others.
+    be read is left out whole, so one bad workspace doesn't hide the others. So is one
+    whose member list no longer has the caller, from the next call on.
     """
-    by_id = await list_agents_by_tenants(
-        runtime.client, tenant_ids=[t.tenant_id for t in hub.tenants]
-    )
+    async with runtime.session_factory() as session:
+        standings = await list_chat_standings(
+            session, people=[(t.tenant_id, t.account_id) for t in hub.tenants]
+        )
+    tenants = [
+        t
+        for t in hub.tenants
+        if (standing := standings.get((t.tenant_id, t.account_id))) is None or standing.admitted
+    ]
+    by_id = await list_agents_by_tenants(runtime.client, tenant_ids=[t.tenant_id for t in tenants])
     out: list[tuple[HubTenant, list[BetaManagedAgentsAgent]]] = []
-    for tenant in hub.tenants:
+    for tenant in tenants:
         try:
             async with runtime.session_factory() as session:
                 policy = await load_access_policy(session, tenant_id=tenant.tenant_id)

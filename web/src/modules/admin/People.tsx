@@ -17,7 +17,7 @@ import type { Role } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import type { AdminPerson } from "./types"
 import { ROLE } from "./roles"
-import { Tag } from "./shared"
+import { PanelSection as Section, Tag } from "./shared"
 
 const usePeople = () => usePaged<AdminPerson>(["admin", "people"], "/api/admin/people")
 // People
@@ -70,15 +70,6 @@ export function People() {
       <LoadMore list={query} />
       <Drawer param="person" title="Person" ids={rows.map((p) => p.id)}>{(id) => <PersonView id={id} />}</Drawer>
     </>
-  )
-}
-
-function Section({ title, children, aside }: { title: string; children: React.ReactNode; aside?: React.ReactNode }) {
-  return (
-    <section className="border-t px-5 py-4">
-      <div className="mb-2 flex items-center justify-between"><h3 className="text-xs font-medium text-muted-foreground">{title}</h3>{aside}</div>
-      {children}
-    </section>
   )
 }
 

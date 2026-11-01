@@ -1,14 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Check, ChevronDown, MoreHorizontal, Ticket, Users, UserRound } from "lucide-react"
+import { Check, ChevronDown, Ticket, Users, UserRound } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { AgentAvatar } from "@/components/common"
 import { useConfirm } from "@/lib/confirm"
 import { CreditMeter } from "@/components/CreditMeter"
+import { Drawer } from "@/components/Drawer"
+import { rowProps, useParam } from "@/lib/filters"
 import { QueryState } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -36,9 +37,10 @@ const changed = (qc: ReturnType<typeof useQueryClient>) => {
 function AllowanceTable({ data }: { data: Allowance[] }) {
   const qc = useQueryClient()
   const confirm = useConfirm()
+  const [, setAllowance] = useParam("allowance")
   const del = useMutation({
     mutationFn: (a: Allowance) => api.del(`/api/credits/allowances/${a.id}`),
-    onSuccess: () => { changed(qc); toast("Allowance removed") },
+    onSuccess: () => { changed(qc); setAllowance(null); toast("Allowance removed") },
   })
   return (
     <div className="mx-auto max-w-[1040px]">
@@ -46,14 +48,14 @@ function AllowanceTable({ data }: { data: Allowance[] }) {
         <TableHeader>
           <TableRow className="hover:bg-transparent">
             <TableHead>For</TableHead><TableHead className="max-md:hidden">Agent</TableHead><TableHead className="text-right">Amount</TableHead>
-            <TableHead className="w-48 max-sm:hidden">Used</TableHead><TableHead className="max-lg:hidden">Expires</TableHead><TableHead className="w-10" />
+            <TableHead className="w-48 max-sm:hidden">Used</TableHead><TableHead className="max-lg:hidden">Expires</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {data.map((a) => {
             const Icon = KIND_ICON[a.subject.kind]
             return (
-              <TableRow key={a.id}>
+              <TableRow key={a.id} {...rowProps(() => setAllowance(a.id))}>
                 <TableCell>
                   <span className="flex items-center gap-2.5">
                     <span className="flex size-6 items-center justify-center rounded-full bg-accent"><Icon className="size-3.5 text-muted-foreground" /></span>
@@ -74,21 +76,46 @@ function AllowanceTable({ data }: { data: Allowance[] }) {
                     : <CreditMeter compact meter={{ left_usd: a.amount_usd - a.used_usd, total_usd: a.amount_usd, window: a.window, resets_at: null }} />}
                 </TableCell>
                 <TableCell className="text-muted-foreground max-lg:hidden">{a.expires_at ? shortDate(a.expires_at) : "Never"}</TableCell>
-                <TableCell>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger className="rounded p-1 text-muted-foreground hover:bg-accent" aria-label="Allowance actions"><MoreHorizontal className="size-4" /></DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem variant="destructive" onSelect={async () => {
-                        if (await confirm({ title: "Remove allowance?", body: a.subject.name, action: "Remove", destructive: true })) del.mutate(a)
-                      }}>Remove</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </TableCell>
               </TableRow>
             )
           })}
         </TableBody>
       </Table>
+      <Drawer param="allowance" title="Allowance" ids={data.map((a) => a.id)}>
+        {(id) => {
+          const a = data.find((x) => x.id === id)
+          if (!a) return null
+          const Icon = KIND_ICON[a.subject.kind]
+          return (
+            <div>
+              <div className="flex items-center gap-3 px-5 py-5">
+                <span className="flex size-10 items-center justify-center rounded-full bg-accent"><Icon className="size-4 text-muted-foreground" /></span>
+                <div className="min-w-0">
+                  <div className="truncate text-base font-semibold">{a.subject.name}</div>
+                  <div className="text-sm text-muted-foreground">{KIND_LABEL[a.subject.kind]}</div>
+                </div>
+              </div>
+              <section className="border-t px-5 py-4">
+                <dl className="space-y-1.5 text-sm">
+                  {([
+                    ["Amount", `${usd(a.amount_usd)}${a.window === "month" ? " / month" : " total"}`],
+                    ["Used", a.subject.kind === "group" ? `Each of ${a.members} members` : usd(a.used_usd)],
+                    ["Agent", a.agent?.name ?? "Any agent"],
+                    ["Expires", a.expires_at ? shortDate(a.expires_at) : "Never"],
+                  ] as const).map(([k, v]) => (
+                    <div key={k} className="grid grid-cols-[112px_1fr] gap-3"><dt className="text-muted-foreground">{k}</dt><dd>{v}</dd></div>
+                  ))}
+                </dl>
+              </section>
+              <div className="border-t px-5 py-4">
+                <Button variant="outline" size="sm" className="text-destructive" disabled={del.isPending} onClick={async () => {
+                  if (await confirm({ title: "Remove allowance?", body: a.subject.name, action: "Remove", destructive: true })) del.mutate(a)
+                }}>Remove</Button>
+              </div>
+            </div>
+          )
+        }}
+      </Drawer>
     </div>
   )
 }

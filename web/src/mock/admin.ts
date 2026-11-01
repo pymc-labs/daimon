@@ -39,12 +39,12 @@ const invites: Invite[] = [
 
 const access: AgentAccess[] = [
   ...AGENTS.map((a): AgentAccess => ({
-    agent: a, web: a.id !== "ag_review", fixed_to: null,
+    agent: a, web: a.id !== "ag_review", fixed_to: null, fixed_name: null,
     who: a.id === "ag_pricing" ? "groups" : a.id === "ag_sales" ? "groups" : "everyone",
     groups: a.id === "ag_pricing" ? ["Pricing", "CLV"] : a.id === "ag_sales" ? ["Sales", "Leadership"] : [],
   })),
   { agent: { id: "ag_northwind", name: "Northwind Support", avatar: face(39), model: "Opus 5.5", description: "Northwind customer support" },
-    web: false, who: "everyone", groups: [], fixed_to: "#northwind-support" },
+    web: false, who: "everyone", groups: [], fixed_to: "1100000000000000001", fixed_name: "northwind-support" },
 ]
 
 const audit: AuditEntry[] = [

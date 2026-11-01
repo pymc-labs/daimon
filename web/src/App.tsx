@@ -5,7 +5,7 @@ import { ErrorState, Rows } from "@/components/QueryState"
 import { ApiError } from "@/lib/api"
 import { useMe } from "@/lib/hooks"
 import type { ModuleKey } from "@/lib/types"
-import { MODULES } from "@/modules/registry"
+import { homeFor, MODULES, redirectFor } from "@/modules/registry"
 import { InviteLanding } from "@/pages/Invite"
 import { SignIn } from "@/pages/SignIn"
 import { NotFound, SignedOut } from "@/pages/Status"
@@ -19,10 +19,21 @@ function RequireAuth() {
   return <Outlet />
 }
 
-/** Routes of a module the server has not enabled for this person lead to chat. */
+/** A page this person may not open, or a module the server has not enabled for them, leads to their first page. */
 function ModuleGate({ k }: { k: ModuleKey }) {
   const { data } = useMe()
-  return data?.modules.includes(k) ? <Outlet /> : <Navigate to="/chat" replace />
+  const { pathname } = useLocation()
+  if (!data) return null
+  const to = data.modules.includes(k) ? redirectFor(data, pathname) : homeFor(data)
+  return to ? <Navigate to={to} replace /> : <Outlet />
+}
+
+/** The app frames live in the shell; this only turns away an app the person does not have. */
+function AppGate() {
+  const { data } = useMe()
+  const { pathname } = useLocation()
+  const to = data && redirectFor(data, pathname)
+  return to ? <Navigate to={to} replace /> : null
 }
 
 export default function App() {
@@ -36,7 +47,7 @@ export default function App() {
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/chat" replace />} />
           {MODULES.map((m) => <Route key={m.key} element={<ModuleGate k={m.key} />}>{m.routes}</Route>)}
-          <Route path="/apps/:app/*" element={null} />
+          <Route path="/apps/:app/*" element={<AppGate />} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Route>

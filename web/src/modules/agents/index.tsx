@@ -18,5 +18,6 @@ export const agents: ModuleDef = {
       <Route path="/agents/:id" element={<AgentPage />} />
     </>
   ),
+  gates: [{ to: "/agents/new", cap: "agents.create" }],
   actions: [{ label: "New agent", to: "/agents/new", icon: Plus, cap: "agents.create" }],
 }

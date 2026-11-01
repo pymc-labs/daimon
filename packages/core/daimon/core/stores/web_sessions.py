@@ -141,6 +141,13 @@ async def delete_session(session: AsyncSession, *, token_sha256: bytes) -> int:
     return cast(CursorResult[Any], result).rowcount
 
 
+async def delete_for_person(session: AsyncSession, *, person_id: uuid.UUID) -> int:
+    """End every sign-in that reaches the person."""
+    reaching = select(WebSessionPerson.session_id).where(WebSessionPerson.person_id == person_id)
+    result = await session.execute(delete(WebSession).where(WebSession.id.in_(reaching)))
+    return cast(CursorResult[Any], result).rowcount
+
+
 async def delete_expired(session: AsyncSession, *, now: datetime) -> int:
     result = await session.execute(delete(WebSession).where(WebSession.expires_at <= now))
     return cast(CursorResult[Any], result).rowcount
