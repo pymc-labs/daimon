@@ -1277,7 +1277,12 @@ person's own message (or to the answer, when that message is not in the
 thread) and says "For @name" without pinging anyone. Discord uses the guild's
 upload limit (10 MB, up to 100 MB for a boosted server; 10 MB where there is
 no guild) and checks the channel's writers before posting. No limit goes above
-200 MB, because each file is read into memory whole. A file over the limit
+200 MB, because each file is read into memory whole. A Discord DM turn gets
+the same sweep once its answer is sent, under the 10 MB default, with no
+"For @name" and no reply reference, since a DM has one reader; before each
+file it checks the DM's recipient policy and the turn's delivery grant
+instead of channel writers. A DM turn on a self-hosted backend is not swept.
+A file over the limit
 (the guild's on Discord, 200 MB on Slack, 20 MB on Teams) is never deleted: it
 stays listed and in the agent's workspace, and the thread gets one notice
 naming the file, its size and the limit, and offering a smaller version or

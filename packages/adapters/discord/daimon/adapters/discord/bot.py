@@ -57,7 +57,7 @@ from daimon.adapters.discord.lifecycle import (
 )
 from daimon.adapters.discord.membership import GatewayMembershipResolver, member_facts
 from daimon.adapters.discord.names import remember_guild_user
-from daimon.adapters.discord.output_delivery import deliver_session_outputs
+from daimon.adapters.discord.output_delivery import Conversation, deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.post_transport import (
     DiscordPostTransport,
@@ -930,27 +930,29 @@ class DaimonBot(commands.Bot):
     async def _sweep_session_outputs(
         self,
         previous: asyncio.Task[None] | None,
-        thread: discord.Thread,
-        tenant_id: uuid.UUID,
+        thread: Conversation,
         session_id: str,
+        may_post: Callable[[], Awaitable[bool]],
         lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
         # A previous sweep owns post-then-delete for this MA session until it finishes.
         if previous is not None:
             with contextlib.suppress(Exception):
                 await previous
+        # A DM has one reader, so a file posted apart from the answer needs no attribution.
+        attributed = lifecycle if isinstance(thread, discord.Thread) else None
         try:
             await deliver_session_outputs(
                 self.runtime.turn_deps.anthropic,
                 thread,
                 session_id=session_id,
-                may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
+                may_post=may_post,
                 notice_thread_ids=self._delivery_notice_thread_ids,
                 noticed_files=self._noticed_output_files,
                 turn_window=lifecycle.turn_window if lifecycle is not None else None,
                 answer=lifecycle.answer_message if lifecycle is not None else None,
-                requester_id=lifecycle.requester_id if lifecycle is not None else None,
-                reply_to=lifecycle.files_reply_to(thread.id) if lifecycle is not None else None,
+                requester_id=attributed.requester_id if attributed is not None else None,
+                reply_to=attributed.files_reply_to(thread.id) if attributed is not None else None,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -1173,10 +1175,39 @@ class DaimonBot(commands.Bot):
             isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             return
-        session_id = outcome.ma_session_id
+        self._queue_output_sweep(
+            thread,
+            outcome.ma_session_id,
+            may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
+            lifecycle=lifecycle,
+        )
+
+    def schedule_dm_output_sweep(
+        self,
+        channel: discord.DMChannel,
+        session_id: str,
+        *,
+        may_post: Callable[[], Awaitable[bool]],
+        lifecycle: DiscordTurnLifecycle | None,
+    ) -> None:
+        """Sweep a DM turn's files onto its answer, detached like a thread's sweep.
+
+        ``may_post`` is the DM's own delivery check, asked again before each
+        file: the thread gate's channel permissions mean nothing in a DM.
+        """
+        self._queue_output_sweep(channel, session_id, may_post=may_post, lifecycle=lifecycle)
+
+    def _queue_output_sweep(
+        self,
+        thread: Conversation,
+        session_id: str,
+        *,
+        may_post: Callable[[], Awaitable[bool]],
+        lifecycle: DiscordTurnLifecycle | None,
+    ) -> None:
         previous = self._output_sweeps.get(session_id)
         task = self._spawn(
-            self._sweep_session_outputs(previous, thread, tenant_id, session_id, lifecycle)
+            self._sweep_session_outputs(previous, thread, session_id, may_post, lifecycle)
         )
         self._output_sweeps[session_id] = task
         task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))

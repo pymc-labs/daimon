@@ -811,6 +811,8 @@ class DirectMessageCog(commands.Cog):
                     raise AdmissionDenied(reason="invoker_not_allowed") from exc
 
             async def edit(sent: discord.Message, **kwargs: Any) -> discord.Message | None:  # noqa: ANN401
+                # A plain message edit has no replacement post to allow or refuse.
+                kwargs.pop("_allow_replacement", None)
                 return await sent.edit(**kwargs)
 
             card = DiscordTurnLifecycle(
@@ -836,6 +838,38 @@ class DirectMessageCog(commands.Cog):
             return card
 
         return build
+
+    def _deliver_files(
+        self,
+        message: discord.Message | _DmRequest,
+        reply: DirectMessageReply,
+        card: DiscordTurnLifecycle | None,
+    ) -> None:
+        """Send the turn's saved files to the DM, rechecking access before each one."""
+        assert isinstance(message.channel, discord.DMChannel)
+        session_id = reply.session_id
+        if session_id is None:
+            return
+        runtime = self.bot.runtime
+        person = str(message.author.id)
+
+        async def may_post() -> bool:
+            policy = runtime.settings.direct_message_policies.get(
+                reply.conversation.tenant_id, DirectMessagePolicy()
+            )
+            if not policy.allows(person):
+                self._suppress(message, "delivery_recipient_revoked")
+                return False
+            try:
+                await require_dm_delivery(runtime.turn_deps, reply)
+            except DirectMessageAccessRevoked as exc:
+                self._suppress(message, exc.reason)
+                return False
+            return True
+
+        self.bot.schedule_dm_output_sweep(
+            message.channel, session_id, may_post=may_post, lifecycle=card
+        )
 
     async def _reply(
         self, message: discord.Message | _DmRequest, *, expected_scope_id: str | None = None
@@ -948,6 +982,8 @@ class DirectMessageCog(commands.Cog):
                         answer[start : start + 1900],
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
+            if reply is not None:
+                self._deliver_files(message, reply, cards[-1] if cards else None)
         except _DM_FAILURES as exc:
             log_anthropic_overload(
                 exc,

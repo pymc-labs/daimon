@@ -555,3 +555,79 @@ async def test_dm_turn_renders_through_the_adapters_card(
         assert seen["cancel"] is cancel, "the card's Stop button cancels this turn"
     else:
         assert type(seen["lifecycle"]).__name__ == "_CollectReply", "no card renders nothing"
+
+
+@pytest.mark.parametrize(
+    ("backend", "files_session"),
+    [(None, "sesn_dm"), ("selfhosted", None)],
+    ids=["managed-agents", "selfhosted"],
+)
+async def test_dm_reply_names_the_session_whose_files_the_adapter_sends(
+    db_session_factory, monkeypatch, backend, files_session
+):
+    from types import SimpleNamespace
+
+    from daimon.core import direct_messages
+    from daimon.core.authz import AgentRef, Place, Surface, build_subject
+    from daimon.core.direct_messages import reply_to_dm_result
+    from daimon.core.turn.admission import AdmissionGrant
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TextBlock, TurnState
+
+    tenant, admission, deps = await seed(db_session_factory)
+    row = await start_cold_dm(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        workspace_id=tenant.external_id,
+        route_key="555",
+        external_user_id="999",
+    )
+    admission = replace(
+        admission,
+        grant=AdmissionGrant(
+            tenant_id=tenant.id,
+            subject=build_subject(is_admin=False, platform_user_id="999", verified_membership=True),
+            surface=Surface.DM,
+            turn_place=Place(),
+            agent=AgentRef.of("private"),
+            run_place=Place(),
+            channel_id=row.channel_id,
+            thread_id=row.scope_id,
+            is_dm=True,
+            cold_dm=True,
+            human_invocation=True,
+        ),
+        backend_revision=SimpleNamespace(backend=backend) if backend is not None else None,
+        backend_revision_origin="agent" if backend is not None else None,
+    )
+    monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
+    monkeypatch.setattr(
+        direct_messages,
+        "bind_session",
+        AsyncMock(return_value=SimpleNamespace(admission=admission)),
+    )
+
+    async def run(deps, prepared, **kwargs):
+        return RunOutcome(
+            TurnState(content=[TextBlock(kind="text", text="the clip")]), "sesn_dm", None, False
+        )
+
+    monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
+
+    reply = await reply_to_dm_result(
+        deps,
+        platform="discord",
+        route_key="555",
+        external_user_id="999",
+        message_id="101",
+        expected_scope_id=row.scope_id,
+        text="make a clip",
+        role=Role.USER,
+        verified_membership=True,
+    )
+
+    assert reply is not None and reply.text == "the clip"
+    assert reply.session_id == files_session, (
+        "only a Managed Agents session has a file listing to sweep"
+    )

@@ -1222,3 +1222,124 @@ def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
         DaimonBot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
             bot, outcome, thread=_thread(), tenant_id=uuid.uuid4(), selfhosted=True
         )
+
+
+# --- Direct messages ----------------------------------------------------------
+
+
+def _dm() -> discord.DMChannel:
+    channel = MagicMock(spec=discord.DMChannel)
+    channel.id = 321
+    channel.guild = None
+    channel.me.id = 42
+    channel.send = AsyncMock()
+    return cast(discord.DMChannel, channel)
+
+
+async def test_a_dm_gets_the_file_and_the_listing_entry_is_cleared() -> None:
+    client, deleted = _client_with_file(filename="clip", size_bytes=9, content=b"mp4-bytes")
+    channel = _dm()
+
+    await deliver_session_outputs(
+        client,
+        channel,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        sleep=_no_sleep,
+    )
+
+    file = cast(AsyncMock, channel.send).await_args.kwargs["file"]
+    assert isinstance(file, discord.File)
+    assert file.fp.read() == b"mp4-bytes"
+    assert deleted == ["file_chart"]
+
+
+async def test_a_dm_skips_a_file_over_discords_default_limit_and_keeps_it() -> None:
+    client, deleted = _client_with_file(filename="clip.mp4", size_bytes=11 * _MIB)
+    channel = _dm()
+
+    await deliver_session_outputs(
+        client,
+        channel,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        sleep=_no_sleep,
+    )
+
+    notice = cast(AsyncMock, channel.send).await_args.args[0]
+    assert "over the 10 MB upload limit" in notice, "a DM is held to Discord's default limit"
+    assert deleted == [], "the oversize file stays in the session"
+
+
+async def test_a_file_the_agent_already_sent_in_the_dm_is_not_sent_again() -> None:
+    client, deleted = _client_with_file(filename="chart", size_bytes=9, content=b"png-bytes")
+    channel = _dm()
+    channel.history = _history(_posted(author_id=42, filename="chart.png", size=9))
+
+    await deliver_session_outputs(
+        client,
+        channel,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        turn_window=_WINDOW,
+        sleep=_no_sleep,
+    )
+
+    cast(AsyncMock, channel.send).assert_not_awaited()
+    assert deleted == ["file_chart"]
+
+
+async def test_a_refused_dm_upload_keeps_the_file_and_asks_for_no_permission() -> None:
+    client, deleted = _client_with_file(filename="chart.png", size_bytes=9, content=b"png-bytes")
+    channel = _dm()
+    forbidden = discord.Forbidden(MagicMock(status=403, reason="Forbidden"), "Cannot send")
+    channel.send = AsyncMock(side_effect=forbidden)
+
+    await deliver_session_outputs(
+        client,
+        channel,
+        session_id="sesn_1",
+        may_post=_allowed,
+        notice_thread_ids=set(),
+        sleep=_no_sleep,
+    )
+
+    assert channel.send.await_count == 1, "no Attach Files notice in a DM"
+    assert deleted == []
+
+
+async def test_a_dm_sweep_attaches_to_the_answer_names_nobody_and_chains_per_session() -> None:
+    from .harness import make_bot
+
+    bot = make_bot(MagicMock())
+    channel = _dm()
+    lifecycle = MagicMock(output_authorization=MagicMock())
+    lifecycle.requester_id = 4242
+    lifecycle.answer_message = AnswerMessage(message_id=_ANSWER_ID, edit=AsyncMock())
+    started = [asyncio.Event(), asyncio.Event()]
+    release = asyncio.Event()
+    calls: list[dict[str, Any]] = []
+
+    async def sweep(*args: object, **kwargs: Any) -> None:
+        calls.append(kwargs)
+        started[len(calls) - 1].set()
+        await release.wait()
+
+    with patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=sweep):
+        bot.schedule_dm_output_sweep(channel, "sesn_1", may_post=_allowed, lifecycle=lifecycle)
+        await started[0].wait()
+        bot.schedule_dm_output_sweep(channel, "sesn_1", may_post=_allowed, lifecycle=lifecycle)
+        await asyncio.sleep(0)
+        assert len(calls) == 1, "a DM sweep waits for the session's earlier sweep"
+        release.set()
+        await started[1].wait()
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+    first = calls[0]
+    assert first["may_post"] is _allowed, "the DM's own delivery check gates every file"
+    assert first["answer"] is lifecycle.answer_message
+    assert first["requester_id"] is None and first["reply_to"] is None
+    lifecycle.files_reply_to.assert_not_called()

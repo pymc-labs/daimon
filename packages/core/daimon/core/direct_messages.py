@@ -93,11 +93,16 @@ class DirectMessageAccessRevoked(UserFacingError):
 
 @dataclass(frozen=True)
 class DirectMessageReply:
-    """Text and the exact agent authority used for this private model turn."""
+    """Text and the exact agent authority used for this private model turn.
+
+    ``session_id`` is the Managed Agents session whose saved files the adapter
+    delivers after the answer; None when the turn ran on another backend.
+    """
 
     text: str
     conversation: DirectMessageRow
     grant: AdmissionGrant
+    session_id: str | None = None
 
 
 async def load_dm_access_policy(
@@ -834,7 +839,7 @@ async def reply_to_dm_result(
                     bounded_turns(previous), from_agent_name="private conversation"
                 )
             )
-            answer, _ = await _run_admitted_dm_turn(
+            answer, session_id = await _run_admitted_dm_turn(
                 deps,
                 prepared,
                 tenant_id=conversation.tenant_id,
@@ -865,7 +870,15 @@ async def reply_to_dm_result(
                 raise DirectMessageAccessRevoked(
                     "authorization_missing", message="Private authority unavailable."
                 )
-            return DirectMessageReply(text=answer, conversation=conversation, grant=grant)
+            revision = prepared.admission.backend_revision
+            return DirectMessageReply(
+                text=answer,
+                conversation=conversation,
+                grant=grant,
+                session_id=None
+                if revision is not None and revision.backend == "selfhosted"
+                else session_id,
+            )
         except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
             raise _revoked(error) from error
         except asyncio.CancelledError:
