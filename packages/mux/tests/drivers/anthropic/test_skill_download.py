@@ -55,6 +55,16 @@ async def test_latest_downloads_the_newest_version() -> None:
     assert not sdk.violations, sdk.violations
 
 
+async def test_a_version_pinned_by_id_downloads_that_version() -> None:
+    sdk = transport(
+        ScriptedReply(
+            "GET", "/v1/skills/s/versions/ver_1/content", httpx.Response(200, content=b"ZIP")
+        )
+    )
+    assert await download(sdk, "ver_1") == b"ZIP", "agents pin a version by its id"
+    assert not sdk.violations, sdk.violations
+
+
 async def test_a_missing_version_is_not_found() -> None:
     with pytest.raises(ProviderError) as raised:
         await download(transport(), "2")

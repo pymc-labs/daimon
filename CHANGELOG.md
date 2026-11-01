@@ -199,8 +199,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offers every enabled provider's models with prices, and saving one switches the agent's
   provider. A data server that refuses access names who can help. MCP servers list their
   real tools for owners and admins, including the deployment's own server, or say "Not
-  listed". Skill files open with a workspace key. Agent spend includes sessions settled
-  after the turn.
+  listed". Skill files open with a workspace key, including versions pinned by id. Agent
+  spend includes sessions settled after the turn, and migration `0158_usage_agent_backfill`
+  credits older usage to the agent whose session spent it.
 
 - Discord MCP posts from self-hosted agents use their local name and avatar when agent identity is enabled, without an Anthropic lookup.
 

@@ -182,12 +182,12 @@ class AnthropicSkillVersions:
             yield chunk
 
     async def _version_id(self, skill_id: str, version: str) -> str:
-        """The id of ``version``; "latest" is the newest one."""
+        """The id of ``version`` (a number or an id); "latest" is the newest one."""
         newest: tuple[datetime, str] | None = None
         async for item in provider_iter(
             self._client.beta.skills.versions.list(skill_id=skill_id, limit=100)
         ):
-            if item.version == version:
+            if version in (item.version, item.id):
                 return item.id
             made = datetime.fromisoformat(item.created_at)
             if version == "latest" and (newest is None or made > newest[0]):
