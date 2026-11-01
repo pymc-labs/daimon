@@ -63,6 +63,7 @@ async def main() -> None:
             web_client=AsyncWebClient(session=runtime.slack_http),
         )
         client.socket_mode_request_listeners.append(app.on_request)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk list attr
+        client.message_listeners.append(member_sync.on_socket_message)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk list attr
 
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -113,8 +114,9 @@ async def main() -> None:
                 )
             )
             _bg_tasks.add(sweep_task)
-            # Member lists for web access, likewise in the background.
-            members_task = asyncio.create_task(member_sync.load_installed())
+            # Member lists for web access, likewise in the background, loaded again after
+            # a reconnect and every few hours.
+            members_task = asyncio.create_task(member_sync.keep_loaded())
             _bg_tasks.add(members_task)
 
             def _on_sweep_done(task: asyncio.Task[None]) -> None:

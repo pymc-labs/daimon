@@ -85,6 +85,37 @@ async def delete_member(
     )
 
 
+async def apply_changes(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    changes: Mapping[str, bool | None],
+    now: datetime,
+) -> None:
+    """Write member changes again: an admin flag lists the user with it, None removes them."""
+    gone = [user_id for user_id, change in changes.items() if change is None]
+    for start in range(0, len(gone), _BATCH):
+        await session.execute(
+            delete(WorkspaceMember).where(
+                WorkspaceMember.tenant_id == tenant_id,
+                WorkspaceMember.platform_user_id.in_(gone[start : start + _BATCH]),
+            )
+        )
+    listed = [
+        {"tenant_id": tenant_id, "platform_user_id": user_id, "is_admin": change, "updated_at": now}
+        for user_id, change in changes.items()
+        if change is not None
+    ]
+    for start in range(0, len(listed), _BATCH):
+        new = insert(WorkspaceMember).values(listed[start : start + _BATCH])
+        await session.execute(
+            new.on_conflict_do_update(
+                index_elements=[WorkspaceMember.tenant_id, WorkspaceMember.platform_user_id],
+                set_={"is_admin": new.excluded.is_admin, "updated_at": now},
+            )
+        )
+
+
 async def update_admin_flags(
     session: AsyncSession, *, tenant_id: uuid.UUID, flags: Mapping[str, bool], now: datetime
 ) -> None:

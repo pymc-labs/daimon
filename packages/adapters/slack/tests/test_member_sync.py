@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -89,3 +92,78 @@ async def test_a_workspace_not_installed_is_tried_again_later() -> None:
     assert not sync.claim_load(_TEAM), "not at once"
     clock[0] += 61
     assert sync.claim_load(_TEAM), "but after a minute"
+
+
+async def test_a_deactivation_during_a_load_is_not_undone(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """users.list still returns the user deactivated while the load paged through it."""
+    await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
+    await db_session.commit()
+    sync = SlackMemberSync(
+        MagicMock(sessionmaker=db_session_factory), clock=lambda: datetime(2026, 5, 1, tzinfo=UTC)
+    )
+    client = _client()
+    pages = list(client.users_list.side_effect)
+
+    async def page_then_deactivate(**_: object) -> dict[str, Any]:
+        if len(pages) == 1:
+            await sync.user_event(_TEAM, _user("U2", deleted=True))
+        return pages.pop(0)
+
+    client.users_list = AsyncMock(side_effect=page_then_deactivate)
+    with patch(
+        "daimon.adapters.slack.member_sync.resolve_web_client", AsyncMock(return_value=client)
+    ):
+        assert sync.claim_load(_TEAM)
+        await sync.load(_TEAM)
+
+    assert await _rows(db_session_factory) == {"U1": True}, "the deactivation stands"
+
+
+async def _until(check: Callable[[], bool]) -> None:
+    for _ in range(200):
+        if check():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition never held")
+
+
+async def _stop(task: asyncio.Task[None]) -> None:
+    """Cancel once the load in flight has written, so no transaction is cut mid-way."""
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_lists_load_again_after_a_reconnect_and_on_a_timer(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Slack never replays events missed while disconnected, so a reconnect reloads, and
+    so does the timer."""
+    await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
+    await db_session.commit()
+    runtime = MagicMock(sessionmaker=db_session_factory)
+    client = MagicMock()
+    client.auth_test = AsyncMock(return_value={"team": "Team"})
+    client.users_list = AsyncMock(return_value={"members": [_user("U1")]})
+    with patch(
+        "daimon.adapters.slack.member_sync.resolve_web_client", AsyncMock(return_value=client)
+    ):
+        sync = SlackMemberSync(runtime)
+        task = asyncio.create_task(sync.keep_loaded())
+        await _until(lambda: client.users_list.await_count == 1)
+        await sync.on_socket_message(None, {"type": "hello"}, None)
+        await asyncio.sleep(0.05)
+        after_first_hello = client.users_list.await_count
+        await sync.on_socket_message(None, {"type": "hello"}, None)
+        await _until(lambda: client.users_list.await_count == 2)
+        await _stop(task)
+
+        timed = SlackMemberSync(runtime, reload_every_s=0.3)
+        timed_task = asyncio.create_task(timed.keep_loaded())
+        await _until(lambda: client.users_list.await_count == 4)
+        await _stop(timed_task)
+
+    assert after_first_hello == 1, "the first connection's hello loads nothing more"

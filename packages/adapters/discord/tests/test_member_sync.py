@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from daimon.adapters.discord.member_sync import MemberSync, tenant_of
 from daimon.core.stores import workspace_members as members_store
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _GUILD = 123456789012345678
 _OWNER, _MOD, _PLAIN, _BOT = 11, 22, 33, 44
@@ -79,3 +81,51 @@ async def test_a_server_without_an_install_is_not_listed(
     await MemberSync(db_session_factory).reload(_guild())
 
     assert await _rows(db_session_factory) == {}
+
+
+async def test_a_leave_and_a_demotion_during_a_reload_are_not_undone(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The reload's read still lists the member who left and the admin who lost the role;
+    what the events wrote while it ran wins."""
+    await make_tenant(db_session, platform="discord", workspace_id=str(_GUILD))
+    await db_session.commit()
+    sync = MemberSync(db_session_factory, clock=lambda: datetime(2026, 5, 1, tzinfo=UTC))
+    guild = _guild()
+
+    async def events_while_chunking(**_: object) -> None:
+        await sync.left(_GUILD, _PLAIN)
+        demoted = _member(guild, _MOD)
+        await sync.admins_changed(guild, [demoted])
+
+    guild.chunk.side_effect = events_while_chunking
+    await sync.reload(guild)
+
+    assert await _rows(db_session_factory) == {"11": True, "22": False}, (
+        "the stale read neither brings back the leaver nor restores admin"
+    )
+
+
+@pytest.mark.usefixtures("db_clean")
+async def test_a_leave_landing_during_the_reload_write_is_written_again(
+    db_committing_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leave noted after the reload laid events over its read, while it writes, is
+    written once more after the reload commits."""
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        await make_tenant(session, platform="discord", workspace_id=str(_GUILD))
+    sync = MemberSync(factory, clock=lambda: datetime(2026, 5, 1, tzinfo=UTC))
+    real = members_store.replace_members
+    leaves: list[asyncio.Task[None]] = []
+
+    async def replace_with_a_leave(session: AsyncSession, **kwargs: Any) -> None:
+        leaves.append(asyncio.create_task(sync.left(_GUILD, _PLAIN)))
+        await asyncio.sleep(0.05)
+        await real(session, **kwargs)
+
+    monkeypatch.setattr(members_store, "replace_members", replace_with_a_leave)
+    await sync.reload(_guild())
+    await asyncio.gather(*leaves)
+
+    assert "33" not in await _rows(factory), "the leave stands after the reload"

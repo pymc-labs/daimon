@@ -1,13 +1,18 @@
 """Each workspace's member list, which web access follows.
 
 Loaded in full from users.list at start and on a workspace's first event after that
-(a new install), then kept current by team_join and user_change. Bots, Slackbot and
-deactivated users are not members; admin is a workspace admin or owner.
+(a new install), then kept current by team_join and user_change. Slack never replays an
+event missed while disconnected, so every list is loaded again after a Socket Mode
+reconnect and every few hours. Bots, Slackbot and deactivated users are not members;
+admin is a workspace admin or owner.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -17,6 +22,7 @@ import structlog
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.member_reloads import ReloadChanges, overlay
 from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from slack_sdk.errors import SlackApiError
@@ -29,6 +35,8 @@ _SLACKBOT = "USLACKBOT"
 _RETRY_AFTER_S = 600.0
 #: Nor is one for a workspace not installed (yet), whose install may be landing.
 _UNINSTALLED_RETRY_S = 60.0
+#: Every list is loaded again this often, for events lost without a reconnect.
+RELOAD_EVERY_S = 6 * 3600.0
 
 
 def _utcnow() -> datetime:
@@ -66,17 +74,28 @@ class SlackMemberSync:
         runtime: SlackRuntime,
         clock: Callable[[], datetime] = _utcnow,
         monotonic: Callable[[], float] = time.monotonic,
+        reload_every_s: float = RELOAD_EVERY_S,
     ) -> None:
         self._runtime = runtime
         self._clock = clock
         self._monotonic = monotonic
+        self._reload_every_s = reload_every_s
         # Team id to when it may be loaded again: never once loaded or loading.
         self._next_load: dict[str, float] = {}
+        self._loading: set[str] = set()
+        self._changes = ReloadChanges()
+        self._hellos = 0
+        self._reload_wanted = asyncio.Event()
 
-    def claim_load(self, team_id: str) -> bool:
-        """Whether the caller should load `team_id` now; at most one load at a time."""
-        if not team_id or self._next_load.get(team_id, 0.0) > self._monotonic():
+    def claim_load(self, team_id: str, *, again: bool = False) -> bool:
+        """Whether the caller should load `team_id` now; at most one load at a time.
+
+        `again` loads a workspace already loaded, or waiting to retry, as well."""
+        if not team_id or team_id in self._loading:
             return False
+        if not again and self._next_load.get(team_id, 0.0) > self._monotonic():
+            return False
+        self._loading.add(team_id)
         self._next_load[team_id] = float("inf")
         return True
 
@@ -84,15 +103,36 @@ class SlackMemberSync:
         """The install ended: a reinstall loads the list afresh on its first event."""
         self._next_load.pop(team_id, None)
 
-    async def load_installed(self) -> None:
-        """Load every live install's list, at start."""
-        tenants = await list_tenants_by_platform(self._runtime.sessionmaker, platform="slack")
-        await self.load_all(t.external_id for t in tenants if t.archived_at is None)
+    async def keep_loaded(self) -> None:
+        """Load every live install's list now, then again after each reconnect and every
+        `reload_every_s`. Runs until cancelled."""
+        while True:
+            self._reload_wanted.clear()
+            await self.load_installed(again=True)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._reload_wanted.wait(), self._reload_every_s)
 
-    async def load_all(self, team_ids: Iterable[str]) -> None:
+    async def on_socket_message(
+        self, _client: object, message: dict[str, Any], _raw: str | None
+    ) -> None:
+        """Socket Mode listener: each connection opens with a hello, so a hello after the
+        first is a reconnect, and the events sent meanwhile may be lost."""
+        if message.get("type") != "hello":
+            return
+        self._hellos += 1
+        if self._hellos > 1:
+            log.info("slack.members.reload_after_reconnect")
+            self._reload_wanted.set()
+
+    async def load_installed(self, *, again: bool = False) -> None:
+        """Load every live install's list."""
+        tenants = await list_tenants_by_platform(self._runtime.sessionmaker, platform="slack")
+        await self.load_all((t.external_id for t in tenants if t.archived_at is None), again=again)
+
+    async def load_all(self, team_ids: Iterable[str], *, again: bool = False) -> None:
         """One workspace at a time, to stay inside users.list's rate limit."""
         for team_id in team_ids:
-            if self.claim_load(team_id):
+            if self.claim_load(team_id, again=again):
                 await self.load(team_id)
 
     async def load(self, team_id: str) -> None:
@@ -103,9 +143,25 @@ class SlackMemberSync:
         except (SlackApiError, aiohttp.ClientError, TimeoutError) as err:
             self._next_load[team_id] = self._monotonic() + _RETRY_AFTER_S
             log.warning("slack.members.load_failed", team_id=team_id, err_type=type(err).__name__)
+        finally:
+            self._loading.discard(team_id)
 
     async def _load(self, team_id: str) -> bool:
         """Whether the workspace is installed, and so loaded."""
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        self._changes.start(tenant_id)
+        try:
+            loaded = await self._replace(team_id, tenant_id)
+        finally:
+            late = self._changes.finish(tenant_id)
+        if loaded and late:
+            async with self._runtime.sessionmaker.begin() as session:
+                await members_store.apply_changes(
+                    session, tenant_id=tenant_id, changes=late, now=self._clock()
+                )
+        return loaded
+
+    async def _replace(self, team_id: str, tenant_id: uuid.UUID) -> bool:
         client = await resolve_web_client(self._runtime, team_id=team_id)
         if client is None:
             return False
@@ -116,11 +172,11 @@ class SlackMemberSync:
             for user in await _all_users(client)
             if (entry := member_entry(user, team_id=team_id)) is not None
         )
-        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         async with self._runtime.sessionmaker.begin() as session:
             tenant = await get_tenant(session, tenant_id)
             if tenant is None or tenant.archived_at is not None:
                 return False
+            members = overlay(members, self._changes.seen(tenant_id))
             await members_store.replace_members(
                 session,
                 tenant_id=tenant_id,
@@ -141,6 +197,7 @@ class SlackMemberSync:
             return
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         entry = member_entry(fields, team_id=team_id)
+        self._changes.note(tenant_id, user_id, None if entry is None else entry[1])
         async with self._runtime.sessionmaker.begin() as session:
             if entry is None:
                 await members_store.delete_member(

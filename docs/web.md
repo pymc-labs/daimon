@@ -106,7 +106,8 @@ their chat account is a member. Their spend and memory are the same as in
 chat. Someone who leaves a Discord server or Slack workspace loses it in the
 web app at once. Discord needs the Server Members intent and Slack the
 `team_join` and `user_change` events for this; until a list loads, the sign-in
-itself decides.
+itself decides. Slack lists also reload after a reconnect and every six hours,
+since Slack does not resend events missed while disconnected.
 
 ## Become the owner
 
