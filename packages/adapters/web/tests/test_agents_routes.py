@@ -10,12 +10,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import Fernet
 from daimon.adapters.web.app import create_app
 from daimon.adapters.web.cookies import new_session_token, token_sha256
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core import agent_skill_files
+from daimon.core import agent_changes, agent_editing, agent_skill_files
+from daimon.core.agent_editing import AgentEditError
 from daimon.core.authz import build_subject
 from daimon.core.channel_backend import BackendActor, make_backend_service
 from daimon.core.config import Settings, TurnSettings
@@ -399,23 +401,7 @@ async def test_an_owner_switches_the_agent_to_another_providers_model(
     """The catalog offers every allowed provider, and applying one writes the provider setting."""
     agents, owner, _other = await _people(db_session)
     await _admin(db_session_factory, owner)
-    settings = Settings(
-        _env_file=None,  # pyright: ignore[reportCallIssue]
-        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-        turn=TurnSettings(path="mux", channel_backends=True),
-    )
-    service = make_backend_service(db_session_factory, settings.turn)
-    policy = await service.tenant_policy(owner.tenant_id)
-    await service.set_tenant_allowlist(
-        owner.tenant_id,
-        ("anthropic", "openai"),
-        policy.revision,
-        BackendActor(
-            tenant_id=owner.tenant_id,
-            account_id=owner.account_id,
-            subject=build_subject(is_admin=True, platform_user_id=None),
-        ),
-    )
+    settings = await _provider_choice(db_session_factory, owner, ("anthropic", "openai"))
     token = await _token(db_session_factory, owner)
     async with _client(
         agents, owner.tenant_id, db_session_factory, token, settings=settings
@@ -440,6 +426,220 @@ async def test_an_owner_switches_the_agent_to_another_providers_model(
     assert all("model" not in update for update in agents.updates), (
         "another provider's model is never written as the Managed Agents model"
     )
+
+
+class _Creatable(_Agents):
+    """`_Agents` that also takes a new agent, `ag_new`, and records what is archived."""
+
+    def __init__(self, agent: BetaManagedAgentsAgent) -> None:
+        super().__init__(agent)
+        self.made: BetaManagedAgentsAgent | None = None
+        self.archived: list[str] = []
+        self.router.add("POST", r"/v1/agents$", self._create)
+        self.router.add("GET", r"/v1/agents/ag_new$", lambda _r, _m: self._made())
+        self.router.add("POST", r"/v1/agents/ag_new/archive$", self._archive)
+
+    def _list(self) -> httpx.Response:
+        rows = [a.model_dump(mode="json") for a in (self.agent, self.made) if a is not None]
+        return httpx.Response(200, json={"data": rows, "has_more": False})
+
+    def _create(self, req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        self.made = ma_agent(
+            id="ag_new",
+            name=body["name"],
+            tenant_id=self.agent.metadata["daimon_tenant"],
+            metadata=body.get("metadata") or {},
+            model=body["model"]["id"] if isinstance(body["model"], dict) else body["model"],
+        )
+        return self._made()
+
+    def _made(self) -> httpx.Response:
+        assert self.made is not None, "created first"
+        return httpx.Response(200, json=self.made.model_dump(mode="json"))
+
+    def _archive(self, _req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        self.archived.append("ag_new")
+        assert self.made is not None, "created first"
+        self.made = self.made.model_copy(update={"archived_at": NOW})
+        return self._made()
+
+
+async def _provider_choice(
+    factory: async_sessionmaker[AsyncSession], owner: WebPersonRow, providers: tuple[str, ...]
+) -> Settings:
+    """Settings with provider choice on, and ``providers`` allowed in the owner's workspace."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+        turn=TurnSettings(path="mux", channel_backends=True),
+    )
+    service = make_backend_service(factory, settings.turn)
+    policy = await service.tenant_policy(owner.tenant_id)
+    await service.set_tenant_allowlist(
+        owner.tenant_id,
+        providers,  # pyright: ignore[reportArgumentType]
+        policy.revision,
+        BackendActor(
+            tenant_id=owner.tenant_id,
+            account_id=owner.account_id,
+            subject=build_subject(is_admin=True, platform_user_id=None),
+        ),
+    )
+    return settings
+
+
+async def test_a_new_agent_on_another_provider_is_made_or_left_unmade(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Made and switched; refused up front when the provider is off; archived when the
+    switch fails after the agent was made."""
+    agents, owner, _other = await _people(db_session)
+    agents = _Creatable(agents.agent)
+    await _admin(db_session_factory, owner)
+    token = await _token(db_session_factory, owner)
+    only_anthropic = await _provider_choice(db_session_factory, owner, ("anthropic",))
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, token, settings=only_anthropic
+    ) as client:
+        off = await client.post(
+            "/api/agents", json={"name": "scout", "model": "gpt-6-astra"}, headers=_OWN
+        )
+    assert off.status_code == 403 and agents.made is None, "an off provider makes nothing"
+
+    settings = await _provider_choice(db_session_factory, owner, ("anthropic", "openai"))
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, token, settings=settings
+    ) as client:
+        made = await client.post(
+            "/api/agents", json={"name": "scout", "model": "gpt-6-astra"}, headers=_OWN
+        )
+    assert made.status_code == 200, made.text
+    assert (made.json()["model"]["backend"], made.json()["model"]["id"]) == (
+        "openai",
+        "gpt-6-astra",
+    ), "the new agent runs on the chosen provider"
+    assert agents.archived == [], "a finished agent stays"
+
+    async def refuse(*_a: object, **_k: object) -> None:
+        raise AgentEditError("Only the agent's owner or an admin can do that.", kind="forbidden")
+
+    agents.made = None
+    monkeypatch.setattr(agent_changes, "switch_provider", refuse)
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, token, settings=settings
+    ) as client:
+        failed = await client.post(
+            "/api/agents", json={"name": "other", "model": "gpt-6-astra"}, headers=_OWN
+        )
+    assert failed.status_code == 403, failed.text
+    assert agents.archived == ["ag_new"], "the half-made agent is archived"
+
+
+async def test_a_failed_later_step_leaves_the_provider_unchanged(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider setting is written last, so a refused agent write leaves it as it was."""
+    agents, owner, _other = await _people(db_session)
+    await _admin(db_session_factory, owner)
+    settings = await _provider_choice(db_session_factory, owner, ("anthropic", "openai"))
+    token = await _token(db_session_factory, owner)
+
+    async def refuse(*_a: object, **_k: object) -> None:
+        raise AgentEditError("This agent changed since your draft began.", kind="stale")
+
+    monkeypatch.setattr(agent_editing, "update_agent", refuse)
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, token, settings=settings
+    ) as client:
+        config = (await client.get("/api/agents/ag_w")).json()
+        before = config["model"]
+        config["system"] = "Be thorough."
+        config["model"] = {**config["model"], "id": "gpt-6-astra", "backend": "openai"}
+        draft = await client.patch(
+            "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
+        )
+        applied = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
+        after = (await client.get("/api/agents/ag_w")).json()
+    assert draft.status_code == 200, draft.text
+    assert applied.status_code == 409, applied.text
+    assert (after["model"]["backend"], after["model"]["id"]) == (
+        before["backend"],
+        before["id"],
+    ), "no half-switched agent: the provider is untouched"
+
+
+async def test_a_draft_is_stale_once_the_provider_moved(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A draft that changes only the Anthropic model does not land while the agent runs
+    on the provider an admin picked after the draft began."""
+    agents, owner, admin = await _people(db_session)
+    await _admin(db_session_factory, owner)
+    await _admin(db_session_factory, admin)
+    settings = await _provider_choice(db_session_factory, owner, ("anthropic", "openai"))
+    owner_token = await _token(db_session_factory, owner)
+    admin_token = await _token(db_session_factory, admin)
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, owner_token, settings=settings
+    ) as client:
+        catalog = (await client.get("/api/agents/catalog")).json()
+        config = (await client.get("/api/agents/ag_w")).json()
+        other_claude = next(
+            m["id"]
+            for m in catalog["models"]
+            if m["backend"] == "anthropic" and m["id"] != config["model"]["id"]
+        )
+        config["model"] = {**config["model"], "id": other_claude}
+        draft = await client.patch(
+            "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
+        )
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, admin_token, settings=settings
+    ) as client:
+        moved = (await client.get("/api/agents/ag_w")).json()
+        moved["model"] = {**moved["model"], "id": "gpt-6-astra", "backend": "openai"}
+        await client.patch(
+            "/api/agents/ag_w/draft", json={"base_version": 3, "config": moved}, headers=_OWN
+        )
+        switched = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, owner_token, settings=settings
+    ) as client:
+        applied = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
+        after = (await client.get("/api/agents/ag_w")).json()
+    assert draft.status_code == 200, draft.text
+    assert switched.status_code == 200, switched.text
+    assert agents.agent.version == 3, "the switch left the agent's version alone"
+    assert applied.status_code == 409, applied.text
+    assert (after["model"]["backend"], after["model"]["id"]) == ("openai", "gpt-6-astra"), (
+        "the stale draft changed nothing"
+    )
+
+
+async def test_a_member_who_is_not_owner_or_admin_cannot_switch_the_provider(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    agents, owner, member = await _people(db_session)
+    settings = await _provider_choice(db_session_factory, owner, ("anthropic", "openai"))
+    token = await _token(db_session_factory, member)
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, token, settings=settings
+    ) as client:
+        config = (await client.get("/api/agents/ag_w")).json()
+        before = config["model"]
+        config["model"] = {**config["model"], "id": "gpt-6-astra", "backend": "openai"}
+        draft = await client.patch(
+            "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
+        )
+        applied = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
+        after = (await client.get("/api/agents/ag_w")).json()
+    assert (draft.status_code, applied.status_code) == (403, 403), (draft.text, applied.text)
+    assert after["model"]["backend"] == before["backend"], "the provider stays"
 
 
 async def test_templates_are_blank_plus_the_marked_default_agents(

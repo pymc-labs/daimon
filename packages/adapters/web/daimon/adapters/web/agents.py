@@ -337,15 +337,25 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 d.edit, actor=actor, spec=spec, owner=True
             )
             if elsewhere is not None:
-                made = await agent_editing.load_editable_agent(
-                    d.edit, actor=actor, ma_agent_id=ma_agent_id
-                )
-                await agent_changes.switch_provider(
-                    d, actor=actor, agent=made, provider=elsewhere.provider, model_id=elsewhere.id
-                )
+                try:
+                    made = await agent_editing.load_editable_agent(
+                        d.edit, actor=actor, ma_agent_id=ma_agent_id
+                    )
+                    await agent_changes.switch_provider(
+                        d,
+                        actor=actor,
+                        agent=made,
+                        provider=elsewhere.provider,
+                        model_id=elsewhere.id,
+                    )
+                except AgentEditError:
+                    # Not left on a model nobody picked: the half-made agent goes.
+                    await agent_editing.discard_created(d.edit, actor, ma_agent_id)
+                    raise
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
-        runtime.agents.forget(caller.person.tenant_id)
+        finally:
+            runtime.agents.forget(caller.person.tenant_id)
         queue_agent_face(
             runtime.sessionmaker,
             tenant_id=caller.person.tenant_id,

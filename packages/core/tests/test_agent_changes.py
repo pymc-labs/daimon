@@ -282,7 +282,7 @@ def test_a_copy_read_without_details_is_not_an_edit_of_what_it_hid() -> None:
     )
 
 
-def test_db_state_moves_with_places_and_tool_rules_only() -> None:
+def test_db_state_moves_with_places_tool_rules_and_provider_only() -> None:
     base = _config(places=[_GENERAL])
     server = base.mcp_servers[0]
     denied = server.model_copy(
@@ -300,6 +300,10 @@ def test_db_state_moves_with_places_and_tool_rules_only() -> None:
     assert agent_changes.db_state(base) == agent_changes.db_state(
         _config(places=[_GENERAL], system="x")
     ), "the prompt, which lives in the provider's agent, does not"
+    elsewhere = base.model.model_copy(update={"backend": "openai", "id": "gpt-6-astra"})
+    assert agent_changes.db_state(base) != agent_changes.db_state(
+        _config(places=[_GENERAL], model=elsewhere)
+    ), "a provider switch moves it"
 
 
 def _stored_rule(tool: str, rule: str) -> AgentToolRule:

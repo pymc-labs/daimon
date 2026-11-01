@@ -38,6 +38,7 @@ from daimon.core.agent_view import (
     AgentViewer,
     Backend,
     McpServer,
+    ModelChoice,
     PlaceDoc,
     config_of,
     load_agent_facts,
@@ -58,6 +59,7 @@ from daimon.core.permissions import WEB_PLACE_ID
 from daimon.core.stores import agent_drafts as drafts_store
 from daimon.core.stores import agent_tool_rules
 from daimon.core.stores.agent_tool_rules import Rule
+from daimon.core.stores.domain import BackendAgent, CompatibilityPreview
 from daimon.core.turn.notices import provider_name
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import ModelRef, Provider
@@ -455,24 +457,35 @@ def redact_draft(draft: Draft, *, details: bool, is_admin: bool) -> Draft:
     )
 
 
-def _state_hash(places: Iterable[PlaceDoc], rules: Iterable[tuple[str, str, str]]) -> str:
+def _provider_state(model: ModelChoice) -> list[str | None]:
+    """The provider setting kept beside the agent; Anthropic's model lives in its version."""
+    return [model.backend, None if model.backend == DEFAULT_BACKEND else model.id]
+
+
+def _state_hash(
+    places: Iterable[PlaceDoc], rules: Iterable[tuple[str, str, str]], model: ModelChoice
+) -> str:
     return hashlib.sha256(
         json.dumps(
-            [sorted((place.id, bool(place.default)) for place in places), sorted(rules)]
+            [
+                sorted((place.id, bool(place.default)) for place in places),
+                sorted(rules),
+                _provider_state(model),
+            ]
         ).encode()
     ).hexdigest()
 
 
 def db_state(config: AgentConfigDoc) -> str:
-    """A fingerprint of what the config keeps outside the provider's agent: its places and
-    its tool rules. They change without a new provider version. Pure."""
+    """A fingerprint of what the config keeps outside the provider's agent: its places, its
+    tool rules and its model provider. They change without a new provider version. Pure."""
     rules = (
         (server.key, tool.name, tool.rule)
         for server in config.mcp_servers
         for tool in server.tools
         if tool.rule != "allow"
     )
-    return _state_hash(config.places or [], rules)
+    return _state_hash(config.places or [], rules, config.model)
 
 
 def stored_db_state(base: AgentConfigDoc, facts: AgentFacts) -> str:
@@ -492,7 +505,7 @@ def stored_db_state(base: AgentConfigDoc, facts: AgentFacts) -> str:
         for tool in server.tools
         if (stored_rule := stored.get((server.key, tool.name), "allow")) != "allow"
     )
-    return _state_hash(facts.places, rules)
+    return _state_hash(facts.places, rules, config_of(facts).model)
 
 
 def place_edits(places: list[PlaceDoc] | None) -> list[PlaceEdit]:
@@ -522,30 +535,53 @@ _PROVIDER_REFUSALS: dict[str, tuple[str, AgentEditRefusal]] = {
     "model_not_selectable": ("That model isn't available. Pick another.", "invalid"),
     "profile_not_selectable": ("That model isn't available. Pick another.", "invalid"),
     "stale_revision": ("The model changed since your draft began", "stale"),
+    "drops_required": ("That model can't use some of this agent's skills or servers.", "invalid"),
     "stale_preview": ("The model changed since your draft began", "stale"),
 }
 
 
 def _provider_refusal(exc: AgentBackendRefused, provider: str) -> AgentEditError:
     if exc.reason == "backend_not_allowed":
-        text = f"{provider_name(provider)} isn't allowed in this workspace. Ask an admin."
+        text = f"{provider_name(provider)} isn't turned on here. Ask an admin."
         return AgentEditError(f"{text} Nothing was saved.", kind="forbidden")
     text, kind = _PROVIDER_REFUSALS.get(exc.reason, ("That model can't be chosen here.", "invalid"))
     return AgentEditError(f"{text} Nothing was saved.", kind=kind)
 
 
-async def switch_provider(
+@dataclass(frozen=True)
+class ProviderSwitch:
+    """A provider change checked and previewed, written by `write_provider_switch`."""
+
+    source: BackendAgent
+    actor: BackendActor
+    provider: Provider
+    backend: Provider | None
+    model: str | None
+    preview: CompatibilityPreview
+    expected_revision: int
+
+
+def _refused_switch(exc: Exception, *, agent_id: str, provider: Provider) -> AgentEditError:
+    if isinstance(exc, AgentBackendRefused):
+        log.info("agent_changes.provider_refused", agent_id=agent_id, reason=exc.reason)
+        return _provider_refusal(exc, provider)
+    log.info("agent_changes.provider_unsupported", agent_id=agent_id, provider=provider)
+    return _provider_refusal(AgentBackendRefused("model_not_selectable"), provider)
+
+
+async def check_provider_switch(
     deps: AgentChangeDeps,
     *,
     actor: AgentActor,
     agent: BetaManagedAgentsAgent,
     provider: Provider,
     model_id: str,
-) -> None:
-    """Point the agent at ``provider`` and its ``model_id``, as the chat switch does.
+    expected_revision: int | None = None,
+) -> ProviderSwitch:
+    """Refuse now what pointing the agent at ``provider`` would refuse, writing nothing.
 
-    The provider setting lives beside the agent, not in its Managed Agents version, and
-    applies to new conversations. Refused with `AgentEditError` in the editor's words.
+    ``expected_revision`` is the provider setting the change was made against; a setting
+    that moved since is stale. None takes the current one.
     """
     if deps.backends is None or not deps.backends.enabled:
         raise _provider_refusal(AgentBackendRefused("feature_disabled"), provider)
@@ -562,29 +598,75 @@ async def switch_provider(
             agent_name=agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name,
             actual_agent=agent,
         )
+        if not await deps.backends.may_edit(source, backend_actor):
+            raise AgentBackendRefused("owner_or_admin_required")
         preview = await deps.backends.preview(source, backend, model)
-        if backend is None:
+        if not preview.allowed:
+            raise AgentBackendRefused("backend_not_allowed")
+        if preview.declared_drops:
+            raise AgentBackendRefused("drops_required")
+        if expected_revision is not None and preview.setting_revision != expected_revision:
+            raise AgentBackendRefused("stale_revision")
+    except (AgentBackendRefused, BackendUnsupported) as exc:
+        raise _refused_switch(exc, agent_id=agent.id, provider=provider) from exc
+    return ProviderSwitch(
+        source=source,
+        actor=backend_actor,
+        provider=provider,
+        backend=backend,
+        model=model,
+        preview=preview,
+        expected_revision=preview.setting_revision,
+    )
+
+
+async def write_provider_switch(deps: AgentChangeDeps, switch: ProviderSwitch) -> None:
+    """Write a checked switch; refused as stale if the setting or its preview moved since."""
+    if deps.backends is None:
+        raise _provider_refusal(AgentBackendRefused("feature_disabled"), switch.provider)
+    try:
+        if switch.backend is None:
             await deps.backends.clear_backend(
-                source,
-                preview.setting_revision,
-                backend_actor,
-                expected_preview_digest=preview.digest,
+                switch.source,
+                switch.expected_revision,
+                switch.actor,
+                expected_preview_digest=switch.preview.digest,
             )
         else:
             await deps.backends.set_backend(
-                source,
-                backend,
-                preview.setting_revision,
-                backend_actor,
-                expected_preview_digest=preview.digest,
-                model=model,
+                switch.source,
+                switch.backend,
+                switch.expected_revision,
+                switch.actor,
+                expected_preview_digest=switch.preview.digest,
+                model=switch.model,
             )
-    except AgentBackendRefused as exc:
-        log.info("agent_changes.provider_refused", agent_id=agent.id, reason=exc.reason)
-        raise _provider_refusal(exc, provider) from exc
-    except BackendUnsupported as exc:
-        log.info("agent_changes.provider_unsupported", agent_id=agent.id, provider=provider)
-        raise _provider_refusal(AgentBackendRefused("model_not_selectable"), provider) from exc
+    except (AgentBackendRefused, BackendUnsupported) as exc:
+        raise _refused_switch(exc, agent_id=switch.source.name, provider=switch.provider) from exc
+
+
+async def switch_provider(
+    deps: AgentChangeDeps,
+    *,
+    actor: AgentActor,
+    agent: BetaManagedAgentsAgent,
+    provider: Provider,
+    model_id: str,
+) -> None:
+    """Point the agent at ``provider`` and its ``model_id``, as the chat switch does.
+
+    The provider setting lives beside the agent, not in its Managed Agents version, and
+    applies to new conversations. Refused with `AgentEditError` in the editor's words.
+    """
+    switch = await check_provider_switch(
+        deps, actor=actor, agent=agent, provider=provider, model_id=model_id
+    )
+    await write_provider_switch(deps, switch)
+
+
+def _provider_revision(facts: AgentFacts) -> int:
+    """The agent's provider setting revision, as the backend service counts it."""
+    return facts.backend.local if facts.backend is not None else 0
 
 
 def _dump(config: AgentConfigDoc) -> dict[str, Any]:
@@ -627,7 +709,7 @@ def _stale(agent: BetaManagedAgentsAgent) -> AgentEditError:
 
 def _moved() -> AgentEditError:
     return AgentEditError(
-        "Where this agent answers or its tool rules changed since your draft began",
+        "This agent's model, where it answers or its tool rules changed since your draft began",
         kind="stale",
     )
 
@@ -769,6 +851,7 @@ async def _write(
     base: AgentConfigDoc,
     target: AgentConfigDoc,
     note: str | None,
+    provider_revision: int,
 ) -> BetaManagedAgentsAgent:
     target = with_hidden_places(base, target, is_admin=actor.subject.is_admin)
     changes = diff_config(base, target)
@@ -786,15 +869,19 @@ async def _write(
     await agent_editing.check_places(
         deps.edit, actor=actor, agent=agent, before=before, after=after
     )
-    # First of the writes: the provider's policy refuses more often than anything after it.
-    if provider_moved(base, target):
-        await switch_provider(
+    # Checked before the first write, written after the agent: nothing half-switched.
+    switch = (
+        await check_provider_switch(
             deps,
             actor=actor,
             agent=agent,
             provider=target.model.backend,
             model_id=target.model.id,
+            expected_revision=provider_revision,
         )
+        if provider_moved(base, target)
+        else None
+    )
     written = agent
     if patch.touched():
         written = await agent_editing.update_agent(
@@ -807,6 +894,8 @@ async def _write(
     await agent_editing.set_places(
         deps.edit, actor=actor, agent=written, before=before, after=after
     )
+    if switch is not None:
+        await write_provider_switch(deps, switch)
     servers = {server.key: server for server in target.mcp_servers}
     async with deps.edit.session_factory() as session:
         for server_key, tool in rules:
@@ -865,6 +954,7 @@ async def apply_draft(
             base=base,
             target=AgentConfigDoc.model_validate(row.config),
             note=(note or "").strip() or None,
+            provider_revision=_provider_revision(facts),
         )
         await _drop_draft(deps, actor=actor, agent_id=agent.id)
         return written
@@ -884,7 +974,8 @@ async def revert(
             )
         if row is None:
             raise AgentEditError("No such version.", kind="not_found")
-        base = await current_config(deps, tenant_id=actor.tenant_id, agent=agent)
+        facts = await _facts(deps, tenant_id=actor.tenant_id, agent=agent)
+        base = config_of(facts)
         return await _write(
             deps,
             actor=actor,
@@ -892,6 +983,7 @@ async def revert(
             base=base,
             target=revert_target(base, AgentConfigDoc.model_validate(row.config)),
             note=f"Reverted to v{version}",
+            provider_revision=_provider_revision(facts),
         )
 
 
@@ -908,7 +1000,14 @@ async def apply_change(
         agent = await agent_editing.load_editable_agent(
             deps.edit, actor=actor, ma_agent_id=ma_agent_id
         )
-        base = await current_config(deps, tenant_id=actor.tenant_id, agent=agent)
+        facts = await _facts(deps, tenant_id=actor.tenant_id, agent=agent)
+        base = config_of(facts)
         return await _write(
-            deps, actor=actor, agent=agent, base=base, target=change(base), note=note
+            deps,
+            actor=actor,
+            agent=agent,
+            base=base,
+            target=change(base),
+            note=note,
+            provider_revision=_provider_revision(facts),
         )
