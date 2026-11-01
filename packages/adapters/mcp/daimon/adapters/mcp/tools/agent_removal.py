@@ -206,22 +206,24 @@ async def _remove_skill_impl(
     titles, _truncated = await resolve_custom_skill_titles(
         runtime.client, agents=[agent], tenant_id=auth.tenant_id
     )
-    target_id: str | None = None
-    for sk in agent.skills:
-        if sk.skill_id == skill_id or titles.get(sk.skill_id) == skill_id:
-            target_id = sk.skill_id
-            break
-    if target_id is None:
-        listing = (
-            ", ".join(
-                f"{sk.skill_id} ({titles[sk.skill_id]})" if sk.skill_id in titles else sk.skill_id
-                for sk in agent.skills
-            )
-            or "none"
-        )
+    by_id = [sk.skill_id for sk in agent.skills if sk.skill_id == skill_id]
+    by_title = [sk.skill_id for sk in agent.skills if titles.get(sk.skill_id) == skill_id]
+    matches = by_id or by_title
+
+    def _listing(ids: list[str]) -> str:
+        return ", ".join(f"{i} ({titles[i]})" if i in titles else i for i in ids) or "none"
+
+    if len(matches) > 1:
         raise ToolError(
-            f"'{skill_id}' is not attached to '{agent_name}'. Currently attached: {listing}"
+            f"'{skill_id}' names more than one skill on '{agent_name}': "
+            f"{_listing(matches)}. Pass the skill id."
         )
+    if not matches:
+        raise ToolError(
+            f"'{skill_id}' is not attached to '{agent_name}'. "
+            f"Currently attached: {_listing([sk.skill_id for sk in agent.skills])}"
+        )
+    target_id = matches[0]
 
     # Version-retry closure: only `skills` is recomputed from `fresh` and
     # patched. `tools` is left untouched — the base toolset must stay whether

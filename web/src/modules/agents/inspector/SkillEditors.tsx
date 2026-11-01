@@ -163,7 +163,7 @@ function SkillBody({ agent, config, ro, update, select, skill }: Props & { skill
         <div className="flex items-center gap-2">
           <h2 className="text-base font-semibold">{skill.title}</h2>
           <Pill>{custom ? "Custom" : "Anthropic"}</Pill>
-          <span className="text-xs text-faint">{skill.version === "latest" ? "Latest" : "Pinned"}</span>
+          <span className="text-xs text-faint">{skill.version && skill.version !== "latest" ? "Pinned" : "Latest"}</span>
           {!ro && (
             <Button variant="ghost" size="xs" className="ml-auto text-muted-foreground hover:text-destructive" onClick={() => void removeSkill()}>
               <Trash2 />Remove skill
