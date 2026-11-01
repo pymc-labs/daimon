@@ -37,6 +37,15 @@ def _ci() -> dict[str, Any]:
         ("tests/golden/turn.json", "golden"),
         ("packages/testing/daimon/testing/asgi.py", "testing"),
         ("packages/core/daimon/core/x.py", "core"),
+        ("packages/core/alembic/versions/0100_x.py", "migrations"),
+        ("alembic.ini", "migrations"),
+        ("tests/test_ci_plan.py", "repo"),
+        ("tests/conftest.py", "tests"),
+        (".github/workflows/docs.yml", "repo"),
+        (".github/workflows/deploy.yml", "deploy-workflow"),
+        ("deploy/azure/main.bicep", "repo"),
+        ("typings/pydub/__init__.pyi", "tooling"),
+        (".github/ISSUE_TEMPLATE/bug.md", "docs"),
         ("apps/report-host/src/report_host/app.py", "report-host"),
         ("pyproject.toml", "all"),
         ("uv.lock", "all"),
@@ -75,6 +84,14 @@ def test_web_adapter_change_runs_only_its_suites() -> None:
     assert [leg["suite"] for leg in legs["pytest-db"]] == ["web", "parity"]
     assert [leg["suite"] for leg in legs["pytest-mux-leg"]] == ["parity-mux"]
     assert legs["pytest-light"] == []
+
+
+def test_a_workflow_change_runs_only_the_repo_tests() -> None:
+    suites, jobs = _tests([".github/workflows/deploy.yml", "tests/test_ci_plan.py"])
+    assert suites == {"core", "lint", "shard-check"}
+    assert jobs == {"lint", "pytest-db", "shard-check"}
+    legs = json.loads(plan.plan_tests([".github/workflows/deploy.yml"])["pytest-db"])["include"]
+    assert {leg["suite"] for leg in legs} == {"core"}
 
 
 def test_without_a_base_every_leg_runs() -> None:
@@ -224,8 +241,18 @@ def test_deploy_yml_inline_full_plan_matches() -> None:
             "mcp": "true", "migrate": "false", "workers": "", "smoke": "true",
         }),
         (["packages/core/daimon/core/x.py"], {
-            "migrate": "true", "workers": "all", "reconcile": "discord slack teams",
+            "migrate": "false", "mcp": "true", "workers": "all", "reconcile": "discord slack teams",
             "notebook_image": "false",
+        }),
+        (["packages/core/alembic/versions/0100_x.py"], {
+            "migrate": "true", "mcp": "true", "workers": "all", "smoke": "true",
+        }),
+        ([".github/workflows/deploy.yml"], {
+            "full": "false", "migrate": "true", "workers": "all", "notebook_vm": "true",
+            "report_image": "true",
+        }),
+        (["tests/test_ci_plan.py", ".github/workflows/docs.yml", "deploy/azure/main.bicep"], {
+            "daimon_image": "false", "migrate": "false", "workers": "", "notebook_vm": "false",
         }),
         (["apps/report-host/src/report_host/app.py"], {
             "report_image": "true", "notebook_image": "false", "daimon_image": "false",

@@ -31,6 +31,14 @@ FILES: dict[str, str] = {
     "docs/slack-app-manifest.yaml": "slack-manifest",
     "docs/teams-app-manifest.yaml": "teams-manifest",
     "docker-compose.yml": "docs",
+    "LICENSE": "docs",
+    ".gitignore": "docs",
+    ".pre-commit-config.yaml": "tooling",
+    "azure.yaml": "repo",
+    ".github/workflows/ci.yml": "all",
+    # Their contract tests are repo tests, but a change deploys everything it can break.
+    ".github/workflows/deploy.yml": "deploy-workflow",
+    ".github/workflows/promote.yml": "deploy-workflow",
 }
 #: Prose no test or image reads; code trees keep their own (skills, fixtures).
 _PROSE = re.compile(r"^(?!defaults/|packages/|tests/|qa/)\S*\.md$")
@@ -38,6 +46,14 @@ _PROSE = re.compile(r"^(?!defaults/|packages/|tests/|qa/)\S*\.md$")
 RULES: tuple[tuple[str, str], ...] = (
     ("docs/", "docs"),
     ("mkdocs.yml", "docs"),
+    (".github/ISSUE_TEMPLATE/", "docs"),
+    ("typings/", "tooling"),
+    # Read only by the repo tests (tests/test_*.py), which run in the core suite.
+    (".github/workflows/", "repo"),
+    ("deploy/azure/", "repo"),
+    ("deploy/lanes/", "repo"),
+    ("scripts/azure/", "repo"),
+    ("tests/test_", "repo"),
     ("web/", "spa"),
     ("tests/parity/", "parity"),
     ("tests/harness_conformance/", "harness"),
@@ -53,10 +69,12 @@ RULES: tuple[tuple[str, str], ...] = (
     ("packages/adapters/scheduler/", "scheduler"),
     # Every pytest run loads its stop_leg_default plugin (pyproject addopts).
     ("packages/testing/", "testing"),
+    # Only a migration needs the migrate job; any other core change skips it.
+    ("packages/core/alembic/", "migrations"),
     # Core and the CLI, which migrations and the smoke turn run through.
     ("packages/", "core"),
     ("defaults/", "core"),
-    ("alembic.ini", "core"),
+    ("alembic.ini", "migrations"),
     ("docker/", "core"),
     ("assets/", "core"),
     ("apps/harness/", "harness"),
@@ -82,6 +100,9 @@ _HOSTS = (*DAIMON, "image-daimon")
 SUITES: dict[str, tuple[str, ...]] = {
     "docs": (),
     "generated": ("lint",),
+    "tooling": ("lint",),
+    "repo": ("core", "lint", "shard-check"),
+    "deploy-workflow": ("core", "lint", "shard-check"),
     "mcp-catalogue": ("lint", "core", "mux"),
     "slack-manifest": ("slack", "slack-mux", "parity", "parity-mux"),
     "teams-manifest": ("teams", "teams-mux", "parity", "parity-mux"),
@@ -95,6 +116,7 @@ SUITES: dict[str, tuple[str, ...]] = {
     "golden": (*DAIMON, "mux"),
     "testing": (*DAIMON, "mux", "harness", "harness-conformance", "report-host", "notebook-host"),
     "core": (*_HOSTS, "mux"),
+    "migrations": (*_HOSTS, "mux"),
     "discord": _HOSTS,
     "slack": _HOSTS,
     "teams": _HOSTS,
@@ -190,8 +212,10 @@ ALL_SUITES = tuple(sorted({s for suites in (*SUITES.values(), *JOBS.values()) fo
 SERVICES = ("discord", "slack", "teams", "scheduler", "web")
 #: Staging components each area changes. "all" in workers means every compose service.
 COMPONENTS: dict[str, tuple[str, ...]] = {
-    "core": ("daimon", "migrate", "mcp", "workers:all"),
-    "mux": ("daimon", "migrate", "mcp", "workers:all"),
+    "core": ("daimon", "mcp", "workers:all"),
+    "migrations": ("daimon", "migrate", "mcp", "workers:all"),
+    "mux": ("daimon", "mcp", "workers:all"),
+    "deploy-workflow": ("daimon", "notebook", "report", "migrate", "mcp", "workers:all"),
     "discord": ("daimon", "workers:discord"),
     "slack": ("daimon", "workers:slack"),
     "teams": ("daimon", "workers:teams"),
