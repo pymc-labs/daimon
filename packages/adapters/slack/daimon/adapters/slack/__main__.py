@@ -16,6 +16,7 @@ from typing import cast
 import structlog
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.boot_sweep import run_boot_sweep
+from daimon.adapters.slack.member_sync import SlackMemberSync
 from daimon.adapters.slack.runtime import build_runtime
 from daimon.core.config import load_settings
 from daimon.core.health import start_liveness_responder
@@ -55,7 +56,8 @@ async def main() -> None:
         integrations=[AsyncioIntegration()],
     )
     async with build_runtime(settings) as runtime:
-        app = SlackApp(runtime=runtime)
+        member_sync = SlackMemberSync(runtime)
+        app = SlackApp(runtime=runtime, member_sync=member_sync)
         client = SocketModeClient(
             app_token=settings.slack.app_token.get_secret_value(),
             web_client=AsyncWebClient(session=runtime.slack_http),
@@ -111,13 +113,22 @@ async def main() -> None:
                 )
             )
             _bg_tasks.add(sweep_task)
+            # Member lists for web access, likewise in the background.
+            members_task = asyncio.create_task(member_sync.load_installed())
+            _bg_tasks.add(members_task)
 
             def _on_sweep_done(task: asyncio.Task[None]) -> None:
                 _bg_tasks.discard(task)
                 if not task.cancelled() and task.exception() is not None:
-                    log.error("slack.boot_sweep_crashed", exc_info=task.exception())
+                    event = (
+                        "slack.boot_sweep_crashed"
+                        if task is sweep_task
+                        else "slack.members.crashed"
+                    )
+                    log.error(event, exc_info=task.exception())
 
             sweep_task.add_done_callback(_on_sweep_done)
+            members_task.add_done_callback(_on_sweep_done)
             async with runtime_health(
                 "slack",
                 cast(AsyncEngine, runtime.sessionmaker.kw["bind"]),

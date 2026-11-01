@@ -148,6 +148,7 @@ from daimon.adapters.slack.help import handle_help_command
 from daimon.adapters.slack.here import handle_here_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
+from daimon.adapters.slack.member_sync import SlackMemberSync
 from daimon.adapters.slack.memory import handle_memory_command
 from daimon.adapters.slack.names import remember_payload_names
 from daimon.adapters.slack.output_delivery import NoticeKeys, deliver_session_outputs
@@ -424,8 +425,12 @@ class SlackApp:
     ``_orchestrate``.
     """
 
-    def __init__(self, *, runtime: SlackRuntime) -> None:
+    def __init__(
+        self, *, runtime: SlackRuntime, member_sync: SlackMemberSync | None = None
+    ) -> None:
         self.runtime = with_budget_notifier(runtime)
+        # Keeps workspace member lists for web access; None leaves them alone.
+        self.member_sync = member_sync
         # Slack timestamps are unique only within a workspace conversation.
         self._processing: set[tuple[str, str, str]] = set()
         self._pending: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
@@ -1225,6 +1230,10 @@ class SlackApp:
             team_id_raw = payload.get("team_id") or event.get("team")
             team_id: str = str(team_id_raw) if team_id_raw is not None else ""
             etype: str | None = event.get("type")
+            members = self.member_sync
+            # A workspace not loaded since start (a new install) loads on its first event.
+            if members is not None and members.claim_load(team_id):
+                self._spawn(members.load(team_id))
             if etype == "app_mention":
                 task = self._spawn(
                     self._handle_app_mention(
@@ -1258,6 +1267,8 @@ class SlackApp:
                 )
             elif etype == "member_joined_channel":
                 self._on_member_joined_channel(event, team_id=team_id)
+            elif etype in {"team_join", "user_change"} and members is not None:
+                self._spawn(members.user_event(team_id, event.get("user")))
             elif etype in {
                 "channel_archive",
                 "channel_unarchive",
@@ -1381,6 +1392,8 @@ class SlackApp:
             now=datetime.now(UTC),
             event_time=event_time,
         )
+        if self.member_sync is not None:
+            self.member_sync.forget(team_id)
 
     async def _handle_block_action(self, payload: dict[str, Any]) -> None:
         """Author- or admin-gated cancel handler for block_actions interactive payloads.
