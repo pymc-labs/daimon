@@ -206,6 +206,15 @@ HELD_CHAT_TOKEN_LABEL_PREFIX = "vault-chat-held:"
 NO_CONFIRMATION_LABEL = "gemini-agent-turn"
 
 
+#: Registry label prefix of a short-lived internal credential the server itself
+#: uses (a tool list read for a viewer); swept with the chat tokens once expired.
+INTERNAL_TOKEN_LABEL_PREFIX = "internal:"
+
+
+def internal_token_label(jti: uuid.UUID) -> str:
+    return f"{INTERNAL_TOKEN_LABEL_PREFIX}{jti}"
+
+
 def chat_token_label(jti: uuid.UUID, *, held: bool = False) -> str:
     """Bind the registry discriminator to a generated id, leaving user labels free."""
     prefix = HELD_CHAT_TOKEN_LABEL_PREFIX if held else CHAT_TOKEN_LABEL_PREFIX
@@ -293,6 +302,7 @@ async def mint_agent_mcp_token(
     chat_execution: bool = False,
     surface: McpTokenSurface | None = None,
     purpose: McpTokenPurpose | None = None,
+    jti: uuid.UUID | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -327,6 +337,8 @@ async def mint_agent_mcp_token(
     ownership on every request, and the key list shows it. Other mints say what
     they are: a ``report`` seam token, or an ``internal`` short-lived credential
     (a chat-execution or provider-turn credential is always ``internal``).
+
+    ``jti`` lets a caller name the token in its label (`internal_token_label`).
     """
     # Registered chat execution retains the ordinary chat surface. External
     # agent keys keep their existing restricted agent-chat surface. The signed
@@ -343,7 +355,7 @@ async def mint_agent_mcp_token(
     if internal and purpose != "internal":
         raise ValueError("a chat-execution or provider-turn credential is internal")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
-    jti = uuid.uuid4()
+    jti = jti or uuid.uuid4()
     expires_at = now + dt.timedelta(days=ttl_days)
     await create_mcp_token_row(
         session,

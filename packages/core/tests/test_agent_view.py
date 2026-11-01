@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_view
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
@@ -438,13 +439,15 @@ async def _own_server_view(
     handler: httpx.MockTransport,
     *,
     is_admin: bool,
+    url: str = _OWN,
+    loads: int = 1,
 ) -> tuple[agent_view.AgentView | None, uuid.UUID]:
-    """The view of an agent on the deployment's own server, by a fresh viewer."""
+    """The view of an agent on a server at ``url``, by a fresh viewer, loaded ``loads`` times."""
     tenant = await make_tenant(db_session)
     viewer = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     router = MARouter()
-    server = {"name": "daimon-mcp", "type": "url", "url": _OWN}
+    server = {"name": "daimon-mcp", "type": "url", "url": url}
     router.add_agent(ma_agent(id="ag_v", name="helper", tenant_id=tenant.id, mcp_servers=[server]))
     deps = AgentViewDeps(
         client=build_fake_anthropic(router.dispatch),
@@ -455,14 +458,23 @@ async def _own_server_view(
             url=_OWN, secret=b"s" * 32, now=lambda: datetime(2026, 10, 2, tzinfo=UTC)
         ),
     )
-    view = await agent_view.load_agent_view(
-        deps,
-        tenant_id=tenant.id,
-        ma_agent_id="ag_v",
-        viewer=AgentViewer(account_id=viewer.id, is_admin=is_admin, may_edit=True),
-        spend_since=datetime(2026, 10, 1, tzinfo=UTC),
-    )
+    view = None
+    for _ in range(loads):
+        view = await agent_view.load_agent_view(
+            deps,
+            tenant_id=tenant.id,
+            ma_agent_id="ag_v",
+            viewer=AgentViewer(account_id=viewer.id, is_admin=is_admin, may_edit=True),
+            spend_since=datetime(2026, 10, 1, tzinfo=UTC),
+        )
     return view, viewer.id
+
+
+async def _tokens_of(db_session: AsyncSession, account: uuid.UUID) -> list[mcp_tokens.McpTokenRow]:
+    rows = await mcp_tokens.list_mcp_tokens(
+        db_session, now=datetime(2026, 10, 2, tzinfo=UTC), include_inactive=True
+    )
+    return [t for t in rows if t.account_id == account]
 
 
 async def test_the_deployments_own_server_is_listed_with_a_token_minted_for_the_viewer(
@@ -483,32 +495,59 @@ async def test_the_deployments_own_server_is_listed_with_a_token_minted_for_the_
         "the viewer sees the server's real tools"
     )
     assert seen and all(h.startswith("Bearer ") for h in seen), "the server was asked"
-    tokens = [
-        t
-        for t in await mcp_tokens.list_mcp_tokens(
-            db_session, now=datetime(2026, 10, 2, tzinfo=UTC), include_inactive=True
-        )
-        if t.account_id == account
-    ]
-    assert len(tokens) == 1 and tokens[0].revoked_at is not None, (
-        "the viewer's token is revoked once the list is read"
+    (token,) = await _tokens_of(db_session, account)
+    assert token.revoked_at is not None, "the viewer's token is revoked once the list is read"
+    assert (token.label, token.surface) == (f"internal:{token.jti}", "provider_turn"), (
+        "an internal token the sweep prunes, refused what a provider turn is refused"
     )
 
 
 async def test_an_unreadable_own_server_shows_not_listed_and_logs_why(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    def handler(_request: httpx.Request) -> httpx.Response:
+    asked: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(request)
         return httpx.Response(503)
 
     with capture_logs() as logs:
-        view, _account = await _own_server_view(
-            db_session, db_session_factory, httpx.MockTransport(handler), is_admin=True
+        view, account = await _own_server_view(
+            db_session, db_session_factory, httpx.MockTransport(handler), is_admin=True, loads=2
         )
     assert view is not None and view.mcp_servers[0].listed is False, "no list, said so"
     (event_,) = [e for e in logs if e["event"] == "agent_view.tools_unlisted"]
     assert (event_["server"], event_["error"]) == ("daimon-mcp", "McpStatusError"), (
         "the failure names the server and the error type"
+    )
+    (token,) = await _tokens_of(db_session, account)
+    assert token.revoked_at is not None, "the token is revoked when the list fails"
+    assert len(asked) == 1, "a failed list is not asked again at once, nor a token minted"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://daimon.example.com.evil.test/mcp",
+        "https://daimon.example.com:8443/mcp",
+        "https://daimon.example.com/mcp/other",
+    ],
+)
+async def test_a_lookalike_of_the_own_server_gets_no_token(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], url: str
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _answer(request)
+
+    view, account = await _own_server_view(
+        db_session, db_session_factory, httpx.MockTransport(handler), is_admin=True, url=url
+    )
+    assert view is not None and view.mcp_servers[0].listed is False, "not listed"
+    assert (seen, await _tokens_of(db_session, account)) == ([], []), (
+        "another host, port or path is never sent a minted token"
     )
 
 

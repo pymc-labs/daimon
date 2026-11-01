@@ -766,6 +766,7 @@ async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
         CHAT_TOKEN_LABEL_PREFIX,
         EPHEMERAL_TOKEN_RETENTION,
         HELD_CHAT_TOKEN_LABEL_PREFIX,
+        INTERNAL_TOKEN_LABEL_PREFIX,
         PANEL_TOKEN_LABEL,
     )
     from daimon.core.stores.mcp_tokens import prune_expired_ephemeral_tokens
@@ -775,7 +776,11 @@ async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
             await prune_expired_ephemeral_tokens(
                 session,
                 expires_before=datetime.now(UTC) - EPHEMERAL_TOKEN_RETENTION,
-                chat_label_prefixes=(CHAT_TOKEN_LABEL_PREFIX, HELD_CHAT_TOKEN_LABEL_PREFIX),
+                chat_label_prefixes=(
+                    CHAT_TOKEN_LABEL_PREFIX,
+                    HELD_CHAT_TOKEN_LABEL_PREFIX,
+                    INTERNAL_TOKEN_LABEL_PREFIX,
+                ),
                 panel_label=PANEL_TOKEN_LABEL,
             )
     except SQLAlchemyError:

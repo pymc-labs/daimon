@@ -43,7 +43,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
+from daimon.core.mcp_auth import internal_token_label, mint_agent_mcp_token, token_jti
 from daimon.core.mcp_personal_servers import hidden_mcp_server_names
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.mcp_tool_listing import ListedTool, McpToolLister, McpToolListingError
@@ -744,17 +744,22 @@ async def _own_server_tools(
     known = lister.cache.recall(key)
     if known is not None:
         return known
+    if lister.failed_recently(key):
+        return None  # no token is minted to ask again at once
+    jti = uuid.uuid4()
     async with deps.session_factory.begin() as db:
         token = await mint_agent_mcp_token(
             db,
             account_id=account_id,
             tenant_id=tenant_id,
             agent_id=agent_uuid,
-            label="web-tool-list",
+            label=internal_token_label(jti),
             secret=own.secret,
             now=own.now(),
             ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
             chat_execution=True,
+            surface="provider_turn",
+            jti=jti,
         )
     try:
         return await _tools_of(

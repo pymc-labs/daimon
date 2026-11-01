@@ -2,8 +2,8 @@
 
 One `initialize`, then `tools/list` until the pages end. Lists are kept for
 ten minutes per server and token, so a page of agents costs a server a request
-each ten minutes, not one per view. A failed read raises `McpToolListingError`;
-the caller decides what to show instead.
+each ten minutes, not one per view. A failed read raises `McpToolListingError`,
+and is not tried again for a minute; the caller decides what to show instead.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from daimon.core.turn.mcp_context import REUSE_S, ContextServer, Expiring
 from pydantic import BaseModel, ConfigDict, JsonValue
 
 _PAGES = 10
+#: A failed read is not tried again for this long.
+FAILED_REUSE_S = 60.0
 _DESCRIPTION_CHARS = 500
 
 
@@ -62,12 +64,15 @@ def parse_tools(tools: list[JsonValue]) -> list[ListedTool]:
 
 @dataclass
 class McpToolLister:
-    """Lists servers' tools, remembering each list for `REUSE_S`."""
+    """Lists servers' tools, remembering a list for `REUSE_S`, a failure for `FAILED_REUSE_S`."""
 
     timeout_s: float = 10.0
     transport: httpx.AsyncBaseTransport | None = None
     cache: Expiring[tuple[str, str], tuple[ListedTool, ...]] = field(
         default_factory=lambda: Expiring[tuple[str, str], tuple[ListedTool, ...]]()
+    )
+    failures: Expiring[tuple[str, str], bool] = field(
+        default_factory=lambda: Expiring[tuple[str, str], bool]()
     )
 
     async def list_tools(
@@ -82,6 +87,8 @@ class McpToolLister:
         known = self.cache.recall(key)
         if known is not None:
             return known
+        if self.failed_recently(key):
+            raise McpToolListingError(f"{server.name} did not list its tools just now")
         try:
             assert_public_https_url(server.url, what="connection URL")
             async with (
@@ -93,9 +100,14 @@ class McpToolLister:
             ):
                 tools = await _read(http, server)
         except (httpx.HTTPError, ValueError, McpUrlError, TimeoutError) as err:
+            self.failures.remember(key, True, for_s=FAILED_REUSE_S)
             raise McpToolListingError(f"{server.name} did not list its tools") from err
         self.cache.remember(key, tools, for_s=REUSE_S)
         return tools
+
+    def failed_recently(self, key: tuple[str, str]) -> bool:
+        """Whether reading ``key``'s list failed within `FAILED_REUSE_S`."""
+        return self.failures.recall(key) is not None
 
 
 async def _read(http: httpx.AsyncClient, server: ContextServer) -> tuple[ListedTool, ...]:
