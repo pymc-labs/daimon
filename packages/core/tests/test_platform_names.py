@@ -704,6 +704,43 @@ async def test_a_deleted_channel_is_answered_from_memory_and_never_stored(
     assert remembered == [], "a status is not stored as a name"
 
 
+async def test_a_channel_not_answered_in_time_is_asked_again_a_minute_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform_names, "_LOOKUP_TIMEOUT_S", 0.05)
+    platform_names.forget_all()
+    asked: list[str] = []
+    slow = True
+
+    async def lookup(_guild: str, channel_id: str) -> platform_names.ChannelStatus:
+        asked.append(channel_id)
+        if slow:
+            await asyncio.sleep(10)
+        return platform_names.ChannelStatus.GONE
+
+    async def ask() -> platform_names.LookedUpChannels:
+        return await platform_names.lookup_channel_names(
+            MagicMock(),
+            tenant_id=tenant,
+            platform="discord",
+            external_id="g1",
+            channel_ids=["c1"],
+            lookup=lookup,
+        )
+
+    tenant = uuid.uuid4()
+    first = await ask()
+    slow = False
+    soon = await ask()
+    memo = platform_names._missed  # pyright: ignore[reportPrivateUsage]
+    at, answer = memo[(tenant, "discord", "c1")]
+    memo[(tenant, "discord", "c1")] = (at - platform_names._TIMEOUT_RETRY_S, answer)  # pyright: ignore[reportPrivateUsage]
+    later = await ask()
+    assert first.labels() == soon.labels() == {}, "a lookup cut off by the timeout names nothing"
+    assert later.labels() == {"c1": "Deleted channel"}, "and is asked again a minute later"
+    assert asked == ["c1", "c1"], "not on every call in between"
+
+
 async def test_a_channel_lookup_that_raises_names_nothing() -> None:
     platform_names.forget_all()
 
