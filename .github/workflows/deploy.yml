@@ -85,7 +85,7 @@ jobs:
           echo "$SHA" | grep -Eq '^[0-9a-f]{40}$' \
             || { echo "Input '$SHA' is not a full 40-char lowercase hex SHA" >&2; exit 1; }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.sha }}
 
@@ -111,13 +111,13 @@ jobs:
 
       - id: auth
         if: steps.fresh.outputs.superseded != 'true'
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
 
       # The runner image ships gcloud; installing another copy cost ~20s.
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
         if: steps.fresh.outputs.superseded != 'true'
         with:
           skip_install: true
@@ -187,14 +187,14 @@ jobs:
       # Main CI passes prebuilt digests and skips these steps. No provenance or
       # SBOM attestations: they would turn the push into an image index, while
       # existing consumers expect a plain image manifest.
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - name: Build + push daimon image
         if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile
@@ -207,7 +207,7 @@ jobs:
 
       - name: Build + push notebook-host image
         if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/notebook-host/Dockerfile
@@ -219,7 +219,7 @@ jobs:
 
       - name: Build + push report-host image
         if: (steps.images.outputs.prebuilt != 'true') && steps.fresh.outputs.superseded != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: apps/report-host/Dockerfile
