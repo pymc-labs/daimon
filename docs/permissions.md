@@ -804,8 +804,10 @@ The live admin bypass for the invoker allowlist still applies.
 
 No eligible tenant, revoked membership or role access, disabled DMs and denied
 recipient access produce no model turn, with a structured reason log. A cold DM
-with no eligible tenant gets a one-time `/dm-me` guidance reply per person per
-process; revoked access to an existing conversation suppresses its reply.
+with no eligible tenant gets a one-time reply per person per process: a verified
+member refused by the invoker policy or an agent's role requirement is told they
+lack permission to DM Daimon, and anyone else gets the `/dm-me` guidance, which
+names no server; revoked access to an existing conversation suppresses its reply.
 Revocation during a running turn suppresses its private result. The active server
 is retained; sending another DM never falls through into a different tenant.
 An unknown membership lookup during discovery can ask for a retry without naming

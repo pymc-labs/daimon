@@ -32,6 +32,7 @@ from daimon.core.direct_messages import (
     DirectMessageAccessRevoked,
     admit_cold_dm,
     cold_dm_text,
+    dm_permission_text,
     load_dm_access_policy,
     reply_to_dm_result,
     require_dm_delivery,
@@ -185,7 +186,15 @@ class DirectMessageCog(commands.Cog):
         self,
         tenant: TenantRow,
         message: discord.Message | _DmRequest,
+        *,
+        denied: set[uuid.UUID] | None = None,
     ) -> tuple[Admission | None, bool, bool]:
+        """Admit `message` through `tenant`, or say why not.
+
+        Returns (admission, membership unknown, discovery failed). A verified
+        member refused for lack of access is added to `denied`, so discovery can
+        tell them they lack permission rather than give the generic guidance.
+        """
         runtime = self.bot.runtime
         if not tenant_ready(tenant):
             self._suppress(message, "tenant_unavailable")
@@ -207,10 +216,13 @@ class DirectMessageCog(commands.Cog):
         subject = await self._subject(tenant.id, message.author.id)
         if subject.verified_membership is None:
             return None, True, False
-        if subject.verified_membership is not True or not authorize(
-            policy, subject=subject, action=Action.START_TURN
-        ):
+        if subject.verified_membership is not True:
             self._suppress(message, "invoker_not_allowed")
+            return None, False, False
+        if not authorize(policy, subject=subject, action=Action.START_TURN):
+            self._suppress(message, "invoker_not_allowed")
+            if denied is not None:
+                denied.add(tenant.id)
             return None, False, False
         try:
             admission = await admit_cold_dm(
@@ -235,6 +247,12 @@ class DirectMessageCog(commands.Cog):
                 self._suppress(
                     message, exc.reason if isinstance(exc, AdmissionDenied) else type(exc).__name__
                 )
+                if (
+                    denied is not None
+                    and isinstance(exc, AdmissionDenied)
+                    and exc.reason == "invoker_not_allowed"
+                ):
+                    denied.add(tenant.id)
                 return None, False, False
             # Membership and invoker eligibility were established above. Do not
             # disclose which candidate failed, or include exception/resource text.
@@ -255,9 +273,10 @@ class DirectMessageCog(commands.Cog):
             return None
         tenants = await list_tenants_by_platform(self.bot.runtime.sessionmaker, platform="discord")
         candidates: list[tuple[TenantRow, Admission]] = []
+        denied: set[uuid.UUID] = set()
         unknown = False
         for tenant in tenants:
-            admission, uncertain, failed = await self._eligible(tenant, message)
+            admission, uncertain, failed = await self._eligible(tenant, message, denied=denied)
             if failed:
                 return None
             unknown |= uncertain
@@ -273,7 +292,7 @@ class DirectMessageCog(commands.Cog):
             return None
         if not candidates:
             self._suppress(message, "no_eligible_tenant")
-            await self._explain_no_private_chat(message, dms_on=None)
+            await self._explain_no_private_chat(message, dms_on=None, permission=bool(denied))
             return None
         if len(candidates) == 1 and expected_scope_id is None:
             tenant, admission = candidates[0]
@@ -599,14 +618,25 @@ class DirectMessageCog(commands.Cog):
                     )
 
     async def _explain_no_private_chat(
-        self, message: discord.Message | _DmRequest, *, dms_on: bool | None
+        self,
+        message: discord.Message | _DmRequest,
+        *,
+        dms_on: bool | None,
+        permission: bool = False,
     ) -> None:
-        """Answer a DM that has no conversation to continue, once per person per process."""
+        """Answer a DM that has no conversation to continue, once per person per process.
+
+        `permission` is set when a server the person verifiably belongs to refused
+        them for lack of access; they are told so instead of being sent to /dm-me.
+        """
         person = str(message.author.id)
         if not self._cold_dm_notices.first_time(person):
             return
+        text = (
+            dm_permission_text("discord") if permission else cold_dm_text("discord", dms_on=dms_on)
+        )
         try:
-            await message.channel.send(cold_dm_text("discord", dms_on=dms_on))
+            await message.channel.send(text)
         except discord.HTTPException as exc:
             self._cold_dm_notices.forget(person)
             log.warning("discord.dm.cold_notice_failed", error_type=type(exc).__name__)

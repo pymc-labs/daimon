@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A Discord member who may not use Daimon and DMs it is told they don't have permission to DM Daimon, instead of being sent to `/dm-me`, which would refuse them too. This applies when the server's invoker policy or the DM agent's role requirement refuses them. Someone who isn't a member of any of Daimon's servers still gets the `/dm-me` guidance, so the reply never confirms a server they aren't in.
+
 - Detaching an MCP server with `detach_mcp_server` also removes the copies of its key from the vaults of everyone who used the agent, a shared thread's vault included, not only the key the agent stores. Before, those copies stayed until someone deleted them by hand, and a later attach at the same URL could quietly use them. Only that agent's copies of that server's key go: another agent's own key for the same server and a person's own sign-in stay. If some copies cannot be removed, the reply says so and asks for an operator.
 
 - A watch that reports in a new thread or the owner's DM reports its events again. Those reports start a fresh session that mounts the agent's memory but has no file tools, and the model wrote file and memory tool calls as plain text instead of the report. Every watch turn now says it has no file, shell or memory tools.
