@@ -109,7 +109,12 @@ class SlackMemberSync:
         `reload_every_s`. Runs until cancelled."""
         while True:
             self._reload_wanted.clear()
-            await self.load_installed(again=True)
+            try:
+                await self.load_installed(again=True)
+            except (SlackApiError, aiohttp.ClientError, TimeoutError, SQLAlchemyError) as err:
+                # One failed pass must not end the loop: no list would load again until
+                # the process restarts.
+                log.warning("slack.members.pass_failed", err_type=type(err).__name__)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._reload_wanted.wait(), self._reload_every_s)
 

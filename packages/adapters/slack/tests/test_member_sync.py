@@ -10,8 +10,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from daimon.adapters.slack.member_sync import SlackMemberSync, member_entry
+from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TEAM = "T01"
@@ -167,3 +169,43 @@ async def test_lists_load_again_after_a_reconnect_and_on_a_timer(
         await _stop(timed_task)
 
     assert after_first_hello == 1, "the first connection's hello loads nothing more"
+
+
+async def test_keep_loaded_survives_a_failing_pass_and_loads_on_the_next(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A database error listing the installs ends one pass, not the loop."""
+    await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
+    await db_session.commit()
+    runtime = MagicMock(sessionmaker=db_session_factory)
+    client = MagicMock()
+    client.auth_test = AsyncMock(return_value={"team": "Team"})
+    client.users_list = AsyncMock(return_value={"members": [_user("U1")]})
+    real = list_tenants_by_platform
+    calls = 0
+
+    async def flaky(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError("select", {}, Exception("connection lost"))
+        return await real(*args, **kwargs)
+
+    with (
+        patch("daimon.adapters.slack.member_sync.list_tenants_by_platform", flaky),
+        patch(
+            "daimon.adapters.slack.member_sync.resolve_web_client",
+            AsyncMock(return_value=client),
+        ),
+    ):
+        sync = SlackMemberSync(runtime)
+        task = asyncio.create_task(sync.keep_loaded())
+        await _until(lambda: calls == 1)
+        await sync.on_socket_message(None, {"type": "hello"}, None)
+        await sync.on_socket_message(None, {"type": "hello"}, None)
+        await _until(lambda: client.users_list.await_count == 1)
+        crashed = task.done()
+        await _stop(task)
+
+    assert not crashed, "the loop outlives the failed pass"
+    assert calls >= 2, "the next pass lists the installs again"
