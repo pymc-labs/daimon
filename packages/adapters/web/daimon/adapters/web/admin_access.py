@@ -14,6 +14,7 @@ from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.authz import build_agent_ref
 from daimon.core.permissions import agent_permissions
+from daimon.core.platform_names import UNNAMED_CHANNEL
 from daimon.core.stores import web_agent_grants
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import WebAgentGrantRow, WebAgentWho
@@ -44,7 +45,8 @@ def access_router(runtime: WebRuntime) -> APIRouter:
             channels = sorted(c for rule in permissions.runs_in for c in rule)
             if fixed := permissions.home or (channels[0] if channels else None):
                 fixed_to[agent.id] = fixed
-        _, names = await channel_names(runtime, tenant_id, set(fixed_to.values()))
+        _, found = await channel_names(runtime, tenant_id, set(fixed_to.values()))
+        names = found.labels()
         return [
             _access_json(
                 agent,
@@ -119,5 +121,5 @@ def _access_json(
         "who": "everyone" if grant is None else grant.who,
         "groups": [] if grant is None else list(grant.groups),
         "fixed_to": fixed_to,
-        "fixed_name": None if fixed_to is None else names.get(fixed_to, "Unnamed channel"),
+        "fixed_name": None if fixed_to is None else names.get(fixed_to, UNNAMED_CHANNEL),
     }

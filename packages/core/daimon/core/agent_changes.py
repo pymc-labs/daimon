@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
@@ -25,9 +26,11 @@ from daimon.core.agent_editing import (
     AgentActor,
     AgentEditDeps,
     AgentEditError,
+    AgentEditRefusal,
     AgentPatch,
     PlaceEdit,
 )
+from daimon.core.agent_model_names import model_name
 from daimon.core.agent_view import (
     AgentConfigDoc,
     AgentFacts,
@@ -41,14 +44,26 @@ from daimon.core.agent_view import (
     redact_config,
     sees_details,
 )
+from daimon.core.channel_backend import (
+    AgentBackendRefused,
+    AgentBackendService,
+    BackendActor,
+    BackendUnsupported,
+    load_backend_agent,
+)
 from daimon.core.constants import MODEL_DISPLAY_NAMES
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.model_presets import ModelConfig
 from daimon.core.permissions import WEB_PLACE_ID
 from daimon.core.stores import agent_drafts as drafts_store
 from daimon.core.stores import agent_tool_rules
 from daimon.core.stores.agent_tool_rules import Rule
+from daimon.core.turn.notices import provider_name
 from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import ModelRef, Provider
 from pydantic import BaseModel, ConfigDict, Field
+
+log = structlog.get_logger(__name__)
 
 Effect = Literal["live", "session", "threads"]
 Axis = Literal["identity", "mutable", "route"]
@@ -114,7 +129,9 @@ _AUTH_LABELS = {"oauth": "OAuth", "token": "Token", "none": "None"}
 
 def _model_label(config: AgentConfigDoc) -> str:
     model = config.model
-    name = MODEL_DISPLAY_NAMES.get(model.id, model.id)
+    name = MODEL_DISPLAY_NAMES.get(model.id) or model_name(
+        ModelRef(provider=model.backend, id=model.id)
+    )
     return f"{name} fast" if model.speed == "fast" else name
 
 
@@ -266,9 +283,23 @@ def unsupported(changes: list[Change], *, a: AgentConfigDoc, b: AgentConfigDoc) 
         head = change.key.split(":", 1)[0]
         if head in ("name", "avatar") or change.key.endswith("/auth"):
             return f"{change.label} can't be changed here yet. Nothing was saved."
-    if a.model != b.model and {a.model.backend, b.model.backend} != {DEFAULT_BACKEND}:
-        return "Another model provider can't be chosen here yet. Nothing was saved."
+    if (
+        a.model.backend == b.model.backend != DEFAULT_BACKEND
+        and a.model.id == b.model.id
+        and a.model != b.model
+    ):
+        return "Effort and speed can't be changed for this model here yet. Nothing was saved."
     return None
+
+
+def provider_moved(a: AgentConfigDoc, b: AgentConfigDoc) -> bool:
+    """Whether ``b`` runs on another provider, or another model off the default one. Pure.
+
+    That is the agent's provider setting, not its Managed Agents model.
+    """
+    return a.model.backend != b.model.backend or (
+        b.model.backend != DEFAULT_BACKEND and a.model.id != b.model.id
+    )
 
 
 def _tools_for(agent: BetaManagedAgentsAgent, target: AgentConfigDoc) -> list[Tool]:
@@ -301,7 +332,8 @@ def patch_for(
         for change in changes
     )
     model: ModelConfig | None = None
-    if "model" in heads:
+    # Another provider's model is the provider setting's (`switch_provider`), not Managed Agents'.
+    if "model" in heads and target.model.backend == DEFAULT_BACKEND:
         model = {"id": target.model.id, "speed": target.model.speed, "effort": target.model.effort}
     skills: list[BetaManagedAgentsSkillParams] | None = None
     if "skill" in heads:
@@ -479,6 +511,80 @@ def place_edits(places: list[PlaceDoc] | None) -> list[PlaceEdit]:
 class AgentChangeDeps:
     edit: AgentEditDeps
     view: AgentViewDeps
+    # Writes the agent's model provider; None where this deployment cannot switch it.
+    backends: AgentBackendService | None = None
+
+
+_PROVIDER_REFUSALS: dict[str, tuple[str, AgentEditRefusal]] = {
+    "feature_disabled": ("Choosing a model provider is turned off here.", "forbidden"),
+    "owner_or_admin_required": ("Only the agent's owner or an admin can do that.", "forbidden"),
+    "admin_required": ("Only an admin can do that.", "forbidden"),
+    "model_not_selectable": ("That model isn't available. Pick another.", "invalid"),
+    "profile_not_selectable": ("That model isn't available. Pick another.", "invalid"),
+    "stale_revision": ("The model changed since your draft began", "stale"),
+    "stale_preview": ("The model changed since your draft began", "stale"),
+}
+
+
+def _provider_refusal(exc: AgentBackendRefused, provider: str) -> AgentEditError:
+    if exc.reason == "backend_not_allowed":
+        text = f"{provider_name(provider)} isn't allowed in this workspace. Ask an admin."
+        return AgentEditError(f"{text} Nothing was saved.", kind="forbidden")
+    text, kind = _PROVIDER_REFUSALS.get(exc.reason, ("That model can't be chosen here.", "invalid"))
+    return AgentEditError(f"{text} Nothing was saved.", kind=kind)
+
+
+async def switch_provider(
+    deps: AgentChangeDeps,
+    *,
+    actor: AgentActor,
+    agent: BetaManagedAgentsAgent,
+    provider: Provider,
+    model_id: str,
+) -> None:
+    """Point the agent at ``provider`` and its ``model_id``, as the chat switch does.
+
+    The provider setting lives beside the agent, not in its Managed Agents version, and
+    applies to new conversations. Refused with `AgentEditError` in the editor's words.
+    """
+    if deps.backends is None or not deps.backends.enabled:
+        raise _provider_refusal(AgentBackendRefused("feature_disabled"), provider)
+    backend = None if provider == DEFAULT_BACKEND else provider
+    model = None if backend is None else model_id
+    backend_actor = BackendActor(
+        tenant_id=actor.tenant_id, account_id=actor.account_id, subject=actor.subject
+    )
+    try:
+        source = await load_backend_agent(
+            deps.edit.client,
+            deps.edit.session_factory,
+            tenant_id=actor.tenant_id,
+            agent_name=agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name,
+            actual_agent=agent,
+        )
+        preview = await deps.backends.preview(source, backend, model)
+        if backend is None:
+            await deps.backends.clear_backend(
+                source,
+                preview.setting_revision,
+                backend_actor,
+                expected_preview_digest=preview.digest,
+            )
+        else:
+            await deps.backends.set_backend(
+                source,
+                backend,
+                preview.setting_revision,
+                backend_actor,
+                expected_preview_digest=preview.digest,
+                model=model,
+            )
+    except AgentBackendRefused as exc:
+        log.info("agent_changes.provider_refused", agent_id=agent.id, reason=exc.reason)
+        raise _provider_refusal(exc, provider) from exc
+    except BackendUnsupported as exc:
+        log.info("agent_changes.provider_unsupported", agent_id=agent.id, provider=provider)
+        raise _provider_refusal(AgentBackendRefused("model_not_selectable"), provider) from exc
 
 
 def _dump(config: AgentConfigDoc) -> dict[str, Any]:
@@ -680,6 +786,15 @@ async def _write(
     await agent_editing.check_places(
         deps.edit, actor=actor, agent=agent, before=before, after=after
     )
+    # First of the writes: the provider's policy refuses more often than anything after it.
+    if provider_moved(base, target):
+        await switch_provider(
+            deps,
+            actor=actor,
+            agent=agent,
+            provider=target.model.backend,
+            model_id=target.model.id,
+        )
     written = agent
     if patch.touched():
         written = await agent_editing.update_agent(

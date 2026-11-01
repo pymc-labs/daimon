@@ -48,7 +48,7 @@ from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.permissions import WEB_PLACE_ID, channel_rule
-from daimon.core.platform_names import ChannelLookup, lookup_channel_names
+from daimon.core.platform_names import UNNAMED_CHANNEL, ChannelLookup, lookup_channel_names
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores import (
     agent_backends,
@@ -74,6 +74,7 @@ from daimon.core.turn.mcp_context import context_servers
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.errors import ScopeViolation
 from mux.contracts.ids import Provider
+from mux.profiles import backend_selection
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -257,7 +258,8 @@ def _person(facts: AgentFacts, account_id: uuid.UUID | None) -> PersonRef:
 def _model(agent: BetaManagedAgentsAgent, backend: AgentBackendRevision | None) -> ModelChoice:
     if backend is not None and backend.backend is not None and backend.backend != DEFAULT_BACKEND:
         return ModelChoice(
-            id=backend.model or "",
+            # No model stored means the provider's default one.
+            id=backend.model or backend_selection(backend.backend).model or "",
             backend=backend.backend,
             speed="standard",
             effort=_DEFAULT_EFFORT,
@@ -504,7 +506,7 @@ def places_of(
             id=channel_id,
             kind="channel",
             platform=platform,
-            name=channel_names.get(channel_id, "Unnamed channel"),
+            name=channel_names.get(channel_id, UNNAMED_CHANNEL),
             default=True if channel_id in defaults else None,
             confidential=True if channel_rule(policy, channel_id).readers == "own" else None,
         )
@@ -669,7 +671,7 @@ async def _named_places(
         channel_ids=places.unnamed,
         lookup=deps.channel_lookup,
     )
-    return replace(places, channel_names={**places.channel_names, **found})
+    return replace(places, channel_names={**places.channel_names, **found.labels()})
 
 
 async def _listed_tools(

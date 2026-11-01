@@ -63,5 +63,7 @@ const money = new Intl.NumberFormat("en", { style: "currency", currency: "USD", 
 export const usd = (n: number | null | undefined) => (n == null ? "–" : money.format(n))
 
 const UNNAMED_CHANNEL = "Unnamed channel"
+// Labels the server sends for a channel with no name of its own; they never get a "#".
+const PLAIN_CHANNEL_LABELS = new Set([UNNAMED_CHANNEL, "Deleted channel", "Direct message"])
 /** A channel as people write it; a channel the platform never named stays unnamed. */
-export const channelLabel = (name: string | null | undefined) => (!name || name === UNNAMED_CHANNEL ? UNNAMED_CHANNEL : `#${name}`)
+export const channelLabel = (name: string | null | undefined) => (!name ? UNNAMED_CHANNEL : PLAIN_CHANNEL_LABELS.has(name) ? name : `#${name}`)

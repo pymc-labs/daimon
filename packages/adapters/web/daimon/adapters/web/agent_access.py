@@ -13,6 +13,7 @@ from daimon.core.agent_changes import AgentChangeDeps
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_view import AgentViewDeps, AgentViewer
 from daimon.core.authz import Subject, Surface
+from daimon.core.channel_backend import make_backend_service
 from fastapi import Depends, HTTPException
 
 Viewer = Annotated[WebCaller, Depends(requires("agents.view"))]
@@ -58,6 +59,7 @@ def change_deps(runtime: WebRuntime) -> AgentChangeDeps:
             fernet=runtime.fernet,
             channel_lookup=channel_lookup_of(runtime),
         ),
+        backends=make_backend_service(runtime.sessionmaker, runtime.settings.turn),
     )
 
 

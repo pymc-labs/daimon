@@ -47,6 +47,9 @@ class AmbiguousModel(ValueError):
 class AgentModel:
     model: ModelRef
     price: str
+    # List price per million tokens, in USD.
+    input_usd: float = 0.0
+    output_usd: float = 0.0
 
 
 def agent_catalog() -> tuple[AgentModel, ...]:
@@ -55,6 +58,8 @@ def agent_catalog() -> tuple[AgentModel, ...]:
         AgentModel(
             ModelRef(provider=MANAGED_AGENTS.provider, id=name),
             f"~${rates.input:g} input / ${rates.output:g} output per million tokens",
+            rates.input,
+            rates.output,
         )
         for name, rates in AGENT_MODEL_PRICING.items()
         if not name.endswith("-fast")
@@ -72,6 +77,8 @@ def agent_catalog() -> tuple[AgentModel, ...]:
                     AgentModel(
                         ModelRef(provider=provider, id=name),
                         f"~${rates.input} input / ${rates.output} output per million tokens",
+                        float(rates.input),
+                        float(rates.output),
                     )
                 )
     return tuple(entries)

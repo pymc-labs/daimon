@@ -141,13 +141,13 @@ const PROVIDER = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google", s
 
 function ModelNode() {
   const { config, catalog } = useCanvas()
-  const c = catalog?.models.find((x) => x.id === config.model.id)
+  const c = catalog?.models.find((x) => x.id === config.model.id && x.backend === config.model.backend)
   return (
     <Card id="model" icon={<Cpu />} title="Model">
       <div className="space-y-1 p-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{c?.label ?? config.model.id}{config.model.speed === "fast" && " Fast"}</span>
-          <Pill>{EFFORT_LABEL[config.model.effort]}</Pill>
+          {config.model.backend === "anthropic" && <Pill>{EFFORT_LABEL[config.model.effort]}</Pill>}
         </div>
         <div className="text-xs text-muted-foreground">
           {PROVIDER[config.model.backend]}{c && <span className="text-faint">, ${c.in_usd} in / ${c.out_usd} out per million</span>}

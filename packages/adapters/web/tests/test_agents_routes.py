@@ -16,7 +16,9 @@ from daimon.adapters.web.app import create_app
 from daimon.adapters.web.cookies import new_session_token, token_sha256
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import agent_skill_files
-from daimon.core.config import Settings
+from daimon.core.authz import build_subject
+from daimon.core.channel_backend import BackendActor, make_backend_service
+from daimon.core.config import Settings, TurnSettings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef
@@ -147,7 +149,7 @@ async def _client(
     **extra: Any,
 ) -> AsyncIterator[httpx.AsyncClient]:
     db = {"url": "postgresql+asyncpg://u:p@h/db"}
-    settings = Settings(_env_file=None, database=db)  # pyright: ignore[reportCallIssue, reportArgumentType]
+    settings = extra.pop("settings", None) or Settings(_env_file=None, database=db)  # pyright: ignore[reportCallIssue, reportArgumentType]
     async with httpx.AsyncClient() as http:
         runtime = WebRuntime(
             settings=settings,
@@ -358,6 +360,61 @@ async def test_the_catalog_offers_this_workspaces_skills_and_configured_channels
     ], "another workspace's skill is left out; a shipped skill carries its description"
     assert [(c["id"], c["name"]) for c in catalog["channels"]] == [("c1", "general")]
     assert "bash" in [t["name"] for t in catalog["tools"]], "built-in tools are listed"
+    models = {m["id"]: m for m in catalog["models"]}
+    assert {m["backend"] for m in models.values()} == {"anthropic"}, (
+        "without provider choice only Anthropic's models are offered"
+    )
+    assert models["claude-opus-5-5"]["fast"] is True, "a model with a fast variant says so"
+    assert not any(i.endswith("-fast") for i in models), "the fast variant is not a model"
+
+
+async def test_an_owner_switches_the_agent_to_another_providers_model(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The catalog offers every allowed provider, and applying one writes the provider setting."""
+    agents, owner, _other = await _people(db_session)
+    await _admin(db_session_factory, owner)
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+        turn=TurnSettings(path="mux", channel_backends=True),
+    )
+    service = make_backend_service(db_session_factory, settings.turn)
+    policy = await service.tenant_policy(owner.tenant_id)
+    await service.set_tenant_allowlist(
+        owner.tenant_id,
+        ("anthropic", "openai"),
+        policy.revision,
+        BackendActor(
+            tenant_id=owner.tenant_id,
+            account_id=owner.account_id,
+            subject=build_subject(is_admin=True, platform_user_id=None),
+        ),
+    )
+    token = await _token(db_session_factory, owner)
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, token, settings=settings
+    ) as client:
+        catalog = (await client.get("/api/agents/catalog")).json()
+        config = (await client.get("/api/agents/ag_w")).json()
+        config["model"] = {**config["model"], "id": "gpt-6-astra", "backend": "openai"}
+        draft = await client.patch(
+            "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
+        )
+        applied = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
+        after = (await client.get("/api/agents/ag_w")).json()
+    offered = {(m["backend"], m["id"]): m for m in catalog["models"]}
+    assert ("openai", "gpt-6-astra") in offered, "an allowed provider's models are offered"
+    assert ("gemini", "gemini-4-argon") not in offered, "a provider not allowed here is not"
+    assert offered[("openai", "gpt-6-astra")]["in_usd"] > 0, "the model carries its price"
+    assert draft.status_code == 200, draft.text
+    assert applied.status_code == 200, applied.text
+    assert (after["model"]["backend"], after["model"]["id"]) == ("openai", "gpt-6-astra"), (
+        "the agent now runs on the chosen provider and model"
+    )
+    assert all("model" not in update for update in agents.updates), (
+        "another provider's model is never written as the Managed Agents model"
+    )
 
 
 async def test_templates_are_blank_plus_the_marked_default_agents(
