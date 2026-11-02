@@ -17,7 +17,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.core.continuity import timers
 from daimon.core.continuity.timers import TimerError
 from daimon.core.stores.domain import ChatPlatform, TaskContinuationRow
@@ -61,7 +61,7 @@ async def _create_timer_impl(
     fire_at: str,
     note: str,
 ) -> Timer:
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if auth.platform_user_id is None:
         raise ToolError(
             "A timer runs as the person who asked for it, and this connection does not "

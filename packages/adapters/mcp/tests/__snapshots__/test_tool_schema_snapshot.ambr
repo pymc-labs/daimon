@@ -580,6 +580,45 @@
         'type': 'object',
       }),
     }),
+    'ask_helper': dict({
+      'description': '''
+        Ask one of your helpers (`list_helpers`) to do part of this turn's work, on its own model, and get its reply.
+        <blank line>
+        It works for the same person in this conversation, with its own tools, keys and
+        rules; nothing it writes is posted. Asking the same helper again continues its
+        conversation in this thread. While `status` is `queued` or `running`, call
+        `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
+        for their replies before you answer.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'helper': dict({
+            'description': "A helper's name or agent id from list_helpers.",
+            'type': 'string',
+          }),
+          'message': dict({
+            'description': "Everything the helper needs: the task, the facts and what to send back. It can't see this conversation's history or your files.",
+            'maxLength': 20000,
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'wait': dict({
+            'default': True,
+            'description': 'False to start it and ask other helpers before waiting.',
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'helper',
+          'message',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'attach_mcp_server': dict({
       'description': '''
         Add an MCP server that needs no token, such as Context7, to an agent.
@@ -3563,6 +3602,21 @@
         }),
         'required': list([
           'handle',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'list_helpers': dict({
+      'description': 'The agents you may ask for help during this turn with `ask_helper`: id, name, purpose.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -7645,6 +7699,29 @@
         }),
         'required': list([
           'routine_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'wait_for_helpers': dict({
+      'description': "Wait for helpers' replies; returns when all of them finish or after about a minute. Call again for any still `queued` or `running`.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'ask_ids': dict({
+            'description': 'ask_id values from ask_helper.',
+            'items': dict({
+              'type': 'string',
+            }),
+            'type': 'array',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'ask_ids',
         ]),
         'type': 'object',
       }),

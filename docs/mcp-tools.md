@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 130 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 133 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -229,6 +229,16 @@ Conversational selection of an agent's one filesystem repository.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `set_working_repo` | Discord callers, Slack callers, Teams callers | Choose the one repo in this agent's filesystem, or pass 'none' to clear it. |
+
+## `helpers`
+
+Ask helper agents for help inside this turn (`daimon.core.helpers`).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `ask_helper` | all callers | Ask one of your helpers (`list_helpers`) to do part of this turn's work, on its own model, and get its reply. |
+| `list_helpers` | all callers | The agents you may ask for help during this turn with `ask_helper`: id, name, purpose. |
+| `wait_for_helpers` | all callers | Wait for helpers' replies; returns when all of them finish or after about a minute. |
 
 ## `here`
 

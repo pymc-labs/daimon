@@ -58,7 +58,7 @@ async def require_turn_origin(
         raise ToolError(
             "The origin_context_id is unavailable or expired; retry in that conversation."
         )
-    return _not_a_helper(_held_by_caller(auth, origin))
+    return _held_by_caller(auth, origin)
 
 
 async def get_web_turn_origin(
@@ -82,12 +82,13 @@ async def get_web_turn_origin(
             platform="web",
             now=datetime.now(UTC),
         )
-    return None if origin is None else _not_a_helper(_held_by_caller(auth, origin))
+    return None if origin is None else _held_by_caller(auth, origin)
 
 
-def _not_a_helper(origin: TurnOriginRow) -> TurnOriginRow:
-    # A helper works for another agent's turn: it changes nothing about the
-    # conversation (hand-offs, timers, cards, repos) and asks no helpers.
+def refuse_helper(origin: TurnOriginRow) -> TurnOriginRow:
+    """``origin``, unless it is a helper's: a helper works inside another agent's turn, so
+    it may not change who answers the conversation, wake it later or ask helpers itself.
+    Every other tool runs for a helper as for the person."""
     if origin.helper_of is not None:
         raise ToolError(
             "You are helping another agent, so you can't do this. Tell it what is needed."
@@ -216,7 +217,7 @@ async def _set_setup_target_impl(
     origin_context_id: str,
     agent_id: str,
 ) -> TurnOriginRow:
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
     caller = await load_caller_view(
         runtime,

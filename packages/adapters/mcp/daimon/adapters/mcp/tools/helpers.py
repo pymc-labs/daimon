@@ -17,7 +17,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.helpers import MAX_ASKS
@@ -99,7 +99,7 @@ async def _wait(
                 session, tenant_id=auth.tenant_id, origin_id=origin.id, ids=ids
             )
         if len(asks) < len(set(ids)):
-            raise ToolError("Use ask ids from ask_helper in this turn.")
+            raise ToolError("Use the ask ids ask_helper gave you for this message.")
         if all(ask.status not in helper_asks.OPEN for ask in asks) or monotonic() >= until:
             return [_answer(ask) for ask in asks]
         await asyncio.sleep(_POLL_S)
@@ -108,7 +108,7 @@ async def _wait(
 async def _list_helpers_impl(
     runtime: McpRuntime, auth: AuthIdentity, *, origin_context_id: str
 ) -> HelperList:
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     return HelperList(helpers=await _roster(runtime, auth, origin))
 
 
@@ -121,8 +121,7 @@ async def _ask_helper_impl(
     message: str,
     wait: bool,
 ) -> HelperAnswer:
-    # A helper's own turn is refused here: helpers ask no helpers.
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.serves_helpers:
         raise ToolError("Helpers can't be asked from this conversation.")
     roster = await _roster(runtime, auth, origin)
@@ -138,7 +137,7 @@ async def _ask_helper_impl(
         raise ToolError("Say what the helper should do.")
     async with runtime.session_factory.begin() as session:
         if await helper_asks.count_asks(session, origin_id=origin.id) >= MAX_ASKS:
-            raise ToolError(f"This turn already asked helpers {MAX_ASKS} times. Answer now.")
+            raise ToolError(f"You asked helpers {MAX_ASKS} times for this message. Answer now.")
         ask = await helper_asks.create_ask(
             session,
             tenant_id=auth.tenant_id,
@@ -157,11 +156,11 @@ async def _ask_helper_impl(
 async def _wait_for_helpers_impl(
     runtime: McpRuntime, auth: AuthIdentity, *, origin_context_id: str, ask_ids: list[str]
 ) -> HelperAnswers:
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     try:
         ids = [uuid.UUID(ask_id) for ask_id in ask_ids]
     except ValueError as exc:
-        raise ToolError("Use ask ids from ask_helper in this turn.") from exc
+        raise ToolError("Use the ask ids ask_helper gave you for this message.") from exc
     if not ids:
         raise ToolError("Name the asks to wait for.")
     return HelperAnswers(answers=await _wait(runtime, auth, origin, ids))

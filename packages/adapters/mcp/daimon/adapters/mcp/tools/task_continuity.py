@@ -30,7 +30,7 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._owner import may_own
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._words import admin_noun
-from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.core.authz import Action, build_agent_ref
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
@@ -206,7 +206,7 @@ async def _hand_off_task_impl(
     before the switch; "commit" hands over after it, when the copy is already on
     the provider the switch moves this thread to.
     """
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     # `require_turn_origin` already refused any non-chat platform.
     platform = cast(ChatPlatform, origin.platform)
 
@@ -650,7 +650,7 @@ async def _start_fresh_task_impl(
     and still gets the confirmation — their next message starts clean either
     way, which is exactly what they asked for.
     """
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     async with runtime.session_factory.begin() as session:
         live_session = await get_live_thread_session(
             session,
