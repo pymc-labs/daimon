@@ -22,7 +22,7 @@ from daimon.core.long_job_models import LongJob, LongJobManifest, LongJobPolicy
 from daimon.core.long_jobs import LongJobExecutor, WorkerVanished, require_admission
 from daimon.core.long_jobs_ma import worker_prompt
 from daimon.core.stores import long_jobs as store
-from daimon.core.stores.task_continuations import list_pending_continuations
+from daimon.core.stores.domain import TaskContinuationRow
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -30,6 +30,27 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 NOW = datetime(2026, 10, 23, 12, tzinfo=UTC)
 LIMITS = LongJobsSettings()
 ADMIN = Subject(is_admin=True, platform_user_id="admin")
+
+
+async def pending_wakes(db, *, tenant_id, platform, thread_id):
+    """Pending wakes for one thread, including any due after the database clock.
+
+    These tests run a fake clock ahead of the database, so a wake written at
+    that clock is not yet due for `list_pending_continuations`.
+    """
+    rows = (
+        await db.execute(
+            select(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.platform == platform,
+                TaskContinuation.thread_id == thread_id,
+                TaskContinuation.status == "pending",
+            )
+            .order_by(TaskContinuation.created_at, TaskContinuation.id)
+        )
+    ).scalars()
+    return [TaskContinuationRow.model_validate(row) for row in rows]
 
 
 async def seed(sm, *, policy=True):
@@ -271,12 +292,11 @@ async def test_finish_cas_publishes_one_unattended_wake(db_engine, db_clean):
                 )
                 is expected
             )
-        wakes = await list_pending_continuations(
+        wakes = await pending_wakes(
             db,
             tenant_id=job.tenant_id,
             platform="discord",
             thread_id=job.thread_id,
-            include_future=True,
         )
     assert len(wakes) == 1
     assert wakes[0].reason == "job_finished" and not wakes[0].attended
