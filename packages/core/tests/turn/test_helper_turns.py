@@ -48,7 +48,7 @@ from mux.testing.drivers.anthropic.ma import (
     make_fake_memory_store_handler,
 )
 from mux.testing.isolated_sdk import build_async_anthropic
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from daimon.testing.factories import (  # isort: skip
     make_ledger_entry,
@@ -64,6 +64,13 @@ QUESTION = "What is six times seven?"
 THREAD = "thread"
 
 
+@pytest.fixture
+def db_session_factory(db_engine: AsyncEngine, db_clean: None) -> async_sessionmaker[AsyncSession]:
+    """Sessions on their own connections, as in production: the asking turn and its
+    helpers run at once, and one's write is seen by the other only once committed."""
+    return async_sessionmaker(db_engine, expire_on_commit=False)
+
+
 @dataclass
 class Scene:
     """What a scenario's fake asker can reach while its stream is open."""
@@ -72,6 +79,7 @@ class Scene:
     tenant: TenantRow
     origin_id: uuid.UUID | None = None
     ask_id: uuid.UUID | None = None
+    streamed: bool = False
     session_agents: dict[str, str] = field(default_factory=dict[str, str])
     sent: dict[str, list[str]] = field(default_factory=dict[str, list[str]])
 
@@ -178,7 +186,10 @@ async def run_asking_turn(
         owner = scene.session_agents[session_id]
         if request.method == "POST" and path.endswith("/events"):
             scene.sent.setdefault(session_id, []).append(request.content.decode())
-        if request.method == "GET" and path.endswith("/events/stream") and owner == PARENT_ID:
+        stream = request.method == "GET" and path.endswith("/events/stream")
+        # Once: a reconnecting stream must not ask again.
+        if stream and owner == PARENT_ID and not scene.streamed:
+            scene.streamed = True
             await on_stream(scene)
         return turns[owner].dispatch(request)
 

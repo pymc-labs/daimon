@@ -135,6 +135,7 @@ def _patch_chat(monkeypatch: pytest.MonkeyPatch, module: object, ma_agent_id: st
         parent_channel_id="channel",
         thread_id="thread",
         sender_foreign=False,
+        helper_of=None,
     )
     agent = SimpleNamespace(id=ma_agent_id, name="Agent", metadata={})
     monkeypatch.setattr(module, "require_turn_origin", AsyncMock(return_value=origin))
