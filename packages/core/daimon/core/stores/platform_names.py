@@ -226,3 +226,16 @@ async def get_channel_names(
         )
     )
     return {channel_id: name for channel_id, name in rows.all()}
+
+
+async def list_channel_names(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str
+) -> dict[str, str]:
+    """Every channel of the tenant on `platform` whose name is stored, by id."""
+    rows = await session.execute(
+        select(PlatformChannelName.channel_id, PlatformChannelName.name).where(
+            PlatformChannelName.tenant_id == tenant_id,
+            PlatformChannelName.platform == platform,
+        )
+    )
+    return {channel_id: name for channel_id, name in rows.all()}

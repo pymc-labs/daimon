@@ -76,10 +76,10 @@ def _caller(
         platform="slack",
         is_admin=admin,
         hold=hold,
-        executing_agent_id=(
-            derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=f"ag_{talking_to}")
+        own_agent_ids=frozenset(
+            {derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=f"ag_{talking_to}")}
             if talking_to
-            else None
+            else set()
         ),
     )
 

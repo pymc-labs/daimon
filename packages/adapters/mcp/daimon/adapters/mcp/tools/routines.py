@@ -210,7 +210,7 @@ def _caller(auth: AuthIdentity) -> RoutineCaller:
         platform=auth.platform or "",
         is_admin=auth.is_admin,
         hold=auth.hold,
-        executing_agent_id=auth.agent_id or auth.chat_agent_id,
+        own_agent_ids=frozenset(i for i in (auth.agent_id or auth.chat_agent_id,) if i is not None),
         admin_noun=admin_noun(auth.platform),
     )
 

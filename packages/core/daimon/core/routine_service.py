@@ -15,7 +15,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
@@ -74,6 +74,8 @@ class Placement:
     parent_channel_id: str | None = None
     """The channel a thread sits in, when the platform says so."""
     category_id: str | None = None
+    category_unresolved: bool = False
+    """The surface could not look the category up; a rule on categories then refuses."""
 
     @property
     def budget_channel_id(self) -> str:
@@ -90,6 +92,11 @@ class DestinationResolver(Protocol):
     async def __call__(self, kind: RoutineDestinationKind, destination_id: str) -> Placement: ...
 
 
+Happened = Literal["created", "changed", "paused", "resumed", "deleted"]
+
+OnChange = Callable[[AsyncSession, Happened, RoutineRow], Awaitable[None]]
+"""Runs inside the transaction that made the change, so a record of it commits with it."""
+
 ChannelAgentName = Callable[[str], Awaitable[str | None]]
 """The name of the agent a channel answers with by default."""
 
@@ -105,8 +112,9 @@ class RoutineCaller:
     is_admin: bool = False
     """Whether the caller may change any routine, not only their own."""
     hold: TurnHold | None = None
-    executing_agent_id: uuid.UUID | None = None
-    """The agent the call runs as; a member may schedule it."""
+    own_agent_ids: frozenset[uuid.UUID] = frozenset()
+    """The agents (as `derive_agent_uuid`) the caller is talking to or may chat with; a
+    member may schedule these."""
     admin_noun: str = "an admin"
 
     @property
@@ -137,6 +145,7 @@ class RoutineEnv:
     origin_budget_channel: Callable[[], Awaitable[str | None]] | None = None
     """The channel a destination-less routine's spend counts against."""
     require_destination: bool = False
+    on_change: OnChange | None = None
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
 
 
@@ -200,6 +209,13 @@ def sees_routine(viewer: RuleViewer, row: RoutineRow) -> bool:
     """Routines of a channel kept to its own agents, and of those agents, show only inside it."""
     place = home_of(viewer.policy, row.channel_id, None)
     return viewer.sees(row.agent_name) and place in (None, viewer.inside_channel_id)
+
+
+async def _record(
+    env: RoutineEnv, session: AsyncSession, happened: Happened, row: RoutineRow
+) -> None:
+    if env.on_change is not None:
+        await env.on_change(session, happened, row)
 
 
 def isolation_view_loader(
@@ -328,6 +344,7 @@ async def check_destination(
             channel_id=placement.channel_id,
             parent_channel_id=placement.parent_channel_id,
             category_id=placement.category_id,
+            category_unresolved=placement.category_unresolved,
         ),
     ):
         raise RoutineRefused(
@@ -407,8 +424,9 @@ async def _require_agent_in_scope(
     """
     if caller.is_admin:
         return
-    if caller.executing_agent_id is not None and caller.executing_agent_id == derive_agent_uuid(
-        tenant_id=caller.tenant_id, ma_agent_id=ma_agent_id
+    if (
+        derive_agent_uuid(tenant_id=caller.tenant_id, ma_agent_id=ma_agent_id)
+        in caller.own_agent_ids
     ):
         return
     if (
@@ -468,7 +486,7 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
         destination_channel_id=destination_channel_id,
     )
     async with env.sessionmaker() as session, session.begin():
-        return await routines_store.create_routine(
+        created = await routines_store.create_routine(
             session,
             tenant_id=caller.tenant_id,
             created_by_user_id=caller.user_id,
@@ -484,6 +502,8 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
             destination_id=new.destination_id,
             channel_id=budget_channel_id,
         )
+        await _record(env, session, "created", created)
+        return created
 
 
 async def list_routines(env: RoutineEnv, caller: RoutineCaller) -> list[RoutineRow]:
@@ -621,6 +641,7 @@ async def update_routine(
         )
         if updated is None:
             raise RoutineNotFound()
+        await _record(env, session, "changed", updated)
         return updated
 
 
@@ -644,6 +665,7 @@ async def set_enabled(
         )
         if changed is None:
             raise RoutineNotFound()
+        await _record(env, session, "resumed" if enabled else "paused", changed)
         return changed
 
 
@@ -657,3 +679,4 @@ async def delete_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uui
         _require_owner(caller, row)
         if not await routines_store.delete_routine(session, routine_id, tenant_id=caller.tenant_id):
             raise RoutineNotFound()
+        await _record(env, session, "deleted", row)
