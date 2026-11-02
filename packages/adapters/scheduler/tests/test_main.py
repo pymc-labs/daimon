@@ -36,6 +36,7 @@ from daimon.adapters.scheduler.main import (
     _run_loops,  # pyright: ignore[reportPrivateUsage]  # tick and usage-sweep loops
     _settle_promo_credit,  # pyright: ignore[reportPrivateUsage]  # test seam for the promo settlement wrapper
     _sweep_github_issued_tokens,  # pyright: ignore[reportPrivateUsage]  # test seam for the closed-token prune wrapper
+    _sweep_long_jobs,  # pyright: ignore[reportPrivateUsage]  # long-job claim boundary
     _sweep_privacy_deletes,  # pyright: ignore[reportPrivateUsage]  # privacy retry boundary
     _sweep_retired_turn_card_intents,  # pyright: ignore[reportPrivateUsage]  # test seam for the card-intent sweep wrapper
     _sweep_slack_event_dedup,  # pyright: ignore[reportPrivateUsage]  # test seam for the slack_event_dedup sweep wrapper
@@ -2382,6 +2383,16 @@ async def test_fire_closure_threads_public_url_from_settings(
         )
 
     await fake_client.close()
+
+
+async def test_sweep_long_jobs_logs_database_error_instead_of_ending_the_tick() -> None:
+    executor = SimpleNamespace(sweep=unittest.mock.AsyncMock(side_effect=SQLAlchemyError("boom")))
+
+    with structlog.testing.capture_logs() as logs:
+        await _sweep_long_jobs(executor)  # pyright: ignore[reportArgumentType]
+
+    executor.sweep.assert_awaited_once()
+    assert [entry["event"] for entry in logs] == ["scheduler.long_jobs_sweep.failed"]
 
 
 async def test_sweep_wizard_sessions_swallows_sqlalchemy_error(
